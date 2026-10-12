@@ -36,6 +36,8 @@ import {
   seedClaudeFleetCredentials,
   sweepClaudeConfigBackups,
   workerHomePlan,
+  workerCredentialFilePath,
+  assertWorkerCredentialFile,
   workerKeychainPaths,
 } from "../src/lib/worker-home.js";
 
@@ -60,7 +62,7 @@ test("workerHomePlan: symlinks map each ALLOWLISTED path from the real HOME into
   assert.equal(plan.symlinks.length, WORKER_HOME_SYMLINKS.length);
   const byRel = Object.fromEntries(plan.symlinks.map((s) => [s.from.replace("/scratch/worker-home/", ""), s]));
   assert.equal(byRel[".claude"].to, "/Users/operator/.claude");
-  assert.equal(byRel[".config/gh"].to, "/Users/operator/.config/gh");
+  assert.equal(byRel[".config/gh"], undefined, "the operator's gh config is never granted back");
   assert.equal(byRel[".gitconfig"].to, "/Users/operator/.gitconfig");
   for (const s of plan.symlinks) {
     assert.ok(s.from.startsWith("/scratch/worker-home/"), "symlink source must live under the redirected HOME");
@@ -129,7 +131,7 @@ test("materializeWorkerHome: truncates a PLANTED alias in the injected workerHom
   }
 });
 
-test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitconfig) resolve UNDER the redirected HOME to the real HOME's paths", () => {
+test("materializeWorkerHome: the auth-path symlinks (.claude, .gitconfig) resolve UNDER the redirected HOME to the real HOME's paths", () => {
   const workerHome = tmp();
   const realHome = tmp();
   try {
@@ -142,7 +144,7 @@ test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitco
 
     materializeWorkerHome({ workerHome, realHome });
 
-    for (const rel of [".claude", join(".config", "gh"), ".gitconfig"]) {
+    for (const rel of [".claude", ".gitconfig"]) {
       const from = join(workerHome, rel);
       const st = lstatSync(from);
       assert.ok(st.isSymbolicLink(), `${rel} must be a symlink under the redirected HOME`);
@@ -150,6 +152,7 @@ test("materializeWorkerHome: the auth-path symlinks (.claude, .config/gh, .gitco
     }
     // And the content is genuinely reachable through the redirected HOME.
     assert.equal(readFileSync(join(workerHome, ".gitconfig"), "utf8"), "[user]\n\tname = Test\n");
+    assert.equal(existsSync(join(workerHome, ".config", "gh")), false, "the operator's gh config stays out");
   } finally {
     rmSync(workerHome, { recursive: true, force: true });
     rmSync(realHome, { recursive: true, force: true });
@@ -206,17 +209,23 @@ test("materializeWorkerHome: self-heals a symlink pointing at a STALE real-HOME 
 
 // ── W1-T505: narrow the `.claude` grant to a credential-only sibling ───────
 
+const USABLE = (token: string) => JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `r-${token}`, expiresAt: 1 } });
+const EMPTIED = JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "" } });
+// W1-T6252: the seed provisions ONE shared store under the (host-mounted) .claude, never a private fork.
+const SHARED = (realHome: string) => join(realHome, ".claude", "fleet-auth", "claude");
+
 test("given an injected real-home fixture whose .claude holds a .credentials.json, the seed uses private modes", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
-    seedClaudeFleetCredentials({ realHome });
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    assert.deepEqual(readdirSync(fleet), [".credentials.json"]);
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "token");
-    assert.equal(statSync(fleet).mode & 0o777, 0o700);
-    assert.equal(statSync(join(fleet, ".credentials.json")).mode & 0o777, 0o600);
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "provisioned");
+    const store = SHARED(realHome);
+    assert.deepEqual(readdirSync(store), [".credentials.json"]);
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("token"));
+    assert.equal(statSync(store).mode & 0o777, 0o700);
+    assert.equal(statSync(join(store, ".credentials.json")).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(realHome), [".claude"], "no private fork is created");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -226,37 +235,78 @@ test("given an injected real-home fixture whose .claude-fleet ALREADY exists, th
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
     const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
     mkdirSync(fleet);
     writeFileSync(join(fleet, ".credentials.json"), "refreshed");
     seedClaudeFleetCredentials({ realHome });
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed", "the old fork is left for recovery");
     assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
 });
 
-test("a concurrent .claude-fleet create wins without replacing its credential", () => {
+// 2026-10-07: core's .claude-fleet fork was emptied at 10:27 (its refresh token rotated away by another
+// holder of the same login) while the owner file stayed usable; every Claude spawn and usage probe on
+// that container refused for five hours. The same heal now applies to the shared store.
+test("an emptied shared credential store heals from a usable owner credential", () => {
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
-    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-    seedClaudeFleetCredentials({
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
+    const store = SHARED(realHome);
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    writeFileSync(join(store, ".credentials.json"), EMPTIED);
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "healed");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("owner"));
+    assert.equal(statSync(join(store, ".credentials.json")).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(store), [".credentials.json"], "no staged file is left behind");
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("a usable shared store is never replaced, and an unusable owner never replaces an emptied one", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("owner"));
+    const store = SHARED(realHome);
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    writeFileSync(join(store, ".credentials.json"), USABLE("refreshed-by-a-worker"));
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), USABLE("refreshed-by-a-worker"));
+
+    writeFileSync(join(store, ".credentials.json"), EMPTIED);
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), EMPTIED);
+    assert.equal(seedClaudeFleetCredentials({ realHome }), "kept");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), EMPTIED);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("a concurrent shared-store create wins without replacing its credential", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("stale"));
+    const store = SHARED(realHome);
+    assert.equal(seedClaudeFleetCredentials({
       realHome,
       fsImpl: {
-        mkdirSync: ((path: string) => {
-          assert.equal(path, fleet);
-          mkdirSync(fleet);
-          writeFileSync(join(fleet, ".credentials.json"), "refreshed");
+        mkdirSync: ((path: string, opts?: { recursive?: boolean }) => {
+          if (opts?.recursive) return mkdirSync(path, opts as never);
+          assert.equal(path, store);
+          mkdirSync(store);
+          writeFileSync(join(store, ".credentials.json"), "refreshed");
           throw Object.assign(new Error("concurrent seed"), { code: "EEXIST" });
         }) as typeof mkdirSync,
       },
-    });
-    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
-    assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
+    }), "kept");
+    assert.equal(readFileSync(join(store, ".credentials.json"), "utf8"), "refreshed");
+    assert.deepEqual(readdirSync(dirname(store)), ["claude"], "the loser's staged file is removed");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -268,6 +318,7 @@ test("given an injected real-home fixture with no real .claude credential, the s
     mkdirSync(join(realHome, ".claude"));
     assert.doesNotThrow(() => seedClaudeFleetCredentials({ realHome }));
     assert.deepEqual(readdirSync(realHome), [".claude"]);
+    assert.deepEqual(readdirSync(join(realHome, ".claude")), []);
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -295,7 +346,7 @@ test("a failed seed publish removes its private staging paths and reports the er
   const realHome = tmp();
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
     assert.throws(
       () => seedClaudeFleetCredentials({
         realHome,
@@ -306,6 +357,7 @@ test("a failed seed publish removes its private staging paths and reports the er
       { code: "EACCES" },
     );
     assert.deepEqual(readdirSync(realHome), [".claude"]);
+    assert.deepEqual(readdirSync(dirname(SHARED(realHome))), [], "neither the store nor its staged file survives");
   } finally {
     rmSync(realHome, { recursive: true, force: true });
   }
@@ -317,7 +369,7 @@ test("the seed is invoked before materializeWorkerHome on the spawn path", async
   const previousHome = process.env.HOME;
   try {
     mkdirSync(join(realHome, ".claude"));
-    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), USABLE("token"));
     writeFileSync(join(realHome, ".claude", "settings.json"), "operator settings");
     process.env.HOME = realHome;
     let spawned = false;
@@ -331,9 +383,8 @@ test("the seed is invoked before materializeWorkerHome on the spawn path", async
       providerRouting: {
         spawnCodex: async ({ workerHome }) => {
           spawned = true;
-          const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-          assert.equal(readlinkSync(join(workerHome, ".claude")), fleet);
-          assert.equal(readFileSync(join(workerHome, ".claude", ".credentials.json"), "utf8"), "token");
+          assert.equal(readlinkSync(join(workerHome, ".claude")), SHARED(realHome));
+          assert.equal(readFileSync(join(workerHome, ".claude", ".credentials.json"), "utf8"), USABLE("token"));
           assert.equal(existsSync(join(workerHome, ".claude", "settings.json")), false);
           return { text: "ok", model: "codex", provider: "codex" } as never;
         },
@@ -914,7 +965,7 @@ test("worker home: the existing grants are unchanged", () => {
   // ADDING ONE ENTRY MUST NOT DISTURB THE FOUR BESIDE IT. Named explicitly rather than by count,
   // so this states which grants must survive rather than merely how many.
   const rels = WORKER_HOME_SYMLINKS.map((s) => s.relPath);
-  for (const expected of [".claude", ".config/gh", ".gitconfig", "Library/Keychains/login.keychain-db"]) {
+  for (const expected of [".claude", ".gitconfig", "Library/Keychains/login.keychain-db"]) {
     assert.ok(rels.includes(expected), `the pre-existing grant ${expected} must still be present`);
   }
   assert.ok(rels.includes(playwrightCacheRelPath()), "and the new grant is present beside them");
@@ -962,4 +1013,58 @@ test("gitWorkTreeAncestor: a linked worktree's .git FILE still disqualifies — 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("Linux credential preflight reads the same narrowed store the real worker HOME grants", () => {
+  const root = tmp();
+  try {
+    const realHome = join(root, "operator");
+    const workerHome = join(root, "worker");
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    mkdirSync(join(realHome, ".claude-fleet"), { recursive: true });
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "broken parent", { mode: 0o600 });
+    const narrowed = join(realHome, ".claude-fleet", ".credentials.json");
+    writeFileSync(narrowed, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access", refreshToken: "fixture-refresh", expiresAt: 123 } }), { mode: 0o600 });
+    materializeWorkerHome({ realHome, workerHome });
+    assert.equal(realpathSync(join(workerHome, ".claude", ".credentials.json")), narrowed);
+    assert.equal(workerCredentialFilePath(realHome), narrowed);
+    assert.equal(assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), 123);
+    writeFileSync(narrowed, "broken worker credential");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "parent-access", refreshToken: "parent-refresh" } }));
+    assert.throws(() => assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), /credential-file-malformed|not valid JSON/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("an explicitly shared Claude child owns every worker grant and preserves old credential forks", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shared-claude-authority-"));
+  const realHome = join(root, "operator");
+  const shared = join(realHome, ".claude", "fleet-auth", "claude");
+  const old = join(realHome, ".claude-fleet");
+  mkdirSync(shared, { recursive: true });
+  mkdirSync(old);
+  const sharedRaw = JSON.stringify({ claudeAiOauth: { refreshToken: "shared-fixture", expiresAt: 123 } });
+  const oldRaw = JSON.stringify({ claudeAiOauth: { refreshToken: "old-fixture", expiresAt: 456 } });
+  writeFileSync(join(shared, ".credentials.json"), sharedRaw, { mode: 0o600 });
+  writeFileSync(join(old, ".credentials.json"), oldRaw, { mode: 0o600 });
+  writeFileSync(join(realHome, ".claude", "rmd-app.pem"), "operator-key-fixture", { mode: 0o600 });
+  try {
+    assert.equal(workerCredentialFilePath(realHome), join(shared, ".credentials.json"));
+    const workerHome = join(root, "worker");
+    const plan = materializeWorkerHome({ workerHome, realHome });
+    assert.equal(realpathSync(join(workerHome, ".claude")), realpathSync(shared));
+    assert.equal(readFileSync(join(old, ".credentials.json"), "utf8"), oldRaw);
+    assert.equal(readFileSync(join(shared, ".credentials.json"), "utf8"), sharedRaw);
+    assert.equal(plan.symlinks.find((grant) => grant.from === join(workerHome, ".claude"))?.to, shared);
+    assert.equal(existsSync(join(workerHome, ".claude", "rmd-app.pem")), false, "the grant contains no surrounding App key");
+    rmSync(old, { recursive: true });
+    materializeWorkerHome({ workerHome: join(root, "second-worker"), realHome });
+    assert.equal(existsSync(old), false, "shared authority never seeds another private token copy");
+    writeFileSync(join(shared, ".credentials.json"), "malformed fixture");
+    assert.throws(() => assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), /credential-file-malformed|not valid JSON/);
+    assert.equal(existsSync(old), false, "a broken declared shared store cannot silently create a fallback authority");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

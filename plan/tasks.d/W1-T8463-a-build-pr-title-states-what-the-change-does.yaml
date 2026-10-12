@@ -1,0 +1,116 @@
+- id: W1-T8463
+  title: "A BUILD PR'S TITLE STATES WHAT THE CHANGE DOES, TYPED BY THE CHANGE — W1-T7952's `prTitleForTask` copies the shard title's lead clause, and a third of unbuilt shards state the DEFECT there, so #11046 squashed onto main as \"feat: the pre-push hook gates a branch deletion as if it were content (W1-T8000)\", the opposite of what it does, typed feat for a fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a filed build PR's title says what its change does, from the change itself
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"lean into automation and self improvement\"): follow-up to W1-T7952 (#11011) after #11046 merged with an inverted title"
+  plan_refs: [W1-T7952, W1-T8399, W1-T8000, W1-T8396, W1-T5403, W1-T6013]
+  files: [src/lib/pr-title-judge.ts, src/run-task.ts, src/lib/host-memory-learning.ts, test/a-build-pr-title-states-the-change.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 ~09:3xZ. 61bb4199f on origin/main, PR #11046, Remudero-Task W1-T8000, is titled
+    "feat: the pre-push hook gates a branch deletion as if it were content (W1-T8000)". The change makes a
+    deletion-only push run NO content gate. Main's history now records the defect as if it were the change, and
+    types a fix `feat`.
+    READ on origin/main 61bb4199f (symbol names, not line numbers):
+      - `branchPrTitle(worktreePath, task)` (src/run-task.ts) returns `prTitleForTask(subjects, task)`
+        (src/lib/unfinished-checkpoint.ts). Its subject is the shard title's text before the first " — ",
+        lower-cased. W1-T8000's lead is "THE PRE-PUSH HOOK GATES A BRANCH DELETION AS IF IT WERE CONTENT".
+      - Its type comes from `taskTitlePrefix`: the newest real conventional branch subject, else `feat: `.
+        W1-T8000's only branch subject was "wip: yield at worker", so it took the `feat` default.
+      - The shard's own `type:` field carries no conventional type. On origin/main it is `implement` on
+        3376 of 3397 shards (diagnose 11, recon 8, manual 2), so it cannot say fix or feat.
+    MEASURED 2026-10-12 on origin/main 61bb4199f. Population: the 203 shards with `status: queued`, `type:
+    implement`, and no merged credit (no `Remudero-Task:` trailer on main, and no "(<id>) (#n)" squash subject).
+    Each title's lead clause was read and classed by hand:
+      - 69 (34%) state the behaviour after the fix, e.g. W1-T8396 "A RED THE PR'S OWN CHANGE CAUSED IS FIXED,
+        NOT REFRESHED". Today's rule titles these correctly.
+      - 65 (32%) state the DEFECT, e.g. W1-T8399 "A WORKER-OPENED BUILD PR KEEPS THE WORKER'S TITLE", W1-T8397
+        "A QUIET-WORKER CHECKPOINT PUSH STILL RUNS THE PR GATES", W1-T4058 "REMUDERO-SERVE NEVER PICKS UP A
+        MERGE". Today's rule titles each of these PRs as the opposite of its change.
+      - 43 (21%) are machine templates that name no change: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE"
+        (and its flow-gardener and fix-lane twins), "THE <gate> GATE REFUSED N PULL REQUESTS IN THIS WINDOW AND
+        EACH WAS REPAIRED", "FLAKE INCIDENT", "REPAIR THE SELECTOR EDGE INTO <test>".
+      - 20 (10%) are imperative ("RETIRE THE REPO LEDGER INDEX"), and 6 (3%) are noun phrases.
+      So 108 of 203 (53%) would merge under a title that inverts or omits what the change does.
+    Seven task-titled PRs merged after #11011 (03:58Z): #11015, #11022, #11024, #11026, #11033, #11034 and #11046.
+    One is inverted (#11046). The other six shards were behaviour-stated. Four of the seven are typed feat.
+    WHY A DETERMINISTIC RULE CANNOT SEPARATE THE TWO SHAPES. A keyword heuristic was run over the 134
+    behaviour/defect titles. A title counted as a defect when it had "never", "cannot", "still", "has no", "not",
+    "keeps", "holds", "fails", "drops", "as if", "silently" or similar. It agreed with the hand classes on 92 of
+    134 (69%). Its 42 misses run both ways: W1-T8396 "… IS FIXED, NOT REFRESHED" and W1-T7813 "A LOCKFILE CHANGE
+    NEVER REFUSES A DISPATCH" read as defects, and W1-T8040 "THE SWEEP RE-QUEUES A DETERMINISTIC SHARD TIMEOUT"
+    and W1-T5443 "A SAFEGUARD REFUSAL IS TREATED AS AN ORDINARY FAILED RUN" read as behaviour. So a lint-plan
+    title rule (option c) would refuse good titles and pass inverted ones. It would also leave the 203 existing
+    shards and every machine template as they are.
+    WHY THE FIRST ACCEPTANCE CLAIM IS NOT THE TITLE EITHER (option b). In 38 of the 203 the first claim is "the new
+    test file passes". The first claim that is not that boilerplate has a median length of 105 characters (p25 74,
+    p75 149). 132 of 203 run past the roughly 80 characters a header leaves after its type and " (<id>)". Those
+    claims also name one test case, not the change: W1-T7745's is "a synchronous spawn made through
+    hostWorktreeGit from a named function records that function as caller and hostWorktreeGit as leaf". So claims
+    are good EVIDENCE of the post-fix behaviour, but a poor title.
+    CHOSEN: option (a). The cheap judge mount writes the title from the shard and the diff. `prTitleForTask` stays
+    as the validated fallback. This matches the standing ruling that machine judgement goes through an LLM judge
+    rather than a fixed rule, and it is the one option that also gives the type from the change.
+    RELATED, NOT DUPLICATED. W1-T8399 (queued) retitles a worker-opened PR with `branchPrTitle`. It does not change
+    what that title says. Whichever of the two lands second points the retitle path at the judged title. Swept
+    plan/ on origin/main and the open PR heads: no record or branch changes how a task title becomes a PR subject.
+  design: |
+    1. A PR-TITLE JUDGE. Add src/lib/pr-title-judge.ts with `judgeBuildPrTitle(input, deps)`.
+       - The input is the task's id, title, rationale, acceptance claims and falsifier. It also carries the
+         branch's real conventional subjects, a `git diff --stat origin/main...HEAD`, and the head of the patch.
+       - The input is bounded by the mount's own budget (`riskJudgeDiffInputBudget(resolveRiskJudgeMount(…))`), never
+         a literal character count.
+       - The production judge spawns the cheapest mount (`resolveRiskJudgeMount`) with no tools, as `realRiskJudge`
+         does (`RISK_JUDGE_TOOLS`). Use `benchmarkNonDispatchSpawn("pr-title")`, record spend, and register
+         "pr-title" in ADVISORY_LANES in src/lib/host-memory-learning.ts.
+       - The prompt asks for two anchored lines. `PR_TITLE: <type>(<scope>): <subject>` must state what the code
+         does AFTER this change, with the type taken from the diff: a defect repaired is `fix`, new capability is
+         `feat`, tests or docs only are `test` or `docs`. `LEAD_READS_AS: behaviour|defect|template|other` classes
+         the shard title's lead clause.
+    2. A VALIDATOR, deterministic, over the judge's reply. It refuses each of these with a named reason:
+       - no parseable PR_TITLE line;
+       - a header that `checkCommitMessage` rejects, or whose type is outside the conventional enum;
+       - a header longer than CONVENTIONAL_LIMITS.headerMaxLength once " (<id>)" is added;
+       - a checkpoint subject (`isWipSubject`);
+       - a subject equal to the lower-cased lead clause when the judge itself classed that lead as `defect` or
+         `template` (reason `restates-defect-lead`).
+       The harness appends " (<id>)"; the judge never writes the id.
+    3. FALLBACK, never a blocked open. When the judge is unavailable, cancelled or refused by the validator, the
+       title is today's `prTitleForTask(subjects, task)`. There is one exception: after a `restates-defect-lead`
+       refusal the subject is the task's first acceptance claim that is not "the new test file passes", fitted by
+       `fitConventionalTitle`. The lead is known to be the defect, so it is never reused. PR opening never waits on
+       or fails for the judge.
+    4. WIRE IT at the build PR create in runTaskBody. The `ghPrCreateFillCommandAsync(…, branchPrTitle(worktreePath,
+       task), …)` argument becomes the awaited `judgeBuildPrTitle(…)` result. Ledger one `pr_title.decided` row with
+       {source: judge|fallback, reason, lead_reads_as, title}, so the judged share and the fallback reasons are
+       measurable on the live fleet. Inject the judge through runTask's opts, as `prOpenProofRunner` is.
+    Tests go in the new file test/a-build-pr-title-states-the-change.test.ts, with `test(` titles exactly as in the
+    proofs below. Use the REAL shard titles, rationale and claims of W1-T8000 (defect-stated) and W1-T8396
+    (behaviour-stated), and an injected judge seam. No live model.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-build-pr-title-states-the-change.test.ts"
+    - claim: "W1-T8000's defect-stated shard opens as its fix, typed fix, and the judge's prompt carried that shard's acceptance claims and the branch's diff stat"
+      proof: 'grep: test("W1-T8463: a defect-stated shard is titled after its fix and typed fix" in test/a-build-pr-title-states-the-change.test.ts'
+    - claim: "W1-T8396's behaviour-stated shard keeps its own words under the judged type"
+      proof: 'grep: test("W1-T8463: a behaviour-stated shard keeps its own words" in test/a-build-pr-title-states-the-change.test.ts'
+    - claim: "a judged title that restates a lead the judge classed as a defect is refused, and the fallback is the first real acceptance claim, never the lead"
+      proof: 'grep: test("W1-T8463: a judged title that restates a defect lead is refused" in test/a-build-pr-title-states-the-change.test.ts'
+    - claim: "an unavailable or malformed judge falls back to the task title, the PR still opens, and a pr_title.decided row names the reason"
+      proof: 'grep: test("W1-T8463: an unavailable judge falls back to the task title and says why" in test/a-build-pr-title-states-the-change.test.ts'
+    - claim: "the build PR create in runTaskBody is titled by the judge"
+      proof: 'grep: judgeBuildPrTitle( in src/run-task.ts'
+  falsifier: |
+    Leave the create on `branchPrTitle(worktreePath, task)`. W1-T8000 then opens as "feat: the pre-push hook gates a
+    branch deletion as if it were content (W1-T8000)", so the first named test fails on both its subject and its
+    type. Drop the `restates-defect-lead` check and a judge that echoes the lead passes, so the third test fails.
+    Fall back to the lead after that refusal and the third test fails again. Let a judge error escape the create
+    and the fourth test sees no PR opened.

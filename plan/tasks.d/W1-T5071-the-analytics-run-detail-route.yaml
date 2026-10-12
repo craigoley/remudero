@@ -2,7 +2,6 @@
   title: "THE CONSOLE'S RUN EXPLORER HAS ALWAYS 404'D — /analytics/runs/[runId] reads /v1/analytics/runs/{runId}?projection=console-v1, which core never served; answer it as a keyed detail read from the run's indexed fact rows, never a fold on the GET"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 4
   type: implement
   verify: auto
@@ -51,6 +50,7 @@
     Scan the ledger union per request: the first proof's fixture counts a ledger read. Copy unnamed upstream
     fields through: the third proof finds a prompt field in the body. Drop the index: the fourth proof reads 0.
   note: |
+    HOLD RELEASED 2026-10-05: W1-T5048 merged 2026-10-02.
     DISPATCH HOLD: waits for W1-T5048 (on-demand keyed views, filed in #8258 and itself held). depends_on
     cannot name it until that shard is on main. RELEASE: one plan amendment deleting dispatch_hold once
     W1-T5048 merges (tracked in arch-plan.md, Phase 4).

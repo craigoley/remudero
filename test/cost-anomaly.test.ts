@@ -24,8 +24,8 @@ import {
 import { appendLedger } from "../src/lib/ledger.js";
 import { parseLedger, type RunSummary } from "../src/lib/retro.js";
 import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import type { ClarificationQuestion } from "../src/lib/sweep.js";
+import { runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import type { ClarificationQuestion } from "./helpers/sweep-test.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 

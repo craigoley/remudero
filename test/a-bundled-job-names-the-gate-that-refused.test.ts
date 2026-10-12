@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 
 // W1-T3720 — A BUNDLED JOB REPORTED UNDER ONE GATE'S NAME WHILE ANOTHER GATE REFUSED. MEASURED
 // 2026-09-17 on five PRs: the `comment-load-ratchet` check run was red while comment-load-ratchet
@@ -44,12 +45,13 @@ function runReporter(outcomes: Record<string, string>, reports: Record<string, s
     for (const [id, text] of Object.entries(reports)) writeFileSync(join(root, `${id}.log`), text);
     const stub = `gh() { printf '%s\\n' "$*" >> "$GH_LOG_FILE"; }\nsleep() { :; }\n`;
     const outcomeEnv = Object.fromEntries(Object.keys(reporter.env).filter((k) => k.startsWith("OUTCOME_")).map((k) => [k, outcomes[k] ?? "success"]));
+    const setupOutcomes = successfulReporterSetupFixture(reporter.env);
     const logFile = join(root, "calls");
     writeFileSync(logFile, "");
     const run = spawnSync("bash", ["-c", stub + reporter.run], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { ...process.env, ...outcomeEnv, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
+      env: { ...process.env, ...outcomeEnv, SETUP_OUTCOMES: setupOutcomes, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
     });
     const calls = readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((line) => ({
       name: /-f name=(\S+) /.exec(line)?.[1] ?? "",
@@ -166,7 +168,7 @@ test("W1-T3720: renaming a bundled report never moves a required context", async
   // And every name ci-gate.yml requires that this job used to post is still posted.
   const gate = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci-gate.yml"), "utf8")) as { jobs: Record<string, { env?: Record<string, string> }> };
   const required = JSON.parse(gate.jobs["ci-gate"]!.env!.REQUIRED!) as string[];
-  for (const name of ["commitlint", "learnings-budget-ratchet", "depcruise", "comment-load-ratchet"].filter((n) => required.includes(n))) {
+  for (const name of ["rule-checks", "learnings-budget-ratchet", "depcruise", "comment-load-ratchet"].filter((n) => required.includes(n))) {
     assert.ok(names(allRed.calls).includes(name), `required context ${name} must still be posted under its own name`);
   }
 });

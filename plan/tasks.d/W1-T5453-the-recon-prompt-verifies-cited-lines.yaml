@@ -1,0 +1,38 @@
+- id: W1-T5453
+  title: "THE RECON PROMPT NEVER VERIFIES A CITED LINE — it asks only for the remote, the history and the tree shape, so a record whose file:line citations have drifted is discovered by the implement worker, or by CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 20.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T3077"]
+  files:
+    - src/lib/prompt-render.ts
+    - test/the-recon-prompt-verifies-cited-lines.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Explore context in multi-app workflows': on loosely specified work the facts the
+    task depends on sit somewhere the request does not name, and one sentence telling the model to look first
+    raises the completion rate (measured at medium and max effort, at the cost of slightly more tool calls).
+    The recon prompt (renderReconPrompt, src/lib/prompt-render.ts ~855-889) asks only for the remote, the
+    history and the tree shape. It never asks recon to verify the file:line citations in the task record at
+    HEAD, the check that hand-written briefs in this repo carry and that finds premise-rotted records before an
+    implement worker spends money on them. renderReconPrompt is a prompt surface (scripts/prompt-surface-gate.mjs).
+  design: |
+    (i) One sentence in renderReconPrompt asking recon to open the task record and verify every cited
+    file:line and symbol at HEAD, and to report each one that drifted or vanished. (ii) Recon stays read-only;
+    add no tool. (iii) Satisfy the prompt-surface gate with evidence and add a text-pinning test. (iv) Measure
+    before and after: premise-rotted REFUSED rate and ALREADY_SATISFIED rate (the guide says to measure, so do
+    not claim an improvement).
+  acceptance:
+    - claim: "the recon prompt asks for every cited file and line to be verified at head"
+      proof: 'grep: test("W1-T5453: the recon prompt asks for every cited file and line to be verified at head" in test/the-recon-prompt-verifies-cited-lines.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if renderReconPrompt already asks for citation verification at HEAD.
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

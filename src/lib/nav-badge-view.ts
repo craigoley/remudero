@@ -22,6 +22,9 @@ import { systemClock, type Clock } from "./clock.js";
 import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-lane.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
+import { projectProposalHumanGates } from "./ask-classification.js";
+import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateCountSummary, type HumanGateProjection } from "./human-gate.js";
+import type { InboxState } from "./inbox.js";
 import {
   OPERATOR_AGENT_DECISION_STEP,
   OPERATOR_AGENT_OUTCOME_STEP,
@@ -35,9 +38,10 @@ import {
   type OperatorAgentMemorySource,
   type OperatorAgentSettings,
 } from "./operator-agent.js";
-import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
+import { AGENT_FOLDS, createAgentFolds, READ_MODEL_DIRNAME, readModelSidecarDir, type AgentFolds, type AgentFoldSlot, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import type { SourcePhase, ViewDefinition, ViewSource } from "./views.js";
 
+export const NAV_BADGE_VIEW_NAME = "nav-badge";
 export const NAV_BADGE_VIEW_VERSION = 1;
 
 /** The console engine's thresholds (agent.ts `AGENT_THRESHOLDS`). */
@@ -61,7 +65,31 @@ export interface NavBadgeData {
     instances: Array<{ instanceId: string; repository?: string; count?: number; reason?: string }>;
     reason?: string;
   };
-  inbox: { ready?: number; needsYou?: number; fleet?: number; reason?: string };
+  /** `needsYou` stays the proposal-lane count it always was; `decisions` is the shared Inbox decision count. */
+  inbox: { ready?: number; needsYou?: number; fleet?: number; reason?: string; decisions?: HumanGateCountSummary };
+}
+
+/** Why the badge has no composite to count from; its decisions are then a lower bound, never zero. */
+export const NAV_BADGE_NO_COMPOSITE = "the needs-you composite is not available: serve runs no read model";
+
+/**
+ * W1-T5373: the badge's Inbox decisions are the needs-you composite's, read through the shared consumer.
+ * The badge counts nothing itself, so it can never disagree with the composite, the now view or /v1/status.
+ */
+export function withNavBadgeDecisions(data: NavBadgeData, projection: HumanGateProjection | undefined): NavBadgeData {
+  const decisions = projection ? consumeHumanGateCounts(projection) : unavailableHumanGateCounts("needs-you", NAV_BADGE_NO_COMPOSITE);
+  return { ...data, inbox: { ...data.inbox, decisions } };
+}
+
+/** The legacy badge with the composite's decisions overlaid; the undecorated view stays the shadow's legacy side. */
+export function navBadgeWithDecisions(view: ViewDefinition<NavBadgeData>, projection: () => HumanGateProjection | undefined): ViewDefinition<NavBadgeData> {
+  return {
+    ...view,
+    compute: (params) => {
+      const computed = view.compute(params);
+      return "error" in computed ? computed : { ...computed, data: withNavBadgeDecisions(computed.data, projection()) };
+    },
+  };
 }
 
 type Candidate = { proposalId: string; category: string; signal: string; confidence: number };
@@ -273,22 +301,23 @@ function sumAgent(counted: readonly CountedInstance[]): NavBadgeData["agent"] {
 
 type Classification = ReturnType<typeof readClassificationSnapshot>;
 
+/** The inbox counts' one source; its as-of is the classification's `generatedAt`, so it names the snapshot counted. */
+const INBOX_CLASSIFICATION_SOURCE = "inbox-classification";
+
 function inboxCounts(classified: Classification, nowMs: number, sources: ViewSource[]): NavBadgeData["inbox"] {
   sources.push({
-    name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable",
+    name: INBOX_CLASSIFICATION_SOURCE, asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable",
     kind: "inbox-store", budgetMs: INBOX_STALE_AFTER_MS,
   });
   if (!classified) return { reason: "no inbox classification has been written yet" };
   let ready = 0;
-  let needsYou = 0;
+  const projection = projectProposalHumanGates(Object.entries(classified.states).map(([proposalId, state]) => ({ proposalId, state: state as InboxState })));
+  const needsYou = projection.count.inbox.count!;
   let fleet = 0;
   for (const [proposalId, state] of Object.entries(classified.states)) {
-    if (state !== "ready" && state !== "drafting" && state !== "not_ready") continue;
-    if (inboxOwner({ id: proposalId }) === "fleet") fleet += 1;
-    else {
-      needsYou += 1;
-      if (state === "ready") ready += 1;
-    }
+    if (inboxOwner({ id: proposalId }) === "fleet") {
+      if (state === "ready" || state === "drafting" || state === "not_ready" || state === "deferred_with_trigger") fleet += 1;
+    } else if (state === "ready") ready += 1;
   }
   return { ready, needsYou, fleet };
 }
@@ -304,8 +333,10 @@ function selectInstances<T extends { instanceId: string }>(all: readonly T[], pa
 /** The nav-badge view over serve's own caches, every instance by default or `?instances=a,b`. */
 export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inboxRoot: string; clock?: Clock }): ViewDefinition<NavBadgeData> {
   return {
-    name: "nav-badge",
+    name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
+    // The worker's body counts the classification it last read; the inbox classifier can rewrite it before this reads it again.
+    shadowSources: { inbox: INBOX_CLASSIFICATION_SOURCE },
     compute: (params) => {
       const nowMs = (deps.clock ?? systemClock).now();
       const scopes = selectInstances(deps.scopes(), params);
@@ -409,40 +440,12 @@ export function readOnMtimeChange<T>(read: (path: string) => T): (path: string) 
   };
 }
 
-/** A fold reads at most this many fact `seq` per step, so a large fact delta spreads over several ticks. */
-export const NAV_BADGE_FOLD_CHUNK = 50_000;
-
-interface MemoryFold {
-  /** Every fact through this `seq` has been folded. */
-  seq: number;
-  rows: Array<{ tsMs: number; seq: number; row: OperatorAgentMemoryLedgerRow }>;
-}
-
-/** The store's fold and its newest `seq`; a store that shrank under the fold (rebuilt in place) folds again from its first row. */
-function memoryFold(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): { fold: MemoryFold; max: number } {
-  const max = Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m);
-  let fold = folds.get(db);
-  if (!fold || max < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
-  return { fold, max };
-}
-
-/** Folds the operator-agent facts past the fold's `seq` through `through`. */
-function foldThrough(fold: MemoryFold, db: ReadModelDb, through: number): void {
-  const fresh = db.prepare(`SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND seq <= ? AND step IN (${OPERATOR_AGENT_MEMORY_STEPS.map(() => "?").join(", ")}) ORDER BY seq`)
-    .all(fold.seq, through, ...OPERATOR_AGENT_MEMORY_STEPS);
-  for (const fact of fresh) {
-    const row = selectOperatorAgentMemoryRow(JSON.parse(String(fact.body)) as Record<string, unknown>);
-    if (row) fold.rows.push({ tsMs: Number(fact.ts_ms), seq: Number(fact.seq), row });
-  }
-  fold.seq = through;
-  if (fresh.length > 0) fold.rows.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
-}
-
-/** Operator-agent rows from the fact store, folded incrementally past the last folded `seq`. */
-function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): readonly OperatorAgentMemoryLedgerRow[] {
-  const { fold, max } = memoryFold(folds, db);
-  if (max > fold.seq) foldThrough(fold, db, max);
-  return fold.rows.map((entry) => entry.row);
+/** The memory rows of an instance's `panel.*` fold: the rows the operator-agent memory keeps. */
+function operatorAgentFacts(folds: AgentFolds, slot: AgentFoldSlot): readonly OperatorAgentMemoryLedgerRow[] {
+  return folds.current(slot).rows.flatMap((row) => {
+    const kept = OPERATOR_AGENT_MEMORY_STEPS.includes(String(row.step)) ? selectOperatorAgentMemoryRow(row) : undefined;
+    return kept ? [kept] : [];
+  });
 }
 
 /**
@@ -451,28 +454,28 @@ function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadMod
  * model's `panel.*` facts, and its analytics from the slice serve persisted. One body for every
  * instance, and one per `?instances=<one>`. `ledgerSource` is the worker's own, passed in so this
  * module never imports the worker.
+ *
+ * W1-T5051: the history is the agent view's persisted fold ({@link AGENT_FOLDS}), so the badge never counts
+ * decisions newer than the agent pages fold; `foldChunk` gives it a fold of its own with that chunk.
  */
-export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource, foldChunk = NAV_BADGE_FOLD_CHUNK): {
+export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource, foldChunk?: number): {
   name: string;
   version: number;
-  prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
+  prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
+  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
 } {
-  const folds = new WeakMap<ReadModelDb, MemoryFold>();
+  const folds = foldChunk === undefined ? AGENT_FOLDS : createAgentFolds({ chunk: foldChunk });
+  const foldSlot = (instance: string, db: ReadModelDb, lease: ReadModelLease | undefined): AgentFoldSlot => ({ instance, db, ...(lease ? { lease } : {}) });
   const sourcesFile = readOnMtimeChange(readNavBadgeSources);
   const classification = readOnMtimeChange((path) => readClassificationSnapshot(dirname(path)));
   return {
-    name: "nav-badge",
+    name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
     /** Folds each projected instance's fact delta one chunk per step, so a cold fold is never one unit. */
     prepare: ({ instances }, more) => {
-      for (const { state, db } of instances) {
+      for (const { state, db, lease } of instances) {
         if (db === undefined || state.tickedAt === undefined) continue;
-        const { fold, max } = memoryFold(folds, db);
-        while (fold.seq < max) {
-          if (!more()) return false;
-          foldThrough(fold, db, Math.min(max, fold.seq + foldChunk));
-        }
+        if (!folds.advance(foldSlot(state.instance, db, lease), more)) return false;
       }
       return true;
     },
@@ -488,7 +491,7 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
           if (slot === undefined) return { reason: "the read model does not project this instance" };
           if (slot.db === undefined) return { reason: "the read model has not opened this instance's store yet", phase: "warming" as const };
           if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet", phase: "warming" as const };
-          return { rows: operatorAgentFacts(folds, slot.db) };
+          return { rows: operatorAgentFacts(folds, foldSlot(slot.state.instance, slot.db, slot.lease)) };
         },
       }));
       const classified = published ? classification(classificationSnapshotPath(published.inboxStateDir)) : undefined;

@@ -1,0 +1,102 @@
+- id: W1-T7837
+  title: "A REVIEW THAT COULD NOT RUN ITS PROOFS BECAUSE OF A HOST GAP IS RE-REVIEWED, NOT BODY-REPAIRED — `runSweep`'s capped-repair block sends every capped-green PR to the PR-body repair rung, including one whose proofs were never run (runner-absent, cwd-missing, incomplete-run, runtime-broken, no-exec-context); a body edit cannot fix a host, so PR #10741 (3/3 proofs runner-absent after its review worktree was reclaimed) was routed to a repair that could not help"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the remedy a capped-green PR gets when its proofs never ran
+  band_meaning: span
+  origin: "operator ruling 2026-10-11: a review that could not run its proofs because of a host gap is re-reviewed, not body-repaired (evidence PR #10741, 2026-10-10)"
+  plan_refs: [W1-T3669, W1-T3306, W1-T7243, W1-T7822, W1-T5840, W1-T3704, W1-T3390]
+  files: [src/lib/sweep.ts, src/lib/classify.ts, test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, read from the core ledger archives on the Azure host (read-only) on 2026-10-11:
+      - 2026-10-10T21:20:54Z `review.posted` for PR #10741, head 3fb4aab41: capped true, and all 3 criteria
+        carry proof_skip runner-absent. The review worktree had been reclaimed mid-review. #10770 fixed that
+        reclaim race, and W1-T7822 now grades a vanished cwd as cwd-missing instead of runner-absent.
+      - 2026-10-10T21:23:46Z onward, `sweep.disposed` for #10741 at the same head: disposition blocked-fixable,
+        blocker plan-proof-unrunnable, reason "capped review has only non-discriminating proofs — would
+        dispatch the existing bounded fix rung to repair the PR body".
+      - It has happened before. 2026-10-10T03:10:39Z `review.posted` for PR #10523 (head 4a46dc19c) was also
+        capped with 4 runner-absent criteria.
+    CURRENT BEHAVIOUR, read on origin/main d7f527f62:
+      - src/lib/sweep.ts:365 `assessReviewReuse` already treats these grades as unreadable evidence. It
+        refuses reuse when a criterion carries proof_skip runner-absent, cwd-missing, incomplete-run,
+        runtime-broken or no-exec-context (sweep.ts:377-381), or proof_exec exec_error or base_unreadable
+        (sweep.ts:375-376).
+      - The capped block does not make that distinction. src/lib/sweep.ts:15221-15273: when
+        `cappedProofDiscriminationFromLedger` returns evidence and `decideSweepArm` refuses, it asks
+        `judgeCappedRepair` (src/lib/classify.ts:330) or `planCappedRepair` (classify.ts:311). Both answer
+        only repair_body, repair_plan_shard, give_up or hold. The default reason is "capped review has only
+        non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body"
+        (sweep.ts:15272). That evidence then reaches the fix rung as `proofDiscrimination` (sweep.ts:16542).
+      - The evidence cannot tell a host gap apart. `proofDiscriminationEvidenceFromCriteria`
+        (sweep.ts:10872) keeps every grade other than executed_pass, executed_fail and stale_self_path.
+        `criteriaFromLedgerValue` (sweep.ts:11026) rebuilds each criterion without `proof_skip`: its push at
+        sweep.ts:11041-11047 copies only claim, proof, met, reason and proof_exec. So the capped block
+        cannot see that a not_executable proof was a missing runner and not a stale or prose proof.
+      - The `review.posted` row does carry the skip reason. run-task.ts writes the whole verdict as
+        `decision_verdict` (e.g. src/run-task.ts:22780), and `CriterionVerdict.proof_skip`
+        (src/lib/review.ts:411) is the `ProofSkipReason` union at review.ts:284-296.
+    SUPERSEDES PART OF W1-T3669. W1-T3669 (#5770) widened the capped-repair evidence on purpose to every
+    non-executed grade (sweep.ts:10859-10871), because a narrow allowlist had left capped PRs with no actor
+    (98 refusals, 0 dispatches). That still stands for grades a body or shard repair can change. The operator
+    ruled on 2026-10-11 that a host-gap grade goes to a re-review instead, so this task narrows only that
+    part. The PR still gets an actor: the re-review. It is not sent back to the "no actor" state W1-T3669
+    closed.
+    A BODY REPAIR WORKED BEFORE ONLY BY ACCIDENT. Review dedup keys on the PR head plus the exact body
+    (doctrine: "A BODY REPAIR IS A NEW REVIEW INPUT"), so a body edit was the only way to earn a fresh
+    review on the same commit. This task gives a host-gap verdict that fresh review directly. The same kind
+    of key release already exists for W1-T5840 (`reviewDelivered.delete(key)`, sweep.ts:12657-12661).
+    AMENDED 2026-10-11 (operator approval): priority 2 -> 1. Its last build branch, run-W1-T7837-1791707730822,
+    stopped at "wip: yield at worker" (09:01:56Z) and no build has started since, while priority-1 work fills every lane.
+  design: |
+    1. KEEP THE SKIP REASON. `criteriaFromLedgerValue` copies `proof_skip` when it is a string. Add one
+       exported predicate, `isHostGapCriterion`, that is true for proof_skip runner-absent, cwd-missing,
+       incomplete-run, runtime-broken or no-exec-context, and for proof_exec exec_error or base_unreadable.
+       `assessReviewReuse` uses this predicate in place of its inline list, so the two readers cannot drift.
+    2. ROUTE HOST-GAP-ONLY VERDICTS TO A RE-REVIEW. In the capped block, when every criterion in the
+       evidence is a host gap, do not call the body or shard repair planner. Ledger
+       `sweep.capped_host_gap_rereview` (pr, head, the proof_skip reasons) and release the delivered-review
+       key for that input, the way W1-T5840 does. The review claim then admits one fresh review of the same
+       head and body. The disposition is `wait`, with a reason that names the host gap, never "repair the PR
+       body". No body edit and no fix strike is spent.
+       A verdict that mixes a host gap with a stale or prose proof (executed_stale, not_yet_built, a
+       not_executable proof with no host-gap skip) keeps today's route. A body or shard repair can still fix
+       the proofs that are genuinely non-discriminating.
+    3. PACE IT FROM WHAT HAS BEEN OBSERVED. There is no fixed count or fixed interval. The wait before the
+       next re-review is derived from this PR's own host-gap re-review history at this head. It starts at the
+       review duration the ledger already observed for this input and grows with each re-review that still
+       grades a host gap. A re-review that runs at least one proof ends the episode.
+    4. ESCALATE A GAP THAT PERSISTS, AS THE FIX-PROGRESS JUDGE DECIDES. From the second host-gap re-review at
+       a head, call `judgeFixProgress` with the host-gap history: each re-review's proof_skip reasons and
+       timestamps go in as rounds and red set. continue or change-approach admits the next paced re-review.
+       escalate calls `deps.escalate` with the persisting skip reasons and the host problem they point to
+       (sandbox runner missing, worktree reclaimed, runtime broken). unavailable holds. This uses the same
+       judge and verdict handling as `judgeCappedRepair` (classify.ts:330). There is no strike cap.
+    Tests go in the new file test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts, with `test(`
+    titles exactly as in the proofs below. The existing capped-route suites must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts"
+    - claim: "a capped review whose proofs all hit a host gap gets a fresh review of the same head and no PR-body repair"
+      proof: 'grep: test("W1-T7837: a capped review whose proofs all hit a host gap is re-reviewed at the same head" in test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts'
+    - claim: "a stale or prose proof beside a host gap still routes to the existing body repair"
+      proof: 'grep: test("W1-T7837: a stale proof beside a host gap still routes to body repair" in test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts'
+    - claim: "the capped evidence read from the ledger keeps each criterion's proof_skip"
+      proof: 'grep: test("W1-T7837: the ledger evidence keeps the proof skip reason" in test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts'
+    - claim: "host-gap re-reviews are paced from the observed history, not a fixed count or interval"
+      proof: 'grep: test("W1-T7837: host-gap re-reviews are paced from the observed history" in test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts'
+    - claim: "a host gap that persists across re-reviews escalates when the fix-progress judge says so"
+      proof: 'grep: test("W1-T7837: a persisting host gap escalates through the fix-progress judge" in test/a-host-gap-review-is-re-reviewed-not-body-repaired.test.ts'
+  falsifier: |
+    Leave the capped block as it is. A ledger with one capped `review.posted` whose three criteria are all
+    runner-absent then disposes blocked-fixable with "repair the PR body", and the first two tests fail. Drop
+    `proof_skip` from `criteriaFromLedgerValue` again: the predicate sees no host gap and the evidence test
+    fails. Route every not_executable proof to re-review: the mixed-verdict test sees a stale proof with no
+    body repair and fails.

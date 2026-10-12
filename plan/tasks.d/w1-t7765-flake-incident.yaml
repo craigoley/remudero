@@ -1,0 +1,37 @@
+- id: W1-T7765
+  title: "FLAKE INCIDENT — test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts failed CI on 5 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+  files:
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+  acceptance:
+    - claim: "the cause of test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts's intermittent failure is fixed in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T7765 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T7765 pins the cause of the intermittent failure\" in test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+    Failed CI on 5 distinct pull requests whose changed files include neither the test file nor a module it imports: #10203, #10310, #10377, #10643, #10671.
+    CI runs: 37865724208, 37919851949, 37946372738, 37951691763, 38052678654, 38063468054.
+    Retry outcomes: 0 recovered on retry, 10 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files list names only one test file. The task is to fix a flaky test and add a pinning test there, so it does not touch secrets, auth, deletion, merge/deploy policy or infrastructure."
+      - "The acceptance criteria are specific and checkable by a unit test and a grep, so the result can be verified."
+      - "The flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89), and the gates state shows nothing concerning."
+      - "No bounded change view was supplied, so I cannot confirm the actual touched files. The description and the declared scope are consistent with each other."
+    judged_at: "2026-10-10T19:18:30.285Z"
+    pin: "c4ce98cb7704f1023de2d6dbf1c97f41de748109186dce71e118324be6d6a5a7"

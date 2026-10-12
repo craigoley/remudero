@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { isMergedLedgerRow } from "./ledger-carry.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -17,6 +18,7 @@ export interface GoalRecord {
   direction: "increase" | "decrease";
   tasks: string[];
 }
+export const GOAL_REMEASUREMENT_CADENCE_MS = 86_400_000;
 export interface GoalObservation {
   goal_id: string;
   key: string;
@@ -66,8 +68,10 @@ export function measureGoal(metric: GoalRecord["measurement"], rows: readonly Le
   for (const row of rows) {
     const time = Date.parse(row.ts ?? "");
     if (!Number.isFinite(time) || typeof row.pr_url !== "string") continue;
-    const map = row.step === "pr.opened" ? opened : row.step === "verdict.merged" ? merged : undefined;
-    if (map) map.set(row.pr_url, Math.min(map.get(row.pr_url) ?? time, time));
+    const isMerge = isMergedLedgerRow(row);
+    const map = row.step === "pr.opened" ? opened : isMerge ? merged : undefined;
+    const at = isMerge && typeof row.merged_at === "string" && Number.isFinite(Date.parse(row.merged_at)) ? Date.parse(row.merged_at) : time;
+    if (map) map.set(row.pr_url, Math.min(map.get(row.pr_url) ?? at, at));
   }
   const minutes = [...merged].flatMap(([pr, time]) => opened.has(pr) && time >= opened.get(pr)! ? [(time - opened.get(pr)!) / 60_000] : []);
   if (!minutes.length) return null;
@@ -95,8 +99,14 @@ export async function remeasureSettledGoals(input: {
     const ids = [...new Set([...goal.tasks, ...input.tasks.filter((t) => t.goal === goal.id).map((t) => t.id)])].sort();
     const key = createHash("sha256").update(JSON.stringify([goal, ids])).digest("hex");
     return { goal, ids, key };
-  }).filter(({ goal, ids, key }) => ids.length > 0 && ids.every((id) => taskById.has(id) && input.settled(id) === true) &&
-    (prior[goal.id]?.key !== key || (prior[goal.id]?.step === "goal.unmeasured" && clock.now() - Date.parse(prior[goal.id]!.ts) >= 86_400_000)));
+  }).filter(({ goal, ids, key }) => {
+    const measuredAt = Date.parse(prior[goal.id]?.ts ?? "");
+    const now = clock.now();
+    // A malformed or future checkpoint cannot postpone observation indefinitely.
+    return ids.length > 0 && ids.every((id) => taskById.has(id) && input.settled(id) === true) &&
+      (prior[goal.id]?.key !== key || !Number.isFinite(measuredAt) || measuredAt > now ||
+        now - measuredAt >= GOAL_REMEASUREMENT_CADENCE_MS);
+  });
   if (!due.length) return [];
   let rows = input.rows;
   const sourceProblems = new Set<string>();
@@ -105,7 +115,7 @@ export async function remeasureSettledGoals(input: {
     const from = clock.now() - 7 * 86_400_000;
     let bytes = 0;
     for await (const row of openLedgerUnion(input.stateDir, { since: fixedClock(from).iso(),
-      step: ["pr.opened", "verdict.merged", "worker.assignment", "worker.attempt", "verdict", "ci-friction.scorecard", ...Object.keys(SPEND_STEP_ROLES)],
+      step: ["pr.opened", "verdict.merged", "pr.terminal", "worker.assignment", "worker.attempt", "verdict", "ci-friction.scorecard", ...Object.keys(SPEND_STEP_ROLES)],
       dedupeWindowPerStep: 32_768,
       onUnreadArchive: () => { sourceProblems.add("unreadable-archive"); }, onUnreadLive: () => { sourceProblems.add("unreadable-live"); }, onMalformedRow: () => { sourceProblems.add("malformed-row"); } })) {
       const timestamp = Date.parse(row.ts as string);

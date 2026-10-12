@@ -656,3 +656,18 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
       `stdout:\n${childResult!.stdout}\nstderr:\n${childResult!.stderr}`,
   );
 });
+
+test("a bare dialect bullet with no claim parses as its own proof, not an empty one", () => {
+  const body = "## Acceptance\n\n- unit test: the suite this PR adds\n- grep: ^export function added in src/lib/added.ts\n- `unit test: a wrapped title`\n";
+  assert.deepEqual(parseAcceptanceBlock(body), [
+    { claim: "unit test: the suite this PR adds", proof: "unit test: the suite this PR adds" },
+    { claim: "grep: ^export function added in src/lib/added.ts", proof: "grep: ^export function added in src/lib/added.ts" },
+    { claim: "`unit test: a wrapped title`", proof: "unit test: a wrapped title" },
+  ]);
+  assert.equal(acceptanceAuthorTimeCheck(body).ok, true, "the gate must not read a bare dialect bullet as empty-proofs");
+});
+
+test("a claim that merely mentions a dialect word mid-sentence still reads as an empty proof", () => {
+  const body = "## Acceptance\n\n- the unit test: suite is green\n";
+  assert.deepEqual(parseAcceptanceBlock(body), [{ claim: "the unit test: suite is green", proof: "" }]);
+});

@@ -5,9 +5,20 @@ import {
   readInboxThreadListView,
   warmInboxThreadListView,
   type ThreadListClassification,
+  type ThreadListRefreshSettled,
   type ThreadListSources,
   type ThreadStoreRead,
 } from "../src/lib/inbox-thread-list-view.js";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fixedClock } from "../src/lib/clock.js";
+import { writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
+import { inboxLegacyView } from "../src/lib/inbox-view.js";
+import * as panelGraph from "../src/lib/panel-graph.js";
+import type { PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { loadPlan } from "../src/lib/plan.js";
+import { makeTempDir } from "../src/lib/tmp.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 import type { InboxThreadItem, ReadMarks } from "../src/lib/inbox-responder.js";
 import { inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
 
@@ -236,4 +247,125 @@ test("warming a thread-list view with no request lands its classification, so th
   const read = await readInboxThreadListView(view);
   assert.equal(read.kind, "ok", "a warmed view answers fresh");
   if (read.kind === "ok") assert.deepEqual(read.threads.map((t) => t.proposalId), ["p1"]);
+});
+
+// ── W1-T5886: the thread list across serve generations ─────────────────────────────────────────────────
+// MEASURED 2026-10-05 on the fleet host: serve forked a generation on every main merge (15 between 12:40Z and
+// 15:59Z, some 2-4 min apart); each starts with an empty main-thread memo, and a cold main-thread pass took up
+// to ~6.5 min. The thread list answered `classification_pending` all that time, while the slow lane wrote a
+// fresh classification to state/inbox-classified.json every few minutes, and a pass that failed after the
+// read's 1.5 s wait left no trace at all.
+
+test("a late classification failure is reported", async () => {
+  const r = rig([message("p1", 1)]);
+  const reports: ThreadListRefreshSettled[] = [];
+  r.sources.report = (settled) => reports.push(settled);
+  const view = createInboxThreadListView(r.sources, { waitMs: 10 });
+  const first = await readInboxThreadListView(view);
+  assert.ok(first.kind === "unavailable" && first.code === "classification_pending", "the read stopped waiting before the pass ended");
+  r.clock.now += 4_000;
+  r.reject(new Error("anchor grep exceeded its bound"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(reports, [{ outcome: "failed", ms: 4_000, error: "anchor grep exceeded its bound" }], "the failure no read was waiting for is named, with how long the pass ran");
+  // The next read joins a retry that also outruns its wait: it says the last pass failed, never just "pending".
+  const second = await readInboxThreadListView(view);
+  assert.equal(r.calls.classify, 2, "the failure was not cached: a retry is running");
+  assert.ok(second.kind === "unavailable" && second.code === "classification_failed", `got ${JSON.stringify(second)}`);
+  if (second.kind === "unavailable") assert.match(second.detail, /anchor grep exceeded its bound/);
+  r.settle(classification([item("p1")], r.clock.now));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reports.at(-1)?.outcome, "landed", "a pass that lands is reported too");
+  const third = await readInboxThreadListView(view);
+  assert.equal(third.kind, "ok", "a landed retry clears the failure");
+});
+
+const SLOW_LANE_AT = Date.parse("2026-10-05T15:57:21.212Z");
+
+/** A cold serve generation's inbox: two operator proposals, and the snapshot the slow lane wrote over them. */
+function slowLaneWorld(t: { after: (fn: () => void) => void }): PanelGraphDeps {
+  const dir = makeTempDir("rmd-thread-list-slow-lane");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "state"), { recursive: true });
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(dir, "state", "ledger.ndjson"), "");
+  const proposals = [{ id: "ruling:p0", summary: "first operator ask", evidenceAnchors: [] }, { id: "ruling:p1", summary: "second operator ask", evidenceAnchors: [] }];
+  writeFileSync(join(dir, "state", "inbox-proposals.json"), JSON.stringify({ proposals }));
+  writeClassificationSnapshot(join(dir, "state"), [{ proposalId: "ruling:p0", state: "not_ready" }, { proposalId: "ruling:p1", state: "ready" }], fixedClock(SLOW_LANE_AT), { complete: true });
+  return {
+    root: dir, inboxRoot: dir, planPath: join(dir, "plan", "tasks.yaml"), ledgerPath: join(dir, "state", "ledger.ndjson"),
+    github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true,
+  };
+}
+
+/** The real panel-graph seams over `deps`, with this generation's own pass still running. */
+function coldGenerationSources(deps: PanelGraphDeps): ThreadListSources<unknown> {
+  const real = (panelGraph as Record<string, unknown>).inboxThreadListSources as ((d: PanelGraphDeps) => ThreadListSources<unknown>) | undefined;
+  assert.equal(typeof real, "function", "panel-graph exposes the thread list's seams");
+  return { ...real!(deps), classify: () => new Promise(() => {}) };
+}
+
+test("a cold main memo answers from the slow lane classification", async (t) => {
+  const deps = slowLaneWorld(t);
+  const view = createInboxThreadListView(coldGenerationSources(deps), { waitMs: 10 });
+  const read = await readInboxThreadListView(view);
+  assert.equal(read.kind, "stale", `a held slow-lane classification is served qualified, never classification_pending: ${JSON.stringify(read)}`);
+  if (read.kind !== "stale") return;
+  assert.deepEqual(read.threads.map((thread) => thread.proposalId).sort(), ["ruling:p0", "ruling:p1"]);
+  assert.equal(read.source.state, "stale", "rows this serve did not verify are never labelled fresh");
+  assert.equal(read.source.completeness, "complete", "the slow lane recorded that its pass saw every input");
+});
+
+test("slow lane classification keeps its own classifiedAt", async (t) => {
+  const deps = slowLaneWorld(t);
+  const view = createInboxThreadListView(coldGenerationSources(deps), { waitMs: 10 });
+  const before = Date.now();
+  const read = await readInboxThreadListView(view);
+  assert.ok(read.kind === "stale", `got ${JSON.stringify(read)}`);
+  assert.equal(read.source.classifiedAt, new Date(SLOW_LANE_AT).toISOString(), "the slow lane's write time, never when this serve read it");
+  assert.ok(read.source.ageMs >= before - SLOW_LANE_AT, "the age runs from the slow lane's classification");
+  // A snapshot whose writer did not record completeness is not claimed complete.
+  const snapshotPath = join(deps.inboxRoot, "state", "inbox-classified.json");
+  const raw = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, unknown>;
+  delete raw.complete;
+  writeFileSync(snapshotPath, `${JSON.stringify({ ...raw, generatedAt: new Date(SLOW_LANE_AT + 1_000).toISOString() })}\n`);
+  const unrecorded = await readInboxThreadListView(view);
+  assert.ok(unrecorded.kind === "stale" && unrecorded.source.completeness === "partial", `got ${JSON.stringify(unrecorded)}`);
+  assert.equal(unrecorded.source.classifiedAt, new Date(SLOW_LANE_AT + 1_000).toISOString(), "a rewritten snapshot is re-read");
+});
+
+test("the inbox view's legacy side reads the classification the panel routes hold", async (t) => {
+  const base = slowLaneWorld(t);
+  const plan = loadPlan(base.planPath);
+  const deps: PanelGraphDeps = { ...base, readPlanSnapshot: () => plan };
+  const legacy = inboxLegacyView(deps);
+  assert.ok("error" in legacy.compute(new URLSearchParams({ section: "needsYou" })), "nothing is classified yet");
+  const route = panelGraph.buildPanelGraphRoutes(deps, deps.readPlanSnapshot).find((r) => r.path === "/v1/inbox/threads" && r.method === "GET");
+  assert.ok(route);
+  const sent: { status?: number; body?: string } = {};
+  const res = { setHeader: () => undefined, writeHead: (status: number) => { sent.status = status; }, end: (body: string) => { sent.body = body; } };
+  await route.handler({ url: "/v1/inbox/threads" } as never, res as never, {} as never);
+  assert.equal(sent.status, 200, `the small inbox classifies inside the read's wait: ${sent.body}`);
+  const answered = legacy.compute(new URLSearchParams({ section: "needsYou" }));
+  assert.ok(!("error" in answered), `the legacy side sees what the routes classified: ${JSON.stringify(answered)}`);
+});
+
+test("the panel thread list logs a failed pass and claims no slow-lane rows without a snapshot", async (t) => {
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const deps: PanelGraphDeps = { ...slowLaneWorld(t), logProjection: (step, extra) => logged.push({ step, extra }) };
+  const stateDir = join(deps.inboxRoot, "state");
+  rmSync(join(stateDir, "inbox-classified.json"));
+  const sources = { ...coldGenerationSources(deps), classify: () => Promise.reject(new Error("plan pin unreadable")) };
+  const view = createInboxThreadListView(sources, { waitMs: 50 });
+  const read = await readInboxThreadListView(view);
+  assert.ok(read.kind === "unavailable" && read.code === "classification_failed", `no snapshot is no evidence: ${JSON.stringify(read)}`);
+  assert.deepEqual(logged.map((row) => [row.step, row.extra.error]), [["inbox.thread_list_classification_failed", "plan pin unreadable"]]);
+  writeClassificationSnapshot(stateDir, [{ proposalId: "ruling:p0", state: "not_ready" }], fixedClock(SLOW_LANE_AT), { complete: false, incompleteReason: "the GitHub projection is indeterminate" });
+  const partial = await readInboxThreadListView(view);
+  assert.ok(partial.kind === "stale" && partial.source.completeness === "partial", `got ${JSON.stringify(partial)}`);
+  assert.deepEqual(partial.threads.map((thread) => thread.proposalId), ["ruling:p0"], "a proposal the slow lane did not classify is not shown");
+  writeFileSync(join(stateDir, "inbox-classified.json"), `${JSON.stringify({ generatedAt: new Date(SLOW_LANE_AT + 5).toISOString(), complete: false, states: { "ruling:p1": "ready" } })}\n`);
+  const unnamed = await readInboxThreadListView(view);
+  assert.ok(unnamed.kind === "stale" && unnamed.source.completeness === "partial" && unnamed.threads[0]?.proposalId === "ruling:p1", `got ${JSON.stringify(unnamed)}`);
 });

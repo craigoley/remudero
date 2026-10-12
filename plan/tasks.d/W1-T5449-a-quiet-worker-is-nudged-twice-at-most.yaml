@@ -1,0 +1,53 @@
+- id: W1-T5449
+  title: "THE OPERATOR CANNOT TELL A SILENT WORKER FROM A BUSY ONE — the state sensor counts any message as a heartbeat, thinking blocks are ignored, and a worker that makes twenty tool calls with no readable text shows a stale reason and tail"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T942", "W1-T943", "W1-T945", "W1-T4673"]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/a-quiet-worker-is-nudged-twice-at-most.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'User-facing progress updates': on Opus 5.5 progress notes can arrive as thinking
+    blocks with empty text at the default display, so a client that renders only text blocks looks silent; the
+    harness lever is to count consecutive tool-calling steps that give the user nothing to read and, after about
+    five, append 'The user hasn't heard from you in a while — say in a few words what you're doing, then
+    continue.', stopping after two or three reminders (measured: roughly halved the share of tasks with a long
+    silent stretch, no cost change). Here collectWorkerResult (worker.ts ~3184-3204) emits 'working' only for
+    text blocks and treats a thinking-only message as a bare heartbeat; the sensor (run-task.ts ~2815-2950)
+    writes tool_reason from the last text block and the tail from text and tool labels, so a long tool-only
+    stretch reads as dead in `rmd peek` and the console, while workerStall never fires because heartbeats keep
+    resetting its clock. NOTE: the installed SDK is 0.3.276 while package.json asks ^0.3.284, and its thinking
+    display type is only summarized or omitted; `display: 'updates'` needs a newer SDK, so do the harness-side
+    counter first and treat updates mode as a separate step after confirming the SDK.
+
+  design: |
+    (i) Count consecutive assistant messages carrying tool_use and no non-empty readable text; emit a
+    quietSteps count on the stream event. (ii) At a policy threshold (default 5), deliver the reminder through
+    deliverOperatorAnswerToRunningWorker; cap at 2 per run; ledger worker.quiet_nudge. (iii) Text arriving resets
+    the counter. (iv) Behind a policy flag, default off, enabled for Claude Opus 5.5 mounts first. (v) Do not
+    change the stall or abandon clocks.
+
+  acceptance:
+    - claim: "six tool-only messages cause exactly one reminder"
+      proof: 'grep: test("W1-T5449: six tool-only messages cause exactly one reminder" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+    - claim: "a third reminder is never sent and text resets the counter"
+      proof: 'grep: test("W1-T5449: a third reminder is never sent and text resets the counter" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+    - claim: "with the flag off the ledger output is byte-identical"
+      proof: 'grep: test("W1-T5449: with the flag off the ledger output is byte-identical" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if a quiet-step reminder already exists, or if a mid-turn message
+    is observed to disturb a running turn in a way that breaks the one-shot DECISION_REQUEST flow.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { priorStrikesFor, strikeRegimeOf, runFixRung } from "../src/run-task.js";
+import { priorStrikesFor, strikeRegimeOf, runFixRung } from "./helpers/run-task-test.js";
 import { fixStrikeCap } from "../src/lib/config.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { CiFailure } from "../src/lib/sweep.js";

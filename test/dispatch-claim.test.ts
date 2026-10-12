@@ -13,6 +13,7 @@ import {
   releaseDispatchClaim,
   type DispatchClaimOutcome,
   type DispatchClaimReserver,
+  type DispatchClaimReserverAsync,
 } from "../src/lib/dispatch-claim.js";
 import { dispatchClaimReserverFor, runTask } from "../src/run-task.js";
 import { nextRunnable, runnableCandidates, type NextRunnableOpts } from "../src/lib/drain.js";
@@ -309,7 +310,7 @@ test("W1-T1268 WIRED: run-task.ts calls decideDispatchClaim, after the inflight 
   assert.ok(claimIdx < worktreeAddIdx, "the cross-host claim precedes worktree materialization");
   assert.ok(claimIdx < reconIdx, "the cross-host claim precedes the recon worker spawn — refused before any spend");
   // The holder-arm release must exist too, or a won claim would never be dropped.
-  assert.match(RUN_TASK_SRC, /releaseDispatchClaim\(task\.id, claimReserver, \{ anchor: claimAnchor \}\)/);
+  assert.match(RUN_TASK_SRC, /releaseDispatchClaim(?:Async)?\(task\.id, claimReserver, \{ anchor: claimAnchor \}\)/);
 });
 
 test("W1-T1268 WIRED: an unreachable claim refuses via blocked_git_fetch, and contention via blocked_inflight — no new RunResult verdict", () => {
@@ -819,6 +820,54 @@ test("W1-T1268 BEHAVIORAL: a REAL runTask() drops its own claim (holder arm) in 
       "a release that does not throw never ledgers the error line",
     );
     assert.ok(reserver.calls.includes(`drop:${TASK_ID}:scripted-anchor`), "the release is CAS'd on this run's own minted anchor");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a REAL runTask awaits an awaited claim reserver and refuses a taken claim via blocked_inflight", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-claim-awaited-root-"));
+  const TASK_ID = "T-DISPATCH-CLAIM-AWAITED";
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, CLAIM_BEHAVIORAL_PLAN(TASK_ID));
+  const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
+  claimGitFixture(root);
+
+  // Every answer arrives on a LATER tick, as the daemon reserver's execFile git does. A runTask
+  // that reads these without awaiting sees a Promise where an outcome belongs and misfiles it.
+  const calls: string[] = [];
+  const later = <T,>(v: T): Promise<T> => new Promise((r) => setTimeout(() => r(v), 5));
+  const reserver: DispatchClaimReserverAsync = {
+    mintAnchor: () => later("awaited-anchor"),
+    attempt: (id) => (calls.push(`attempt:${id}`), later("taken" as const)),
+    holder: (id) => (calls.push(`holder:${id}`), later("someone-elses-anchor")),
+    drop: (id) => (calls.push(`drop:${id}`), later(false)),
+    anchorMessage: (id) => (calls.push(`message:${id}`), later(`rmd-dispatch claim 999999@${hostname()} 2000-01-01T00:00:00.000Z`)),
+  };
+  const spawn: typeof spawnWorker = async () => {
+    throw new Error("must never spawn a worker — a TAKEN claim refuses before any spend");
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: noCreditGithub(),
+        spawn,
+        containmentExec: behavioralHoldingContainmentExec,
+        isolationExec: behavioralCleanIsolationExec,
+        claimReserver: reserver,
+      }),
+    );
+    assert.equal(res.verdict, "blocked_inflight", "an awaited `taken` is contention, not an unreadable origin");
+    const ledger = readLedger(root);
+    const claimLine = ledger.find((l) => l.step === "dispatch.claim");
+    assert.equal(claimLine?.outcome, "taken");
+    assert.match(String(claimLine?.reason), /held by someone-elses-anchor/, "the awaited holder names the refusal");
+    assert.ok(ledger.some((l) => l.step === "dispatch.claim_released"), "the contention release still runs");
+    assert.ok(calls.includes(`message:${TASK_ID}`), "the dead-claimant arm reads the anchor message, awaited");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

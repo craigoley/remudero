@@ -20,14 +20,19 @@
  * a `low` verdict must be: {@link earnedConfidenceBar}. A family that keeps helping is trusted
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import type { GardenCheckout, PrState } from "./gardener.js";
+import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
+import { ghExec } from "./github-transport.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGit } from "./worktree-git.js";
+import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
-import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
+import { machineFilingAdmissionViolations, parseTasksFromYaml, type MachineFilingAdmissionContext, type Plan, type Task } from "./plan.js";
 import {
   buildFilingRiskJudgeInput,
   DEFAULT_RISK_POLICY,
@@ -38,8 +43,8 @@ import {
   type RiskJudgeVerdict,
   type RiskPolicy,
 } from "./risk-judge.js";
-import { deterministicEscalation, UNPRICED_PRIORITY } from "./machine-filing.js";
-import { lintTask, rulingVerifyViolation, taskRulingPin } from "./task-linter.js";
+import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
 export const MACHINE_JUDGE_ESCALATE_ONLY_IF =
@@ -210,20 +215,18 @@ export async function judgeMachineShard(
 
 const q = (v: string): string => JSON.stringify(v);
 
-/** Drop an existing `risk_ruling:` block from a single-record shard's text. */
-function withoutRulingBlock(lines: string[]): string[] {
-  const out: string[] = [];
+/** A shard's text without its `risk_ruling` block's `judged_at:` line: an operator release is stamped
+ *  afresh every pass, so only this line may differ from the ruling main carries (W1-T5406). */
+function withoutJudgedAt(text: string): string {
   let inBlock = false;
-  for (const line of lines) {
-    if (/^ {2}risk_ruling:\s*$/.test(line)) {
-      inBlock = true;
-      continue;
-    }
-    if (inBlock && (line.trim() === "" || /^ {4}/.test(line))) continue;
-    inBlock = false;
-    out.push(line);
-  }
-  return out;
+  return text
+    .split("\n")
+    .filter((line) => {
+      if (/^ {2}risk_ruling:\s*$/.test(line)) return (inBlock = true);
+      if (line.trim() !== "" && !/^ {4}/.test(line)) inBlock = false;
+      return !(inBlock && /^ {4}judged_at:/.test(line));
+    })
+    .join("\n");
 }
 
 /** ONE shard's record. A lone shard cannot resolve its `depends_on`, so the caller checks them against
@@ -242,14 +245,20 @@ export function renderRuledShard(
   judgedPin: string,
   ruling: FilingRiskRuling,
   known: { has: (id: string) => boolean } = new Set<string>(),
+  /** lint-plan --base's machine-filing admission (W1-T3843), as the landing PR will meet it. Absent: not checked. */
+  admission?: Omit<MachineFilingAdmissionContext, "releasedIds">,
 ): { contents: string } | { refused: string; lint?: true } {
   if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
   const unknownDep = shardRecord(text, relPath).depends_on.find((d) => !known.has(d));
   if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
-  const verifyAt = lines.findIndex((l) => /^ {2}verify:\s*\S+\s*$/.test(l));
+  // 2026-10-10: `verify: human  # <why>` is valid YAML the plan loads, and W1-T7736 was refused as having no
+  // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
+  let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
+  const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
+  if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
   lines[verifyAt] = `  verify: ${verify}`;
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
@@ -277,15 +286,61 @@ export function renderRuledShard(
   // The pin is taken from `after`, whose pinned fields the block above does not touch, and a
   // `proceed` is written at `verify: auto` while an `escalate` stays `verify: human`: the written
   // pin matches and machine-author-verify clears by construction, so neither is re-checked here.
-  const blocking = (t: Task) => new Set(lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check));
-  const had = blocking(before);
-  const added = [...blocking(reparsed)].filter((c) => !had.has(c));
+  // Judged as lint-plan --base judges the landing PR: a warning the flip introduces is promoted to block
+  // on a plan-only diff (W1-T3814). 2026-10-10: proof-test-only-discrimination, a warn at verify: auto
+  // and silent at human, refused every landing the live ledger kept (29) while this read only `severity: block`.
+  const checks = (vs: readonly LintViolation[]) => new Set(vs.filter((v) => v.severity === "block").map((v) => v.check));
+  const base = lintTask(before).violations;
+  const had = checks(base);
+  const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
   if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
+  // lint-plan --base also runs the machine-filing admission on every changed machine record, and a plain lintTask
+  // skips it: at verify: auto it refuses unmerged depends_on, which verify: human parks past. Only what the
+  // rewrite introduces counts, as above, so a reason the record already carried is not the ruling's to answer.
+  if (admission !== undefined) {
+    const admit = (t: Task) => machineFilingAdmissionViolations(t, { ...admission, releasedIds: new Set() });
+    const held = new Set(admit(before));
+    const refusedBy = admit(reparsed).filter((r) => !held.has(r));
+    if (refusedBy.length > 0) return { refused: `${reparsed.id}: at verify: auto lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
+  }
   return { contents };
 }
 
+interface RulingPins {
+  id: string;
+  relPath: string;
+  pin: string;
+  sourcePin: string;
+}
+
+function mainRecords(root: string, paths: string[]): Map<string, string> {
+  // In-place callers have no merge target; Git-backed workspaces always refresh origin/main.
+  if (!existsSync(join(root, ".git"))) {
+    return new Map(paths.flatMap((path) => {
+      const text = readFileIfExists(join(root, path));
+      return text === undefined ? [] : [[path, text] as const];
+    }));
+  }
+  const git = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: "pipe" });
+  fetchOriginRetryingRefLock(git);
+  const target = git(["rev-parse", "origin/main"]).trim();
+  const present = new Set(git(["ls-tree", "-r", "--name-only", target, "--", ...paths]).trim().split("\n"));
+  return new Map(paths.filter((path) => present.has(path)).map((path) => [path, git(["show", `${target}:${path}`])]));
+}
+
+function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id: string; pin: string; main_pin: string | null }[] {
+  return records.flatMap((record) => {
+    const text = main.get(record.relPath);
+    const task = text === undefined ? undefined : parseTasksFromYaml(text, record.relPath).find((t) => t.id === record.id);
+    const pin = task === undefined ? null : taskRulingPin(task);
+    // The source pin covers the unruled record; the rendered pin covers verify/priority after release.
+    return task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)
+      ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
+  });
+}
+
 interface MachineJudgeState {
-  pending?: { prUrl: string; ids: string[] };
+  pending?: { prUrl: string; ids: string[]; records?: RulingPins[]; repoRoot?: string };
   /** A record whose judge PR a person closed, by the pin it had: not re-asked until it changes. */
   declined?: Record<string, string>;
   /** The judge's answer for a record not yet landed, by the pin it judged: reused with no model call
@@ -314,7 +369,7 @@ export interface MachineJudgePorts {
   /** Where a family's gardener keeps its Beta record: `<stateDir>/<family>-gardener.json`. */
   gardenRecord?: (family: string) => { alpha: number; beta: number } | undefined;
   /** Land the rewrites as one plan-only PR (the daemon). Absent, `writeRoot` is written in place. */
-  openWorkspace?: () => GardenCheckout;
+  openWorkspace?: GardenWorkspacePort;
   writeRoot?: string;
   /** Task ids the operator released with `rmd approve` ({@link readOperatorReleases}). */
   operatorReleases?: () => ReadonlySet<string>;
@@ -324,6 +379,30 @@ export interface MachineJudgePorts {
   clock: Clock;
   limit?: number;
   excludeFamilies?: readonly string[];
+}
+
+/** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
+ *  lives in it) and the operator's releases. A plan that cannot be resolved stamps as unreadable, so it
+ *  differs from any recorded tree and the pass runs and reports the failure. */
+export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
+  let plan: string;
+  try {
+    plan = hostWorktreeGit(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
+  } catch {
+    // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
+    plan = "unreadable";
+  }
+  const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });
+  return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
+}
+
+/** Whether a pass moved anything: a ruling proceeded, escalated, refused or settled, or a PR opened. Waiting
+ *  on a PR, an unavailable judge and a failed landing (one whose PR did not open) are not new; pacing backs off. */
+export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
+  const unlanded = new Set(report.unlanded);
+  const moved = (ids: readonly string[]) => ids.some((id) => !unlanded.has(id));
+  return report.prUrl !== undefined || moved(report.proceeded) || moved(report.escalated) ||
+    report.refused.length > 0 || report.settled.length > 0;
 }
 
 export interface MachineJudgeReport {
@@ -336,6 +415,7 @@ export interface MachineJudgeReport {
   /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
   settled: string[];
   prUrl?: string;
+  unlanded?: string[];
 }
 
 /** The Beta record gardener.ts keeps for a family, summed over its classes. */
@@ -373,6 +453,25 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
+      const pendingPlan = ports.plan();
+      const records = state.pending.records ?? state.pending.ids.map((id) => ({
+        id, relPath: shardRelPath(pendingPlan.byId.get(id) ?? {}) ?? "",
+        pin: state.rulings?.[id]?.pin ?? "unknown", sourcePin: state.rulings?.[id]?.pin ?? "unknown",
+      }));
+      const source = pendingPlan.tasks.find((t) => t.sourcePath !== undefined)?.sourcePath;
+      const root = state.pending.repoRoot ?? (source === undefined ? undefined : dirname(dirname(dirname(source))));
+      if (root === undefined) throw new Error("machine judge: pending PR has no merge-target checkout");
+      const stale = staleRulingPins(records, mainRecords(root, records.map((r) => r.relPath).filter(Boolean)));
+      if (stale.length > 0) {
+        const comment = "Withdrawing stale machine-filing rulings after origin/main changed:\n" +
+          stale.map((r) => `${r.id}: ruling pin ${r.pin}; main pin ${r.main_pin ?? "removed"}`).join("\n");
+        ghExec(["pr", "close", state.pending.prUrl, "--comment", comment], { encoding: "utf8", stdio: "pipe" });
+        ports.log("machine_judge.withdrawn", { pr_url: state.pending.prUrl, stale });
+        for (const id of state.pending.ids) delete state.rulings?.[id];
+        state.pending = undefined;
+        writeAtomic(statePath, JSON.stringify(state) + "\n");
+        return report;
+      }
       ports.log("machine_judge.waiting", { pr_url: state.pending.prUrl });
       return report;
     }
@@ -449,24 +548,25 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   writeAtomic(statePath, JSON.stringify(state) + "\n");
   if (ruled.length === 0) return report;
 
-  const ws = ports.writeRoot === undefined ? ports.openWorkspace?.() : undefined;
+  const ws = ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
   if (root === undefined) throw new Error("machine judge: neither a workspace nor a write root was supplied");
   try {
-    const landed: { id: string; relPath: string; pin: string; action: string }[] = [];
+    let landed: (RulingPins & { action: string })[] = [];
     for (const r of ruled) {
       try {
         const relPath = shardRelPath(r.task)!;
         const text = readFileIfExists(join(root, relPath));
         const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
+        const admission = { plan, isMerged: (t: Task) => isMerged(t.id), pathExists: (p: string) => existsSync(join(root, p)) };
         let out = text === undefined
           ? { refused: `${relPath} is absent from the landing tree` }
-          : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+          : renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         if (text !== undefined && "refused" in out && out.lint && !r.byOperator) {
           // A proceed the record cannot honour is BROKEN, which is the operator's to see: park it,
           // pinned, with the reason, rather than re-asking the judge every pass.
           r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
-          out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId);
+          out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         }
         if ("refused" in out) {
           // Settled by the record's pin, so an unchanged record is not re-judged every pass.
@@ -476,9 +576,9 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           continue;
         }
         const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
-        if (out.contents === text) {
-          // Main already carries this exact ruling: the daemon's plan lags the landing tree, so
-          // landing it again commits nothing and throws. Settled by its pin instead (W1-T5359).
+        if (out.contents === text || (r.byOperator && withoutJudgedAt(out.contents) === withoutJudgedAt(text!))) {
+          // Main already carries this ruling: the daemon's plan lags the landing tree, so landing it
+          // again commits nothing or only a timestamp. Settled by its pin instead (W1-T5359, W1-T5406).
           delete state.rulings[r.task.id];
           state.settled[r.task.id] = taskRulingPin(r.task);
           report.settled.push(r.task.id);
@@ -486,11 +586,11 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           continue;
         }
         writeAtomic(join(root, relPath), out.contents);
-        landed.push({ id: r.task.id, relPath, pin, action: r.ruling.action });
+        landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action });
         if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
         else {
           report.escalated.push(r.task.id);
-          ports.stageProposal(machineJudgeProposal(r));
+          if (!ws) ports.stageProposal(machineJudgeProposal(r));
         }
       } catch (e) {
         // One bad record is ledgered and skipped; the rest of the pass still lands (2026-09-30).
@@ -499,16 +599,32 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       }
     }
     if (ws && landed.length > 0) {
-      report.prUrl = ws.land({
+      const stale = staleRulingPins(landed, mainRecords(root, landed.map((l) => l.relPath)));
+      const staleIds = new Set(stale.map((r) => r.id));
+      for (const r of stale) {
+        delete state.rulings[r.id];
+        ports.log("machine_judge.pin_stale", { task_id: r.id, pin: r.pin, main_pin: r.main_pin });
+      }
+      landed = landed.filter((l) => !staleIds.has(l.id));
+      report.proceeded = report.proceeded.filter((id) => !staleIds.has(id));
+      report.escalated = report.escalated.filter((id) => !staleIds.has(id));
+      for (const r of ruled) if (report.escalated.includes(r.task.id)) ports.stageProposal(machineJudgeProposal(r));
+    }
+    if (ws && landed.length > 0) {
+      report.prUrl = await ws.land({
         paths: landed.map((l) => l.relPath),
         title: `chore(plan): the machine-filing judge rules on ${landed.length} machine-filed task(s)`,
         body: machineJudgePrBody(landed),
       });
-      if (report.prUrl) state.pending = { prUrl: report.prUrl, ids: landed.map((l) => l.id) };
+      if (report.prUrl) state.pending = {
+        prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
+        repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
+      };
+      else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
     }
   } finally {
-    ws?.dispose();
+    await ws?.dispose();
   }
   writeAtomic(statePath, JSON.stringify(state) + "\n");
   return report;

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-bakeoff-trigger-1790777606000 -> plan-bakeoff-trigger-1790777606000"
   plan_refs: [W1-T4907, W1-T3570, W1-T4916]
   files: [src/lib/bakeoff-trigger.ts, src/lib/sweep.ts, test/a-newly-deployed-model-earns-its-lane-by-a-bake-off.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30: gpt-6-luna was routed to lead the inbox lane on price and model generation (#7963) and failed

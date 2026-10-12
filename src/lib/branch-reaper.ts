@@ -25,6 +25,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isLandingRef } from "./feedback-landing.js";
 import type { Clock } from "./clock.js";
+import { runStepsSync, step, type Steps } from "./git-push.js";
+
+export type BranchReapExec = (cmd: string, args: string[]) => string | Promise<string>;
 
 /**
  * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
@@ -70,7 +73,11 @@ export function isDeclaredBranchGuard(name: string, declaredGuards: readonly str
 
 /** Every remote branch name, newest-agnostic — `git ls-remote --heads`, parsed. */
 export function remoteBranchNames(exec: (cmd: string, args: string[]) => string): string[] {
-  return exec("git", ["ls-remote", "--heads", "origin"])
+  return runStepsSync(remoteBranchNamesSteps(exec));
+}
+
+export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
+  return (yield* step(() => exec("git", ["ls-remote", "--heads", "origin"])))
     .split("\n")
     .map((l) => l.split("refs/heads/")[1])
     .filter((n): n is string => Boolean(n && n.trim()))
@@ -329,9 +336,13 @@ export function parseRemoteBranchTips(raw: string): Map<string, RemoteBranchTip>
  *  namespace resolves to an EMPTY map — every name reads "no local tip", the same conservative
  *  reading a single ref's own resolve failure already produced. */
 export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => string): Map<string, RemoteBranchTip> {
+  return runStepsSync(readRemoteBranchTipsSteps(exec));
+}
+
+export function* readRemoteBranchTipsSteps(exec: BranchReapExec): Steps<Map<string, RemoteBranchTip>> {
   let raw: string;
   try {
-    raw = exec("git", ["for-each-ref", `--format=${REMOTE_BRANCH_TIP_FORMAT}`, "refs/remotes/origin"]);
+    raw = yield* step(() => exec("git", ["for-each-ref", `--format=${REMOTE_BRANCH_TIP_FORMAT}`, "refs/remotes/origin"]));
   } catch {
     return new Map(); // an unreadable local ref namespace — every name reads "no local tip"
   }
@@ -345,9 +356,13 @@ export function readRemoteBranchTips(exec: (cmd: string, args: string[]) => stri
  *  and therefore all-false — merged set: that collapse is the exact §6 defect W1-T2246 fixed for
  *  the per-branch read, and a batched read must not reintroduce it. */
 export function readTipInMainMembership(exec: (cmd: string, args: string[]) => string): Set<string> | undefined {
+  return runStepsSync(readTipInMainMembershipSteps(exec));
+}
+
+export function* readTipInMainMembershipSteps(exec: BranchReapExec): Steps<Set<string> | undefined> {
   let raw: string;
   try {
-    raw = exec("git", ["for-each-ref", "--format=%(refname:short)", "--merged=origin/main", "refs/remotes/origin"]);
+    raw = yield* step(() => exec("git", ["for-each-ref", "--format=%(refname:short)", "--merged=origin/main", "refs/remotes/origin"]));
   } catch {
     return undefined; // the ancestry read itself failed (e.g. an unresolvable origin/main) —
     // "cannot determine", never an empty (and therefore all-false) merged set
@@ -376,15 +391,10 @@ export function tipInMainFor(
 }
 
 /**
- * `namedInSource` for EVERY branch from one `git grep -F` read over every name at once, never one
- * call per branch. `-F` (fixed strings) with one `-e <name>` per branch preserves the exact
- * per-branch semantics a `-l -F -- <name>` call had — an unanchored literal SUBSTRING match, not a
- * word-boundary one — including the case the per-branch read could also produce: a name that only
- * appears INSIDE a longer name's match (`foo` inside `foobar`). Git's multi-pattern match is
- * leftmost-LONGEST (POSIX, confirmed for both `-F -e/-e` and `-E` alternation), so a hit's own
- * matched text can be the LONGER neighbor rather than the shorter name itself; testing
- * `hit.name.includes(queriedName)` rather than exact equality recovers that shorter name without a
- * second read, because the longer match trivially contains it as a substring.
+ * `namedInSource` for EVERY branch from one `git grep` over every name at once ({@link
+ * namedInSourcePatterns}), keeping the per-branch `-l -F -- <name>` semantics: an unanchored
+ * SUBSTRING match. The match is leftmost-LONGEST, so a hit can be a longer neighbor (`foobar` for
+ * `foo`); `hit.name.includes(queriedName)` recovers the shorter name without a second read.
  */
 export function readNamedInSource(
   exec: (cmd: string, args: string[]) => string,
@@ -392,26 +402,66 @@ export function readNamedInSource(
   root?: string,
   onFailure?: (why: string) => void,
 ): Set<string> {
+  return runStepsSync(readNamedInSourceSteps(exec, names, root, onFailure));
+}
+
+export function* readNamedInSourceSteps(
+  exec: BranchReapExec,
+  names: readonly string[],
+  root?: string,
+  onFailure?: (why: string) => void,
+): Steps<Set<string>> {
   const found = new Set<string>();
   if (names.length === 0) return found;
   const roots = ["src/", "scripts/", "deploy/", ".github/"].filter((p) => root === undefined || existsSync(join(root, p)));
   if (roots.length === 0) return found;
-  const args = ["grep", "-n", "-o", "-F"];
-  for (const name of names) args.push("-e", name);
-  args.push("--", ...roots);
-  let raw: string;
-  try {
-    raw = exec("git", args);
-  } catch (err) {
-    if ((err as { status?: unknown }).status === 1) return found; // git grep exits 1 on no match anywhere — a real "nothing named", not a failure
-    onFailure?.(String((err as Error)?.message ?? err));
-    return new Set(names);
+  const fixed = ["grep", "-n", "-o", "-F", ...names.flatMap((name) => ["-e", name]), "--", ...roots];
+  const queue = names.every((name) => /^[\x21-\x7e]+$/.test(name))
+    ? namedInSourcePatterns(names).map((pattern) => ["grep", "-n", "-o", "-P", "-e", pattern, "--", ...roots])
+    : [fixed];
+  let raw = "";
+  while (queue.length > 0) {
+    const args = queue.shift()!;
+    try {
+      raw += `${yield* step(() => exec("git", args))}\n`;
+    } catch (err) {
+      if (((err as { status?: unknown }).status ?? (err as { code?: unknown }).code) === 1) continue; // sync status and async code both identify git grep's no-match exit
+      const why = String((err as Error)?.message ?? err);
+      if (args !== fixed && /perl|pcre/i.test(why)) {
+        queue.splice(0, queue.length, fixed); // a git built without PCRE: the -F scan finds the same names
+        raw = "";
+        continue;
+      }
+      onFailure?.(why);
+      return new Set(names);
+    }
   }
   const hits = parseBranchCitationHits(raw);
-  for (const name of names) {
-    if (hits.some((hit) => hit.name.includes(name))) found.add(name);
+  return new Set(names.filter((name) => hits.some((hit) => hit.name.includes(name))));
+}
+
+/**
+ * `-F` with one `-e` per name costs git a pass per pattern per line (224 names: 12 s, 2026-10-12).
+ * One `-P` alternation, longest name first, gives the same leftmost-longest hits in 0.2 s. A list
+ * over one argv string's 128 KiB limit splits, which can only report more names, never fewer.
+ */
+export function namedInSourcePatterns(names: readonly string[]): string[] {
+  const sorted = [...new Set(names)].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
+  const patterns: string[] = [];
+  let current: string[] = [];
+  let length = 0;
+  for (const name of sorted) {
+    const escaped = name.replace(/[^A-Za-z0-9_]/g, "\\$&");
+    if (current.length > 0 && length + escaped.length + 1 > 64 * 1024) {
+      patterns.push(current.join("|"));
+      current = [];
+      length = 0;
+    }
+    current.push(escaped);
+    length += escaped.length + 1;
   }
-  return found;
+  if (current.length > 0) patterns.push(current.join("|"));
+  return patterns;
 }
 
 /**
@@ -619,6 +669,14 @@ export function pruneDeletableBranches(
   exec: (cmd: string, args: string[]) => string,
   opts: { readonly chunkSize?: number } = {},
 ): BranchPruneOutcome {
+  return runStepsSync(pruneDeletableBranchesSteps(manifest, exec, opts));
+}
+
+export function* pruneDeletableBranchesSteps(
+  manifest: readonly BranchManifestEntry[],
+  exec: BranchReapExec,
+  opts: { readonly chunkSize?: number } = {},
+): Steps<BranchPruneOutcome> {
   const chunkSize = Math.max(1, opts.chunkSize ?? 25);
   const deleted: string[] = [];
   const skipped: { name: string; reason: string }[] = [];
@@ -636,7 +694,7 @@ export function pruneDeletableBranches(
   for (let i = 0; i < deletable.length; i += chunkSize) {
     const chunk = deletable.slice(i, i + chunkSize);
     try {
-      exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]);
+      yield* step(() => exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]));
       for (const e of chunk) deleted.push(e.name);
     } catch (err) {
       // The whole chunk survives: git applies a rejected push atomically per invocation, so naming

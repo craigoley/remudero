@@ -151,7 +151,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
       return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
     }
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -164,7 +164,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
   assert.ok(suite, "the ci job must still shell `npm run test:ci`");
   assert.equal(suite!.opts?.stream, true, "the full-suite step must stream — it is the hour of silence");
 
-  // W1-T3299 — THE COVERAGE LEAF IS FOUR SHARDS NOW, MIRRORING CI, AND IT CAPTURES ON PURPOSE.
+  // W1-T3299 — THE COVERAGE LEAF IS EIGHT SHARDS NOW, MIRRORING CI, AND IT CAPTURES ON PURPOSE.
   // CI's coverage-shard job states the retry removal outright ("`scripts/test-with-retry.mjs` is
   // GONE from this invocation and STAYS in the `ci` job"), so this local leaf dropped it too —
   // that IS the parity this suite exists to hold, not a regression against it.
@@ -175,7 +175,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
   // disarm that refusal. Capture is the correct trade, and the cost — a shard runs without live
   // progress — is named here rather than left for the next reader to rediscover.
   const shards = calls.filter((c) => c.args.includes("--experimental-test-coverage") && c.args.some((a) => /^test\/coverage-shard-\d+\.test\.ts$/.test(a)));
-  assert.equal(shards.length, 4, "the coverage leaf must still run the suite under coverage, as CI's four shards");
+  assert.equal(shards.length, 8, "the coverage leaf must still run the suite under coverage, as CI's eight shards");
   for (const shard of shards) {
     assert.notEqual(
       shard.opts?.stream,

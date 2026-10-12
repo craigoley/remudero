@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found by W1-T5351's build (PR #8826)"
   plan_refs: ["W1-T5351", "W1-T2675"]
   files: [src/lib/panel-graph.ts, test/the-frontier-panel-names-every-filter-reason.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

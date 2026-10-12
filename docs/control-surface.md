@@ -27,7 +27,7 @@ unattended, because the bogus `install` subcommand was ignored.)
 | | `rmd stop` | `rmd pause` |
 |---|---|---|
 | purpose | halt an accidental / runaway run **now** | deliberate maintenance hold |
-| scope | the **currently running** drain/daemon | the fleet, across runs |
+| scope | the **currently running** drain/daemon | **one instance**, across runs (`--fleet`: every instance) |
 | lifecycle | **ONE-SHOT** — auto-consumed when the halted run terminates | **PERSISTENT** — survives across runs |
 | cleared by | nothing (auto) — your next drain starts clean | **`rmd resume`** only |
 | when idle | **no-op that warns** (writes no latch) | writes the hold |
@@ -41,6 +41,40 @@ unattended, because the bogus `install` subcommand was ignored.)
   (verdict + merge), no new task spawns, and the hold **survives across runs** until you run
   **`rmd resume`**. This is the deliberate-maintenance case.
 - **`rmd resume`** clears the pause (and any stop) — the one command that always means "go".
+
+### Which instance a pause holds (W1-T7727)
+
+Core, site and console run one checkout against one origin, each from its own state root (the
+`state_dir` in `.remudero/daemon-instances.yaml`, mounted as the container's `config.root`). A pause
+holds exactly **one** of them:
+
+- **`rmd pause [--instance <name>] [--reason <text>]`** writes `<state_dir>/state/PAUSE` for the
+  instance `--instance` names. Without the flag, it writes it for the instance whose registry
+  `state_dir` is this process's `config.root`.
+  - It is resolved only through the registry and the config, never the cwd, repository, hostname or
+    pid.
+  - An unreadable registry, an unknown or retired name, a `config.root` that matches no instance or
+    several, or an unreachable `state_dir` all **refuse before anything is written**.
+  - Inside a daemon container, `config.root` is not the host path the registry records, so run
+    `rmd pause --instance <name>` on the host.
+  - The flag and the `fleet.pause` row (in that instance's own ledger) carry the instance, reason,
+    owner session and expiry.
+- **`rmd resume [--instance <name>]`** clears that instance's PAUSE and STOP only. Another
+  instance's hold stands.
+- **`rmd pause --fleet`** / **`rmd resume --fleet`** are the separate, explicit fleet-wide hold:
+  `refs/rmd-pause/hold` on origin, which every daemon on every host sharing that origin honors
+  (W1-T1216; an unreachable read still holds). An instance resume never deletes it, and an existing
+  fleet-wide hold keeps its meaning.
+
+**What a pause gates, unchanged by scope:**
+- that instance's new implement, fix and review spawns (daemon and drain);
+- one review-only pass that still runs while a lane is in flight (W1-T5343);
+- in-flight work still finishes and merges.
+- For the core instance only, deploy-run's automatic serve replace holds while core's PAUSE is set
+  (`serve-policy-convergence.ts`).
+
+A recycle's own PAUSE body (`deploy/recycle-container.sh`) is written and removed for the instance
+it recycles, as before.
 
 **Auto-consume timing (by design):** STOP is cleared on the halting run's **terminal**
 verdict — in the same drain/daemon exit path (and signal handler) that releases the

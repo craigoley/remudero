@@ -4,9 +4,10 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listProcesses, reclaimStaleGitLocks, type StaleLockReclaimOptions } from "../src/lib/git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 import { createSlotPreparer, linkTree, prepareSlotDeps, runCommand, type RunCommand } from "../src/lib/serve-slots.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -156,7 +157,7 @@ test("a failing command rejects with what it printed", async () => {
 });
 
 /** An origin with one commit, a serving clone of it with a fresh install, and an empty gens dir. */
-function slotsFixture(): { origin: ReturnType<typeof gitRepo>; serving: ReturnType<typeof gitRepo>; gensDir: string; steps: Array<{ step: string; extra?: Record<string, unknown> }>; prepare: (activeDir: string) => Promise<{ dir: string; sha: string; deps?: string }> } {
+function slotsFixture(lockReclaim?: StaleLockReclaimOptions): { origin: ReturnType<typeof gitRepo>; serving: ReturnType<typeof gitRepo>; gensDir: string; steps: Array<{ step: string; extra?: Record<string, unknown> }>; prepare: (activeDir: string) => Promise<{ dir: string; sha: string; deps?: string }> } {
   const origin = gitRepo({ kind: "slots-origin" });
   writeFileSync(join(origin.dir, "package.json"), '{"name":"slot"}\n');
   writeFileSync(join(origin.dir, "package-lock.json"), "lock-1");
@@ -169,7 +170,7 @@ function slotsFixture(): { origin: ReturnType<typeof gitRepo>; serving: ReturnTy
   writeFileSync(installHashMarkerPath(serving.dir), hashInstallInputs(serving.dir));
   const gensDir = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gens-`)), "gens");
   const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const prepare = createSlotPreparer({ repoDir: serving.dir, gensDir, run: recordingRun([]), log: (step, extra) => steps.push({ step, extra }) });
+  const prepare = createSlotPreparer({ repoDir: serving.dir, gensDir, run: recordingRun([]), log: (step, extra) => steps.push({ step, extra }), lockReclaim });
   return { origin, serving, gensDir, steps, prepare };
 }
 
@@ -223,4 +224,126 @@ test("a healthy slot of the serve clone is reused and ledgered as reused", async
   assert.equal(readFileSync(join(again.dir, "VERSION"), "utf8"), "3\n");
   assert.ok(existsSync(marker), "the slot dir was not removed and re-added");
   assert.deepEqual(steps.filter((s) => s.step === "serve.slot_prepare").map((s) => s.extra?.path), ["created", "reused"]);
+});
+
+const TWO_HOURS_MS = 2 * 60 * 60_000;
+
+/** Write `content` at `path` under the serving clone's .git dir, its mtime `agoMs` in the past. */
+function leftover(gitDir: string, path: string, agoMs: number, content = ""): string {
+  const full = join(gitDir, path);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, content);
+  const when = new Date(Date.now() - agoMs);
+  utimesSync(full, when, when);
+  return full;
+}
+
+const noGitRunning: StaleLockReclaimOptions = { listProcesses: async () => [{ pid: 1, args: "/sbin/init" }] };
+
+test("a killed gc's stale maintenance.lock and another host's gc.pid are reclaimed before the slot fetch, and the event names them", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture(noGitRunning);
+  const gitDir = join(serving.dir, ".git");
+  const lock = leftover(gitDir, "objects/maintenance.lock", TWO_HOURS_MS);
+  const pidFile = leftover(gitDir, "gc.pid", TWO_HOURS_MS, "2327 51b559d2fff2");
+  const logLock = leftover(gitDir, "gc.log.lock", TWO_HOURS_MS);
+  const sha = bump(origin, "2");
+  const slot = await prepare(serving.dir);
+  assert.equal(slot.sha, sha, "the fetch still ran after the reclaim");
+  assert.ok(!existsSync(lock) && !existsSync(pidFile) && !existsSync(logLock), "every stale leftover is gone");
+  const events = steps.filter((s) => s.step === "serve.slot_git_lock_reclaimed");
+  assert.equal(events.length, 1, "ONE event per reclaim");
+  const removed = events[0].extra?.removed as Array<{ path: string; age_ms: number; why: string }>;
+  assert.deepEqual(removed.map((r) => r.path).sort(), ["gc.log.lock", "gc.pid", "objects/maintenance.lock"]);
+  assert.ok(removed.every((r) => r.age_ms >= TWO_HOURS_MS - 60_000), "each removal carries its age");
+  assert.match(removed.find((r) => r.path === "gc.pid")?.why ?? "", /pid 2327 on host 51b559d2fff2, not this host/);
+});
+
+test("a fresh maintenance lock is kept while a stale gc.log beside it is removed", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture(noGitRunning);
+  const gitDir = join(serving.dir, ".git");
+  const fresh = leftover(gitDir, "objects/maintenance.lock", 60_000);
+  const gcLog = leftover(gitDir, "gc.log", TWO_HOURS_MS, "warning: There are too many unreachable loose objects");
+  bump(origin, "2");
+  await prepare(serving.dir);
+  assert.ok(existsSync(fresh), "a lock a live command may hold is never taken from it");
+  assert.ok(!existsSync(gcLog), "a stale gc.log no longer suppresses automatic gc");
+  const removed = steps.find((s) => s.step === "serve.slot_git_lock_reclaimed")?.extra?.removed as Array<{ path: string }>;
+  assert.deepEqual(removed.map((r) => r.path), ["gc.log"]);
+});
+
+test("a stale ref lock left by a killed gc is removed so the slot fetch can update the ref", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture(noGitRunning);
+  const refLock = leftover(join(serving.dir, ".git"), "refs/remotes/origin/main.lock", TWO_HOURS_MS);
+  const sha = bump(origin, "2");
+  const slot = await prepare(serving.dir);
+  assert.equal(slot.sha, sha, "the fetch updated refs/remotes/origin/main");
+  assert.ok(!existsSync(refLock));
+  const removed = steps.find((s) => s.step === "serve.slot_git_lock_reclaimed")?.extra?.removed as Array<{ path: string }>;
+  assert.deepEqual(removed.map((r) => r.path), [join("refs", "remotes", "origin", "main.lock")]);
+});
+
+test("no stale git lock is removed while a live git gc process exists, and the refusal is ledgered", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture({ listProcesses: async () => [{ pid: 4242, args: "git gc --auto --quiet" }] });
+  const lock = leftover(join(serving.dir, ".git"), "objects/maintenance.lock", TWO_HOURS_MS);
+  bump(origin, "2");
+  await prepare(serving.dir);
+  assert.ok(existsSync(lock), "a live gc keeps its lock however old");
+  assert.equal(steps.filter((s) => s.step === "serve.slot_git_lock_reclaimed").length, 0);
+  const refused = steps.find((s) => s.step === "serve.slot_git_lock_reclaim_refused")?.extra;
+  assert.deepEqual(refused?.paths, ["objects/maintenance.lock"]);
+  assert.match(String(refused?.reason), /live git maintenance process 4242: git gc --auto/);
+});
+
+test("a stale gc.pid naming a live git process on this host is kept", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture({ hostname: () => "this-host", listProcesses: async () => [{ pid: 4242, args: "/usr/bin/git fetch origin" }] });
+  const pidFile = leftover(join(serving.dir, ".git"), "gc.pid", TWO_HOURS_MS, "4242 this-host");
+  bump(origin, "2");
+  await prepare(serving.dir);
+  assert.ok(existsSync(pidFile));
+  assert.match(String(steps.find((s) => s.step === "serve.slot_git_lock_reclaim_refused")?.extra?.reason), /gc\.pid names live git process 4242 on this host/);
+});
+
+test("a stale gc.pid on this host whose pid is not a live git process is reclaimed", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture({ hostname: () => "this-host", listProcesses: async () => [{ pid: 4242, args: "node serve.js" }] });
+  const pidFile = leftover(join(serving.dir, ".git"), "gc.pid", TWO_HOURS_MS, "4242 this-host");
+  bump(origin, "2");
+  await prepare(serving.dir);
+  assert.ok(!existsSync(pidFile));
+  const removed = steps.find((s) => s.step === "serve.slot_git_lock_reclaimed")?.extra?.removed as Array<{ why: string }>;
+  assert.match(removed[0].why, /gc\.pid names pid 4242, not a live git process/);
+});
+
+test("stale git locks are kept when the process list cannot be read", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture({ listProcesses: async () => Promise.reject(new Error("spawn ps ENOENT")) });
+  const lock = leftover(join(serving.dir, ".git"), "objects/maintenance.lock", TWO_HOURS_MS);
+  const sha = bump(origin, "2");
+  assert.equal((await prepare(serving.dir)).sha, sha, "a refused reclaim never blocks the prepare");
+  assert.ok(existsSync(lock));
+  assert.match(String(steps.find((s) => s.step === "serve.slot_git_lock_reclaim_refused")?.extra?.reason), /process list unavailable.*spawn ps ENOENT/);
+});
+
+test("a stale git lock that cannot be removed is ledgered as failed and the prepare continues", async () => {
+  const { origin, serving, steps, prepare } = slotsFixture({ ...noGitRunning, remove: async () => Promise.reject(new Error("EACCES: permission denied")) });
+  leftover(join(serving.dir, ".git"), "gc.log.lock", TWO_HOURS_MS);
+  const sha = bump(origin, "2");
+  assert.equal((await prepare(serving.dir)).sha, sha);
+  const event = steps.find((s) => s.step === "serve.slot_git_lock_reclaimed")?.extra;
+  assert.deepEqual(event?.removed, []);
+  assert.deepEqual(event?.failed, [{ path: "gc.log.lock", error: "EACCES: permission denied" }]);
+});
+
+test("the git lock reclaimer's real process list includes this process", async () => {
+  const processes = await listProcesses();
+  assert.ok(processes.length > 1, "ps listed more than one process");
+  assert.ok(processes.some((entry) => entry.pid === process.pid && entry.args.length > 0), "and this test's own pid among them");
+});
+
+test("a git dir with no refs and an unreadable gc.pid is reclaimed from without throwing", async () => {
+  const gitDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gitdir-`));
+  mkdirSync(join(gitDir, "gc.pid"));
+  const when = new Date(Date.now() - TWO_HOURS_MS);
+  utimesSync(join(gitDir, "gc.pid"), when, when);
+  const result = await reclaimStaleGitLocks(gitDir, noGitRunning);
+  assert.deepEqual(result.removed, [], "no refs dir and a gc.pid that reads as nothing: no crash, no removal");
+  assert.deepEqual(result.failed?.map((f) => f.path), ["gc.pid"], "the attempt is reported, not swallowed");
 });

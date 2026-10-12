@@ -81,15 +81,15 @@ test("W1-T3090: a refused pass leaves gc.log in place, so auto-gc stays suppress
   const { repoDir, gcLog } = repoWithGcLog();
   const r = reapGitObjects(repoDir, "/i", {
     ...quietDeps,
-    listWorktrees: () => ["/w/live"],
+    openFileCount: () => 1,
     runPrune: () => assert.fail("a refused pass must not prune"),
   });
   assert.equal(r.pruned, 0);
-  assert.match(r.refusedBecause ?? "", /worktree/);
+  assert.match(r.refusedBecause ?? "", /open handle/);
   assert.equal(existsSync(gcLog), true, "removing it here would re-arm the unsupervised auto-gc");
 });
 
-test("W1-T3090: a pass that prunes removes gc.log first, so the suppressor comes off only with a fix", () => {
+test("W1-T3116: the retired prune API preserves Git failure evidence", () => {
   const { repoDir, gcLog } = repoWithGcLog();
   let sawGcLogAtPruneTime: boolean | undefined;
   const r = reapGitObjects(repoDir, "/i", {
@@ -98,7 +98,7 @@ test("W1-T3090: a pass that prunes removes gc.log first, so the suppressor comes
       sawGcLogAtPruneTime = existsSync(gcLog);
     },
   });
-  assert.equal(sawGcLogAtPruneTime, false, "gc.log is gone BEFORE prune runs, not after");
+  assert.equal(sawGcLogAtPruneTime, true, "RMD must leave the Git marker untouched");
   assert.equal(r.refusedBecause, undefined);
 });
 

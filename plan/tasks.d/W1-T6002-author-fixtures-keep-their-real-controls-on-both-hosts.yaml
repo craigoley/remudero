@@ -1,0 +1,44 @@
+- id: W1-T6002
+  title: "AUTHOR FIXTURES KEEP THEIR REAL CONTROLS ON BOTH HOSTS — six concrete portability and synthetic credential failures must not prevent real author validation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator continuation 2026-10-06: retained actual failed full author at 964d04b18bcbb4072112e8d0492baf9fdb4f0cb0; explicit six-fixture repair, PR9547 identity correction"
+  plan_refs: [W1-T5882, W1-T5930]
+  files: [test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts, test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts, test/clone-reaper.test.ts, test/event-driven-semantic-review.test.ts, test/review-skips-spawn-on-plan-only.test.ts, test/worker.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    A retained real full author failed eight tests. Six failures came from concrete fixture
+    assumptions: BSD realpath after actual owner removal, Darwin's real EPERM rather than Linux's
+    EISDIR for unlink-directory, an explicit temporary root contaminated by the host root, and
+    three semantic fixtures entering the real Mac keychain before their injected synthetic query.
+    Source controls at an unchanged unfiled head passed the shipped author 1460/1460, but its
+    nonconforming codex branch makes hosted identity fail. File the exact repair scope and attach
+    its task identity to the existing PR, retaining historical failures and requiring a new gate
+    for the amended head. Do not rename an existing PR head or invent credit for a different task.
+  design: |
+    Capture the actual canonical owner path before deleting its target. Assert each host's real
+    unlink-directory error while retaining latch and retry behavior. Bind and restore TMPDIR to
+    the fixture root and explicitly prove Linux root selection plus Darwin alias deduplication.
+    Synthetic semantic fixtures retain the ledgered reviewer wrapper and real spawnWorker, using
+    its existing credential-file seam with a synthetic reader instead of entering the host Mac
+    keychain. Preserve query failure, transcript parsing and plan-only skip assertions. Production
+    sources/defaults stay intact. Verify both supported Node runtimes, then the actual shipped
+    committed-head author and required hosted CI/native review. These fixtures are prerequisites
+    for broader source validation; their pass is not the broader source's author PASS.
+  acceptance:
+    - claim: "The real reviewer-spawn fixture supplies a synthetic credential-file preflight explicitly."
+      proof: 'grep: keychain: { platform: "linux", readCredentialFile: () => "{}" } in test/worker.test.ts'
+    - claim: "The owner fixture captures the canonical path before its actual removal."
+      proof: 'grep: const ownerRealpath = realpathOf(f\.ownerPath); in test/a-dead-fix-owner-with-nothing-to-preserve-is-reset-and-reclaimed.test.ts'
+  falsifier: |
+    Remove the credential-file injection: the retained Mac failure returns before the synthetic
+    query is reached. Restore realpath after actual removal: BSD realpath cannot resolve the
+    missing target. Retain raw terminal author failures rather than retry unchanged suites green.

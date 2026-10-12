@@ -32,7 +32,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 /*
  * W1-T3980 — core PR #7495 (2026-09-27): every required context green, `mergeable: true`, auto-merge
@@ -99,7 +99,7 @@ function sceneFetch(over: {
           number: PR,
           html_url: PR_URL,
           head: { ref: BRANCH, sha: HEAD },
-          updated_at: "2026-09-27T11:00:00.000Z",
+          updated_at: "2026-09-27T11:00:00.000Z", // expiring-fixture: exempt -- aged only against this suite's injected NOW, never the wall clock; 13/13 pass with Date.now shifted +8d and +30d
           body: BODY,
           auto_merge: { merge_method: "squash" },
           draft: false,
@@ -115,7 +115,7 @@ function sceneFetch(over: {
       };
     }
     if (path.endsWith(`/commits/${HEAD}/status`)) {
-      return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-09-27T10:10:00Z", updated_at: "2026-09-27T10:10:00Z" }] };
+      return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-09-27T10:10:00Z", updated_at: "2026-09-27T10:10:00Z" }] }; // expiring-fixture: exempt -- aged only against this suite's injected NOW, never the wall clock; 13/13 pass with Date.now shifted +8d and +30d
     }
     if (path.endsWith(`/pulls/${PR}`)) {
       return { mergeable: true, mergeable_state: "blocked", merge_commit_sha: MERGE, head: { sha: HEAD } };
@@ -163,7 +163,7 @@ function blockedPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-27T11:00:00Z",
+    lastActivityAt: "2026-09-27T11:00:00Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock; 13/13 pass with Date.now shifted +30d
     headSha: HEAD,
     headRefName: BRANCH,
     autoMergeArmed: true,
@@ -397,8 +397,12 @@ test("no alert, a non-candidate PR, a foreign branch and an exhausted budget eac
   assert.match(deriveDisposition(foreign, DEFAULT_SWEEP_POLICY, NOW).reason, /foreign-branch/);
   assert.equal(repairableCodeqlBlocker(blockedPr({ taskId: undefined })), undefined);
 
-  const exhausted = blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap });
+  // W1-T7096 (ruling 2026-10-09: "an llm judge should determine if more fix attempts should be made"): the count makes
+  // a judgment DUE; the strikes-exhausted route is taken once the progress judge rules the rounds a loop.
+  const exhausted = blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap, progressEscalation: { loop: "fix rounds repeat without progress", reason: "the progress judge ruled the rounds a loop", judged: true } });
   assert.notEqual(repairableCodeqlBlocker(exhausted), undefined);
+  assert.equal(deriveDisposition(blockedPr({ priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap }), DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "blocked-fixable", "an unjudged repair at the former ceiling is a judgment due, not a closed route");
   const result = deriveDisposition(exhausted, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-ambiguous");
   assert.match(result.reason, /exhausted: fix strikes/);
@@ -455,29 +459,43 @@ test("the scanner diagnostic is size-bounded and the repair evidence never asks 
 });
 
 test("the repair shares the fix rung's hold, claim, host admission and detached wait", async () => {
-  const pr = blockedPr();
   const held = sweepDeps([], { workerAdmissionHold: () => "fleet hold: paused" });
-  await runSweep([pr], held.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], held.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(held.rec.dispatched.length, 0);
   assert.equal(held.rec.rows.some((row) => row.step === CODEQL_BLOCKER_DISPATCH_STEP), false, "no key is spent on a hold");
 
   const strikes = Array.from({ length: DEFAULT_SWEEP_POLICY.strikeCap }, () => ({ step: "fix.dispatch", task_id: TASK, head_sha: HEAD }));
-  const claimed = sweepDeps([], { readLedger: () => strikes });
-  await runSweep([pr], claimed.deps, DEFAULT_SWEEP_POLICY);
+  let judgments = 0;
+  const claimed = sweepDeps(strikes, { fixProgressJudge: async input => {
+    judgments++;
+    assert.equal(input.strikesSpent, DEFAULT_SWEEP_POLICY.strikeCap);
+    assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
+    return undefined;
+  } });
+  await runSweep([blockedPr()], claimed.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 1);
   assert.equal(claimed.rec.dispatched.length, 0);
-  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /strikes exhausted under the claim/);
+  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  claimed.deps.fixProgressJudge = async () => {
+    judgments++;
+    return { verdict: "change-approach", approach: "reproduce the scanner finding", reason: "new fixture" };
+  };
+  await runSweep([blockedPr()], claimed.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(judgments, 2);
+  assert.equal(claimed.rec.dispatched.length, 1);
+  assert.equal(claimed.rec.dispatched[0]?.progressApproach, "reproduce the scanner finding");
 
   const refused = sweepDeps([], { claimFixAdmission: () => ({ admitted: false, reason: "host slots full" }) });
-  await runSweep([pr], refused.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], refused.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(refused.rec.dispatched.length, 0);
   assert.equal(refused.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason, "host slots full");
 
   const detached = sweepDeps([], { detachFixWait: true });
-  await runSweep([pr], detached.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], detached.deps, DEFAULT_SWEEP_POLICY);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(detached.rec.dispatched.length, 1);
 
   const unspent = sweepDeps([], { dispatchFix: () => false });
-  await runSweep([pr], unspent.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([blockedPr()], unspent.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(unspent.rec.rows.find((row) => row.step === "sweep.disposed")?.spent, false);
 });

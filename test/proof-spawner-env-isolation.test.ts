@@ -90,7 +90,10 @@ test("the variables these suites genuinely need still reach the child", () => {
   assert.ok(process.env.HOME, "precondition: this process itself has a HOME");
   const childEnv = spawnAndReadEnv();
   assert.equal(childEnv.PATH, process.env.PATH, "PATH must reach the child unchanged — node/npm/grep/playwright resolve through it");
-  assert.equal(childEnv.HOME, process.env.HOME, "HOME must reach the child unchanged — npm/git config and cache resolution need it");
+  // W1-T6124: HOME is SET, but to a throwaway rmd-proof-home-* dir — the daemon's own HOME holds the
+  // ~/.gitconfig credential helper a proof must never be able to write.
+  assert.match(childEnv.HOME ?? "", /rmd-proof-home-/, "HOME reaches the child as a throwaway dir");
+  assert.notEqual(childEnv.HOME, process.env.HOME, "never the orchestrator's own HOME");
   // The declared allowlist itself must actually name PATH and HOME, not merely happen to pass
   // them through some other mechanism.
   assert.ok(PROOF_ENV_ALLOWLIST.includes("PATH"));
@@ -133,5 +136,8 @@ test("the same sha reviewed under two different orchestrator environments reache
       delete process.env.CI;
     }
   });
-  assert.deepEqual(observedA, observedB, "a proof's child process must observe the identical declared env either way");
+  // Each spawn gets its OWN throwaway HOME (W1-T6124), so compare everything else byte-for-byte.
+  const withoutHome = ({ HOME: _home, ...rest }: Record<string, string | undefined>) => rest;
+  assert.deepEqual(withoutHome(observedA), withoutHome(observedB),
+    "a proof's child process must observe the identical declared env either way");
 });

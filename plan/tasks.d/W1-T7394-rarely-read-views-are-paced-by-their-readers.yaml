@@ -1,0 +1,31 @@
+- id: W1-T7394
+  title: "RARELY READ VIEWS ARE PACED BY THEIR READERS — `workstreams`, `host` and `repositories` rebuild on their cost cadence although they were read 1, 2 and 33 times in 45 h; #10435 now judges a paced body stale by its build, so they can be read-paced like `now`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-10-09: Azure-host performance work, follow-up to #10411 and #10435"
+  plan_refs: [W1-T5050]
+  files: [src/lib/read-model-worker.ts, test/rarely-read-views-are-paced-by-their-readers.test.ts]
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: |
+    READ 2026-10-09 at origin/main 500b53676: src/lib/read-model-worker.ts:1623 marks only `now` readPaced. The
+    factories at :1620 (repositories), :1627 (workstreams) and :1629 (host) carry no flag, so `paced` (:1203) keeps
+    them on cost / share whatever their readers do. #10411 introduced read pacing and #10435 made serve judge a paced
+    body stale by the build that made it, so pacing no longer risks serving a stale body as fresh.
+    OBSERVED over 45 h on the fleet host: workstreams was read once, host twice, repositories 33 times. Low value:
+    these views cost far less than `now`, so this is a tidy-up, not a fix.
+  design: |
+    Add `readPaced: true` to the repositories, workstreams and host factories. Keep host's own 60 s re-probe if a
+    reader depends on it; nothing else changes.
+  acceptance:
+    - claim: "the repositories, workstreams and host view units stretch their cadence while unread"
+      proof: 'grep: test("W1-T7394: repositories, workstreams and host are read-paced" in test/rarely-read-views-are-paced-by-their-readers.test.ts'
+  falsifier: |
+    Leave the factories unflagged: an unread unit keeps its unstretched due time and the test fails.

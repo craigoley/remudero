@@ -12,7 +12,7 @@
   files: [deploy/host-update.sh, test/agent-history-reclaim-reaches-the-bulk.test.ts]
   origin: oper#disk-verification-2026-09-16
   plan_refs: ["W1-T3626"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-16, after W1-T3626's reclaim merged (#5732, 08:06 UTC):

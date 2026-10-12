@@ -209,7 +209,7 @@ export function runIncidentLifecyclePass(store: IncidentLifecycleStore, deps: In
 
 // ── GET /v1/incidents ────────────────────────────────────────────────────────────────────────
 
-interface IncidentWire {
+export interface IncidentWire {
   fingerprint: string;
   title: string;
   source: IncidentSource;
@@ -237,6 +237,11 @@ function projectIncidentRecord(record: IncidentLifecycleRecord): IncidentWire {
   };
 }
 
+/** GET /v1/incidents' list: the store's records newest-first, as the wire carries them; the incidents view's too. */
+export function incidentsNewestFirst(store: IncidentLifecycleStore): IncidentWire[] {
+  return Object.values(store).sort((a, b) => b.lastSeenMs - a.lastSeenMs).map(projectIncidentRecord);
+}
+
 /** `stateDir`/`clock` are the pass's own (and so sre-lane.ts's) members, reused, not redeclared. */
 export type IncidentsRouteInput = Pick<IncidentLifecyclePassInput, "stateDir" | "clock"> & {
   /** Injectable so a test drives the "unreadable" (`ok: false`) path without a real state dir —
@@ -259,10 +264,7 @@ export function buildIncidentsRoute(deps: IncidentsRouteInput): Route {
         sendJson(res, 503, { error: "incidents_unavailable", reason: result.reason });
         return;
       }
-      const incidents = Object.values(result.store)
-        .sort((a, b) => b.lastSeenMs - a.lastSeenMs)
-        .map(projectIncidentRecord);
-      sendJson(res, 200, { incidents, generatedAt: clock.iso() });
+      sendJson(res, 200, { incidents: incidentsNewestFirst(result.store), generatedAt: clock.iso() });
     },
   };
 }

@@ -1,0 +1,37 @@
+- id: W1-T6014
+  title: "A COLD BOARD INGEST YIELDS BETWEEN CHUNKS — BoardProjection's ingest (board-projection.ts) walks every fact after lastSeq in one call, so the `now` view's cold `board` stage (W1-T5066's yielding stages) still ingests the whole fact store as one unbreakable step: 1.1 s on the Mac, minutes on the host disk (SLOWVIEW, 2026-10-01)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — bounding one BoardProjection ingest step, across the modules it spans
+  band_meaning: span
+  origin: "2026-10-06 core-console architecture plan backlog E14 (SLOWVIEW follow-up (a), after #8324/#8325/#8329)"
+  plan_refs: [W1-T5066, W1-T5885]
+  files: [src/lib/board-projection.ts, src/lib/now-view.ts, test/a-cold-board-ingest-yields-between-chunks.test.ts]
+  status: merged
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-06 at origin/main a6a285150: board-projection.ts `function ingest()` is
+    `for (const r of sql.facts.iterate(lastSeq)) { … }` with no bound, and `update()` calls it first; now-view.ts's
+    `board` stage calls `h.board.update({ force: true })`, so on a cold store (a restart without a persisted
+    projection, a new generation, a new instance) the whole fact table is read, parsed and spliced in one step.
+    MEASURED 2026-10-01 (SLOWVIEW): the cold board stage took 1.1 s on the Mac and minutes on the host disk, and
+    `now.prepare`'s other six stages yield (#8329) while this one cannot. W1-T5885 (#9388) moved heavy units to
+    their own lane, which keeps cheap views moving but does not shorten this step. Scope-time checks: no plan
+    record, run- branch or open PR head chunks BoardProjection ingest.
+  design: |
+    ingest takes a row (or time) bound and returns whether it reached the store's tail; `update` on a projection
+    that is not caught up ingests one chunk and returns a not-caught-up result without deriving. The `board`
+    stage of the `now` view returns not-done until the projection is caught up, so prepare resumes it on the
+    next step. A warm projection (a few new rows) still ingests and derives in one call. The final projection
+    after a chunked cold ingest is identical to a one-call ingest.
+  acceptance:
+    - claim: "a cold board stage over a fact store larger than one chunk takes more than one prepare step, each step ingests at most one chunk, and the resulting projections equal those of an unchunked ingest"
+      proof: "unit test: test/a-cold-board-ingest-yields-between-chunks.test.ts"
+  falsifier: |
+    Keep the unbounded ingest: the fixture's cold board stage finishes in a single step that reads every fact,
+    and the test fails.

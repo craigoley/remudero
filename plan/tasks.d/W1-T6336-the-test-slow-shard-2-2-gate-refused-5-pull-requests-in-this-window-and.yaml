@@ -1,0 +1,21 @@
+- id: W1-T6336
+  title: "THE test-slow-shard (2/2) GATE REFUSED 5 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T6336 into W1-T6152 — Its title and files repeat an older queued task.
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:9872:test-slow-shard (2/2)"
+  ci_learning_prs: [9872, 9912, 9972, 10001, 10025]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the test-slow-shard (2/2) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:9872:test-slow-shard (2/2) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:9872:test-slow-shard (2/2). The test-slow-shard (2/2) gate went red on #9872 and was repaired; the repair touched test/golden-verdicts.test.ts, learnings/ci.yaml, learnings/index.json, plan/tasks.d/W1-T5400-the-ci-gate-refused-12-pull-requests-in-this-window-and-each-was-repaire.yaml, plan/tasks.d/W1-T6322-grandfather-the-w1-t3688-proof-discrimination-finding-with-a-reviewed-ba.yaml, scripts/preflight-author.mjs, src/lib/ci-friction-gardener.ts, src/lib/ci-friction-remedy.ts, test/a-ci-friction-workflow-owner-is-discovered.test.ts, test/a-generic-term-locates-no-owner.test.ts, test/a-stale-worker-smoke-container-pins-no-image.test.ts, test/author-preflight.test.ts, test/fixtures/golden-verdicts/ci-claims-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/diff.patch, test/fixtures/golden-verdicts/ci-claims-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-claims-lesson/report.md, test/fixtures/golden-verdicts/ci-light-gates-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-light-gates-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-light-gates-lesson/diff.patch, test/fixtures/golden-verdicts/ci-light-gates-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-light-gates-lesson/report.md, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/checkout/learnings/ci.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/criteria.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/diff.patch, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/golden.yaml, test/fixtures/golden-verdicts/ci-shard-conflict-lesson/report.md, test/inflight-sweep-rung.test.ts, test/learnings.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."

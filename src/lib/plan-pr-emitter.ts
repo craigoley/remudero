@@ -15,13 +15,16 @@
  */
 
 import type { AcceptanceCriterion } from "./plan.js";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { acceptanceBlockDiagnostics, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
+import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
   checkCommitMessage,
@@ -34,6 +37,10 @@ import {
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { RmdError } from "./errors.js";
+import { isTaskShardName } from "./task-shard-name.js";
+import { budgetedSpawn, inTreeCheckBudgetMs, killBudgetLeftovers, waitForProcessGroupExit } from "./in-tree-budget.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+import { lowPriorityCommand, testRunArgv } from "./test-slot.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -66,7 +73,13 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
     }
     lines.push(`- ${claim} | ${proof}`);
   }
-  return lines.join("\n");
+  const block = lines.join("\n"), parsed = parseAcceptanceBlock(block);
+  const lost = criteria.findIndex((criterion, index) => !criterion.proof.trim() ||
+    parsed[index]?.claim !== criterion.claim || parsed[index]?.proof !== criterion.proof);
+  if (parsed.length !== criteria.length || lost >= 0) {
+    throw new Error(`renderAcceptanceBlock: lossless round trip refused at criterion ${lost >= 0 ? lost + 1 : parsed.length + 1}; preserve every authored claim and proof`);
+  }
+  return block;
 }
 
 // ── 2. "Ensure judgeable" repair (the #394 backstop) ─────────────────────────────────────────
@@ -92,10 +105,6 @@ export function bodyNeedsAcceptanceRepair(body: string): boolean {
   // Everything parsed, but at least one resolved with nothing to execute.
   return diagnostics.emptyProofs > 0;
 }
-
-/** Mirrors {@link "./review.js".parseAcceptanceBlock}'s header regex, to demote a defective header so the
- *  parser walks past it to the repaired block appended below — otherwise a broken block would still be the only one the parser reaches. */
-const ACCEPTANCE_HEADER_RE = /^(\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*)$/i;
 
 /** The suffix that demotes a superseded header. Prose, not a marker — nothing parses it. */
 export const SUPERSEDED_HEADER_SUFFIX = " (superseded — unparseable, see the repaired block below)";
@@ -145,15 +154,12 @@ export function replaceAcceptanceBlock(body: string, fallbackCriteria: Acceptanc
   // something about this diff and the fallback says only that the body parses.
   const recovered = recoverableCriteria(body);
   const block = renderAcceptanceBlock(recovered.length > 0 ? recovered : fallbackCriteria);
-  // Demote only the first matching header; a body with no header is unaffected.
-  let demoted = false;
-  const lines = body.split("\n").map((line) => {
-    if (demoted) return line;
-    const m = ACCEPTANCE_HEADER_RE.exec(line);
-    if (!m) return line;
-    demoted = true;
-    return `${m[1].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
-  });
+  // Demote the header the parser reads, so it walks past it to the repaired block appended below —
+  // otherwise a broken block would still be the only one it reaches. THE SAME fence-aware walker
+  // (W1-T5621): a fenced example header is left as written; a body with no header is unaffected.
+  const lines = body.split("\n");
+  const header = acceptanceHeaderLine(lines);
+  if (header >= 0) lines[header] = `${lines[header].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
   const trimmed = lines.join("\n").replace(/\s*$/, "");
   return trimmed.length > 0 ? `${trimmed}\n\n${block}\n` : `${block}\n`;
 }
@@ -186,7 +192,7 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
     files.find(
       (f) =>
         f.startsWith(PLAN_TASK_SHARD_PREFIX) &&
-        f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+        isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), taskId),
     );
   const criteria: AcceptanceCriterion[] = [];
   for (const taskId of taskIds) {
@@ -323,7 +329,7 @@ function listedChangedFiles(body: string): string[] | undefined {
  */
 export function diffContributesTaskShard(taskId: string, files: readonly string[]): boolean {
   return files.some(
-    (f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && f.slice(PLAN_TASK_SHARD_PREFIX.length).startsWith(`${taskId}-`),
+    (f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), taskId),
   );
 }
 
@@ -366,10 +372,11 @@ function authorBaseRef(cwd: string): string {
 }
 
 function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): number | null {
-  const runTask = fileURLToPath(new URL("../run-task.ts", import.meta.url));
+  // A consumer checkout has no tsx: use rmd's own launcher, but inspect the consumer's HEAD/base.
+  const rmdBin = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
   const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", runTask, "check-proof", proof, "--base", baseRef],
+    rmdBin,
+    ["check-proof", proof, "--base", baseRef],
     {
       cwd,
       encoding: "utf8",
@@ -386,9 +393,8 @@ function checkProofAtAuthorTime(proof: string, baseRef: string, cwd: string): nu
  */
 export function buildPlanPrBody(opts: PlanPrBodyOpts): string {
   const { intro, criteria, taskId, changedFiles } = opts;
-  // The gate's own base execution decides this. A claim's wording cannot say whether its proof
-  // was already true before the diff. Keep synthetic/non-executable legacy inputs for the other
-  // author gate, but never write a runnable stale or zero-match proof into a new body.
+  // Execute at base rather than guessing from claim wording. Keep synthetic legacy inputs for the
+  // other author gate, but never emit a runnable stale or zero-match proof.
   if (opts.proofCheck || criteria.some((c) => parseWhitelistedProof(c.proof.trim()) !== null)) {
     const proofCwd = opts.proofCwd ?? process.cwd();
     const baseRef = opts.baseRef ?? authorBaseRef(proofCwd);
@@ -481,17 +487,23 @@ export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | 
 export interface PlanPrPreflightFinding {
   check: PlanPrPreflightCheck;
   firstLine: string;
+  lines?: string[];
+  task_ids?: string[];
 }
 export interface PlanPrPreflightResult {
   ok: boolean;
   failures: PlanPrPreflightFinding[];
   unreadable: PlanPrPreflightFinding[];
+  timedOut?: PlanPrPreflightFinding[]; // killed at their inTreeCheckBudgetMs: no verdict, so the push waits for a later pass
 }
 /** One check's reading: 0 green, 1 red, anything else (null included) could not run. */
 export interface PlanPrPreflightReading {
   status: number | null;
   output: string;
+  timedOutMs?: number; // killed at this budget: `status` is no verdict at all
 }
+export type ProofCheckStatus = number | null | { timedOutMs: number }; // check-proof's exit, or the budget it was killed at
+export { inTreeCheckBudgetMs };
 
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
@@ -503,45 +515,162 @@ export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could 
 const RED_BODY_PROOF_EXIT: Record<number, string> = { 1: "fails on this tree", 2: "does not parse as a proof", 3: "matches no tests", 5: "passes at origin/main too" };
 const CHECK_PROOF_STALE_EXIT = 5;
 
-/** Run a script the tree itself carries; a tree without it is a check that cannot run. */
-function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
-  if (!existsSync(join(cwd, relPath))) return { status: null, output: `${relPath} is absent from the tree` };
+const LINT_PLAN_ARGV = [LINT_PLAN_SCRIPT];
+const TASK_ID_ARGV = [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"];
+const taskIdArgv = (headRef?: string): string[] => (headRef ? [...TASK_ID_ARGV, "--head-ref", headRef] : TASK_ID_ARGV);
+const SHARD_CENSUS_ARGV = ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST];
+const checkProofArgv = (proof: string): string[] => ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"];
+
+function inTreeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
   delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
-  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
-  return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
+  return env;
+}
+function inTreeCommand(cwd: string, relPath: string, argv: string[], judged?: JudgedRun) {
+  const env = inTreeEnv();
+  if (relPath !== SHARD_CENSUS_TEST) return { file: process.execPath, args: argv, env };
+  delete env.RMD_SELF_SYNC_DONE;
+  const setup = "./test/setup/tmp-hygiene.ts";
+  let args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
+  if (judged) args = loadCensusJudge().judgedNodeTestArgs(args, judged.args);
+  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env: { ...env, ...judged?.env } };
+}
+const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
+const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
+  r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
+const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
+  r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
+
+interface JudgedRun {
+  args: string[];
+  env: Record<string, string>;
+  read(): { tallyText: string; markerText: string };
+  cleanup(): void;
+}
+interface CensusJudge {
+  prepareJudgedRun(): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+const loadCensusJudge = (): CensusJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CensusJudge;
+
+function judgedCensusReading(cwd: string, judged: JudgedRun, r: PlanPrPreflightReading): PlanPrPreflightReading {
+  if (r.status !== 0 || r.timedOutMs !== undefined) return r;
+  const judge = loadCensusJudge();
+  const verdict = judge.judgeRun([SHARD_CENSUS_TEST], { status: 0, pool: false, root: cwd, ...judged.read() });
+  if (verdict.complete) return r;
+  return { status: verdict.status, output: `${judge.describeJudgedRun("shard census", verdict, { prefix: "test-judge" })}\n${r.output}` };
+}
+function runShardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
+}
+async function runShardCensusAsync(cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
 }
 
-/** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
+/** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
+function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
+  const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
+  const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
+  killBudgetLeftovers(r.pid);
+  return { status: null, output, timedOutMs: budgetMs };
+}
+
+const execFileAsync = promisify(execFile);
+/** One awaited child process, read as a {@link PlanPrPreflightReading}: `spawnSync`'s status, never its stall (W1-T5521). */
+async function runChildAsync(file: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv, budgetMs?: number): Promise<PlanPrPreflightReading> {
+  const run = execFileAsync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...(budgetMs === undefined ? {} : budgetedSpawn(budgetMs)) });
+  try {
+    const r = await run;
+    return { status: 0, output: `${r.stdout}\n${r.stderr}` };
+  } catch (e) {
+    // A numeric code is a non-zero exit; a signal, spawn error or buffer cap is spawnSync's null (could not run).
+    const err = e as { code?: unknown; killed?: boolean; stdout?: string; stderr?: string };
+    const output = `${err.stdout ?? ""}\n${err.stderr ?? ""}`;
+    if (budgetMs === undefined || err.killed !== true || err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") { // killed by node: budget, not buffer
+      return { status: typeof err.code === "number" ? err.code : null, output };
+    }
+    killBudgetLeftovers(run.child.pid);
+    return { status: null, output, timedOutMs: budgetMs };
+  }
+}
+async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
+  return runChildAsync(file, args, cwd, env, budgetMs);
+}
+
+const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
+
+/** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited, budgeted. */
 const defaultPreflightChecks = {
-  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, [LINT_PLAN_SCRIPT]),
-  taskIdExistence: (cwd: string): PlanPrPreflightReading => {
-    const r = runInTree(cwd, TASK_ID_SCRIPT, [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"]);
-    return r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
-  },
-  shardCensus: (cwd: string): PlanPrPreflightReading => {
-    const r = runInTree(cwd, SHARD_CENSUS_TEST, ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST]);
-    // A run with no failing-test count is not a result (a load error exits 1 too).
-    return r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
-  },
-  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"]).status,
+  lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
+  taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
+    taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
+  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
 };
-/** A test's stand-ins for any of {@link defaultPreflightChecks}. */
-export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
+/** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number };
+const defaultPreflightChecksAsync = {
+  lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
+  taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
+    taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
+  checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
+};
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
 
+const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
+const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
 function firstLineOf(output: string, status: number | null): string {
-  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const diagnosticLine = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
-  return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
+  const lines = outputLines(output);
+  return lines.find((l) => DIAGNOSTIC_LINE.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-function shardProofs(text: string): string[] {
+export const FAILURE_DETAIL_CHARS = 4000;
+const REFUSED_TASK_ROW = /^✗ ([A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?):/;
+
+function redFinding(check: PlanPrPreflightCheck, output: string, status: number | null): PlanPrPreflightFinding {
+  const firstLine = firstLineOf(output, status);
+  const all = outputLines(output);
+  const from = all.slice(Math.max(0, all.indexOf(firstLine)));
+  const lines: string[] = [];
+  let used = 0;
+  for (const line of from) {
+    if (lines.length > 0 && used + line.length > FAILURE_DETAIL_CHARS) break;
+    lines.push(line);
+    used += line.length;
+  }
+  if (lines.length < from.length) lines.push(`… ${from.length - lines.length} more line(s)`);
+  const taskIds = [...new Set(all.flatMap((l) => REFUSED_TASK_ROW.exec(l)?.[1] ?? []))];
+  return { check, firstLine, ...(lines.length > 1 ? { lines } : {}), ...(taskIds.length > 0 ? { task_ids: taskIds } : {}) };
+}
+
+function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
   let tasks: unknown;
   try {
-    tasks = parseYaml(text);
+    tasks = parseYaml(text, opts);
   } catch {
-    // An unparseable shard is the plan lint's to refuse, by name — this check has no proofs of it to read.
-    return [];
+    // A head is the plan lint's to refuse, by name; a base (duplicate keys allowed: a W1-T5519 repair's) falls back to its bytes.
+    return undefined;
   }
   const proofs: string[] = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
@@ -553,38 +682,118 @@ function shardProofs(text: string): string[] {
   return proofs;
 }
 
+function introducedProofs(headText: string, baseText: string | undefined): string[] {
+  const head = parsedShardProofs(headText) ?? [];
+  if (baseText === undefined) return head;
+  const atBase = parsedShardProofs(baseText, { uniqueKeys: false });
+  const preexisting = atBase === undefined ? (p: string) => baseText.includes(p) : (p: string) => atBase.includes(p);
+  return head.filter((p) => !preexisting(p));
+}
+const CHANGED_SHARDS_ARGS = ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX];
+
 /** Proofs this tree INTRODUCES in changed task shards (undefined when unreadable): a MERGED task's own proofs pass at
  *  base by construction, so a status edit to its shard (plan-reconcile) is not this PR's to discriminate. */
 function changedShardProofs(cwd: string): string[] | undefined {
-  const diff = spawnSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX], { cwd, encoding: "utf8" });
+  const diff = spawnSync("git", CHANGED_SHARDS_ARGS, { cwd, encoding: "utf8" });
   if (diff.status !== 0) return undefined;
   const proofs: string[] = [];
   for (const rel of diff.stdout.split("\n").filter(Boolean)) {
     const base = spawnSync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 });
-    const atBase = new Set(base.status === 0 ? shardProofs(base.stdout) : []);
-    proofs.push(...shardProofs(readFileSync(join(cwd, rel), "utf8")).filter((p) => !atBase.has(p)));
+    proofs.push(...introducedProofs(readFileSync(join(cwd, rel), "utf8"), base.status === 0 ? base.stdout : undefined));
+  }
+  return proofs;
+}
+async function changedShardProofsAsync(cwd: string): Promise<string[] | undefined> {
+  const diff = await runChildAsync("git", CHANGED_SHARDS_ARGS, cwd);
+  if (diff.status !== 0) return undefined;
+  const proofs: string[] = [];
+  for (const rel of diff.output.split("\n").filter(Boolean)) {
+    const base = await execFileAsync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 }).then(
+      (r) => r.stdout,
+      () => undefined, // a failed `git show` (the shard is new on this tree) reads as no base, as the sync form's does
+    );
+    proofs.push(...introducedProofs(await readFile(join(cwd, rel), "utf8"), base));
   }
   return proofs;
 }
 
-/** A PR-body proof is red on any non-pass; a changed shard's proof only when it already passes at origin/main —
- *  a task filed before it is built fails its own proof at head by design. */
-function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => number | null): PlanPrPreflightReading {
+const bodyProofsOf = (body: string): Set<string> => new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean));
+interface ProofTimeouts {
+  lines: string[];
+  budgetMs?: number;
+}
+function timedOutProof(kind: string, proof: string, status: ProofCheckStatus, timeouts: ProofTimeouts): status is { timedOutMs: number } {
+  if (status === null || typeof status !== "object") return false;
+  timeouts.lines.push(`${kind} proof ${JSON.stringify(proof)} timed out after ${status.timedOutMs} ms`);
+  timeouts.budgetMs = status.timedOutMs;
+  return true;
+}
+function sortBodyProof(proof: string, status: ProofCheckStatus, red: string[], unreadable: string[], timeouts: ProofTimeouts): void {
+  if (status === 0 || timedOutProof("PR-body", proof, status, timeouts)) return;
+  if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
+  else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
+}
+function sortShardProof(proof: string, status: ProofCheckStatus, red: string[], timeouts: ProofTimeouts): void {
+  if (timedOutProof("shard", proof, status, timeouts)) return;
+  if (status === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
+}
+function discriminationReading(red: string[], unreadable: string[], timeouts: ProofTimeouts, shardProofList: string[] | undefined): PlanPrPreflightReading {
+  if (shardProofList === undefined) unreadable.push("the changed task shards could not be read against origin/main");
+  if (red.length > 0) return { status: 1, output: red.join("\n") };
+  if (timeouts.budgetMs !== undefined) return { status: null, output: timeouts.lines.join("\n"), timedOutMs: timeouts.budgetMs }; // undecided: asked again
+  return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
+}
+
+/** A PR-body proof is red on any non-pass; a shard's only when it passes at origin/main (a filed task fails at head). */
+function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => ProofCheckStatus): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
-  for (const proof of new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean))) {
-    const status = checkProof(cwd, proof);
-    if (status === 0) continue;
-    if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
-    else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
-  }
-  const shardProofs = changedShardProofs(cwd);
-  if (shardProofs === undefined) unreadable.push("the changed task shards could not be read against origin/main");
-  for (const proof of new Set(shardProofs ?? [])) {
-    if (checkProof(cwd, proof) === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
-  }
-  if (red.length > 0) return { status: 1, output: red.join("\n") };
-  return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
+  const timeouts: ProofTimeouts = { lines: [] };
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable, timeouts);
+  const shardProofList = changedShardProofs(cwd);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red, timeouts);
+  return discriminationReading(red, unreadable, timeouts, shardProofList);
+}
+async function proofDiscriminationAsync(
+  cwd: string,
+  body: string,
+  checkProof: (cwd: string, proof: string) => Promise<ProofCheckStatus>,
+): Promise<PlanPrPreflightReading> {
+  const red: string[] = [];
+  const unreadable: string[] = [];
+  const timeouts: ProofTimeouts = { lines: [] };
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable, timeouts);
+  const shardProofList = await changedShardProofsAsync(cwd);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red, timeouts);
+  return discriminationReading(red, unreadable, timeouts, shardProofList);
+}
+
+const timedOutFinding = (check: PlanPrPreflightCheck, budgetMs: number): PlanPrPreflightFinding => ({
+  check,
+  firstLine: `timed out after ${budgetMs} ms (its budget scales with host load) — no verdict; the push waits for a later pass`,
+});
+
+function preflightTally() {
+  const failures: PlanPrPreflightFinding[] = [];
+  const unreadable: PlanPrPreflightFinding[] = [];
+  const timedOut: PlanPrPreflightFinding[] = [];
+  return {
+    record(check: PlanPrPreflightCheck, reading: PlanPrPreflightReading): void {
+      if (reading.timedOutMs !== undefined) {
+        timedOut.push(timedOutFinding(check, reading.timedOutMs));
+        return;
+      }
+      if (reading.status === 0) return;
+      if (reading.status === 1) failures.push(redFinding(check, reading.output, reading.status));
+      else unreadable.push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+    },
+    result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable, ...(timedOut.length > 0 ? { timedOut } : {}) }),
+  };
+}
+const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
+function prTitleReading(title: string): PlanPrPreflightReading {
+  const v = checkCommitMessage(title)[0];
+  return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
 }
 
 /**
@@ -593,73 +802,240 @@ function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string
  * task-id-existence `--require-open-prs`, proof discrimination of the PR body and of each changed shard through
  * `rmd check-proof --base origin/main`, the PR-title lint, and the `every-shard-on-main-is-lintable` census.
  */
-export function planPrPreflight(input: { cwd: string; title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+export function planPrPreflight(input: { cwd: string; title: string; body: string; headRef?: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   const d = { ...defaultPreflightChecks, ...checks };
-  const failures: PlanPrPreflightFinding[] = [];
-  const unreadable: PlanPrPreflightFinding[] = [];
+  const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
+  const tally = preflightTally();
   const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
     let reading: PlanPrPreflightReading;
     try {
       reading = run();
     } catch (e) {
-      reading = { status: null, output: String((e as Error)?.message ?? e) };
+      reading = { status: null, output: errorText(e) };
     }
-    if (reading.status === 0) return;
-    (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+    tally.record(check, reading);
   };
-  read("lint-plan", () => d.lintPlan(input.cwd));
-  read("task-id-existence", () => d.taskIdExistence(input.cwd));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, d.checkProof));
-  read("pr-title", () => {
-    const v = checkCommitMessage(input.title)[0];
-    return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
-  });
-  read("shard-census", () => d.shardCensus(input.cwd));
-  return { ok: failures.length === 0, failures, unreadable };
+  read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
+  read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
+  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  read("pr-title", () => prTitleReading(input.title));
+  read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
+  return tally.result();
+}
+
+/** {@link planPrPreflight} as awaited child processes (W1-T5521): the same checks, order and verdict, off the loop. */
+export async function planPrPreflightAsync(
+  input: { cwd: string; title: string; body: string; headRef?: string },
+  checks: PlanPrPreflightAsyncChecks = {},
+): Promise<PlanPrPreflightResult> {
+  const d = { ...defaultPreflightChecksAsync, ...checks };
+  const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
+  const tally = preflightTally();
+  const read = async (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading | Promise<PlanPrPreflightReading>): Promise<void> => {
+    let reading: PlanPrPreflightReading;
+    try {
+      reading = await run();
+    } catch (e) {
+      reading = { status: null, output: errorText(e) };
+    }
+    tally.record(check, reading);
+  };
+  await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
+  await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
+  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  await read("pr-title", () => prTitleReading(input.title));
+  await read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
+  return tally.result();
+}
+
+const unmaterialized = (commitSha: string, e: unknown): PlanPrPreflightFinding => ({
+  check: "tree",
+  firstLine: `${commitSha} could not be materialized: ${firstLineOf(errorText(e), null)}`,
+});
+function treeNotMaterialized(commitSha: string, e: unknown, budgetMs: number, pid = (e as { pid?: number }).pid): PlanPrPreflightResult {
+  const err = e as { code?: unknown; killed?: boolean };
+  if (err.code !== "ETIMEDOUT" && err.killed !== true) return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] }; // never refuses
+  killBudgetLeftovers(pid);
+  return { ok: true, failures: [], unreadable: [], timedOut: [timedOutFinding("tree", budgetMs)] };
+}
+function borrowNodeModules(repoDir: string, tree: string): void {
+  if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
+}
+
+function dropOrphanedWorktreeAdmin(tree: string, realTree: string, gitCommonDir: string): void {
+  const dotGit = join(tree, ".git");
+  if (!existsSync(dotGit)) return;
+  const pointer = readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)\s*$/);
+  if (!pointer) return;
+  const admin = resolve(dirname(dotGit), pointer[1]!);
+  const common = realpathSync(gitCommonDir);
+  const adminRoot = realpathSync(join(common, "worktrees"));
+  const adminReal = realpathSync(admin);
+  if (adminReal === adminRoot || !adminReal.startsWith(`${adminRoot}${sep}`) || !lstatSync(admin).isDirectory()) return;
+  const backLink = join(adminReal, "gitdir");
+  if (!existsSync(backLink)) return;
+  const recordedTree = resolve(dirname(backLink), readFileSync(backLink, "utf8").trim());
+  const expectedTree = join(realTree, ".git");
+  if (existsSync(recordedTree) && realpathSync(recordedTree) === realpathSync(expectedTree)) rmSync(adminReal, { recursive: true, force: true });
+}
+
+function cleanupErrorText(error: unknown): string {
+  const value = error as { message?: unknown; stderr?: unknown };
+  return `${String(value?.message ?? error)}\n${String(value?.stderr ?? "")}`;
+}
+
+function canonicalWorktreePath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch (parentError) {
+      if ((parentError as NodeJS.ErrnoException).code !== "ENOENT") throw parentError;
+      return absolute;
+    }
+  }
 }
 
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
-export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: { title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+export function planPrPreflightAtCommit(
+  repoDir: string,
+  commitSha: string,
+  pr: { title: string; body: string; headRef?: string },
+  checks: PlanPrPreflightChecks = {},
+): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
+  const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   try {
-    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe" });
-  } catch (e) {
-    rmSync(parent, { recursive: true, force: true });
-    return { ok: true, failures: [], unreadable: [{ check: "tree", firstLine: `${commitSha} could not be materialized: ${firstLineOf(String((e as Error)?.message ?? e), null)}` }] };
-  }
-  try {
-    if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
+    try {
+      execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe", ...budgetedSpawn(budgetMs) });
+    } catch (e) {
+      return treeNotMaterialized(commitSha, e, budgetMs); // failed or killed: it names which, unreadable or timedOut
+    }
+    borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], { stdio: "pipe" });
+    let removed = true;
+    try {
+      hostWorktreeGit(repoDir, ["worktree", "remove", "--force", "--force", realTree]); // twice: a killed add leaves it locked
+    } catch {
+      removed = false; // the orphaned-admin fallback below decides what is left
+    }
+    if (!removed && existsSync(join(tree, ".git"))) {
+      const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+      dropOrphanedWorktreeAdmin(tree, realTree, common);
+    }
     rmSync(parent, { recursive: true, force: true });
   }
 }
 
-/** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run,
- *  `plan_pr.preflight_refused { lane, branch, failures }` when one is red — and answer whether to push. */
+/** {@link planPrPreflightAtCommit} for a daemon lane (W1-T5521): the tree's add and removal are awaited too. */
+export async function planPrPreflightAtCommitAsync(
+  repoDir: string,
+  commitSha: string,
+  pr: { title: string; body: string; headRef?: string },
+  checks: PlanPrPreflightAsyncChecks = {},
+): Promise<PlanPrPreflightResult> {
+  const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
+  const tree = join(parent, "tree");
+  const realTree = join(realpathSync(parent), "tree");
+  const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
+  let leaveTreeForSafety = false;
+  try {
+    const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
+    try {
+      await add;
+    } catch (e) {
+      const result = treeNotMaterialized(commitSha, e, budgetMs, add.child.pid); // failed or killed: it names which
+      if (result.timedOut !== undefined && !(await waitForProcessGroupExit(add.child.pid))) {
+        leaveTreeForSafety = true;
+        throw new Error(`timed-out plan-PR checkout still has live processes; leaving its worktree for safety: ${tree}`);
+      }
+      return result;
+    }
+    borrowNodeModules(repoDir, tree);
+    return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
+  } finally {
+    if (!leaveTreeForSafety) {
+      await removeTemporaryWorktree(repoDir, tree);
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+}
+
+async function removeTemporaryWorktree(repoDir: string, tree: string): Promise<void> {
+  if (!existsSync(join(repoDir, ".git"))) return; // test/minimal trees with no Git metadata cannot own a registration
+  const target = canonicalWorktreePath(tree);
+  const registered = (output: string) => output.split("\n").some((line) => line.startsWith("worktree ") && canonicalWorktreePath(line.slice("worktree ".length)) === target);
+  let listed: string;
+  try {
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  } catch (error) {
+    if (!existsSync(join(tree, ".git")) && /not a git repository/i.test(cleanupErrorText(error))) return;
+    throw new Error(`could not verify plan-PR worktree cleanup: ${cleanupErrorText(error).trim()}`);
+  }
+  if (!registered(listed)) return;
+  let lastRemovalFailure: string | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await hostWorktreeGitAsync(repoDir, ["worktree", "remove", "--force", "--force", target]);
+      lastRemovalFailure = undefined;
+    } catch (error) {
+      const reason = cleanupErrorText(error);
+      lastRemovalFailure = reason;
+    }
+    listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+    if (!registered(listed)) return;
+    if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  const common = await hostWorktreeGitAsync(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  dropOrphanedWorktreeAdmin(tree, target, common.trim());
+  listed = await hostWorktreeGitAsync(repoDir, ["worktree", "list", "--porcelain"]);
+  if (!registered(listed)) return;
+  const detail = lastRemovalFailure === undefined ? "" : `; last removal error: ${lastRemovalFailure}`;
+  throw new Error(`plan-PR worktree remains registered after cleanup attempts: ${tree}${detail}`);
+}
+
+/** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run, `_refused`
+ *  when one is red, `_timed_out` when one ran out of its budget (never a pass: asked again) — and answer whether to push. */
 export function planPrPreflightAllows(
   result: PlanPrPreflightResult,
   ctx: { lane: string; branch: string; log?: (step: string, extra?: Record<string, unknown>) => void },
 ): boolean {
   if (result.unreadable.length > 0) ctx.log?.("plan_pr.preflight_unreadable", { lane: ctx.lane, branch: ctx.branch, unreadable: result.unreadable });
-  if (result.ok) return true;
-  ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+  if (!result.ok) {
+    const taskIds = [...new Set(result.failures.flatMap((f) => f.task_ids ?? []))];
+    ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, ...(taskIds.length > 0 ? { task_ids: taskIds } : {}), failures: result.failures });
+    return false;
+  }
+  if (result.timedOut === undefined) return true;
+  ctx.log?.("plan_pr.preflight_timed_out", { lane: ctx.lane, branch: ctx.branch, timed_out: result.timedOut });
   return false;
 }
 
 export class PlanPrPreflightRefusedError extends RmdError {
-  constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[]) {
-    super("plan", 1, `plan-PR preflight refused the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
+  constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[], verb = "refused") {
+    super("plan", 1, `plan-PR preflight ${verb} the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
     this.name = "PlanPrPreflightRefusedError";
+  }
+}
+
+export class PlanPrPreflightTimedOutError extends PlanPrPreflightRefusedError {
+  constructor(lane: string, timedOut: PlanPrPreflightFinding[]) {
+    super(lane, timedOut, "deferred");
+    this.name = "PlanPrPreflightTimedOutError";
   }
 }
 
 /** The throwing form of {@link planPrPreflightAllows}, for a lane whose not-landed outcome is a throw. */
 export function refuseRedPlanPr(result: PlanPrPreflightResult, ctx: Parameters<typeof planPrPreflightAllows>[1]): void {
-  if (!planPrPreflightAllows(result, ctx)) throw new PlanPrPreflightRefusedError(ctx.lane, result.failures);
+  if (planPrPreflightAllows(result, ctx)) return;
+  throw result.ok ? new PlanPrPreflightTimedOutError(ctx.lane, result.timedOut ?? []) : new PlanPrPreflightRefusedError(ctx.lane, result.failures);
 }
 
 // ── 8. Retro changeset-claim reconciliation (W1-T911) ───────────────────────────────────────

@@ -97,21 +97,22 @@ test("archive absence, unreadable archives and incomplete association reads refu
     : { ...result, ok: false }), /unread ledger file/);
 });
 
-test("plan status history searches only the current friction shards and preserves trailer and status timing", () => {
-  const paths = ["plan/tasks.d/one.yaml", "plan/tasks.d/two.yaml"];
+test("plan status history searches only merged friction shards without trailer credit", () => {
+  const paths = ["plan/tasks.d/one.yaml", "plan/tasks.d/two.yaml", "plan/tasks.d/queued.yaml"];
   let walks = 0;
   const tasks = readCiFrictionPlanTasks(args => {
     if (args[0] === "grep") return paths.map(path => `origin/main:${path}`).join("\n");
     if (args[0] === "show") {
-      const id = args[1]!.endsWith("one.yaml") ? "W1-T1" : "W1-T2";
-      return `- id: ${id}\n  title: "remedy"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: merged\n  attempts: 0\n  origin: "ci-friction:check:ci-log"\n  files: [src/lib/ci-friction-gardener.ts]\n  acceptance: [{claim: "c", proof: "unit test: p"}]\n`;
+      const id = args[1]!.endsWith("one.yaml") ? "W1-T1" : args[1]!.endsWith("two.yaml") ? "W1-T2" : "W1-T3";
+      const status = id === "W1-T3" ? "queued" : "merged";
+      return `- id: ${id}\n  title: "remedy"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: ${status}\n  attempts: 0\n  origin: "ci-friction:check:ci-log"\n  files: [src/lib/ci-friction-gardener.ts]\n  acceptance: [{claim: "c", proof: "unit test: p"}]\n`;
     }
     assert.equal(args[0], "log");
     if (!args.includes("-S")) return "2026-09-20T12:00:00Z\tW1-T1\n";
     walks++;
-    assert.deepEqual(args.slice(args.indexOf("--") + 1), paths, "avoid pickaxing every unrelated plan shard");
+    assert.deepEqual(args.slice(args.indexOf("--") + 1), [paths[1]], "trailer-credited and queued shards never need a status history walk");
     return `\x012026-09-21T12:00:00Z\n${paths[1]}\n`;
   }, "plan/tasks.d");
   assert.equal(walks, 1);
-  assert.deepEqual(tasks.map(task => [task.id, task.mergedAt]), [["W1-T1", "2026-09-20T12:00:00Z"], ["W1-T2", "2026-09-21T12:00:00Z"]]);
+  assert.deepEqual(tasks.map(task => [task.id, task.mergedAt]), [["W1-T1", "2026-09-20T12:00:00Z"], ["W1-T2", "2026-09-21T12:00:00Z"], ["W1-T3", undefined]]);
 });

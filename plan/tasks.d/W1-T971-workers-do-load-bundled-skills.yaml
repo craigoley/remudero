@@ -165,9 +165,17 @@
   origin: "oper#record-worker-skill-surface-2026-08-18"
   plan_refs: ["W1-T933", "W1-T935", "W1-T505", "W1-T438"]
   files: [DECISIONS.md, test/worker-skill-surface-premises.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   note: |
+    OPERATOR RULING 2026-10-04: retire only W1-T971 as superseded by W1-T2766. The owner
+    explicitly authorized this obsolete-only retirement in the Inbox review follow-up. This
+    confirms the 2026-09-30 DECISIONS.md ruling and supersedes the conflicting 2026-10-01
+    keep-held instruction for W1-T971 only. Its historical finding and evidence remain below;
+    the old source-premise pins are not current implementation requirements or completion credit.
+    No other task, dependency hold, acceptance criterion, worker grant or skill policy is changed.
+
     THIS SETTLES THE BET FOR THE IMPLEMENT LANE AND NOT FOR THE OTHERS, AND BOTH CITED SHARDS ARE
     CITED RATHER THAN RE-FILED. W1-T935
     (plan/tasks.d/W1-T935-w1-t933-is-framed-as-shrinkage-when-the-measured-problem-is-access.yaml)

@@ -213,10 +213,104 @@ function slackViolations(root: string, baseline: Record<string, number>): BareCa
 
 // ─────────────────────── detector (b): negated optional-chain conflators ──────────────────────
 
+// A regex literal can follow these; a `/` after anything else (an identifier, `)` or `]`) divides.
+const REGEX_PRECEDER = /[(,=:[!&|?{};+\-*%<>~^]/;
+const REGEX_KEYWORD_RE = /\b(?:return|typeof|case|do|else|in|of|void|yield|await|delete|throw)$/;
+
+/** Blanks every comment to spaces (newlines kept, so offsets hold) with ONE left-to-right scan
+ *  that knows where strings, template literals and regex literals begin and end. Two independent
+ *  regex passes cannot: `"--test-coverage-exclude=test/**"` in src/lib/ci-parity.ts opened a
+ *  "block comment" that ran to the next real `* /` and hid 391 lines of code from this detector,
+ *  and a `//` inside a URL string hid the rest of its line. String and regex text is kept as is. */
 function stripCommentsPreserveOffsets(source: string): string {
-  let out = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
-  out = out.replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
-  return out;
+  const out = source.split("");
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  // Each entry is the brace depth at which a template literal's `${` opened; closing it resumes
+  // the template string rather than code.
+  const templateResume: number[] = [];
+  let braceDepth = 0;
+  let lastSignificant = "";
+  let i = 0;
+  const n = source.length;
+
+  const scanQuoted = (quote: string): void => {
+    i++;
+    while (i < n && source[i] !== quote && source[i] !== "\n") i += source[i] === "\\" ? 2 : 1;
+    i++;
+  };
+  // Returns true when the template closed; false when it stopped at `${` (code resumes).
+  const scanTemplate = (): boolean => {
+    while (i < n) {
+      const c = source[i];
+      if (c === "\\") i += 2;
+      else if (c === "`") {
+        i++;
+        return true;
+      } else if (c === "$" && source[i + 1] === "{") {
+        i += 2;
+        templateResume.push(braceDepth);
+        braceDepth++;
+        return false;
+      } else i++;
+    }
+    return true;
+  };
+
+  while (i < n) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? n : end;
+      blank(i, stop);
+      i = stop;
+    } else if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? n : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '"' || c === "'") {
+      scanQuoted(c);
+      lastSignificant = c;
+    } else if (c === "`") {
+      i++;
+      scanTemplate();
+      lastSignificant = "`";
+    } else if (c === "/" && (lastSignificant === "" || REGEX_PRECEDER.test(lastSignificant) || REGEX_KEYWORD_RE.test(source.slice(Math.max(0, i - 12), i).trimEnd()))) {
+      i++;
+      let inClass = false;
+      while (i < n && source[i] !== "\n") {
+        const r = source[i];
+        if (r === "\\") {
+          i += 2;
+          continue;
+        }
+        if (r === "[") inClass = true;
+        else if (r === "]") inClass = false;
+        else if (r === "/" && !inClass) break;
+        i++;
+      }
+      i++;
+      lastSignificant = "/";
+    } else {
+      if (c === "{") braceDepth++;
+      else if (c === "}") {
+        braceDepth--;
+        if (templateResume.length > 0 && templateResume[templateResume.length - 1] === braceDepth) {
+          templateResume.pop();
+          i++;
+          scanTemplate();
+          lastSignificant = "`";
+          continue;
+        }
+      }
+      if (!/\s/.test(c)) lastSignificant = /[A-Za-z0-9_$]/.test(c) ? "a" : c;
+      i++;
+    }
+  }
+  return out.join("");
 }
 
 const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";
@@ -333,7 +427,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/reachability.ts": 1,
   "src/lib/relint.ts": 2,
   "src/lib/retro.ts": 2,
-  "src/lib/review.ts": 4,
+  "src/lib/review.ts": 3,
   "src/lib/risk-judge.ts": 1,
   "src/lib/self-sync.ts": 2,
   "src/lib/serve.ts": 3,
@@ -347,7 +441,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/worker-containment.ts": 5,
   "src/lib/worker-home.ts": 3,
   "src/lib/worker.ts": 11,
-  "src/run-task.ts": 54,
+  "src/run-task.ts": 51,
   "src/spike.ts": 1,
 };
 
@@ -371,7 +465,13 @@ const BASELINE_CONFLATOR_SITES: ConflatorSite[] = [
   },
   { file: "src/lib/task-linter.ts", text: "!entry?.qualifier" },
   { file: "src/lib/task-linter.ts", text: "!opts.newMonolithIds?.has(task.id)" },
+  // These three were in the tree all along. The regex comment stripper hid them inside fake block
+  // comments: ci-parity.ts's from a `"test/**"` string literal, run-task.ts's from a `/**` inside
+  // a `//` line comment. The string-aware scanner shows them, so they are recorded as existing sites.
+  { file: "src/lib/ci-parity.ts", text: "!Number.isSafeInteger(holder?.pid)" },
   { file: "src/run-task.ts", text: "!v?.headRefOid" },
+  { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
+  { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
   { file: "src/run-task.ts", text: "!parseReport(fullText(impl))?.prUrl" },
   { file: "src/spike.ts", text: "!!report?.prUrl" },
 ];
@@ -480,6 +580,30 @@ test("catch-erasure-ratchet: findConflatorSites ignores !== / != and ordinary ne
 test("catch-erasure-ratchet: findConflatorSites ignores a conflator-shaped string that appears only inside a comment", () => {
   const src = `// example: !closedUnmergedRunBranches?.has(id) is the whole fix\nconst x = 1;`;
   assert.deepEqual(findConflatorSites(src), []);
+});
+
+test("catch-erasure-ratchet: a string literal holding `test/**` does not open a block comment that hides the code after it", () => {
+  const src = [
+    'const args = ["--test-coverage-exclude=test/**", "--x"];',
+    "if (!holder?.pid) stop();",
+    "/** a real doc comment */",
+    "const y = 2;",
+  ].join("\n");
+  assert.deepEqual(findConflatorSites(src), ["!holder?.pid"]);
+});
+
+test("catch-erasure-ratchet: a `/**` inside a line comment does not open a block comment that hides the next lines", () => {
+  const src = ["// globs like `plan/feedback/**` stay clean", "if (!report?.prUrl) open();", "/* real */ const z = 3;"].join("\n");
+  assert.deepEqual(findConflatorSites(src), ["!report?.prUrl"]);
+});
+
+test("catch-erasure-ratchet: comments are still blanked when strings, templates and regex literals hold comment markers", () => {
+  const src = [
+    'const url = "https://example.test/x"; if (!a?.b) go();',
+    "const t = `${x // not a comment in a template expression\n}//y`; if (!c?.d) go(); // !e?.f",
+    "const re = /\\/\\*[^*]*\\*\\//g; if (!g?.h) go(); /* !i?.j */",
+  ].join("\n");
+  assert.deepEqual(findConflatorSites(src), ["!a?.b", "!c?.d", "!g?.h"]);
 });
 
 // ── wiring: the git-ls-files-driven violation functions, on isolated fixture repos

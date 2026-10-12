@@ -233,10 +233,10 @@ export function bodyVsDiffContractLines(): string[] {
  * closing them. Four were repaired by hand and needed no judgement — #4330, #4324, #4343 and #4333
  * were red on ratchets the change itself moved and never recorded.
  *
- * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "run the shipped local gate
- * before your FIRST push", and its own header states a dispatched worker never sees the file, since
- * `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane that keeps
- * breaking it — precisely what that header warns about.
+ * AND THE HOUSE RULE CANNOT REACH A WORKER. CLAUDE.md's first bullet is "before your FIRST push, run
+ * `scripts/preflight-author.mjs`", and its own header states a dispatched worker never loads the
+ * file, since `spawnWorker` passes `settingSources: []`. A rule only humans read cannot bind the lane
+ * that keeps breaking it — precisely what that header warns about.
  */
 export function ratchetContractLines(): string[] {
   /*
@@ -361,6 +361,20 @@ export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
   "  that decision after CI and semantic review; stop after reporting the PR URL.",
 ];
 
+/** W1-T4268 — shared by both PR-authoring worker prompts, spliced beside {@link WORKER_PR_AUTHORITY_LINES}.
+ * `gh pr edit` can fail on this repo/token with a Projects (classic) GraphQL error even for a body-only
+ * edit. That is a TRANSPORT defect, so a worker must neither assume the edit was rejected nor that it
+ * landed. The substitute is the REST PATCH `prBodyRestArgs` (run-task.ts, W1-T2948) already proved;
+ * `-f`, never `-F`, because `-F` reads a leading `@` value as a filename and expands `{owner}`/`{repo}`. */
+export const GH_PR_EDIT_FALLBACK_LINES: readonly string[] = [
+  "- If `gh pr edit` fails with \"Projects (classic) is being deprecated\" /",
+  "  `repository.pullRequest.projectCards`, that is a TRANSPORT failure of gh's GraphQL query, never",
+  "  evidence the edit was rejected or already applied. Use the REST substitute instead:",
+  "  `gh api -X PATCH repos/{owner}/{repo}/pulls/{number} -f body=<text>` (or `-f title=<text>`),",
+  "  with the real owner, repo and PR number. Use `-f`, NEVER `-F`: `-F` reads a value starting",
+  "  with `@` as a FILENAME and substitutes `{owner}`/`{repo}`/`{branch}` placeholders.",
+];
+
 /**
  * W1-T3696 step (2), per-provider: the contract a worker gets when the HARNESS owns git.
  *
@@ -377,6 +391,14 @@ export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
 export function outputContractLines(taskId: string, harnessCommits = false): string[] {
   return [
     "# OUTPUT CONTRACT",
+    // THE SCOPE-TIME CHECK, ordered up front: it used to live only in hand-written briefs, and its
+    // absence cost dispatches whose work had already shipped. Read and Grep only, so it rides the
+    // shell-less variant too (IMPLEMENT_CASH_TOOLS carries both). Exit names are the real ones.
+    "- BEFORE EDITING, open your task record and, using Read and Grep at this HEAD: (a) re-verify",
+    "  every file:line it cites — cited lines drift, and a record that names a symbol that no longer",
+    "  exists is premise-rotted (REFUSED, class `premise-rotted`); (b) check whether each acceptance",
+    "  proof already passes on origin/main — if every one does, the exit is ALREADY_SATISFIED (below).",
+    "  Then act on what you found.",
     "- Make ONLY the change described in TASK; one concern.",
     ...ratchetContractLines(),
     // W1-T502: THE CADENCE INSTRUCTION. Until this line, the contract taught exactly one
@@ -458,6 +480,7 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  NAME, which is not a conventional subject. Pass it yourself, e.g. `gh pr create --title",
     "  \"type(scope): subject\" --fill --base main`.",
     ...WORKER_PR_AUTHORITY_LINES,
+    ...GH_PR_EDIT_FALLBACK_LINES,
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because

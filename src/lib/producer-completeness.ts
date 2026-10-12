@@ -193,6 +193,10 @@ export function producerAssignedKeys(src: string, required: readonly string[]): 
  * means wiring it.
  */
 export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
+  lastProgressJudgement:
+    "Not an input from buildOpenPrViews: runSweep derives it after construction from the ledger's newest fix.progress_judged row (lastProgressJudgementFor), the same post-construction pattern as progressContinue. Absent means no judge has ruled on the PR, and fixRoundLabel deliberately falls back to the stand-in strike label in that case.",
+  progressContinue:
+    "This is intentionally not input from buildOpenPrViews or routeFix: the sweep derives it only after judgeFixProgress evaluates the current pass's fresh ledger and red set, or defers that judgment to the fixable path. claimFixDispatch consumes it to authorize the judged next round. Seeding it in either input producer would bypass that per-pass judgment; the producer census cannot see this post-construction derived state.",
   // isPlanFiling WIRED by W1-T2439: buildOpenPrViews (run-task.ts) now assigns it from
   // `isPlanOnlyFilingPr`, the predicate that was already implemented beside it and never called —
   // removed here per this file's own "removing a field from this list means wiring it" rule. The

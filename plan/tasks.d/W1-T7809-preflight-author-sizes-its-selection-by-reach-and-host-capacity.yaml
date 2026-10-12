@@ -1,0 +1,80 @@
+- id: W1-T7809
+  title: "PREFLIGHT-AUTHOR SIZES ITS SELECTION BY THE DIFF'S REACH AND THE HOST'S CAPACITY — a plan-only filing diff selected 467 suites and pushed the operator Mac to load ~11, an openapi diff full-falls-back to ~2,588, and a 2-file src diff reaches an affected floor of ~2,253; a plan-only diff runs plan lint and the suites that read its shards, and a selection the host cannot carry reports CI is the check"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how much of the suite the author preflight runs on this host for this diff
+  band_meaning: span
+  origin: "operator session 2026-10-10: a plan-only filing preflight selected 467 suites (Mac load ~11); approved 2026-10-10"
+  plan_refs: [W1-T5895, W1-T5902, W1-T6090, W1-T2680, W1-T4952, W1-T7766]
+  files: [scripts/preflight-author.mjs, src/lib/affected-suites.ts, scripts/diff-class.mjs, test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 on the operator Mac. `node --import tsx scripts/preflight-author.mjs` on a plan-only
+    filing diff printed `author selection: affected-floor, 467 suite(s)` and pushed host load to about 11.
+    Earlier records (operator memory, W1-T5895) give two more cases:
+    - an openapi/daemon.yaml diff took a full fallback of about 2,588 suites (load ~400 on the host);
+    - a 2-file src diff reached an affected floor of about 2,253.
+    CLAUDE.md tells every author to run this preflight before the first push, so an over-selection is paid
+    on every filing.
+
+    READ on origin/main e2288e457.
+    - `authorSelection` (scripts/preflight-author.mjs:56) calls `affectedSelectionOrFull` (src/lib/affected-suites.ts:737).
+    - main() picks full-fallback / affected-narrow / affected-floor (preflight-author.mjs:211-221) and prints
+      the selection line at :222. Nothing compares the selection's size or cost to what this host can run.
+    - The runtime fit `runtimeDeadlineFit` (scripts/lib/native-author-runtime.mjs:147) is consulted ONLY
+      when `--deadline` and `--runtime-profile` are passed (preflight-author.mjs:238). The operator's bare
+      invocation passes neither.
+    - A plan-only diff reaches 467 through the prose listing:
+      - `readAffectedListings` (affected-suites.ts:716) adds `--list-plan-reading-suites` whenever a changed
+        path is outside src/scripts/bin/test (:729);
+      - `planReadingSuiteFiles` (scripts/diff-class.mjs:254) then adds every suite that calls `loadPlan(` on
+        plan/tasks.yaml, or walks the plan, as soon as ANY plan path changed (`readsChangedPlanOrDocs`,
+        diff-class.mjs:235, the `planChanged && (loadsPlan || walksPlan)` arm).
+    - Any `openapi/` or `packages/` path other than the two modelled contract files forces a full run
+      (`fullRunTrigger`, affected-suites.ts:100). So does a selector input read failure (:737-748).
+
+    IN FLIGHT, NOT DUPLICATED:
+    - W1-T5902 (queued, branch run-W1-T5902-*) takes test/retro-marker-atomic.test.ts off the PLAN_ONLY
+      candidate set in CI.
+    - W1-T4952 and W1-T7766 add selector edges in src/lib/affected-suites.ts.
+    Build on a main that contains them. This task changes the author lane's sizing, not CI's selection.
+  design: |
+    1. PLAN-ONLY REACH. When every changed path is under plan/, the author selection is:
+       - `npm run lint-plan:fast`;
+       - the suites that read a changed shard by path or by id;
+       - the plan-integrity suites, i.e. those whose subject is loading or linting the plan itself.
+       It is not every suite that happens to call `loadPlan`. The builder derives the integrity set from
+       code (for example, the suites that import the plan linter or loader as their subject), never from a
+       hand list. The receipt names the arm (`plan-only`) and its size.
+    2. SIZE BY HOST CAPACITY, NO FIXED NUMBER. Before running, price the selection:
+       - per-suite durations from scripts/test-tier-manifest.json (unknown files priced at the manifest
+         median, never zero), over the concurrency the acquired test slot grants;
+       - compared with a budget derived from the host as measured now: free cores and memory headroom
+         from the same readers test-slot.ts uses, and the author step runtime `AUTHOR_STEP_RUNTIME_MS`.
+       A selection that fits runs as today. One that does not still runs the static preflight and the
+       census precheck, and prints `affected-tests: NOT RUN — CI is the check` with the priced cost, the
+       budget and the inputs to both. It exits with a distinct status the receipt records
+       (`selection: over-capacity`). It is never reported as green tests.
+    3. Tiered, not a cliff. Between "fits" and "over capacity", the builder may run the narrow subset that
+       fits, ordered by reach (changed tests first, then direct importers). The receipt then names what was
+       skipped. No fixed suite count appears anywhere.
+  acceptance:
+    - claim: "a diff touching only plan/tasks.d runs plan lint plus the suites that read that shard, not every suite that calls loadPlan"
+      proof: 'grep: test("W1-T7809: a plan-only diff selects plan lint and the suites that read its shard" in test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts'
+    - claim: "a selection whose priced cost exceeds the host budget skips affected tests and reports CI is the check with the cost and the budget"
+      proof: 'grep: test("W1-T7809: an over-capacity selection reports CI is the check with its priced cost and budget" in test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts'
+    - claim: "the host budget is derived from the measured cores, memory headroom and step runtime, so the same selection fits a larger host and not a smaller one"
+      proof: 'grep: test("W1-T7809: the same selection fits a larger host and not a smaller one" in test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts'
+    - claim: "an over-capacity run never records green tests in the receipt"
+      proof: 'grep: test("W1-T7809: an over-capacity receipt never records the affected tests as passed" in test/preflight-author-sizes-its-selection-by-reach-and-host-capacity.test.ts'
+  falsifier: |
+    Leave `planReadingSuiteFiles` adding every loadPlan suite for a plan-only diff: the first test sees
+    hundreds of suites. Leave the run unpriced: the second test sees affected-tests start on an
+    over-capacity selection. Replace the derived budget with a constant: the third test sees the same
+    verdict on both hosts.

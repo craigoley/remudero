@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 
@@ -51,16 +51,19 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
 
 function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   fixed: Array<{ pr: OpenPrView; evidence: unknown }>;
+  escalated: Array<{ pr: OpenPrView; reason: string }>;
 } {
   const fixed: Array<{ pr: OpenPrView; evidence: unknown }> = [];
+  const escalated: Array<{ pr: OpenPrView; reason: string }> = [];
   return {
     fixed,
+    escalated,
     arm: () => {},
     close: () => {},
     dispatchFix: (p, evidence) => {
       fixed.push({ pr: p, evidence });
     },
-    escalate: () => {},
+    escalate: (candidate, reason) => { escalated.push({ pr: candidate, reason }); },
     ledgerPath: ledgerPath(),
     runId: "SWEEP-1",
     now: () => NOW,
@@ -112,42 +115,35 @@ test("acceptance 1 — two concurrent sweeps dispatch at most one fix worker for
   assert.equal(dispatches.length, 1, "exactly one fix.dispatch row was ever written for this PR");
 });
 
-test("acceptance 2 — the strike count is read under the claim, so both callers cannot see the same value", async () => {
+test("acceptance 2 — fix history is re-read under the claim, so judgment cannot race a new round", async () => {
   const lp = ledgerPath();
   const taskId = "W1-CAP2";
-  // The ledger already carries `strikeCap` fix.dispatch rows for this task — written by an
-  // earlier, already-settled dispatch this OpenPrView snapshot PREDATES (`priorStrikes: 0`
-  // below is stale, exactly the shape `priorStrikesFor`'s read-modify-write race produces).
-  for (let i = 0; i < DEFAULT_SWEEP_POLICY.strikeCap; i++) {
-    appendLedger(lp, { run_id: "SWEEP-0", task_id: taskId, step: "fix.dispatch", strike: i + 1 });
-  }
+  appendLedger(lp, { run_id: "SWEEP-0", task_id: taskId, step: "fix.dispatch", round_id: "old-round", head_sha: "sha-cap2", strike: 1 });
+  let judgeCalls = 0;
   const staleView = pr({ prNumber: 2002, prUrl: "url/2002", taskId, headSha: "sha-cap2", priorStrikes: 0 });
-  const deps = fakeDeps({ ledgerPath: lp });
+  const deps = fakeDeps({ ledgerPath: lp, fixProgressJudge: async () => {
+    judgeCalls++;
+    appendLedger(lp, { run_id: "SWEEP-racing", task_id: taskId, step: "fix.dispatch", round_id: "new-round", head_sha: "sha-cap2", strike: 2 });
+    return { verdict: "continue", reason: "fixture permits the next attempt" };
+  } });
 
   const summary = await runSweep([staleView], deps, DEFAULT_SWEEP_POLICY);
 
-  assert.equal(deps.fixed.length, 0, "no fix worker dispatched, even though the OpenPrView's own priorStrikes (0) reads under the cap");
+  assert.equal(judgeCalls, 1);
+  assert.equal(deps.fixed.length, 0, "the fresh round history invalidates the judgment made against the older snapshot");
   assert.equal(summary.actions[0].acted, false);
-  assert.match(String(standDownReasonFor(lp, staleView.prNumber)), /fix strikes exhausted under the claim/);
+  assert.match(String(standDownReasonFor(lp, staleView.prNumber)), /fix round history changed during judgment/);
 });
 
-test("acceptance 3 — a PR at its strike cap dispatches nothing, however many sweeps observe it", async () => {
+test("acceptance 3 — reaching the former strike cap does not stop a judge-authorized fix round", async () => {
   const lp = ledgerPath();
   const taskId = "W1-CAP3";
-  const headSha = "sha-cap3";
-  for (let i = 0; i < DEFAULT_SWEEP_POLICY.strikeCap; i++) {
-    appendLedger(lp, { run_id: "SWEEP-0", task_id: taskId, step: "fix.dispatch", strike: i + 1, head_sha: headSha });
-  }
-  const staleView = pr({ prNumber: 2003, prUrl: "url/2003", taskId, headSha, priorStrikes: 0 });
-  const deps = fakeDeps({ ledgerPath: lp });
+  const staleView = pr({ prNumber: 2003, prUrl: "url/2003", taskId, headSha: "sha-cap3", priorStrikes: DEFAULT_SWEEP_POLICY.strikeCap });
+  const deps = fakeDeps({ ledgerPath: lp, fixProgressJudge: async () => ({ verdict: "continue", reason: "the regression fixture explicitly permits another round" }) });
 
-  // Five SEPARATE sweeps, none concurrent with another — the shape the live incident's own
-  // "13 dispatches against a cap of 2" actually was: not one giant race, but many callers each
-  // observing the same pre-dispatch ledger state in turn.
-  for (let i = 0; i < 5; i++) {
-    await runSweep([staleView], deps, DEFAULT_SWEEP_POLICY);
-  }
-  assert.equal(deps.fixed.length, 0, "zero dispatches across five separate sweeps over an already-capped PR");
+  const summary = await runSweep([staleView], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(deps.fixed.length, 1);
+  assert.equal(summary.actions[0].acted, true);
 });
 
 test("acceptance 4 — the claim is released when the attempt settles, including when it throws", async () => {
@@ -279,7 +275,7 @@ test("acceptance 8 — removing (releasing) the claim lets a later sweep dispatc
   assert.equal(depsC.fixed.length, 1, "once the claim is removed, a later sweep dispatches again — its own (second, still-under-cap) strike");
 });
 
-test("W1-T2788: tagged strikes on the unchanged head still exhaust the fresh under-claim count", async () => {
+test("W1-T2788: tagged strikes on the unchanged head are given to the progress judge, not auto-exhausted", async () => {
   const lp = ledgerPath();
   const taskId = "W1-T2788-SAME";
   const headSha = "sha-current";
@@ -293,13 +289,19 @@ test("W1-T2788: tagged strikes on the unchanged head still exhaust the fresh und
     });
   }
   const staleView = pr({ prNumber: 6001, prUrl: "url/6001", taskId, headSha, priorStrikes: 0 });
-  const deps = fakeDeps({ ledgerPath: lp });
+  let observedRounds = 0;
+  const deps = fakeDeps({ ledgerPath: lp, fixProgressJudge: async input => {
+    observedRounds = input.rounds.length;
+    return { verdict: "escalate", loop: "same head remains red", reason: "the judge declines another round" };
+  } });
 
   const summary = await runSweep([staleView], deps, DEFAULT_SWEEP_POLICY);
 
-  assert.equal(deps.fixed.length, 0, "the same bad head cannot recover budget merely because rows are tagged");
-  assert.equal(summary.actions[0].acted, false);
-  assert.match(String(standDownReasonFor(lp, staleView.prNumber)), /fix strikes exhausted under the claim/);
+  assert.equal(observedRounds, DEFAULT_SWEEP_POLICY.strikeCap);
+  assert.equal(deps.fixed.length, 0, "the explicit judge verdict declines another round");
+  assert.equal(deps.escalated.length, 1);
+  assert.match(deps.escalated[0]?.reason ?? "", /same head remains red/);
+  assert.match(String(standDownReasonFor(lp, staleView.prNumber)), /same head remains red/);
 });
 
 test("W1-T2788: concurrent observations of one task at different heads never share a fix claim or strike budget", async () => {

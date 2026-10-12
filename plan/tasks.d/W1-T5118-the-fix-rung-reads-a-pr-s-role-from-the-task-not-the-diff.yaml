@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/prompt-render.ts
     - test/the-fix-rung-keeps-a-plan-filing-plan-only.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INCIDENT (2026-09-06, from the original shard). PR #4236 opened as a one-file plan-only

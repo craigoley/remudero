@@ -1,0 +1,15 @@
+- id: ci-shard-one-eight-refuses-conflict-markers
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "src/run-task.ts", "hooks/pre-commit", ".github/workflows/ci.yml"]
+  fact: >-
+    Before committing or pushing a worker repair that resolves a merge conflict, verify the staged
+    tree contains no leftover conflict markers. Git can mark a conflicted path resolved when it is
+    staged even if marker text remains; a two-parent commit can then reach CI and fail every shard.
+    The harness commit and fix push check for markers, and the pre-commit hook checks every committer.
+  evidence: >-
+    PR #8551's commit 4c047d2bd was a two-parent merge whose src/lib/now-view.ts retained conflict
+    markers; esbuild then failed on the marker text. W1-T5227 records the reproduction and repairs
+    the harness commit, fix push, and pre-commit paths.
+  src: "ci-learning:8551:ci-shard (1/8)"
+  cited: "2026-10-08"

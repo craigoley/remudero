@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { workerHomeDir, type Config } from "../src/lib/config.js";
-import { lostWorkerHomeGrants, materializeWorkerHome, perRunWorkerHomeDir } from "../src/lib/worker-home.js";
+import { lostWorkerHomeGrants, materializeWorkerHome, perRunWorkerHomeDir, playwrightCacheRelPath } from "../src/lib/worker-home.js";
 import { readUsageSnapshot } from "../src/run-task.js";
 import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
 
@@ -181,7 +181,7 @@ test("the usage probe reports a DISPLACED grant through its own failure sink, na
   // `.claude` to lose — true on the operator's mini, false on a Linux CI runner, where it failed
   // with "this host really has the grant to lose: false !== true". A fixture that depends on the
   // machine it runs on tests the machine; this one builds the exact precondition it needs, so the
-  // grant is guaranteed to exist and `.config/gh` is guaranteed ABSENT, which makes the
+  // grant is guaranteed to exist and every other grant is guaranteed ABSENT, which makes the
   // one-event-not-one-per-symlink assertion below deterministic rather than incidental.
   const realHome = mkdtempSync(join(tmpdir(), "rmd-usage-grant-home-"));
   mkdirSync(join(realHome, ".claude"), { recursive: true });
@@ -214,21 +214,22 @@ test("a grant that genuinely CANNOT be created reports `failed`, distinct from `
   const root = mkdtempSync(join(tmpdir(), "worker-home-failed-"));
   const workerHome = join(root, "wh");
   const realHome = join(root, "real");
-  mkdirSync(join(realHome, ".config", "gh"), { recursive: true }); // the target EXISTS
+  const nested = playwrightCacheRelPath(); // a grant whose link sits one directory below HOME
+  mkdirSync(join(realHome, nested), { recursive: true }); // the target EXISTS
   // Lock the PARENT of the link path (not the home itself, or the rc writes fail first and the
   // function throws before any grant is attempted). `symlinkSync` into it then fails for real —
   // a REAL EACCES, never a stubbed error: a fabricated failure is indistinguishable from the
   // thing under test, which is the whole defect one level up.
-  mkdirSync(join(workerHome, ".config"), { recursive: true });
-  chmodSync(join(workerHome, ".config"), 0o500);
+  mkdirSync(join(workerHome, dirname(nested)), { recursive: true });
+  chmodSync(join(workerHome, dirname(nested)), 0o500);
   try {
     const plan = materializeWorkerHome({ workerHome, realHome });
-    const outcome = plan.outcomes?.find((o) => o.relFrom === join(".config", "gh"));
+    const outcome = plan.outcomes?.find((o) => o.relFrom === nested);
     assert.equal(outcome?.state, "failed", "the target EXISTS and we could not reach it — a loss, not an option");
     assert.ok(outcome?.reason, "carrying the error's own message, never a guess");
     assert.notEqual(outcome?.state, "absent", "and never conflated with the silent optional-grant skip");
   } finally {
-    chmodSync(join(workerHome, ".config"), 0o700);
+    chmodSync(join(workerHome, dirname(nested)), 0o700);
   }
 });
 

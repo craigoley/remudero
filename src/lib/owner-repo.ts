@@ -5,8 +5,11 @@
  * and its exports are pinned to the argv cluster, so a class a caller needs for `instanceof`, and a
  * root-parameterised reader a test can drive, cannot live there without every importer paying that.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { RmdError } from "./errors.js";
+
+const execFileAsync = promisify(execFile);
 
 export const OWNER_REPO_REMEDY = "run inside a git checkout, or pass --repo <owner>/<repo> where the command accepts it";
 
@@ -55,6 +58,23 @@ export function resolveOwnerRepoAt(root: string): { owner: string; repo: string 
   } catch (e) {
     throw new OwnerRepoUnresolvableError(root, gitFailureReason(e, root));
   }
+  return ownerRepoFromOriginUrl(root, url);
+}
+
+/** {@link resolveOwnerRepoAt} with its one `git config` read awaited: the same parse and the same typed failure. */
+export async function resolveOwnerRepoAtAsync(root: string): Promise<{ owner: string; repo: string }> {
+  let url: string;
+  try {
+    url = (await execFileAsync("git", ["-C", root, "config", "--get", "remote.origin.url"], { encoding: "utf8" })).stdout.trim();
+  } catch (e) {
+    // An async exec carries git's exit status as `code`; the sync reader's reason reads it as `status`.
+    const err = e as { code?: unknown; stderr?: unknown; message?: unknown };
+    throw new OwnerRepoUnresolvableError(root, gitFailureReason({ stderr: err.stderr, status: err.code, message: err.message }, root));
+  }
+  return ownerRepoFromOriginUrl(root, url);
+}
+
+function ownerRepoFromOriginUrl(root: string, url: string): { owner: string; repo: string } {
   const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
   if (!m) {
     throw new OwnerRepoUnresolvableError(root, `cannot parse owner/repo from origin url "${url.replace(/\/\/[^/@]*@/, "//")}"`);

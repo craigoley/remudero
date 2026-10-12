@@ -23,21 +23,27 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   verdict: "restated", // the run's last worker, via `terminalVerdictFields`, or the run's running total
   "cost.anomaly": "restated", // a finding about a run's cost, never a spend of its own
   "budget.warning": "restated", // the run's accumulated cost so far, ledgered once at a threshold
+  "pr.open_deferred_to_existing": "restated", // the run's accumulated cost at a deferred PR open (W1-T5520)
   "implement.done": "produced",
   "implement.resumed": "produced",
+  "implement.continued": "produced",
+  "implement.preopen_continued": "produced",
   "recon.done": "produced",
   "diagnose.worker_done": "produced",
   "fix.done": "produced",
   "fix.commit_line_answered": "produced",
   "fix.spawn_infra_blocked": "produced", // $0 by construction: nothing was billed
   "alert-fix.dispatched_worker": "produced",
+  "main-repair.dispatched_worker": "produced",
   "census_push.strike": "produced",
+  "sweep.plan_round.worker": "produced",
   "inbox.draft_synthesized": "produced",
   "plan.synthesized": "produced",
   "triage.synthesized": "produced",
   "retro.synthesized": "produced",
   "retro.preflight_repair": "produced",
   "risk_judge.decision": "produced",
+  "ci_judge.spend": "produced",
   "containment.probe": "produced",
   "isolation.probe": "produced",
 };
@@ -51,6 +57,16 @@ export function spendAmountUsd(row: Record<string, unknown>): number | undefined
   return finiteNumber(row.total_cost_usd) ?? finiteNumber(row.cost_usd);
 }
 
+/**
+ * W1-T5629: the row's NOTIONAL (api-equivalent, never billed) price — a codex row's `notional_cost_usd`, which its
+ * worker prices from the routed model's tokens while `total_cost_usd` stays 0; every other row's {@link spendAmountUsd}.
+ * For analytics that compare lanes only: no budget, cap or spend series reads it. A codex row with no price stays
+ * `undefined`, so its billed 0 is never drawn as a price.
+ */
+export function notionalSpendUsd(row: Record<string, unknown>): number | undefined {
+  return row.provider === "codex" ? finiteNumber(row.notional_cost_usd) : spendAmountUsd(row);
+}
+
 /** The row's role: its own `spend_role` label, else its step's entry, else the pre-label rule (a string `model`). */
 export function spendRoleOf(row: Record<string, unknown>): SpendRole | undefined {
   if (row.spend_role === "produced" || row.spend_role === "restated") return row.spend_role;
@@ -61,4 +77,10 @@ export function spendRoleOf(row: Record<string, unknown>): SpendRole | undefined
 /** True when this row carries a cost AND is the row that produced it. The one predicate every spend series reads. */
 export function isProducedSpendRow(row: Record<string, unknown>): boolean {
   return spendAmountUsd(row) !== undefined && spendRoleOf(row) === "produced";
+}
+
+/** A cash-attributed producer receipt, including an unpriced one. Never infer billing from a
+ * model name or credit a restated verdict. Missing provider attribution stays outside this sum. */
+export function isCashSpendProducer(row: Record<string, unknown>): boolean {
+  return row.provider === "cash" && spendRoleOf(row) === "produced";
 }

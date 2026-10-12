@@ -15,17 +15,19 @@ import type { ReviewVerdict } from "./review.js";
 
 /**
  * W1-T528: PURE classifier for a failed update-branch request (W1-T1208: the REST `gh api` PUT,
- * not the `gh pr update-branch` subcommand), same shape as {@link armFailureAction} directly
- * above. Design clause (v): this shard does NOT pretend to have
- * observed a real 422/diverged response — it was never called against a live PR (a call on a
- * real PR discards a real verdict). Anything that plausibly names a conflict or a divergence is
- * classified `"conflict"` — reported and never retried by {@link updateBranchViaGh}'s own caller;
- * everything else is `"error"` — informational, retried only by a LATER pass's own fresh
- * selection, never by this call. Exported so a future task can correct this classification
- * against `gh`'s ACTUAL response shape without guessing here first.
+ * not the `gh pr update-branch` subcommand), same shape as {@link armFailureAction}.
+ * W1-T5933: GitHub answers 422 for three different things, so the status code alone names none of
+ * them. `"conflict"` only when the text names a conflict or a divergence — reported and never
+ * retried by {@link updateBranchViaGh}'s caller; `"head-moved"` for an expected_head_sha that no
+ * longer matches ("expected head sha didn't match current head ref"), so the caller re-reads next
+ * pass; `"up-to-date"` for "There are no new commits on the base branch", so no refresh is needed;
+ * `"error"` for everything else, an unrecognised 422 included — named, never misrouted to the
+ * merge-conflict path.
  */
-export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "error" {
-  return /conflict|divergent|diverged|422/i.test(stderrText) ? "conflict" : "error";
+export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "head-moved" | "up-to-date" | "error" {
+  if (/expected[ _]head[ _]sha/i.test(stderrText)) return "head-moved";
+  if (/no new commits on the base branch/i.test(stderrText)) return "up-to-date";
+  return /conflict|divergent|diverged/i.test(stderrText) ? "conflict" : "error";
 }
 
 /**

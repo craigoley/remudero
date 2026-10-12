@@ -92,14 +92,18 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   ISSUES: producer("issues", "Issues Intake"),
   INTAKE: producer("intake", "Intake Cadence"),
   GOVERNOR: producer("governor", "Governor"),
+  MINT: producer("mint", "Task-Id Mint"),
   "MODEL-CATALOG": producer("model-catalog", "Model Catalog"),
+  "ESCALATION-ANSWERS": producer("escalation-answers", "Escalation Answers"),
   INCIDENT: producer("incident", "Incident Ingest"),
   inbox: producer("inbox", "Inbox"),
   "inbox-bakeoff": producer("inbox-bakeoff", "Inbox Bake-off"),
   _ledger: producer("_ledger", "Ledger Internals"),
   "coverage-improve": producer("coverage-improve", "Coverage Improvement"),
+  "coverage-nightly": producer("coverage-nightly", "Nightly Coverage"),
   "hand-run-census": producer("hand-run-census", "Hand-Run Census"),
   "knowledge-measurement": producer("knowledge-measurement", "Knowledge Measurement"),
+  "RECOVERY-REFS": producer("recovery-refs", "Recovery Refs"),
 });
 
 /**

@@ -12,7 +12,7 @@
   origin: "2026-10-02 operator approved investigation and filing of the follow-ups"
   plan_refs: [W1-T1117, W1-T1079, W1-T970, W1-T3995]
   files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/failed-arm-fresh-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: armFailureAction

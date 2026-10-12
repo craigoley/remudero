@@ -176,6 +176,7 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
       { field: "Memory", expected: 8457 * MIB, actual: 0 },
       { field: "MemorySwap", expected: 12553 * MIB, actual: 0 },
       { field: "CpuShares", expected: 512, actual: 0 },
+      { field: "MemoryHigh", expected: 8034 * MIB, actual: 0 }, // core's 8192 MiB floor, held at 95% of max
     ]);
     assert.deepEqual(inspected[0], ["inspect", IMAGE_SHA_CONTAINER, "--format", "{{json .HostConfig}}"]);
 
@@ -197,6 +198,7 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
       { field: "MemorySwap", expected: 8704 * MIB, actual: 0 },
       { field: "CpuShares", expected: 4096, actual: 0 },
       { field: "MemoryReservation", expected: 5120 * MIB, actual: 0 },
+      { field: "MemoryHigh", expected: 5632 * MIB, actual: 0 }, // serve's working-set floor
     ]);
 
     // A container already on the policy reads NO drift (Docker's -1 swap is drift, not unknown).

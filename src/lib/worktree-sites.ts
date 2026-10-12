@@ -149,6 +149,17 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/lib/plan-pr-emitter.ts",
+    site: "planPrPreflightAtCommitAsync",
+    creates: "the same throwaway DETACHED preflight worktree, cut by an awaited child process for a daemon lane (W1-T5521)",
+    disposition: {
+      kind: "exempt",
+      because:
+        "the async form of planPrPreflightAtCommit above, for the same reason: it materializes the EXACT commit the " +
+        "sweep's plan-PR rung is about to push, so the preflight judges that tree, never a fresh branch off origin/main.",
+    },
+  },
+  {
     file: "src/lib/sweep.ts",
     site: "rebaseDirtyFleetBranchViaGit",
     creates: "a DETACHED worktree at the PR's own head sha, so that head can be rebased onto origin/main",
@@ -183,8 +194,9 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     file: "src/run-task.ts",
     site: "buildBaseProofDir",
     creates:
-      "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side every proof " +
-      "is re-run against for the staleness check (R-11)",
+      "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side a `unit test:` " +
+      "or legacy fenced grep proof is re-run against for the staleness check (R-11); a grep-only review " +
+      "reads its base blobs instead and creates none",
     disposition: {
       kind: "exempt",
       because:
@@ -236,6 +248,32 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "worktreeAdd always names a branch, and a serve generation slot runs code, never commits it: it is " +
         "cut detached at the sha the supervisor just fetched from origin/main, so it IS origin/main at the " +
         "instant it is cut, and the readiness probe's /v1/version smoke read refuses a slot at any other sha.",
+    },
+  },
+  {
+    file: "src/lib/hand-worktree.ts",
+    site: "createHandWorktree",
+    creates: "a HAND build's run-<taskId>-<epochMs> worktree off fresh origin/main, under an operator-named parent",
+    disposition: {
+      kind: "exempt",
+      because:
+        "worktreeAdd SYMLINKS node_modules (linkWorktreeNodeModules), and a hand build must be able to " +
+        "`npm ci` in its worktree: ensureInstallFresh refuses that through a symlink (SymlinkInstallRefusal) " +
+        "because an install's clear phase empties the shared tree. This site hard-links (`cp -al`) instead. " +
+        "It cuts the same `--no-track` branch off origin/main right after its own fetch, so the currency " +
+        "question is answered by that fetch, and no dispatched worker ever runs in the tree (W1-T5533).",
+    },
+  },
+  {
+    file: "src/run-task.ts",
+    site: "defaultNodePinSyncIo",
+    creates: "a throwaway worktree at a Dependabot image-bump PR's own head, removed once the .nvmrc commit is pushed",
+    disposition: {
+      kind: "exempt",
+      because:
+        "origin/main currency is not this site's question: W1-T6258 commits the synced .nvmrc ON TOP OF the bump PR's " +
+        "exact head and pushes that branch, so the tree must be the PR head and no other. `worktreeAdd` cuts a fresh " +
+        "branch off origin/main, which is not the branch being pushed — the same shape as planPrPreflightAtCommit above.",
     },
   },
 ];

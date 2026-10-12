@@ -2,7 +2,7 @@
 // On 2026-10-02, 44 of the 46 selector-shadow filings came from two CI runs read while main was
 // itself red (~590 "missed" failures), each a one-file plan PR at about one every 3 minutes.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -25,6 +25,11 @@ function run(id: number, missed: readonly string[], baseSha?: string): gardener.
 
 function harness() {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-mass-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", gardener.SELECTOR_SHADOW_MISS_TEST_PATH]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   const landed: Array<{ paths: string[]; title: string; body: string }> = [];

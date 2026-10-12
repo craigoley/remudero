@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,6 +8,13 @@ import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
+/** W1-T6120: the hook runs its checks from its OWN code root, so a fixture runs it as the tree's own hook. */
+function ownHook(tree: string): string {
+  mkdirSync(join(tree, "hooks"), { recursive: true });
+  copyFileSync(HOOK, join(tree, "hooks", "pre-push"));
+  return join(tree, "hooks", "pre-push");
+}
+
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "head-identity-gate.mjs")).href;
 const ZERO = "0".repeat(40);
 
@@ -34,7 +41,7 @@ function commit(dir: string, message: string): string {
 }
 
 function push(dir: string, remoteRef: string, localSha: string, remoteSha: string): { status: number; stderr: string } {
-  const res = spawnSync("sh", [HOOK], {
+  const res = spawnSync("sh", [ownHook(dir)], {
     cwd: dir,
     encoding: "utf8",
     input: `refs/heads/local ${localSha} refs/heads/${remoteRef} ${remoteSha}\n`,

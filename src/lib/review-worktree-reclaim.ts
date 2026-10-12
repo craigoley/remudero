@@ -21,8 +21,9 @@
  * dirs and any hand-cut lane never match it and are never even considered, let alone touched.
  */
 import { execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS, worktreesDir, worktreeRemove } from "./worker.js";
@@ -54,7 +55,9 @@ export type ReviewWorktreeSweepReason =
   /** The candidate's own `.git` pointer, or its HEAD, could not be read or parsed. */
   | "git-unreadable"
   /** Every gate passed but the removal itself failed — best-effort, the pass continues. */
-  | "removal-failed";
+  | "removal-failed"
+  /** THIS process materialized it and has not torn it down — a live review, whatever its age. */
+  | "live-review";
 
 export interface ReviewWorktreeSweepOutcome {
   name: string;
@@ -87,6 +90,32 @@ export interface ReviewWorktreeSweepOptions {
    *  remote could not be read at all: network failure, auth failure, or the ref is gone. */
   readRemoteHeadSha?: (repoDir: string, prNumber: number) => string | undefined;
   removeWorktree?: (repoDir: string, worktreePath: string) => void;
+  /** Whether THIS process is still reviewing in the candidate. Defaults to {@link reviewWorktreeIsHeld}. */
+  isLive?: (worktreePath: string) => boolean;
+}
+
+/**
+ * The review worktrees THIS process materialized and has not yet torn down. Age cannot tell a
+ * slow live review from a stranded one, so the grace window alone let the daemon reclaim its OWN
+ * live review: on 2026-10-10 PR #10741's review ran its reviewer for 37 minutes, the sweep removed
+ * `review-PR10741-1791665021022` at 30.0 minutes from the same pid, and every proof then spawned
+ * into a missing cwd (ENOENT, ledgered as "bwrap is not installed"), capping the verdict at 0/3.
+ * A SIGKILL empties this set with the process, so a stranded worktree is still reclaimed later.
+ */
+const heldReviewWorktrees = new Set<string>();
+
+/** Mark `worktreePath` as one this process is reviewing in; {@link sweepStrandedReviewWorktrees} keeps it. */
+export function holdReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.add(resolve(worktreePath));
+}
+
+/** The review using `worktreePath` is over (torn down, or its teardown failed): the sweep may reclaim it. */
+export function releaseReviewWorktree(worktreePath: string): void {
+  heldReviewWorktrees.delete(resolve(worktreePath));
+}
+
+export function reviewWorktreeIsHeld(worktreePath: string): boolean {
+  return heldReviewWorktrees.has(resolve(worktreePath));
 }
 
 /**
@@ -119,6 +148,7 @@ export function sweepStrandedReviewWorktrees(
   const readHeadSha = opts.readHeadSha ?? defaultReadHeadSha;
   const readRemoteHeadSha = opts.readRemoteHeadSha ?? defaultReadRemoteHeadSha;
   const removeWorktree = opts.removeWorktree ?? worktreeRemove;
+  const isLive = opts.isLive ?? reviewWorktreeIsHeld;
 
   const reclaimed: string[] = [];
   const kept: ReviewWorktreeSweepOutcome[] = [];
@@ -144,6 +174,10 @@ export function sweepStrandedReviewWorktrees(
 
     if (clock.now() - createdAtMs < graceMs) {
       keep(name, path, "too-young");
+      continue;
+    }
+    if (isLive(path)) {
+      keep(name, path, "live-review");
       continue;
     }
 
@@ -202,10 +236,8 @@ function defaultResolveRepoDir(worktreePath: string): string | undefined {
 
 function defaultReadHeadSha(worktreePath: string): string | undefined {
   try {
-    return execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    // W1-T6122: a reviewer ran in this PR-head tree, so the read goes through the leaf.
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch (e) {
     console.error(`review-worktree-reclaim: could not read HEAD at ${worktreePath} (${String((e as Error)?.message ?? e)})`);
     return undefined;

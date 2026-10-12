@@ -15,6 +15,7 @@ import {
 } from "../src/lib/panel-actions.js";
 import { readFeedbackEntry, listFeedback, FEEDBACK_STATUSES, isValidFeedbackOrigin } from "../src/lib/feedback.js";
 import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity } from "../src/lib/inbox-thread.js";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 
 // ── W1-T2496: forty console routes shipped and not one let a human answer an escalation in
 // prose. `/v1/escalation/mark-handled` dismisses (no words); `/v1/questions/answer` answers a
@@ -106,7 +107,8 @@ test("a prose reply on a raised thread lands as a feedback entry carrying that t
     assert.equal(body.threadId, threadId);
     assert.equal(body.feedback.thread_id, threadId);
 
-    // Filed for real, at the durable path -- readable back byte for byte.
+    // Filed for real, at the durable path once the sweep lands it -- readable back byte for byte.
+    landQueuedFeedback(root, root);
     const entry = readFeedbackEntry(root, body.feedback.id);
     assert.equal(entry.thread_id, threadId);
     assert.equal(entry.raw, "retry once more, the flake looks like ci noise");
@@ -130,6 +132,7 @@ test("the filed entry is a plain FeedbackEntry -- the exact shape rmd triage / l
     assert.equal(res.status, 200);
   });
 
+  landQueuedFeedback(root, root);
   const all = listFeedback(root);
   assert.equal(all.length, 1);
   const entry = all[0];

@@ -1,0 +1,43 @@
+- id: W1-T6266
+  title: "A BOX COST REPORT REFUSES A ZERO WITHOUT ITS CONTROL — the read-only report that ranked serve's CPU and memory (now@core 18,461 s of slow builds a day, 1,897 s of plan re-parses, about 5 cold memo loads per process) lives in an operator's scratch directory, so a change's before and after are not measured with one instrument"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a read-only, counts-only cost report over the ledger union
+  band_meaning: span
+  origin: "operator session 2026-10-07: serve CPU and memory plan (item T2), split from W1-T6265 by lint-plan's one-concern rule"
+  plan_refs: [W1-T6264, W1-T6265, W1-T6191]
+  files: [scripts/box-cost-report.ts, test/a-box-cost-report-refuses-a-zero-without-its-control.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-07: a read-only union census over 24 h of the production ledger (407 gzip archives plus the live
+    file, 0 unread) produced the baseline that every serve CPU and memory change is measured against:
+    - read_model.slow_view per view and stage;
+    - workstreams.built per hour;
+    - read_model.memo_retention per thread, lane and holder;
+    - serve.plan_pin_adopted parse ms;
+    - serve.memory RSS, heap and unattributed bytes;
+    - serve.handoff_done.
+    It prints counts, ms, MiB and field names only. It reports a positive control (rows of a step known to be
+    present) so a zero is never read as a measurement. It exists only as an operator's scratch script, so the
+    after-adoption measurement of PR 9922 and every later change depends on that copy surviving.
+  design: |
+    (1) scripts/box-cost-report.ts reads through openLedgerUnion with an explicit window and prints one JSON object of
+    aggregates. It never prints a row body, a path beyond the state directory, or any field value other than numbers,
+    step names, view, holder and lane names, and short shas.
+    (2) Every aggregate the census reports comes with the count of its positive-control step in the same window, and an
+    unread archive or a missed live read fails the run rather than reporting a partial window.
+    (3) The same script compares two windows (before and after) and prints the deltas.
+  acceptance:
+    - claim: "the report refuses to answer when its positive control reads zero or an archive went unread, and reports counts and field names only"
+      proof: "unit test: test/a-box-cost-report-refuses-a-zero-without-its-control.test.ts"
+    - claim: "the report carries its positive control"
+      proof: "grep: positiveControl in scripts/box-cost-report.ts"
+  falsifier: |
+    Report a window whose control step reads zero: the test's empty-ledger case reports numbers and fails. Print a row's
+    body: the payload-free assertion fails.

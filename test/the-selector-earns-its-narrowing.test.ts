@@ -137,6 +137,11 @@ test("selector-shadow reads all eight coverage job logs instead of a partial run
 
 test("W1-T4439: a missed failure files a task naming the missing edge", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", "test/the-affected-suite-selector-runs-in-shadow.test.ts"]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "test", "a.test.ts"), "");
@@ -494,6 +499,12 @@ test("a self-hosting daemon keeps timers alive while selector-shadow reads a run
         await new Promise((r) => setTimeout(r, 10));
       }
       assert.ok(existsSync(allDone), "the current read completed all eight coverage jobs");
+      // W1-T5925: the pass then lists older history once for its replay; keep the shim until it has.
+      const replayState = join(root, "state", "selector-shadow-replay.json");
+      for (let waited = 0; !existsSync(replayState) && waited < 5_000; waited += 10) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(existsSync(replayState), "the pass finished, its replay listing included");
     } finally {
       garden.stop();
     }
@@ -584,13 +595,18 @@ test("a retry-recovered file is ledgered once as flake evidence for the test gar
   await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
   await readSelectorShadowRunsAsync("acme", "remudero", 1, io);
   assert.deepEqual(rows, [
-    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
-    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow" } },
+    { step: "test.flake_retry", extra: { file: "test/a.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow", retry_outcome: "recovered", head_sha: "h" } },
+    { step: "test.flake_retry", extra: { file: "test/b.test.ts", headline: "recovered on retry", ci_run_id: 7, shard: 1, source: "selector-shadow", retry_outcome: "recovered", head_sha: "h" } },
   ], "a cached complete run is never reported twice");
 });
 
 test("a later miss of the same suite is ledgered as evidence for its task and never filed again", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-shadow-dedupe-`));
+  // The filing checkout holds the files a narrow edge declares, as main does: lint-plan's admission reads them.
+  for (const owner of ["src/lib/affected-suites.ts", "test/the-affected-suite-selector-runs-in-shadow.test.ts"]) {
+    mkdirSync(join(root, owner, ".."), { recursive: true });
+    writeFileSync(join(root, owner), "// fixture\n");
+  }
   mkdirSync(join(root, "test"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });

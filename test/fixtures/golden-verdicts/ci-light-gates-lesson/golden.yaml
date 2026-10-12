@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T5960: the light-gates lesson must reach its matched lane, and the cited incident must
+  execute as a proof against the active CI learning entry.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass

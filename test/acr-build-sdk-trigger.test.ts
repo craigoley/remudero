@@ -13,8 +13,8 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -71,7 +71,10 @@ function guardSays(before: string, after: string, extraChangedFile?: string): st
   git("commit", "-q", "-m", "before");
   const beforeSha = git("rev-parse", "HEAD");
   writeFileSync(join(dir, "package-lock.json"), after);
-  if (extraChangedFile) writeFileSync(join(dir, extraChangedFile), "changed\n");
+  if (extraChangedFile) {
+    mkdirSync(dirname(join(dir, extraChangedFile)), { recursive: true });
+    writeFileSync(join(dir, extraChangedFile), "changed\n");
+  }
   git("add", "-A");
   git("commit", "-q", "--allow-empty", "-m", "after");
   const afterSha = git("rev-parse", "HEAD");
@@ -131,4 +134,20 @@ test("W1-T5018: the guard reads the SDK from the same lockfile key the image ins
   };
   assert.ok(lock.packages?.[SDK_KEY]?.version, `the root lockfile resolves ${SDK_KEY}`);
   assert.match(guardScript(), /node_modules\/@anthropic-ai\/claude-agent-sdk/);
+});
+
+test("the real image guard builds for a baked supervisor change and skips mounted source", () => {
+  assert.equal(guardSays(lockfile(SDK_OLD), lockfile(SDK_OLD), "src/lib/serve-supervisor.ts"), "true");
+  assert.equal(guardSays(lockfile(SDK_OLD), lockfile(SDK_OLD), "src/run-task.ts"), "false");
+});
+
+
+test("the image guard detects the supervisor loader and its Linux compiler pins", () => {
+  for (const name of ["tsx", "esbuild", "@esbuild/linux-x64"]) {
+    const before = JSON.parse(lockfile(SDK_OLD));
+    const after = JSON.parse(lockfile(SDK_OLD));
+    before.packages[`node_modules/${name}`] = { version: "1.0.0", integrity: "sha512-old" };
+    after.packages[`node_modules/${name}`] = { version: "1.0.0", integrity: "sha512-new" };
+    assert.equal(guardSays(JSON.stringify(before), JSON.stringify(after)), "true", name);
+  }
 });

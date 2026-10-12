@@ -33,7 +33,7 @@ function settingsFile(contents: unknown): string {
 }
 
 const ENABLED = {
-  sandbox: { enabled: true, failIfUnavailable: true },
+  sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
   permissions: { deny: [], allow: [], ask: [] },
 };
 

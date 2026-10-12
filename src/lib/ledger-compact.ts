@@ -2,7 +2,7 @@
  * Bounded operator entry point for ledger archive compaction.
  *
  * `compactRotations` owns row-set preservation. This module owns the filesystem boundary the
- * compactor deliberately leaves to its caller: select a small oldest-first window, read plain or
+ * compactor deliberately leaves to its caller: select a bounded window preferring shared days, read plain or
  * gzip rotations, stage one replacement per UTC day atomically, and remove sources only after those writes.
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
@@ -103,7 +103,7 @@ const realFs: LedgerCompactFs = {
   mtimeMs: (path) => statSync(path).mtimeMs,
 };
 
-/** Select the oldest parseable rotations strictly older than the requested age. The hard source
+/** Select parseable rotations strictly older than the requested age, preferring shared UTC days. The hard source
  * ceiling bounds `compactRotations`' exact-row Set even when an operator supplies a larger flag. */
 export function selectLedgerCompactionSources(
   names: string[], stateDir: string, olderThanDays: number, maxSources: number, now: Date,
@@ -155,8 +155,16 @@ export function selectLedgerCompactionSources(
     : undefined;
   const candidates = repair ? [repair, ...eligible.filter((entry) => entry.path !== repair.path)]
     : rotations.length > 0 ? rotations : eligible;
+  const dayOf = (entry: LedgerCorpusEntry): string => compactionStamp(basename(entry.path))!.slice(0, 10);
+  const dayCounts = new Map<string, number>();
+  for (const entry of candidates) dayCounts.set(dayOf(entry), (dayCounts.get(dayOf(entry)) ?? 0) + 1);
+  // Keep oldest-first order within each tier, without letting singleton days starve mergeable days.
+  const preferred = repair ? candidates : [
+    ...candidates.filter((entry) => dayCounts.get(dayOf(entry))! > 1),
+    ...candidates.filter((entry) => dayCounts.get(dayOf(entry)) === 1),
+  ];
   const sourceLimit = repair ? Math.min(cap, 2) : rotations.length > 0 ? cap : Math.min(cap, 2);
-  const window = candidates.slice(0, sourceLimit);
+  const window = preferred.slice(0, sourceLimit);
   if (!decompressedSizeOf) return { sources: window, eligibleCount: eligible.length, unparseableAge };
 
   const sources: LedgerCorpusEntry[] = [];
@@ -175,7 +183,7 @@ export function selectLedgerCompactionSources(
       break;
     }
     if (selectedBytes + bytes > maxArchiveBytes) {
-      // Preserve oldest-first prefix selection. The remaining candidates are deferred, not silently
+      // Preserve the preferred candidate prefix. The remaining candidates are deferred, not silently
       // merged into an output whose next read would exceed the measured budget.
       sizeSkippedCount = window.length - index;
       break;
@@ -216,6 +224,7 @@ function reportFor(
   unparseableAgeCount: number,
   result: LedgerCompactionResult,
   sizeSkippedCount?: number,
+  reason?: string,
 ): string {
   // These fields are the preview/apply audit contract.
   // The row counts come from exact compaction, never estimated bytes.
@@ -226,6 +235,7 @@ function reportFor(
     rowsWritten: result.rowsWritten, duplicatesCollapsed: result.duplicatesCollapsed, archiveName: result.archiveName,
     archiveNames: result.archiveNames,
     ...(sizeSkippedCount && sizeSkippedCount > 0 ? { sizeSkippedCount } : {}),
+    ...(reason ? { reason } : {}),
   });
 }
 
@@ -415,6 +425,14 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     // unsplit base names.
     result = { ...result, archiveName: staged.at(-1)!.name, archiveNames: staged.map((entry) => entry.name) };
   }
+  let reason: string | undefined;
+  if (staged.length > 0 && staged.length >= selection.sources.length) {
+    reason = `no-reduction — ${selection.sources.length} source archive(s) would produce ${staged.length} archive(s)`;
+    // compactRotations has partitioned the rows; these are the actual outputs, including byte splits.
+    // Decline before atomic writes or cold storage so source bytes and mtimes stay untouched.
+    staged.length = 0;
+    result = { sourceCount: 0, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "", archiveNames: [] };
+  }
 
   const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
   const report = reportFor(
@@ -425,6 +443,7 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     selection.unparseableAge.length,
     result,
     selection.sizeSkippedCount,
+    reason,
   );
   if (selection.unparseableAge.length > 0) {
     log(

@@ -14,7 +14,7 @@
   files:
     - src/run-task.ts
     - test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 10579515f (the first four numbers were first taken at 431d71762 and re-taken at this head); every command is read-only.

@@ -32,7 +32,9 @@ import {
   writePriorRefusal,
 } from "./dispatch-repair.js";
 import type { Task } from "./plan.js";
+import type { PlanPrPreflightCheck, PlanPrPreflightFinding } from "./plan-pr-emitter.js";
 import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** The ledger step {@link runSweep}'s call site writes once per handled refusal, and the ONLY thing
  *  {@link noPrVerdictRowsFromLedger} reads back to dedupe — one constant so writer and fold agree. */
@@ -101,6 +103,7 @@ export interface NoPrVerdictRow {
   readonly taskId: string;
   readonly runId: string;
   readonly reportExcerpt: string;
+  readonly contractRevision?: string;
 }
 
 /** A nominated row whose excerpt carried at least one categorized refusal. */
@@ -108,23 +111,52 @@ export interface RefusalCandidate extends NoPrVerdictRow {
   readonly refusals: readonly WorkerRefusal[];
 }
 
+/** W1-T5531: the preflight checks that read the plan TREE, so the same red on the amendment's base
+ *  alone is main's — the title and the proof belong to the amendment. */
+const MAIN_ATTRIBUTABLE_PREFLIGHT_CHECKS: ReadonlySet<PlanPrPreflightCheck> = new Set(["lint-plan", "shard-census"]);
+
+/** True when every check that refused the amendment is a tree check that ALSO fails on its base
+ *  (origin/main) alone — the amendment did not cause the red, so it is worth one retry. */
+export function refusalIsMainCaused(
+  amendmentFailures: readonly PlanPrPreflightFinding[],
+  baseFailures: readonly PlanPrPreflightFinding[],
+): boolean {
+  return (
+    amendmentFailures.length > 0 &&
+    amendmentFailures.every((f) => MAIN_ATTRIBUTABLE_PREFLIGHT_CHECKS.has(f.check) && baseFailures.some((b) => b.check === f.check))
+  );
+}
+
+/** W1-T5531: a source run's recorded amendment rows settle it unless its ONLY row is a main-red
+ *  `preflight_refused` and `mainSha` (this pass's origin/main) has moved past the sha it ran on.
+ *  An unread `mainSha` settles it too — never re-pay a preflight on a guess. */
+function amendmentSettled(recorded: readonly Record<string, unknown>[], mainSha: string | undefined): boolean {
+  if (recorded.length !== 1) return true;
+  const [only] = recorded;
+  if (only!.outcome !== "preflight_refused" || only!.main_red !== true) return true;
+  return typeof only!.origin_main_sha !== "string" || mainSha === undefined || mainSha === only!.origin_main_sha;
+}
+
 /**
  * The LATEST verdict row per task, kept only when it is a recent `no_pr` carrying an excerpt and no
- * amendment has already been recorded for that same source run. A later verdict of any kind
+ * amendment has already been recorded for that same source run (W1-T5531: a main-red refusal is
+ * re-offered once, when `mainSha` has moved). A later verdict of any kind
  * (a merged PR, a failure) supersedes the refusal, so a task that moved on is never held for it.
  */
 export function noPrVerdictRowsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowMs: number,
   maxAgeMs: number = REFUSAL_AMENDMENT_MAX_AGE_MS,
+  mainSha?: string,
 ): NoPrVerdictRow[] {
   const latest = new Map<string, Record<string, unknown>>();
-  const handled = new Set<string>();
+  const handled = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const taskId = line.task_id;
     if (typeof taskId !== "string") continue;
     if (line.step === REFUSAL_AMENDMENT_STEP && typeof line.source_run_id === "string") {
-      handled.add(`${taskId}\u0000${line.source_run_id}`);
+      const key = `${taskId}\u0000${line.source_run_id}`;
+      handled.set(key, [...(handled.get(key) ?? []), line]);
     } else if (line.step === "verdict") {
       latest.set(taskId, line);
     }
@@ -138,8 +170,10 @@ export function noPrVerdictRowsFromLedger(
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
     // An undated or stale row is history — never a live block to hold a task for.
     if (!Number.isFinite(at) || nowMs - at > maxAgeMs) continue;
-    if (handled.has(`${taskId}\u0000${runId}`)) continue;
-    out.push({ taskId, runId, reportExcerpt: excerpt });
+    const recorded = handled.get(`${taskId}\u0000${runId}`);
+    if (recorded && amendmentSettled(recorded, mainSha)) continue;
+    out.push({ taskId, runId, reportExcerpt: excerpt,
+      ...(typeof row.pre_dispatch_contract_revision === "string" ? { contractRevision: row.pre_dispatch_contract_revision } : {}) });
   }
   return out;
 }
@@ -159,14 +193,92 @@ export function refusalHoldVerdict(refusals: readonly WorkerRefusal[]): string {
  * pre-dispatch guard writes, so the daemon's existing `isTerminalPreDispatchRefusalHeld` filter is
  * the whole enforcement — no second hold mechanism. Idempotent.
  */
-export function holdTaskForRefusal(stateRoot: string, task: Task, refusals: readonly WorkerRefusal[]): void {
+export function holdTaskForRefusal(
+  stateRoot: string, task: Task, refusals: readonly WorkerRefusal[], sourceRunId?: string, sourceContractRevision?: string,
+): void {
   const prior = readPriorRefusal(stateRoot, task.id);
+  if (sourceRunId !== undefined) {
+    const recorded = readWorkerRefusalHold(stateRoot, task.id);
+    if (recorded?.sourceRunId === sourceRunId) return;
+  }
   writePriorRefusal(stateRoot, task.id, {
     verdict: refusalHoldVerdict(refusals),
     attempts: (prior?.attempts ?? 0) + 1,
     escalated: true,
-    preDispatchContractRevision: preDispatchContractRevision(task),
+    preDispatchContractRevision: sourceContractRevision ?? preDispatchContractRevision(task),
+    ...(sourceRunId !== undefined ? { sourceRunId } : {}),
   });
+}
+
+export interface CategorizedRefusalRejoin {
+  sourceRunId: string;
+  refusedContractRevision: string;
+  contractRevision: string;
+  receiptRecorded: boolean;
+}
+
+function readWorkerRefusalHold(stateRoot: string, taskId: string): {
+  verdict: string; escalated: boolean; preDispatchContractRevision: string; sourceRunId?: string;
+} | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(stateRoot, "dispatch-repair", `${taskId}.json`), "utf8"));
+    if (typeof raw.verdict !== "string" || raw.escalated !== true || typeof raw.attempts !== "number" ||
+      typeof raw.preDispatchContractRevision !== "string" || !/^pre-dispatch-v1:[a-f0-9]{64}$/.test(raw.preDispatchContractRevision) ||
+      (raw.sourceRunId !== undefined && typeof raw.sourceRunId !== "string")) return undefined;
+    return raw;
+  } catch (error) {
+    // Missing, corrupt or unreadable evidence cannot verify a release of an independent failure.
+    return undefined;
+  }
+}
+
+export function activeCategorizedRefusal(
+  taskId: string,
+  rows: ReadonlyArray<Record<string, unknown>>,
+): RefusalCandidate | undefined {
+  let verdict: Record<string, unknown> | undefined;
+  let start: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.task_id !== taskId && row.task !== taskId) continue;
+    if (row.step === "verdict") verdict = row;
+    if (row.step === "run.start") start = row;
+  }
+  if (verdict?.verdict !== "no_pr" || typeof verdict.run_id !== "string" || !verdict.run_id ||
+    start?.run_id !== verdict.run_id) return undefined;
+  const reportExcerpt = typeof verdict.report_excerpt === "string" ? verdict.report_excerpt : "";
+  const refusals = extractRefusal(reportExcerpt);
+  if (refusals.length === 0) return undefined;
+  return { taskId, runId: verdict.run_id, reportExcerpt, refusals,
+    ...(typeof verdict.pre_dispatch_contract_revision === "string" ? { contractRevision: verdict.pre_dispatch_contract_revision } : {}) };
+}
+
+/** Join the latest failure to its persisted refusal; a later start spends this source's opportunity. */
+export function categorizedRefusalRejoin(
+  stateRoot: string,
+  task: Task,
+  rows: ReadonlyArray<Record<string, unknown>>,
+  source = activeCategorizedRefusal(task.id, rows),
+): CategorizedRefusalRejoin | undefined {
+  if (!source) return undefined;
+  const block = rows.findLast((row) => (row.task_id === task.id || row.task === task.id) && row.step === "dispatch.blocked_independent");
+  if (block && (block.run_id !== source.runId || block.verdict !== "no_pr")) return undefined;
+  const hold = readWorkerRefusalHold(stateRoot, task.id);
+  if (!hold || hold.verdict !== refusalHoldVerdict(source.refusals)) return undefined;
+  if (source.contractRevision !== undefined && source.contractRevision !== hold.preDispatchContractRevision) return undefined;
+  const sourceRunId = source.runId;
+  const ownsHold = hold.sourceRunId === sourceRunId || (hold.sourceRunId === undefined && rows.some((row) =>
+    row.task_id === task.id && row.step === REFUSAL_AMENDMENT_STEP && row.source_run_id === sourceRunId));
+  if (!ownsHold) return undefined;
+  const contractRevision = preDispatchContractRevision(task);
+  if (hold.preDispatchContractRevision === contractRevision) return undefined;
+  return {
+    sourceRunId,
+    refusedContractRevision: hold.preDispatchContractRevision,
+    contractRevision,
+    receiptRecorded: rows.some((row) => row.task_id === task.id && row.step === "dispatch.harness_commit_retry" &&
+      row.original_refusal === "categorized_worker_refusal" && row.original_run_id === sourceRunId &&
+      row.refused_contract_revision === hold.preDispatchContractRevision && row.contract_revision === contractRevision),
+  };
 }
 
 /** The comment block a shard gains: one proposal + evidence pair per refusal. */
@@ -228,7 +340,7 @@ export interface RefusalAmendmentIo {
     prIntro: string;
     claim: string;
     proof: string;
-  }) => { prUrl: string };
+  }) => { prUrl: string } | Promise<{ prUrl: string }>;
   readonly nowIso: () => string;
 }
 
@@ -277,7 +389,7 @@ export async function draftRefusalAmendment(
     );
     if (amendedText === undefined) return { ...base, outcome: "text_drift" };
     const summary = refusals.map((r) => `criterion ${r.criterion} [${r.refusalClass}]: ${r.detail}`).join("\n");
-    const created = io.openAmendmentPr({
+    const created = await io.openAmendmentPr({
       branch,
       shardRelPath: shard.relPath,
       amendedText,
@@ -308,7 +420,7 @@ export function readTaskShard(repoDir: string, taskId: string): { relPath: strin
   let shardRel: string | undefined;
   try {
     shardRel = readdirSync(shardDir)
-      .filter((f) => f.startsWith(`${taskId}-`) && /\.ya?ml$/.test(f))
+      .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
       .map((f) => relative(repoDir, join(shardDir, f)).split(sep).join("/"))[0];
   } catch {
     /* the shard directory is unreadable — fall through to the monolith */

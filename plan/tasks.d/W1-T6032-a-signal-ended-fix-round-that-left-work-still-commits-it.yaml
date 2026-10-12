@@ -1,0 +1,40 @@
+- id: W1-T6032
+  title: "A SIGNAL-ENDED FIX ROUND THAT LEFT WORK STILL COMMITS IT — W1-T5999 (#9566, merged 2026-10-06T14:19Z) stands a fix round down as signal_terminated whenever its codex worker ended by signal, checked BEFORE the harness commit, so a worker that finished its edits and was then ended by signal loses them; on 2026-10-04 at 01:06 W1-T4283's round was exactly that shape, and its harness-committed head a77eedf went on to merge as #8973"
+  repo: remudero
+  depends_on: [W1-T5999]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — which signal-ended fix rounds stand down and which still commit
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-06: W1-T5999 follow-up (research r-5999); built on run-W1-T5999-1791296617622 (7b31026c), held as PR #9589"
+  plan_refs: [W1-T5999, W1-T5325, W1-T4052, W1-T6027, W1-T6028]
+  files: [src/run-task.ts, test/a-signal-ended-fix-round-that-left-work-still-commits-it.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06 (ledger rotation 2026-10-04, read-only): W1-T4283's fix round dispatched at 01:06:47Z,
+    implement.harness_commit fired at 01:06:47Z (W1-T5325 derives the subject when a shell-less worker leaves
+    edits), and fix.done at 01:06:57Z carried worker_subtype error_exit_null with pushed head a77eedf9. PR #8973
+    then went through review, automerge arming and verdict.merged. #9528's two rounds (2026-10-06 09:50/10:02Z)
+    differ: their workers left no edits, so they were refused. W1-T5999's check (runFixRung, src/run-task.ts,
+    fixWorkerEndedBySignal) runs right after the spawn, before the harness commit, so the #8973 shape would now
+    stand down with its edits discarded. A follow-up under W1-T5999 cannot pass proof-discrimination: that
+    task's file proof became true on main when #9566 merged (#9589 refused executed_stale, closed and held).
+    Differs from W1-T6028, which decides how a signal-ended round is SCORED by the routing learner; this task
+    only decides whether such a round COMMITS its leftover work.
+  design: |
+    Record signal_terminated only when the signal-ended worker left NO work: no uncommitted edits
+    (worktreeHasUncommittedChanges false) and no commits ahead of roundStartSha (when defined). Otherwise fall
+    through to the normal harness-commit-and-push path exactly as before W1-T5999. The existing build is commit
+    7b31026c on branch run-W1-T5999-1791296617622; re-home it under this id with its two
+    added cases moved into the new test file (W1-T5999's own file proof is already true on main). W1-T5999 is
+    merged (#9566); this task only narrows its stand-down, so the shared src/run-task.ts surface is intended.
+  acceptance:
+    - claim: "a signal-ended fix worker that left edits, or committed on its own, has its work committed and pushed and is never recorded signal_terminated, while one that left no work still stands down without a refusal"
+      proof: "unit test: test/a-signal-ended-fix-round-that-left-work-still-commits-it.test.ts"
+  falsifier: |
+    Keep W1-T5999's unconditional stand-down: the fixture worker's edits are never committed, the round reads
+    signal_terminated, and the test fails.

@@ -16,7 +16,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 
 // EVERY threshold comparison in this suite reads THIS constant, never the wall clock: `deps()`
 // below injects `now: () => NOW`, `selectUpdateBranchTarget` takes it as an explicit argument, and
@@ -291,7 +291,7 @@ test("the update-branch REST call carries an expected head sha lease", () => {
   assert.deepEqual(argv.slice(-2), ["-f", "expected_head_sha=head-before-refresh"]);
   assert.equal(
     classifyUpdateBranchFailure("HTTP 422: expected_head_sha does not match the pull request head"),
-    "conflict",
+    "head-moved", // W1-T5933: a broken lease is a moved head, not a conflict
   );
 });
 

@@ -1,0 +1,52 @@
+- id: W1-T8399
+  title: "A WORKER-OPENED BUILD PR KEEPS THE WORKER'S TITLE — W1-T7952 (#11011) titles a build PR after its task only at the harness's own create, so when the worker opened the PR itself (prUrl reported, or adopted after the create's 422) runTask normalizes the body from the plan and never the title"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern — every build PR the run owns carries its task title, whichever side opened it
+  band_meaning: span
+  origin: "operator approval 2026-10-12 (\"go with your recommended follow ups\"): follow-up to W1-T7952 (#11011)"
+  plan_refs: [W1-T7952, W1-T4425, W1-T4466, W1-T327, W1-T3781, W1-T6013]
+  files: [src/run-task.ts, test/a-worker-opened-pr-is-titled-after-its-task.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 38470cc40, src/run-task.ts `runTaskBody` (symbol names, not line numbers):
+      - #11011 (W1-T7952) made `branchPrTitle(worktreePath, task)` return `prTitleForTask(...)`, the shard title's
+        lead clause plus the task id. Its one caller is the harness create inside `if (!prUrl) { … }`:
+        `ghPrCreateFillCommandAsync(…, branchPrTitle(worktreePath, task), …)`.
+      - When the worker already reported its own PR, `if (prUrl) { normalizeRunPrAcceptanceFromPlan(prUrl, …) }`
+        repairs the BODY from the plan record (W1-T4425) and nothing touches the title.
+      - When the create 422s because the worker opened the PR without reporting it, `adoptExistingPrForHead`
+        adopts it (W1-T4466) and the same `normalizeRunPrAcceptanceFromPlan` runs again. Again body only.
+    So on both worker-opened paths the PR keeps whatever title the worker typed, including a checkpoint subject
+    or a free-form sentence: the exact class W1-T7952 closed for harness-opened PRs. pr-title-lint.yml runs on
+    `edited`, so a corrected title is re-judged without a new push.
+  design: |
+    1. On both worker-opened paths, after the body normalization, compute the task title with the same
+       `branchPrTitle(worktreePath, task)` the create uses. When the PR's current title differs, set it through
+       the same REST writer family the body repair uses (`defaultRetroEditBody`'s gateway), behind the existing
+       live-write boundary. One read of the current title, one write only when it differs; no write when equal.
+    2. Ledger one row when the title is replaced (old title, new title, PR url). A failed title write is ledgered
+       and does not fail the run: the PR exists and review proceeds, as for a failed body repair.
+    3. A PR the run does not own is never retitled: only the run's own `prUrl` (reported or adopted for this
+       branch's head) is touched.
+    Tests go in the new file test/a-worker-opened-pr-is-titled-after-its-task.test.ts, with `test(` titles exactly
+    as in the proofs below. Inject the read and write seams; no live GitHub.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-worker-opened-pr-is-titled-after-its-task.test.ts"
+    - claim: "a PR the worker opened and reported is retitled after its task"
+      proof: 'grep: test("W1-T8399: a worker-reported PR is retitled after its task" in test/a-worker-opened-pr-is-titled-after-its-task.test.ts'
+    - claim: "a worker-opened PR adopted after the create's 422 is retitled after its task"
+      proof: 'grep: test("W1-T8399: an adopted worker PR is retitled after its task" in test/a-worker-opened-pr-is-titled-after-its-task.test.ts'
+    - claim: "a PR already carrying the task title is not written, and a failed title write does not fail the run"
+      proof: 'grep: test("W1-T8399: a matching title is not rewritten and a failed write is ledgered" in test/a-worker-opened-pr-is-titled-after-its-task.test.ts'
+  falsifier: |
+    Leave the `if (prUrl)` path at `normalizeRunPrAcceptanceFromPlan` alone. The injected writer then records no
+    title for a worker-opened PR, so the first two tests fail. Write unconditionally and the third test sees a
+    write for a title that already matched.

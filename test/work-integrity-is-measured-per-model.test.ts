@@ -258,6 +258,7 @@ test("a checkpoint resume carries the retained work-integrity rows forward", asy
 
     const legacy = structuredClone(first.checkpoint);
     delete (legacy.state as { workIntegrityRows?: unknown }).workIntegrityRows;
+    delete (legacy.state as { workIntegrityFold?: unknown }).workIntegrityFold;
     const rescanned = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, fixedClock(Date.parse(NOW)), undefined, legacy);
     assert.deepEqual(rescanned.snapshot.workIntegrity, full.snapshot.workIntegrity, "a checkpoint without retained rows forces a full scan");
   } finally {

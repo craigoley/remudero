@@ -46,7 +46,18 @@ export interface ThreadListSources<C> {
   items(classified: C): InboxThreadItem[];
   /** Identity of every other input `items` reads (the plain-message store), so a change to one rebuilds. */
   inputsKey(): string;
+  /**
+   * W1-T5886: told how every shared refresh settled, whether or not a read was still waiting on it. A pass
+   * that outran the read's wait used to fail with no trace: the read had already answered "pending", and the
+   * next read started another pass that did the same.
+   */
+  report?(settled: ThreadListRefreshSettled): void;
 }
+
+/** How one shared refresh ended, and how long it ran. */
+export type ThreadListRefreshSettled =
+  | { outcome: "landed"; ms: number; classifiedAtMs: number }
+  | { outcome: "failed"; ms: number; error: string };
 
 /** What a response says about the evidence under its rows. */
 export interface ThreadListSource {
@@ -87,21 +98,38 @@ export interface InboxThreadListView<C> {
   readonly waitMs: number;
   inflight?: Promise<Refresh<C>>;
   built?: Built<C>;
+  /** The last refresh's failure, kept until one lands, so a read that joins its retry can still name it. */
+  lastFailure?: string;
 }
 
 export function createInboxThreadListView<C>(sources: ThreadListSources<C>, opts: { waitMs?: number } = {}): InboxThreadListView<C> {
   return { sources, waitMs: opts.waitMs ?? INBOX_THREAD_LIST_WAIT_MS };
 }
 
-/** Start the shared refresh, or join the one running. A failure is returned, never thrown, and never kept. */
+/**
+ * Start the shared refresh, or join the one running. A failure is returned, never thrown, and never cached as
+ * a result: the next read retries. It IS reported, and remembered as `lastFailure` until a refresh lands.
+ */
 function refresh<C>(view: InboxThreadListView<C>): Promise<Refresh<C>> {
   if (view.inflight !== undefined) return view.inflight;
+  const { sources } = view;
+  const startedMs = sources.now();
   const run = (async (): Promise<Refresh<C>> => {
+    let settled: Refresh<C>;
     try {
-      return { ok: true, value: await view.sources.classify() };
+      settled = { ok: true, value: await sources.classify() };
     } catch (err) {
-      return { ok: false, error: String((err as Error)?.message ?? err) };
+      settled = { ok: false, error: String((err as Error)?.message ?? err) };
     }
+    const ms = Math.max(0, sources.now() - startedMs);
+    if (settled.ok) {
+      view.lastFailure = undefined;
+      sources.report?.({ outcome: "landed", ms, classifiedAtMs: settled.value.classifiedAtMs });
+    } else {
+      view.lastFailure = settled.error;
+      sources.report?.({ outcome: "failed", ms, error: settled.error });
+    }
+    return settled;
   })();
   const inflight = run.finally(() => {
     if (view.inflight === inflight) view.inflight = undefined;
@@ -181,7 +209,8 @@ export async function readInboxThreadListView<C>(view: InboxThreadListView<C>): 
     return { kind: "ok", threads: built.views, source: sourceOf(view, classification, built, "fresh") };
   }
 
-  const refreshError = outcome === undefined ? undefined : outcome.error;
+  // A refresh that failed after an earlier read stopped waiting is still this read's evidence (W1-T5886).
+  const refreshError = outcome === undefined ? (view.lastFailure === undefined ? undefined : `the last classification failed: ${view.lastFailure}; a retry is running`) : outcome.error;
   const held = view.sources.peek();
   if (held === undefined) {
     return refreshError === undefined

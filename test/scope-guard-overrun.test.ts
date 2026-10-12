@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { scopeAdvisorySection, type UnwiredAdvisory } from "../src/lib/review.js";
-import { runFixRung, runTask, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import { runFixRung, runTask, scopeGuardOutOfScopeFiles } from "./helpers/run-task-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { Mount } from "../src/lib/mounts.js";

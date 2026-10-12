@@ -2,6 +2,28 @@
 
 ## Decision
 
+**2026-10-07 Haiku 5.5 switch.** Claude subscription economy aliases resolve to
+`claude-haiku-5-5`, with Haiku 4.5 retained as the same-capability health fallback. Cash economy
+retains OSS 120B, nano and both Luna generations ahead of Haiku; balanced and frontier ordering
+stays unchanged. Foundry Haiku may run ordinary economy work; Opus/Sonnet still require an actual
+blocked-subscription squeeze. Every Foundry turn uses the existing atomic fleet cash allowance,
+the fixed $25 UTC daily ceiling and the unchanged shared Claude $5 normal/$10 squeezed sublimit.
+
+The [Haiku release](https://www.anthropic.com/claude-haiku-5-5) prices input/output at
+$0.10/$0.50 per million through 100,000 prompt tokens and $0.50/$2.50 above it. The threshold
+includes uncached input, cache reads and cache creation; the higher tier applies to the whole
+request. Reservations use a conservative byte ceiling and one-hour cache-write price, while
+settlement prices each turn independently. These are usage-based estimates, not an Azure invoice.
+Sonnet 5.5's published cache-read rate is now $0.10 per million. Thinking blocks are parsed by
+type; an empty visible answer or failed local tool is a failure, never a completed chain.
+
+New `haiku55-vs-luna6-low`, `-medium` and `-high` subscription epochs start October 7 with daily
+review and at least 20 tasks per arm. They join only when both actual concrete candidates are
+eligible; existing assignment, served-identity, crossover, lineage and missing-evidence rules
+still apply. Synthetic cash bakeoffs against OSS/nano/Luna are separate experiments and must
+reserve inside the fleet allowance before transport. No cash candidate is promoted from a
+list-price comparison or an insufficient sample, and public trial release stays separately held.
+
 **2026-10-02 Sol 6.1 switch.** `gpt-6.1-sol` now leads every subscription balanced and frontier
 Sol seat. `gpt-6-sol` and `gpt-5.6-sol` trail for account availability and supported effort fallback.
 Claude keeps frontier preference; economy keeps Luna/Spark. No effort or subscription share changes.
@@ -17,6 +39,14 @@ changing routing, and retain the existing Field Trials verified-outcome and rele
 Retries keep their task assignment; a fallback to Sol 6 belongs to its original epoch. Assignment,
 served model, terminal receipt, non-starter, crossover, risk/class/lane and pinned stack remain
 separate evidence. Before/after adoption is observational; it does not establish a causal winner.
+
+Private GitHub collection refreshes recent PR, commit and deployment list heads during historical
+backfill. A dated head read does not advance the historical watermark or discard its resume page.
+Historical pages rotate across these resources; deployment statuses and recent missing PR detail
+retain room in the request budget. The daily default is 24 total requests across three repositories,
+within the existing 1..24 bound. Status and detail requests count toward that total, including failed
+reads. A smaller override can defer those joins; incomplete history and unreadable deployment
+permission remain explicit. This does not change the model cash allowance or publication consent.
 
 Azure Foundry offers `gpt-6.1-sol`, version `2026-09-29`, in our East US 2 account (GlobalStandard).
 Cash balanced rows retain nano/OSS/Luna ahead of Sol 6.1; economy does not offer Sol. A squeezed
@@ -282,6 +312,11 @@ while the Codex and Claude routing auction here spends subscriptions. The quoted
 personal-agent estimate does not establish Remudero savings.
 
 ## Paid pilot accounting
+
+Daily and full trial collection count invalid timestamps separately from future rows. Both are
+excluded before assignment cohorts and watermarks, while the raw receipts and private quarantine
+findings remain intact. An older snapshot without the invalid-timestamp count reports that count
+as unavailable. A current partial source remains partial; these diagnostics do not promote a model.
 
 The narrow `cash-simple` paid trial is a separate, task-stable allocation for low-risk, single-file
 docs or plan-lint implementation. Its pilot-only daily spend is the sum of distinct API-billed

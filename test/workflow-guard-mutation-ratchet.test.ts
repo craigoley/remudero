@@ -21,7 +21,7 @@ interface SkipGuard {
   job: string;
   line: number;
   text: string;
-  form: "if" | "or";
+  form: "if" | "or" | "case";
 }
 
 interface GuardResult {
@@ -52,6 +52,49 @@ const GUARD_A: SkipGuard = { key: "j#1: guard-a", job: "j", line: 5, text: "  if
 const GUARD_B: SkipGuard = { key: "j#2: guard-b", job: "j", line: 9, text: "  if [ \"$B\" ]; then", form: "if" };
 
 // ── acceptance 1: an inherited violation is reported as such, not failed ───────────────────────
+
+test("variable-linked and case guards already present at the base are recorded as inherited", () => {
+  const text = `jobs:
+  j:
+    steps:
+      - run: |
+          if [ "$INPUT" = "skip" ]; then
+            CLASS=SKIP
+          fi
+          echo waiting
+          echo waiting
+          echo waiting
+          echo waiting
+          echo waiting
+          case "$CLASS" in
+            SKIP) exit 0 ;;
+            *) echo run ;;
+          esac
+`;
+  let written: string | undefined;
+  const classified: string[] = [];
+  const code = main([], {
+    readCi: () => text,
+    readBaseline: () => ({ guards: {} }),
+    suites: () => ["test/behavior.test.ts"],
+    redCorpus: () => [],
+    classify: (guard: SkipGuard) => {
+      classified.push(guard.form);
+      return { covered: false, by: undefined };
+    },
+    resolveMergeBase: () => "1".repeat(40),
+    readCiAtBase: () => text,
+    writeBaseline: (value: string) => { written = value; },
+    log: () => {},
+    err: (message: string) => assert.fail(message),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(classified, ["if", "case", "if", "case"]);
+  assert.ok(written);
+  const recorded = (JSON.parse(written) as { guards: Record<string, { reason: string }> }).guards;
+  assert.deepEqual(Object.keys(recorded), ['j#1: if [ "$INPUT" = "skip" ]; then', 'j#1: case "$CLASS" in']);
+  for (const entry of Object.values(recorded)) assert.match(entry.reason, /inherited/);
+});
 
 test("acceptance 1: a guard already UNCOVERED at the merge base is INHERITED, not blamed on this diff", () => {
   const baseGuardsByKey = new Map([[GUARD_A.key, GUARD_A]]);

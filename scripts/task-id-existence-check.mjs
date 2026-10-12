@@ -31,6 +31,24 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { join, relative } from "node:path";
 import { git } from "./lib/git.mjs";
+import {
+  adjudicateReservationChain as adjudicateReservationChainCore,
+  parseReservationHolderFields,
+  parseReservationHolderLine,
+  RESERVATION_PUSH_GRACE_MS,
+} from "../src/lib/reservation-chain.mjs";
+
+export {
+  parseReservationHolderFields,
+  parseReservationHolderLine,
+  RESERVATION_PUSH_GRACE_MS,
+};
+
+// Keep the gate's public adjudicator as the entry point its holder read calls, while sharing the
+// pure implementation with source-only runtimes.
+export function adjudicateReservationChain(links, graceMs = RESERVATION_PUSH_GRACE_MS) {
+  return adjudicateReservationChainCore(links, graceMs);
+}
 
 const TASK_ID_RE = /\bW1-T[0-9]+\b/g;
 // DECLARED_ID_LINE_RE matches the WHOLE line after `- id:` (`^...$`, not a character class), so a
@@ -142,10 +160,11 @@ export function scanDeclaredPlanIds(cwd, opts = {}) {
 export function resolveReservedIds(remote, cwd, opts = {}) {
   const result = git(["ls-remote", remote, "refs/rmd-id/W1-T*"], { cwd });
   if (result.error || result.status !== 0) {
-    return { reachable: false, ids: new Set(), holders: new Map() };
+    return { reachable: false, ids: new Set(), holders: new Map(), records: new Map() };
   }
   const ids = new Set();
   const holders = new Map();
+  const records = new Map();
   for (const line of result.stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -154,48 +173,36 @@ export function resolveReservedIds(remote, cwd, opts = {}) {
     const m = /^refs\/rmd-id\/(W1-T[0-9]+)$/.exec(ref);
     if (!m) continue;
     ids.add(m[1]);
-    if (opts.readHoldersFor?.has(m[1])) holders.set(m[1], readReservationHolder(remote, cwd, ref));
+    if (!opts.readHoldersFor?.has(m[1])) continue;
+    // W1-T6025: `holders` keeps the rightful holder's old shape; `records` adds its fields and any takeover.
+    const record = adjudicateReservationHolder(readReservationHolderRecord(remote, cwd, ref));
+    holders.set(m[1], record.holder);
+    records.set(m[1], record);
   }
-  return { reachable: true, ids, holders };
-}
-
-function decodeHolderValue(raw) {
-  return decodeURIComponent(raw.replace(/\+/g, "%20"));
-}
-
-export function parseReservationHolderLine(message) {
-  const line = message.split(/\r?\n/).find((l) => l.startsWith("rmd-id holder "));
-  if (!line) return { status: "legacy" };
-  const values = new Map();
-  for (const token of line.slice("rmd-id holder ".length).trim().split(/[ \t]+/)) {
-    if (!token) continue;
-    const eq = token.indexOf("=");
-    if (eq < 1) return { status: "unreadable", reason: `malformed token ${token}` };
-    try {
-      values.set(token.slice(0, eq), decodeHolderValue(token.slice(eq + 1)));
-    } catch {
-      return { status: "unreadable", reason: `malformed value for ${token.slice(0, eq)}` };
-    }
-  }
-  const branch = values.get("branch");
-  // A holder line that PARSED and says `branch=unknown` is still unreadable as a CLAIM -- there is
-  // no branch to compare a filer against -- but it is not the same fact as a line that could not be
-  // read at all. `currentBranch` (src/lib/task-id-reservation.ts) writes that literal whenever it
-  // mints from a detached HEAD, which is how the fleet daemon reserves: it takes the id BEFORE the
-  // run branch exists. So `recordedBranch` carries what the reservation itself recorded, and ONLY
-  // this arm sets it -- a malformed token or an unfetchable ref stays a bare unreadable with no
-  // recorded value and therefore no hand-off to honour. See evaluateReservationHolderConflicts.
-  if (!branch) return { status: "unreadable", reason: "missing branch" };
-  if (branch === "unknown") return { status: "unreadable", reason: "missing branch", recordedBranch: "unknown" };
-  return { status: "known", branch };
+  return { reachable: true, ids, holders, records };
 }
 
 export function readReservationHolder(remote, cwd, ref, runGit = git) {
+  return readReservationHolderRecord(remote, cwd, ref, runGit).holder;
+}
+
+// Read one bounded, head-first chain; an unweighable chain keeps the head.
+export function readReservationHolderRecord(remote, cwd, ref, runGit = git) {
   const fetched = runGit(["fetch", remote, ref], { cwd });
-  if (fetched.error || fetched.status !== 0) return { status: "unreadable", reason: `could not fetch ${ref}` };
-  const body = runGit(["log", "-1", "--format=%B", "FETCH_HEAD"], { cwd });
-  if (body.error || body.status !== 0) return { status: "unreadable", reason: `could not read ${ref}` };
-  return parseReservationHolderLine(body.stdout ?? "");
+  if (fetched.error || fetched.status !== 0) return { holder: { status: "unreadable", reason: `could not fetch ${ref}` } };
+  const body = runGit(["log", "--first-parent", "-n", "16", "--format=%B%x00", "FETCH_HEAD"], { cwd });
+  if (body.error || body.status !== 0) return { holder: { status: "unreadable", reason: `could not read ${ref}` } };
+  const output = body.stdout ?? "";
+  const messages = output.includes("\0") ? output.split("\0").slice(0, -1) : [output];
+  const chain = messages.map((message) => ({
+    holder: parseReservationHolderLine(message), fields: parseReservationHolderFields(message),
+  }));
+  return { ...(chain[0] ?? { holder: { status: "legacy" } }), chain };
+}
+
+// Preserve the one-parent entry point for callers supplying a W1-T6025 record.
+export function adjudicateReservationHolder(record, graceMs = RESERVATION_PUSH_GRACE_MS) {
+  return adjudicateReservationChain(record.chain ?? [record, ...(record.parent ? [record.parent] : [])], graceMs);
 }
 
 export function shardNoteRecordsReservationHandoff(text, holderBranch, filerBranch) {
@@ -345,6 +352,7 @@ export function evaluateReservationHolderConflicts(addedIds, occurrencesById, re
     if (!reservation.ids.has(id)) continue;
     const holder = reservation.holders?.get(id) ?? { status: "legacy" };
     if (holder.status === "legacy") continue;
+    const record = reservation.records?.get(id);
     const occurrences = occurrencesById.get(id) ?? [];
     if (holder.status === "unreadable") {
       // THE GATE'S OWN REMEDY HAS TO BE REACHABLE. This arm used to refuse WITHOUT consulting
@@ -362,15 +370,48 @@ export function evaluateReservationHolderConflicts(addedIds, occurrencesById, re
       // fail-closed exactly as before. And the note must name that value on its left-hand side,
       // so it is a specific, falsifiable claim about THIS reservation, not a blanket opt-out.
       if (holder.recordedBranch !== undefined && hasRecordedHandoff(cwd, occurrences, holder.recordedBranch, filerBranch)) continue;
-      conflicts.push({ id, reason: holder.reason, holderBranch: undefined, recordedBranch: holder.recordedBranch, filerBranch, occurrences });
+      conflicts.push({ id, reason: holder.reason, holderBranch: undefined, recordedBranch: holder.recordedBranch, filerBranch, occurrences, holder: record?.fields });
       continue;
     }
-    if (holder.branch === filerBranch) continue;
-    if (hasRecordedHandoff(cwd, occurrences, holder.branch, filerBranch)) continue;
-    conflicts.push({ id, reason: "holder differs", holderBranch: holder.branch, filerBranch, occurrences });
+    // W1-T6025: a race's LOSER is refused even beside a hand-off note: the takeover's own minter prints
+    // that exact line, so honouring it would hand the id to the very client the grace refuses.
+    const takeover = record?.takeover;
+    const lostRace = takeover?.winner === "original" && takeover.reclaimer.branch === filerBranch && holder.branch !== filerBranch;
+    if (!lostRace && holder.branch === filerBranch) continue;
+    if (!lostRace && hasRecordedHandoff(cwd, occurrences, holder.branch, filerBranch)) continue;
+    conflicts.push({
+      id,
+      reason: lostRace ? "lost the takeover race" : "holder differs",
+      holderBranch: holder.branch,
+      filerBranch,
+      occurrences,
+      holder: record?.fields,
+      takeover,
+    });
   }
   conflicts.sort((a, b) => a.id.localeCompare(b.id));
   return conflicts;
+}
+
+/** W1-T6025: the four facts that tell one holder from another -- an unrecorded one says so. */
+function describeHolderFields(fields) {
+  const v = (x) => (x === undefined || x === "" ? "<unrecorded>" : x);
+  return `host=${v(fields?.host)} pid=${v(fields?.pid)} started_at=${v(fields?.startedAt)} source=${v(fields?.source)}`;
+}
+
+/** W1-T6025: one holder refusal's line, always naming host, pid, started_at and source. */
+export function formatHolderConflictLine(c) {
+  if (c.reason === "lost the takeover race") {
+    const t = c.takeover;
+    return (
+      `LOST THE RACE -- this filing (${c.filerBranch}) took the reservation over ${(t.ageMs / 1000).toFixed(1)}s after ` +
+      `${c.holderBranch} reserved it (holder ${describeHolderFields(c.holder)}), inside the ` +
+      `${t.graceMs / 3_600_000}h push grace, so the original holder keeps the id. Renumber this filing; ` +
+      "the hand-off line the takeover printed does not clear it."
+    );
+  }
+  const who = c.holderBranch ? `reserved by ${c.holderBranch}, while this filing is ${c.filerBranch}` : `holder unreadable (${c.reason})`;
+  return `${who} -- holder ${describeHolderFields(c.holder)}`;
 }
 
 /** Every plan file that DECLARES each id, keyed by id -- the multiplicity {@link scanDeclaredPlanIds}'s
@@ -624,7 +665,10 @@ export function fetchPrChangedFiles(owner, repo, number, cwd) {
  * declaration clears, while an unreadable answer keeps the refusal. OMITTING `confirmDeclares`
  * leaves the original behaviour -- how W1-T2324's arms drive it, never reaching the network.
  */
-export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef, confirmDeclares) {
+// W1-T6025: `rightfulHolderOf(id)` (the reservation's adjudicated holder branch) marks THIS PR the winner, or
+// names the claimant that is. No readable holder keeps the symmetric row, fail-closed -- though that text
+// made BOTH #9556 and #9557 renumber on 2026-10-06, so W1-T5997 was filed by nobody.
+export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef, confirmDeclares, rightfulHolderOf) {
   const others = openPrRows.filter((r) => (r.head && r.head.ref) !== ownHeadRef);
   const collisions = [];
   for (const id of addedIds) {
@@ -636,7 +680,13 @@ export function evaluateOpenPrIdCollisions(addedIds, openPrRows, ownHeadRef, con
             const seen = confirmDeclares(r, id);
             return !seen || seen.readable !== true || seen.ids.has(id);
           });
-    if (claimants.length > 0) collisions.push({ id, prs: claimants.map((r) => ({ number: r.number, url: r.html_url })) });
+    if (claimants.length === 0) continue;
+    const prs = claimants.map((r) => ({ number: r.number, url: r.html_url }));
+    const rightful = rightfulHolderOf?.(id);
+    const winnerRow = rightful === undefined ? undefined : claimants.find((r) => (r.head && r.head.ref) === rightful);
+    if (rightful !== undefined && rightful === ownHeadRef) collisions.push({ id, prs, winner: { self: true, branch: rightful } });
+    else if (winnerRow) collisions.push({ id, prs, winner: { number: winnerRow.number, url: winnerRow.html_url, branch: rightful } });
+    else collisions.push({ id, prs });
   }
   collisions.sort((a, b) => a.id.localeCompare(b.id));
   return collisions;
@@ -846,10 +896,7 @@ export function main(argv) {
   if (holderConflicts.length > 0) {
     console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
     for (const c of holderConflicts) {
-      const holder = c.holderBranch
-        ? `reserved by ${c.holderBranch}, while this filing is ${c.filerBranch}`
-        : `holder unreadable (${c.reason})`;
-      console.error(`  ${c.id} -- ${holder}`);
+      console.error(`  ${c.id} -- ${formatHolderConflictLine(c)}`);
       for (const occ of c.occurrences) console.error(`    ${occ.file}:${occ.line}`);
       // Print the EXACT line that clears this row when there is one, rather than a shape the
       // author has to guess the left-hand side of -- an unreadable holder has no branch name to
@@ -923,11 +970,29 @@ export function main(argv) {
             }
             return seen;
           };
-          const openPrCollisions = evaluateOpenPrIdCollisions(addedAtHead.ids, openPrs.rows, ownHeadRef, confirmDeclares);
+          // W1-T6025: THIS PR holds the id when the holder half passed it against a readable holder
+          // (same branch, or a recorded hand-off); any other readable holder is named as itself.
+          const rightfulHolderOf = (id) => {
+            const holder = holderReservation.holders?.get(id);
+            if (holder?.status !== "known") return undefined;
+            return ownHeadRef && !holderConflicts.some((c) => c.id === id) ? ownHeadRef : holder.branch;
+          };
+          const allCollisions = evaluateOpenPrIdCollisions(addedAtHead.ids, openPrs.rows, ownHeadRef, confirmDeclares, rightfulHolderOf);
+          const prList = (c) => c.prs.map((p) => p.url || `#${p.number}`).join(", ");
+          for (const c of allCollisions.filter((x) => x.winner?.self)) {
+            console.log(
+              `task-id-existence: ${c.id} is also claimed by ${prList(c)}, but this PR's branch ${c.winner.branch} ` +
+                "is the reservation's rightful holder -- the other PR is refused on its own run, not this one.",
+            );
+          }
+          const openPrCollisions = allCollisions.filter((x) => !x.winner?.self);
           if (openPrCollisions.length > 0) {
             console.error("\ntask-id-existence: FAILED -- the following added id(s) are ALREADY CLAIMED by another OPEN PR:\n");
             for (const c of openPrCollisions) {
-              console.error(`  ${c.id} -- claimed by ${c.prs.map((p) => p.url || `#${p.number}`).join(", ")}`);
+              const verdict = c.winner
+                ? `; the reservation's rightful holder is ${c.winner.url || `#${c.winner.number}`} (branch ${c.winner.branch}), so THIS PR is the one that renumbers`
+                : "";
+              console.error(`  ${c.id} -- claimed by ${prList(c)}${verdict}`);
             }
             console.error(
               "\nRenumber to a fresh reserved id. Whichever of the two PRs merges first leaves the other " +

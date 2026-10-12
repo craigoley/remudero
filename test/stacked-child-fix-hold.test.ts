@@ -12,7 +12,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
+} from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 const CONFLICT_POLICY = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };

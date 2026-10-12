@@ -28,6 +28,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { loadLearningsForTaskFiles, selectLearnings } from "../src/lib/learnings.js";
 import {
   checkDrillCoverage,
   checkTroubleshootingCoverage,
@@ -217,8 +218,162 @@ test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — CI SQUASH TRAILER LESSON: the task authoring lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-squash-trailer-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — LINT-PLAN LESSON: the task-authoring lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-lint-plan-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — ACCEPTANCE-AUTHOR LESSON: the cited refusal reaches task authors and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-acceptance-author-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T6921-the-acceptance-author-gate-gate-refused-2-pull-requests-in-this-window-a.yaml";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "acceptance-author-gate-task-authoring-lane"));
+});
+
+test("GOLDEN — RULE-CHECKS LESSON: the cited gate refusal reaches the worker lane and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-rule-checks-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["src/run-task.ts", "plan/tasks.d/W1-T5961-the-rule-checks-gate-refused-9-pull-requests-in-this-window-and-each-was.yaml"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "rule-checks-gate-census-and-plan-scope-refusals"), taskFile);
+  }
+});
+
+test("GOLDEN — CLAIMS LESSON: the matched lane's cited incident executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-claims-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — CI SHARD CONFLICT LESSON: the staged-marker remedy executes and arms", () => {
+  const { verdict, golden } = judgeCase("ci-shard-conflict-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — CODEQL READ-MODEL LESSON: the cited incident executes and the CodeQL guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-codeql-read-model-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — COMMENT-LOAD LESSON: the cited incident executes and the comment-load guidance arms", () => {
   const { verdict, golden } = judgeCase("ci-comment-load-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — LIGHT-GATES LESSON: the cited incident executes and the pre-push guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-light-gates-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
+test("GOLDEN — TEST-SLOW-SHARD LESSON: the cited incident executes and the test lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-test-slow-shard-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "test/new-slow-suite.test.ts";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "test-slow-shard-single-suite-at-a-time"));
+});
+
+test("GOLDEN — ANALYZE JAVASCRIPT-TYPESCRIPT LESSON: the cited proof executes and affected lanes receive the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-analyze-javascript-typescript-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6154.yaml", "src/run-task.ts", "test/new-census.test.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "analyze-javascript-typescript-gate-pre-push-steps"), taskFile);
+  }
+});
+
+test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task authors and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-prompt-surface-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const taskFile = "plan/tasks.d/W1-T6335-the-prompt-surface-gate-gate-refused-7-pull-requests-in-this-window-and.yaml";
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), [taskFile]);
+  const selected = selectLearnings(entries, [taskFile]).selected;
+  assert.ok(selected.some((entry) => entry.id === "prompt-surface-gate-learning-path-evidence"));
+});
+
+test("GOLDEN — HEAD-IDENTITY LESSON: the cited refusal reaches the push lane and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-head-identity-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), ["hooks/pre-push"]);
+  const selected = selectLearnings(entries, ["hooks/pre-push"]).selected;
+  assert.ok(selected.some((entry) => entry.id === "head-identity-gate-pre-push-identity"));
+});
+
+test("GOLDEN — UNWIRED-GATE LESSON: the cited proof executes and the gate lanes receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-unwired-gate-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of [
+    ".github/workflows/unwired-gate.yml",
+    "scripts/unwired-gate-check.mjs",
+    "src/lib/ci-parity.ts",
+  ]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "unwired-gate-repair-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task authors receive guidance", () => {
+  const { verdict, golden } = judgeCase("ci-shard-seven-eight-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6919.yaml", "plan/feedback/example.yaml", "deploy/example.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "ci-shard-seven-eight-refusals-reach-task-authoring-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {
+  const { verdict, golden } = judgeCase("ci-remudero-review-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T6334.yaml", "src/run-task.ts", "src/lib/policy.ts", "src/lib/dep-review.ts", "test/new-census.test.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "remudero-review-refusals-repaired-by-hand"), taskFile);
+  }
+});
+
+test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
+  const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
   assertGolden(verdict, golden);
 });

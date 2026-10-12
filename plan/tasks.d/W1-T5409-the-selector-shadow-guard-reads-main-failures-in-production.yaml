@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up named by W1-T5350's build (PR #8823)"
   plan_refs: ["W1-T5350"]
   files: [src/lib/garden-registry.ts, test/the-selector-shadow-guard-reads-main-failures-in-production.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

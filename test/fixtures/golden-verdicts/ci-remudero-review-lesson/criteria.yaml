@@ -1,0 +1,2 @@
+- claim: the remudero-review refusal lesson reaches the matched worker lane
+  proof: "grep: ci-learning:9717:remudero-review in learnings/ci.yaml"

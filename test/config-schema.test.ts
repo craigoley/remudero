@@ -78,7 +78,9 @@ test("validateConfigShape refuses a missing required root and a non-object docum
 test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
   const fields = new Set<keyof Config>([
     "claudeBin",
+    "contributorAdmission",
     "root",
+    "diskArtifactScanRoots",
     "installRoot",
     "zdotdir",
     "workerShell",
@@ -90,6 +92,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
     "accessTeamDomain",
     "accessAudience",
     "notifyRecipient",
+    "operatorGithubLogins",
     "overflow",
     "dailyCapUsd",
     "fixStrikeCap",

@@ -16,7 +16,7 @@ import {
   type InstancesData,
 } from "../src/lib/instances-view.js";
 import type { ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, ledgerSource, readModelSwitchesPath, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { buildRegistryRoute } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -69,6 +69,9 @@ function fixture(t: TestCtx, opts: { heartbeatAgoMs?: number } = {}): Fixture {
 function materialize(f: Fixture, at: number = NOW): ViewBodyEntry {
   const view = createInstancesView<ReadModelInstanceState>({ instances: f.instances, repoPath: f.repoPath, hostPath: f.hostPath, ledgerSource });
   const posted: ReadModelWorkerMessage[] = [];
+  // W1-T5896: a view with no switch is not built; its route serves it only under serve.
+  mkdirSync(join(f.stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(f.stateDir), JSON.stringify({ views: { [INSTANCES_VIEW_NAME]: "serve" } }));
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: clockAt(at), holder: "instances-test", oracle: "off", post: (m) => posted.push(m) });
   ticker.start();
   ticker.tick();

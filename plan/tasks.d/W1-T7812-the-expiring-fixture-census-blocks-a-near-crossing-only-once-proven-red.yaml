@@ -1,0 +1,71 @@
+- id: W1-T7812
+  title: "THE EXPIRING-FIXTURE CENSUS BLOCKS A NEAR CROSSING ONLY AFTER PROVING IT RED — for a crossing inside 24 h the census re-runs the named test file with the clock shifted past it under a private temp root, blocks when it goes red, and proposes the exemption marker with the measured pass counts when it stays green; on 2026-10-10 text-only blocking named three false positives in one file and missed the real mechanism"
+  repo: remudero
+  depends_on: [W1-T7808]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — whether a near fixture crossing blocks is decided by a shifted re-run, not by the stamp text alone
+  band_meaning: span
+  origin: "operator session 2026-10-10: #10719, the W1-T4064 cost-of-delay fixture rows; approved 2026-10-10"
+  plan_refs: [W1-T3388, W1-T3655, W1-T3839, W1-T5826, W1-T6035, W1-T6036, W1-T4064, W1-T7808]
+  files: [scripts/expiring-fixture-census.mjs, src/lib/gate-gardener.ts, test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts, "src/lib/ci-parity.ts"]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-10 (#10719). The census named three rows of test/new-work-is-ordered-by-cost-of-delay.test.ts
+    as crossings: lines 53, 210 and 228 then (54, 211 and 229 on origin/main e2288e457, now carrying
+    `expiring-fixture: exempt`). All three compare against an injected now, never the wall clock. 15/15
+    passed with Date.now shifted +7 d and +30 d. Blocking on the text would have reddened main three times
+    for nothing. The real failure in that file was a different mechanism the text census cannot see: the
+    daemon's boot temp sweep deleting the fixture's own repo under a shifted clock. W1-T7808 fixes that.
+
+    READ on origin/main e2288e457.
+    - `censusExpiringFixtures` (scripts/expiring-fixture-census.mjs:460) reports every stamp within
+      `MARGIN_DAYS` (7, :33) of its threshold, from the stamp text alone.
+    - `isBlocked` (:546) blocks any crossing this diff introduced. `main()` (:679) exits 1 on it. Nothing
+      ever runs the test.
+    - A shifted re-run already exists: `runSuiteShifted` (src/lib/gate-gardener.ts:64) runs one file under
+      the repo's test invocation plus scripts/clock-shift.mjs (FK_SHIFT_DAYS).
+    - `confirmDefuse` (gate-gardener.ts:174) already separates a control failure, a shifted pass and a
+      confirmed red. But only the gate gardener's defuse lane uses it, days ahead. The census in CI never
+      does.
+    - `runSuiteShifted` passes the parent's TMPDIR through. A shifted daemon-booting suite can therefore
+      sweep the real temp root until W1-T7808 lands. Hence the dependency.
+  design: |
+    1. TIERED BY TIME TO CROSSING.
+       - A reported crossing inside 24 h of now is PROVEN before it can block.
+       - A crossing further out keeps today's attribution rule (W1-T3388/W1-T3655/W1-T5826) unchanged.
+       24 h is the operator's tier boundary, declared as a named constant with this reason.
+    2. PROOF. Run the named file twice, through one shared runner with the gate gardener (extract it; do not
+       fork a second copy):
+       - at the control shift `DEFUSE_CONTROL_SHIFT_DAYS`;
+       - shifted one day past the crossing.
+       Each run has its own private TMPDIR, created for it and removed after, never the parent's.
+    3. VERDICTS, each a distinct value in the report:
+       - control red: `control_failed`. It blocks, naming that the file is red without any shift.
+       - shifted red: `confirmed`. It BLOCKS.
+       - shifted green: `shifted_passed`. It does not block. The report prints the exact marker line to add,
+         `expiring-fixture: exempt -- <reason>; <pass>/<tests> pass with Date.now shifted +<d>d`, with the
+         counts read from the run's own TAP summary. A run with no `# tests` summary is not a pass.
+       - no verdict (killed, timed out, no summary): `run_error`. It BLOCKS, naming the reason. It is never
+         read as green.
+    4. COST. Only crossings inside the 24 h tier re-run, deduplicated per file. Each run is niced and bounded
+       the way `runSuiteShifted` already is.
+  acceptance:
+    - claim: "a crossing inside 24 h whose shifted re-run goes red blocks the census with a confirmed verdict"
+      proof: 'grep: test("W1-T7812: a near crossing whose shifted re-run goes red blocks as confirmed" in test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts'
+    - claim: "a crossing inside 24 h whose shifted re-run stays green does not block and the report proposes the exemption marker with the measured pass counts"
+      proof: 'grep: test("W1-T7812: a near crossing that stays green proposes the exemption marker with its pass counts" in test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts'
+    - claim: "a shifted re-run that reaches no verdict blocks as run_error and is never read as green"
+      proof: 'grep: test("W1-T7812: a re-run with no verdict blocks as run_error" in test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts'
+    - claim: "each shifted re-run gets a private TMPDIR, never the parent temp root"
+      proof: 'grep: test("W1-T7812: each shifted re-run runs under its own private TMPDIR" in test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts'
+    - claim: "a crossing further out than 24 h keeps the attributed text rule and runs no suite"
+      proof: 'grep: test("W1-T7812: a crossing beyond the 24 h tier runs no suite and keeps the attributed rule" in test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts'
+  falsifier: |
+    Leave `isBlocked` deciding from the stamp text: the second test sees a block on a file that passes
+    shifted. Read a summary-less run as a pass: the third test sees no block. Pass the parent's TMPDIR
+    through: the fourth test sees the child's TMPDIR equal the parent's.

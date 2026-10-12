@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { createReadModelTicker, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 
@@ -22,6 +23,7 @@ function rig(t: { after: (fn: () => void) => void }, costs: Record<string, numbe
     },
   });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(stateDir, Object.keys(costs));
   const ticker = createReadModelTicker({ stateDir, instances: [], views: Object.keys(costs).map(view), clock, holder: "budget", post: (m) => void posted.push(m), passBudgetMs: 100 });
   const tick = (): string[] => {
     pass = [];
@@ -82,6 +84,7 @@ test("a view with prepare steps spreads a long build over ticks and posts its bo
     materialize: () => [{ key: "", data: { done }, sources: [] }],
   };
   const bodies: unknown[] = [];
+  switchViewsOn(stateDir, [view.name]);
   const ticker = createReadModelTicker({ stateDir, instances: [], views: [view], clock, holder: "steps", post: (m) => void (m.type === "body" && bodies.push(m.entry.body.data)), passBudgetMs: 100 });
   ticker.tick();
   assert.deepEqual(perTick, [3], "steps stop at the 40 ms view share; the first is always allowed");

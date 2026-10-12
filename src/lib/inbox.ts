@@ -1,4 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { fixedClock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
 // bindings off `node:fs` are non-configurable, so mocking them throws.
@@ -21,6 +23,7 @@ import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
+import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
@@ -28,8 +31,8 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
 import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
-import { RmdError } from "./errors.js";
+import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
 
@@ -325,12 +328,12 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
  * operator decision to clear by hand.
  *
  * ONLY THE ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>`,
- * `verify-human:<taskId>` and `machine-judge:<taskId>` name theirs structurally. Other ids are
- * keyed on a run, a symbol or a content hash, so there is nothing to read and they are left alone
- * rather than guessed at.
+ * `verify-human:<taskId>`, `verify-human-automate:<taskId>` and `machine-judge:<taskId>` name theirs
+ * structurally. Other ids are keyed on a run, a symbol or a content hash, so there is nothing to
+ * read and they are left alone rather than guessed at.
  */
 export function deriveTaskReferent(proposalId: string): string | undefined {
-  const match = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
+  const match = /^(?:verify-human|verify-human-automate|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
   return match?.[1] ?? match?.[2];
 }
 
@@ -419,6 +422,11 @@ export interface DraftExclusion {
   detail: string;
 }
 
+export type DraftSelectionContext = Pick<
+  ReadinessContext,
+  "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds"
+>;
+
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
     return check();
@@ -430,7 +438,7 @@ function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclu
 
 /** The draft-independent reason a proposal can never render READY. Unreadable facts return
  *  `undefined`, so the daemon spends rather than silently dropping uncertain work. */
-export function draftExclusionForProposal(proposal: Proposal, ctx: ReadinessContext): DraftExclusion | undefined {
+export function draftExclusionForProposal(proposal: Proposal, ctx: DraftSelectionContext): DraftExclusion | undefined {
   const ratified = readDraftExclusion(() =>
     ctx.isRatified(proposal.id) ? { predicate: "ratified", detail: `${proposal.id} is already ratified` } : undefined,
   );
@@ -485,7 +493,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
 /** Every proposal needing a fresh draft. Takes no throttle input by design — this is the unthrottled predicate behind
  *  `rmd inbox`'s manual force, which {@link draftsDueOnDaemon} wraps. Supplying a readiness context enables the
  *  daemon's draft-independent exclusions; omitting it preserves the manual force. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: ReadinessContext): Proposal[] {
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (p.lifecycleAction || p.skillFile) return false;
     if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
@@ -574,7 +582,7 @@ export function draftsDueOnDaemon(
   drafts: DraftCache,
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
-  ctx?: ReadinessContext,
+  ctx?: DraftSelectionContext,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
   const due = rankDraftSelection(
@@ -736,6 +744,7 @@ export interface InboxClassification {
   draftStale?: boolean;
   /** Present iff state === "ready" — the reasoning rides with the recommendation. */
   draft?: DraftedCandidate;
+  proposal?: RatificationProvenance;
   /** Present iff this READY item is a structured lifecycle action rather than a drafted task. */
   lifecycleAction?: SkillLifecycleAction;
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
@@ -1208,7 +1217,7 @@ export function classifyProposal(
         `operator actually decides in; this row stays in the registry as a record, never deleted`,
     };
   }
-  const taskAskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const taskAskId = deriveTaskReferent(proposal.id);
   const taskAsk = taskAskId ? ctx.plan.byId.get(taskAskId) : undefined;
   if (taskAsk?.status === "blocked" && taskAsk.retirement) {
     return {
@@ -1339,7 +1348,7 @@ export function classifyProposal(
   }
 
   if (reasons.length === 0) {
-    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft, ...referentUnverified };
+    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft, proposal, ...referentUnverified };
   }
   return { proposalId: proposal.id, state: "not_ready", reasons, draftStale, ...referentUnverified };
 }
@@ -1807,6 +1816,64 @@ export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefine
 
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
+// W1-T5660: reject placeholder drafts without changing lint rules for inherited plan shards.
+function draftPlaceholderViolations(
+  task: import("./plan.js").Task,
+  directoryExists: (path: string) => boolean,
+): DraftLintViolation[] {
+  const out: DraftLintViolation[] = [];
+  const block = (check: string, message: string) => out.push({ check, severity: "block", message: `${task.id}: ${message}` });
+  const titleIds = task.title.match(/\b(?:W\d+-T\d+|NEW-\d+)\b/g) ?? [];
+  if (titleIds.some((id) => id === task.id || id.startsWith("NEW-"))) {
+    block("draft-placeholder-title", "title must describe the work without naming its own id or a NEW-n placeholder");
+  }
+  for (const criterion of task.acceptance ?? []) {
+    const label = /^unit test:\s*(.+)$/i.exec(criterion.proof.trim())?.[1].trim();
+    if (label && /^\S*\/\S*\.[A-Za-z0-9]+$/.test(label) && !label.startsWith("test/")) {
+      block("draft-path-proof", `unit-test path ${JSON.stringify(label)} must be under test/`);
+    }
+  }
+  const aimedElsewhere = task.repo !== undefined && task.repo !== "none" && task.repo !== "remudero"; // W1-T5890: top dir, this repo only
+  for (const path of aimedElsewhere ? [] : task.files ?? []) {
+    const directory = path.includes("/") ? path.split("/")[0] : ".";
+    if (directory !== "." && directory !== "" && !directoryExists(directory)) {
+      block("draft-missing-directory", `files entry ${JSON.stringify(path)} names a nonexistent directory ${JSON.stringify(directory)}`);
+    }
+  }
+  if (!["recon", "implement", "diagnose"].includes(task.type)) {
+    block("draft-undispatched-type", `type ${JSON.stringify(task.type)} is outside the dispatched draft set (recon, implement, diagnose)`);
+  }
+  return out;
+}
+
+// W1-T5827: the executor's `grep:` split (review.ts DIALECT_GREP_PATH_RE) — the pattern is everything before the last
+// ` in <path>`, so `grep: "x" not found in f.md` greps for the literal `"x" not found`, which no file holds.
+/** A drafted `grep:` proof written as an absence can never pass: refuse it, drafts only. The patterns are
+ *  function-local on purpose: the negative-reachability ratchet counts module-scope `_RE` validators. */
+function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintViolation[] {
+  const splitPattern = /^(.*?)\s+in\s+(\S*[./*]\S*)$/i;
+  const absenceSuffix = /\s(?:not found|absent|no longer|is gone|removed)$/i;
+  const absencePrefix = /^(?:no|not)\s+["'`]/i;
+  const out: DraftLintViolation[] = [];
+  for (const [i, criterion] of (task.acceptance ?? []).entries()) {
+    const proof = typeof criterion.proof === "string" ? criterion.proof.trim() : "";
+    const body = /^grep:\s*([\s\S]*)$/i.exec(proof)?.[1];
+    if (body === undefined) continue;
+    const pattern = (splitPattern.exec(body.trim())?.[1] ?? "").trim();
+    if (absenceSuffix.test(pattern) || absencePrefix.test(pattern)) {
+      out.push({
+        check: "draft-absence-proof",
+        severity: "block",
+        message:
+          `${task.id}: criterion ${i + 1} proof ${JSON.stringify(proof.slice(0, 90))} is an absence written as a grep — ` +
+          `the executor greps for the literal ${JSON.stringify(pattern.slice(0, 70))}, which no file holds, so it can never pass. ` +
+          "State the change as a positive proof: a unit test, or a grep for the replacement text",
+      });
+    }
+  }
+  return out;
+}
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(
@@ -1814,6 +1881,7 @@ export function lintDraftedFragment(
   proposalId: string,
   stampLine?: string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
+  directoryExists: (path: string) => boolean = (path) => fs.existsSync(resolvePath(HARNESS_ROOT, path)),
 ): DraftLintViolation[] {
   let tasks;
   try {
@@ -1822,8 +1890,18 @@ export function lintDraftedFragment(
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
-  if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
+  for (const task of tasks) {
+    violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
+    violations.push(...draftPlaceholderViolations(task, directoryExists));
+    violations.push(...draftAbsenceProofViolations(task));
+  }
+  if (stampLine !== undefined) {
+    violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
+    const label = stampLine.startsWith(`- ${proposalId} (`) ? stampLine.slice(proposalId.length + 4).split(")")[0] : "";
+    if (/^(?:W\d+-T\d+|NEW-\d+)(?:[\s/,.;–—-]+(?:W\d+-T\d+|NEW-\d+))*$/.test(label.trim())) {
+      violations.push({ check: "draft-placeholder-stamp", severity: "block", message: "stamp label must summarize the work, rather than list only task ids" });
+    }
+  }
   return violations;
 }
 
@@ -2020,6 +2098,87 @@ export function gitGrepAnchorTrue(cwd: string, ref: string, anchor: EvidenceAnch
   }
 }
 
+/** BACKSTOP: how long one evidence-anchor `git grep` may run off the loop before it is killed. A sync grep held the
+ *  daemon loop up to 29 s (2026-10-06 loop_lag rows); this fires only on a grep already far past that. */
+export const ANCHOR_GREP_TIMEOUT_MS = 120_000;
+
+/** An evidence-anchor grep that ran past its bound and was killed: neither "true" nor "false". */
+export class AnchorGrepTimeoutError extends RmdError {
+  constructor(readonly anchor: EvidenceAnchor, readonly timeoutMs: number) {
+    super("git", GENERIC_EXIT_CODE, `git grep for evidence anchor "${anchor.description}" exceeded its ${timeoutMs}ms bound and was killed`, {
+      pattern: anchor.pattern,
+      timeoutMs,
+    });
+    this.name = "AnchorGrepTimeoutError";
+  }
+}
+
+/** One `execFile` call, injectable so a test can stand in a slow or failing child. */
+export type AnchorGrepExecFile = typeof execFile;
+
+interface AnchorGrepWarmPass {
+  anchors: readonly EvidenceAnchor[];
+  batches: Map<AnchorGrepExecFile, Map<string, Promise<string>>>;
+}
+
+// W1-T6277: carry the whole pass through the existing single-anchor callback without changing its callers.
+const anchorGrepWarmPass = new AsyncLocalStorage<AnchorGrepWarmPass>();
+
+function batchableAnchor(anchor: EvidenceAnchor): boolean {
+  // Regex dialects and locale-sensitive expressions stay with Git's matcher (W1-T6277).
+  return /^[\x20-\x7e]*$/.test(anchor.pattern) && !/[\\.*+?^$()[\]{}|]/.test(anchor.pattern);
+}
+
+/** {@link gitGrepAnchorTrue} OFF THE EVENT LOOP, with the same exit-code contract: 0 is true, EXACTLY 1 is false, and
+ *  anything else rejects with the child's own error. Past `timeoutMs` the child gets SIGTERM, then SIGKILL after a
+ *  grace, and the call rejects with {@link AnchorGrepTimeoutError} — a named failure, never a guessed answer. */
+export function gitGrepAnchorTrueAsync(
+  cwd: string,
+  ref: string,
+  anchor: EvidenceAnchor,
+  timeoutMs = ANCHOR_GREP_TIMEOUT_MS,
+  run: AnchorGrepExecFile = execFile,
+): Promise<boolean> {
+  const pass = anchorGrepWarmPass.getStore();
+  const grouped = pass !== undefined && batchableAnchor(anchor);
+  const groupKey = JSON.stringify([cwd, ref, anchor.path || null, timeoutMs]);
+  let batches = pass?.batches.get(run);
+  if (pass !== undefined && batches === undefined) pass.batches.set(run, batches = new Map());
+  const pending = grouped ? batches?.get(groupKey) : undefined;
+  const result = pending ?? new Promise<string>((resolve, reject) => {
+    const patterns = grouped
+      ? [...new Set(pass.anchors.filter((a) => (a.path || null) === (anchor.path || null) && batchableAnchor(a)).map((a) => a.pattern))]
+      : [anchor.pattern];
+    const args = ["grep", "-I", ...(grouped ? ["--no-color", "--no-line-number", "--no-column", "--no-heading", "--no-break", "-h"] : ["-q"]), ...patterns.flatMap((pattern) => ["-e", pattern]), ref, ...(anchor.path ? ["--", anchor.path] : [])];
+    let timedOut = false;
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const child = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+      done = true;
+      clearTimeout(timer);
+      if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
+      if (!err) return resolve(grouped ? stdout : "matched");
+      // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
+      if ((err as { code?: unknown }).code === 1) return resolve("");
+      reject(err);
+    });
+    if (done) return;
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killAfterGrace(child);
+    }, timeoutMs);
+  });
+  if (grouped && pending === undefined) batches!.set(groupKey, result);
+  return result.then(
+    (text) => grouped ? text.split("\n").slice(0, -1).some((line) => line.includes(anchor.pattern)) : text === "matched",
+    (err: unknown) => {
+      if (err instanceof AnchorGrepTimeoutError) throw new AnchorGrepTimeoutError(anchor, timeoutMs);
+      throw err;
+    },
+  );
+}
+
 /**
  * W1-T4261 — answers {@link gitGrepAnchorTrue} once per (main commit, anchor). MEASURED 2026-09-23 on the fleet
  * gateway: one `git grep` spawn per proposal per inbox pass was 39% of the serve process's CPU (693 proposals). A
@@ -2048,16 +2207,84 @@ export function cachedAnchorGrep(
   grep: (ref: string, anchor: EvidenceAnchor) => boolean,
 ): boolean {
   if (sha === undefined) return grep("origin/main", anchor);
-  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
-    cache.sha = sha;
-    cache.results.clear();
-  }
-  const key = JSON.stringify([anchor.pattern, anchor.path ?? null]);
+  resetAnchorGrepCacheFor(cache, sha);
+  const key = anchorGrepKey(anchor);
   const hit = cache.results.get(key);
   if (hit !== undefined) return hit;
   const answer = grep(sha, anchor);
   cache.results.set(key, answer);
   return answer;
+}
+
+/** The cache key of one anchor: its pattern and path, the only inputs a grep at a fixed sha reads. */
+function anchorGrepKey(anchor: EvidenceAnchor): string {
+  return JSON.stringify([anchor.pattern, anchor.path ?? null]);
+}
+
+/** A new sha empties the cache; so does the {@link ANCHOR_GREP_CACHE_MAX_ENTRIES} backstop. */
+function resetAnchorGrepCacheFor(cache: AnchorGrepCache, sha: string): void {
+  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
+    cache.sha = sha;
+    cache.results.clear();
+  }
+}
+
+/** How many anchor greps one warm pass keeps in flight at once. */
+export const ANCHOR_GREP_WARM_CONCURRENCY = 4;
+
+/**
+ * Fill `cache` for `sha` with every anchor's answer BEFORE the sync readiness pass reads it, each miss through the
+ * async `grep`, so the daemon loop never waits on a `git grep` child (2026-10-06: up to 29 s a spawn). A failed or
+ * timed-out grep is NOT cached, as {@link cachedAnchorGrep} never caches a throw; it is returned by key so
+ * {@link warmedAnchorGrep} rethrows it where the sync grep would have thrown, and the next pass retries it.
+ * `sha` undefined (origin/main unresolvable) warms nothing and keeps the uncached sync grep, as before.
+ */
+export async function warmAnchorGrepCache(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  anchors: readonly EvidenceAnchor[],
+  grep: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
+  concurrency = ANCHOR_GREP_WARM_CONCURRENCY,
+): Promise<Map<string, unknown>> {
+  const failures = new Map<string, unknown>();
+  if (sha === undefined) return failures;
+  resetAnchorGrepCacheFor(cache, sha);
+  const misses = new Map<string, EvidenceAnchor>();
+  for (const anchor of anchors) {
+    const key = anchorGrepKey(anchor);
+    if (!cache.results.has(key)) misses.set(key, anchor);
+  }
+  const queue = [...misses.entries()];
+  const lane = async (): Promise<void> => {
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      const [key, anchor] = next;
+      try {
+        const answer = await grep(sha, anchor);
+        // The backstop bound still holds: past it, the rest stay misses and take the sync path.
+        if (cache.sha === sha && cache.results.size < ANCHOR_GREP_CACHE_MAX_ENTRIES) cache.results.set(key, answer);
+      } catch (err) {
+        // Carried, not erased: warmedAnchorGrep rethrows this exact error for this key.
+        failures.set(key, err);
+      }
+    }
+  };
+  await anchorGrepWarmPass.run({ anchors: [...misses.values()], batches: new Map() },
+    () => Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => lane())));
+  return failures;
+}
+
+/** The readiness pass's grep after {@link warmAnchorGrepCache}: a key whose warm grep failed rethrows THAT error
+ *  (the sync grep would have thrown there too); every other key answers through {@link cachedAnchorGrep}. */
+export function warmedAnchorGrep(
+  cache: AnchorGrepCache,
+  sha: string | undefined,
+  failures: ReadonlyMap<string, unknown>,
+  anchor: EvidenceAnchor,
+  grep: (ref: string, anchor: EvidenceAnchor) => boolean,
+): boolean {
+  const key = anchorGrepKey(anchor);
+  if (failures.has(key)) throw failures.get(key);
+  return cachedAnchorGrep(cache, sha, anchor, grep);
 }
 
 /** A file's text, or undefined when it cannot be read — every caller below treats absent and unreadable alike. */
@@ -2860,7 +3087,9 @@ export function approveProposal(
   }
   const payload: RatificationPayload = {
     proposalId: classification.proposalId,
-    fragmentYaml: draft?.fragmentYaml ?? "",
+    fragmentYaml: draft && classification.proposal
+      ? carryRatificationRationale(draft.fragmentYaml, classification.proposal, draft.stampLine)
+      : draft?.fragmentYaml ?? "",
     stampLine: draft?.stampLine ?? "",
   };
 
@@ -3003,6 +3232,50 @@ export interface ShardWriteFs {
   writeFileSync: (path: string, data: string, enc: "utf8") => void;
 }
 
+type RatificationProvenance = Pick<Proposal, "id" | "summary" | "originatingItemId">;
+
+function carryRatificationRationale(fragmentYaml: string, proposal: RatificationProvenance, stampLine: string): string {
+  // Materializers rebuild payloads from fragment/id/stamp, so provenance must ride the fragment (W1-T5541).
+  const run = /\(run ([^,)]+)/.exec(proposal.summary)?.[1];
+  const epoch = /(?:^|-)(\d{13})(?:-|$)/.exec(run ?? proposal.id)?.[1];
+  const date = epoch ? fixedClock(Number(epoch)).iso().slice(0, 10) : /RATIFIED (\d{4}-\d{2}-\d{2})/.exec(stampLine)?.[1];
+  const source = proposal.originatingItemId ?? /https:\/\/github\.com\/[^\s,)]+\/pull\/\d+/.exec(proposal.summary)?.[0] ?? run ?? proposal.id;
+  const provenance = `From the ${date ? `${date} ` : ""}${proposal.id.startsWith("followup:") ? "follow-up" : "proposal"} on ${source}, ratified via rmd approve:`;
+  const document = parseDocument(fragmentYaml);
+  if (!isSeq(document.contents)) return fragmentYaml;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const node of document.contents.items) {
+    if (!isMap(node) || !node.range) continue;
+    const value: unknown = node.get("rationale");
+    const rationale = typeof value === "string" && value.trim() ? value : proposal.summary;
+    if (rationale.startsWith(`${provenance}\n`)) continue;
+    const scalar = node.get("rationale", true);
+    const pair = node.items.find((item) => isScalar(item.key) && item.key.value === "rationale");
+    const rendered = stringifyYaml({ rationale: `${provenance}\n${rationale}` }, {
+      defaultKeyType: "PLAIN",
+      defaultStringType: /[\t ]$|\n{2,}$/.test(rationale) ? "QUOTE_DOUBLE" : "BLOCK_FOLDED",
+      blockQuote: "folded", lineWidth: 96,
+    }).trimEnd().slice("rationale: ".length).replace(/\n/g, "\n  ");
+    if (isScalar(scalar) && scalar.range) {
+      const end = scalar.range[1] + (fragmentYaml[scalar.range[1]] === "\n" ? 1 : 0);
+      const space = fragmentYaml[scalar.range[0] - 1] === ":" ? " " : "";
+      edits.push({ start: scalar.range[0], end, text: `${space}${rendered}\n` });
+    } else if (pair && isScalar(pair.key) && pair.key.range) {
+      const start = pair.key.range[1] + 1;
+      const end = isNode(pair.value) && pair.value.range
+        ? pair.value.range[1] : fragmentYaml.indexOf("\n", start);
+      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + (fragmentYaml[end] === "\n" ? 1 : 0), text: ` ${rendered}\n` });
+    } else {
+      edits.push({ start: node.range[1], end: node.range[1], text: `\n  rationale: ${rendered}\n` });
+    }
+  }
+  let carried = fragmentYaml;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    carried = carried.slice(0, edit.start) + edit.text + carried.slice(edit.end);
+  }
+  return carried;
+}
+
 /** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
 export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
   | { ok: true; fragmentYaml: string }
@@ -3094,10 +3367,13 @@ export function writeRatificationShards(
   proposalId: string,
   fs: ShardWriteFs,
   joinPath: (...parts: string[]) => string,
+  provenance?: RatificationProvenance,
+  stampLine = "",
 ): string[] {
   const relinted = relintRatificationFragment(fragmentYaml, proposalId);
   if (!relinted.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${relinted.reason}`);
-  const shards = ratificationShardFiles(relinted.fragmentYaml);
+  const carried = provenance ? carryRatificationRationale(relinted.fragmentYaml, provenance, stampLine) : relinted.fragmentYaml;
+  const shards = ratificationShardFiles(carried);
   if (!shards.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${shards.reason}`);
   fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
   for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
@@ -3119,10 +3395,26 @@ export function assertRatificationDraftFileable(
   proposalId: string,
   stampLine: string,
   knownRepos: ReadonlySet<string> | undefined,
+  worktreePath = process.cwd(),
 ): void {
   const relinted = relintRatificationFragment(fragmentYaml, proposalId);
-  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
+  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
+    (path) => fs.existsSync(resolvePath(worktreePath, path)));
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
+  const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
+  if ("plan" in parsed) {
+    const directory = (path: string): boolean => path.endsWith("/") ||
+      fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true;
+    for (const task of parsed.plan.tasks) {
+      for (const path of task.files ?? []) {
+        if (directory(path)) violations.push(`[draft-directory-files] ${task.id} files entry ${JSON.stringify(path)} is a directory`);
+      }
+      for (const criterion of task.acceptance ?? []) {
+        const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
+        if (path && directory(path)) violations.push(`[draft-directory-grep] ${task.id} grep proof target ${JSON.stringify(path)} is a directory`);
+      }
+    }
+  }
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
 }
@@ -3131,13 +3423,13 @@ export function assertRatificationDraftFileable(
  *  stamp replaced a bullet, which the PR body's Changed files once named regardless. */
 export function fileRatificationDraft(
   worktreePath: string,
-  payload: { fragmentYaml: string; proposalId: string; stampLine: string },
+  payload: { fragmentYaml: string; proposalId: string; stampLine: string; proposal?: RatificationProvenance },
   fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
 ): string[] {
-  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos);
-  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath);
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos, worktreePath);
+  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath, payload.proposal, payload.stampLine);
   const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
   const before = fs.readFileSync(masterPlanPath, "utf8");
   const after = applyStampToMasterPlan(before, payload.proposalId, payload.stampLine);
@@ -3173,7 +3465,7 @@ export function fileRatificationBatch(
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
 ): { writtenPaths: string[]; filedIds: string[] } {
-  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos);
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos, worktreePath);
   const written = new Set<string>();
   const filedIds: string[] = [];
   for (const payload of payloads) {
@@ -3313,7 +3605,11 @@ export function planRatificationBatch(
       });
       continue;
     }
-    accepted.push({ proposalId: c.proposalId, fragmentYaml: c.draft.fragmentYaml, stampLine: c.draft.stampLine });
+    accepted.push({
+      proposalId: c.proposalId,
+      fragmentYaml: c.proposal ? carryRatificationRationale(c.draft.fragmentYaml, c.proposal, c.draft.stampLine) : c.draft.fragmentYaml,
+      stampLine: c.draft.stampLine,
+    });
     // Q5: fold this NOW-accepted member's own drafted shard slugs into the corpus BEFORE the next member is checked —
     // dedupping against main UNION accepted-so-far, additive only.
     corpus = [...corpus, ...draftedShardSlugs(c.draft.fragmentYaml)];

@@ -77,7 +77,7 @@ test("a garden PR create that throws retracts its pushed branch", () => {
   try {
     assert.throws(() => withLiveWritesAllowed(() => ws.land({ paths: ["change.txt"], title: "chore: t", body: "b" })), /secondary rate limit/);
     assert.deepEqual(f.heads(), ["main"], "the branch pushed for the failed PR is gone");
-    assert.ok(steps.includes("plan.garden_branch_retracted"), `ledgered the retraction: ${steps.join(",")}`);
+    assert.ok(steps.includes("plan.garden_head_deleted"), `ledgered the retraction: ${steps.join(",")}`);
   } finally {
     ws.dispose();
     f.cleanup();

@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+import { threadId } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -185,27 +186,99 @@ export function readModelDirtyMarkerPath(path: string): string {
   return `${path}.dirty`;
 }
 
+function identifyLockFailure(error: unknown, path: string, connection: string, readOnly: boolean): void {
+  const code = sqliteErrcode(error);
+  if (error instanceof Error && code !== undefined && [5, 6].includes(code & 0xff)) {
+    error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}]`;
+  }
+}
+
 /** `marker`: the dirty marker this connection wrote and its close removes; only openReadModel's writer owns one. */
 function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
-  return {
+  let reader: DatabaseSync | undefined;
+  const connection = randomUUID();
+  const checked = <T>(target: DatabaseSync, operation: () => T): T => {
+    try {
+      return operation();
+    } catch (error) {
+      identifyLockFailure(error, path, connection, target !== raw || readOnly);
+      throw error;
+    }
+  };
+  const reading = (): DatabaseSync => readOnly || path === ":memory:" ? raw : (reader ??= connect(path, true));
+  const db: ReadModelDb = {
     path,
     schemaVersion,
     readOnly,
     ...(recoveredFrom ? { recoveredFrom } : {}),
     ...(marker?.unclean ? { uncleanShutdown: true } : {}),
-    exec: (sql) => raw.exec(sql),
-    prepare: (sql, opts = {}) => {
-      const statement: StatementSync = raw.prepare(sql);
-      if (opts.bigInts) statement.setReadBigInts(true);
-      return statement as unknown as ReadModelStatement;
+    exec: (sql) => {
+      const command = sql.trim().replace(/;$/, "").trim();
+      const beginRead = /^BEGIN(?: DEFERRED)?(?: TRANSACTION)?$/i.test(command);
+      const endRead = /^(?:COMMIT|END|ROLLBACK)(?: TRANSACTION)?$/i.test(command) && reader?.isTransaction && !raw.isTransaction;
+      const target = beginRead ? reading() : endRead ? reader! : raw;
+      checked(target, () => target.exec(sql));
     },
-    meta: (key) => raw.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
-    inTransaction: () => raw.isTransaction,
+    prepare: (sql, opts = {}) => {
+      const statement: StatementSync = checked(raw, () => raw.prepare(sql));
+      if (opts.bigInts) statement.setReadBigInts(true);
+      let readStatement: StatementSync | undefined;
+      let tempSchemaVersion: number | undefined;
+      let readsTemp = false;
+      // Transaction reads see their own writes; PRAGMAs describe the writer's configuration.
+      const forRead = (): { target: DatabaseSync; statement: StatementSync } => {
+        const target = raw.isTransaction || /^\s*(?:PRAGMA|EXPLAIN)\b/i.test(sql) ? raw : reading();
+        if (target === raw) return { target, statement };
+        const version = Number(checked(raw, () => raw.prepare("PRAGMA temp.schema_version").get()?.schema_version));
+        if (version !== tempSchemaVersion) {
+          const hasTemp = checked(raw, () => raw.prepare("SELECT 1 FROM temp.sqlite_schema WHERE type IN ('table', 'view') LIMIT 1").get()) !== undefined;
+          // SQLite's plan resolves aliases, views and shadowing; database 1 is connection-local TEMP.
+          const plan = hasTemp ? checked(raw, () => raw.prepare(`EXPLAIN ${sql}`).all()) : [];
+          readsTemp = plan.some((row) => row.opcode === "Transaction" && row.p1 === 1)
+            && !plan.some((row) => row.opcode === "Transaction" && row.p2 !== 0);
+          tempSchemaVersion = version;
+        }
+        if (readsTemp) return { target: raw, statement };
+        if (!readStatement) {
+          readStatement = checked(target, () => target.prepare(sql));
+          if (opts.bigInts) readStatement.setReadBigInts(true);
+        }
+        return { target, statement: readStatement };
+      };
+      return {
+        run: (...params) => checked(raw, () => statement.run(...params)) as { changes: number },
+        get: (...params) => {
+          const read = forRead();
+          return checked(read.target, () => read.statement.get(...params)) as SqlRow | undefined;
+        },
+        all: (...params) => {
+          const read = forRead();
+          return checked(read.target, () => read.statement.all(...params)) as SqlRow[];
+        },
+        iterate: function* (...params) {
+          const read = forRead();
+          const iterator = checked(read.target, () => read.statement.iterate(...params));
+          try {
+            for (;;) {
+              const next = checked(read.target, () => iterator.next());
+              if (next.done) return;
+              yield next.value as SqlRow;
+            }
+          } finally {
+            checked(read.target, () => iterator.return?.());
+          }
+        },
+      };
+    },
+    meta: (key) => db.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
+    inTransaction: () => raw.isTransaction || (reader?.isTransaction ?? false),
     close: () => {
+      reader?.close();
       raw.close();
       if (marker) rmSync(marker.path, { force: true });
     },
   };
+  return db;
 }
 
 /**
@@ -215,14 +288,16 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
  */
 function connect(path: string, readOnly: boolean): DatabaseSync {
   const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
-  const raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
-  if (readOnly) return raw;
+  const connection = randomUUID();
+  let raw: DatabaseSync | undefined;
   try {
-    raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
+    raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
+    if (!readOnly) raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
       PRAGMA journal_size_limit=${READ_MODEL_JOURNAL_SIZE_LIMIT_BYTES};`);
     return raw;
   } catch (error) {
-    raw.close();
+    raw?.close();
+    identifyLockFailure(error, path, connection, readOnly);
     throw error;
   }
 }
@@ -405,3 +480,188 @@ function immediate<T>(db: ReadModelDb, fn: () => T): T {
     throw error;
   }
 }
+
+/**
+ * A producer's persisted output, one row per (instance, name) (arch Phase 4 D10, W1-T5055): the slow lane's
+ * analytics refresh writes each instance's `console-v1`, `signals` and `usage-v1` here, so a view answers from
+ * the rows after a restart. A failed refresh sets `error` and leaves the last committed `as_of` and `body`.
+ */
+export const SOURCE_SNAPSHOT_DDL = `CREATE TABLE IF NOT EXISTS source_snapshot(instance TEXT NOT NULL, name TEXT NOT NULL,
+  as_of TEXT, body TEXT, error TEXT, error_ms INTEGER, PRIMARY KEY(instance, name)) WITHOUT ROWID;`;
+
+/** One producer run for one instance: every name it produced with their shared source time, or why it failed. */
+export type SourceSnapshotWrite =
+  | { instance: string; ok: true; asOf: string; bodies: ReadonlyArray<{ name: string; body: unknown }> }
+  | { instance: string; ok: false; names: readonly string[]; error: string; atMs: number };
+
+/**
+ * Commits one producer run in one fenced transaction: a complete snapshot and its source time land together or
+ * not at all, and a failure records why without touching the snapshot it keeps.
+ */
+export function writeSourceSnapshot(db: ReadModelDb, lease: ReadModelLease, write: SourceSnapshotWrite): void {
+  withWriteTransaction(db, lease, () => {
+    if (write.ok) {
+      const upsert = db.prepare(`INSERT INTO source_snapshot(instance, name, as_of, body, error, error_ms) VALUES(?, ?, ?, ?, NULL, NULL)
+        ON CONFLICT(instance, name) DO UPDATE SET as_of = excluded.as_of, body = excluded.body, error = NULL, error_ms = NULL`);
+      for (const { name, body } of write.bodies) upsert.run(write.instance, name, write.asOf, JSON.stringify(body));
+      return;
+    }
+    const failed = db.prepare(`INSERT INTO source_snapshot(instance, name, as_of, body, error, error_ms) VALUES(?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(instance, name) DO UPDATE SET error = excluded.error, error_ms = excluded.error_ms`);
+    for (const name of write.names) failed.run(write.instance, name, write.error, write.atMs);
+  });
+}
+
+/** One persisted source snapshot's state, without its body. */
+export interface SourceSnapshotState {
+  instance: string;
+  asOf: string | null;
+  error: string | null;
+  errorMs: number | null;
+}
+
+/** Every instance's row of `name`, bodies left unread: a reader parses a body only when its `asOf` moved. */
+export function sourceSnapshotStates(db: ReadModelDb, name: string): SourceSnapshotState[] {
+  return db.prepare("SELECT instance, as_of, error, error_ms FROM source_snapshot WHERE name = ? ORDER BY instance").all(name).map((row) => ({
+    instance: String(row.instance),
+    asOf: row.as_of === null ? null : String(row.as_of),
+    error: row.error === null ? null : String(row.error),
+    errorMs: row.error_ms === null ? null : Number(row.error_ms),
+  }));
+}
+
+/** The committed body of one instance's `name`, parsed; undefined when none was ever committed. */
+export function readSourceSnapshotBody(db: ReadModelDb, instance: string, name: string): unknown {
+  const body = db.prepare("SELECT body FROM source_snapshot WHERE instance = ? AND name = ?").get(instance, name)?.body;
+  return body === null || body === undefined ? undefined : JSON.parse(String(body));
+}
+
+/**
+ * The agent view's fold state per instance (arch Phase 4 §7.1, W1-T5051): `state_json` is the fold of every
+ * `fact` row through `last_seq`, so a restart folds only the rows after it instead of the whole store.
+ */
+export const AGENT_FOLD_DDL = "CREATE TABLE IF NOT EXISTS agent_fold(instance TEXT PRIMARY KEY, last_seq INTEGER NOT NULL, state_json TEXT NOT NULL) WITHOUT ROWID;";
+
+/** One instance's committed fold: the state, and the last fact `seq` it consumed. */
+export interface AgentFoldRecord {
+  lastSeq: number;
+  stateJson: string;
+}
+
+/** The committed fold of `instance`; undefined when none was ever committed (or the store predates the table). */
+export function readAgentFold(db: ReadModelDb, instance: string): AgentFoldRecord | undefined {
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'agent_fold'").get() === undefined) return undefined;
+  const row = db.prepare("SELECT last_seq, state_json FROM agent_fold WHERE instance = ?").get(instance);
+  return row === undefined ? undefined : { lastSeq: Number(row.last_seq), stateJson: String(row.state_json) };
+}
+
+/**
+ * Commits a fold state and the fact position it consumed in one fenced transaction: both land or neither does,
+ * and a writer that lost its lease writes nothing, so the committed pair stays the last whole one.
+ */
+export function writeAgentFold(db: ReadModelDb, lease: ReadModelLease, instance: string, record: AgentFoldRecord): void {
+  withWriteTransaction(db, lease, () => {
+    db.exec(AGENT_FOLD_DDL);
+    db.prepare(`INSERT INTO agent_fold(instance, last_seq, state_json) VALUES(?, ?, ?)
+      ON CONFLICT(instance) DO UPDATE SET last_seq = excluded.last_seq, state_json = excluded.state_json`).run(instance, record.lastSeq, record.stateJson);
+  });
+}
+
+/** Fact `seq` one fold step reads, so a large delta spreads over several passes. */
+export const AGENT_FOLD_CHUNK = 5_000;
+/** A fold still catching up commits at least once per this many chunks, so a restart mid-delta re-reads at most these. */
+export const AGENT_FOLD_COMMIT_CHUNKS = 20;
+const AGENT_FOLD_STATE_VERSION = 1;
+
+interface AgentFoldEntry {
+  tsMs: number;
+  seq: number;
+  row: Record<string, unknown>;
+}
+
+interface AgentFoldState {
+  /** Every fact through this `seq` is folded. */
+  seq: number;
+  entries: AgentFoldEntry[];
+  /** The `seq` of the pair last committed to `agent_fold`, and whether rows were folded since. */
+  committed: number;
+  dirty: boolean;
+}
+
+/** One instance's store as the fold sees it; without a lease the fold advances in memory only. */
+export interface AgentFoldSlot {
+  instance: string;
+  db: ReadModelDb;
+  lease?: ReadModelLease;
+  log?: (step: string, extra: Record<string, unknown>) => void;
+}
+
+/** The `panel.*` facts of each instance, folded incrementally and persisted in `agent_fold` (arch Phase 4 §7.1). */
+export interface AgentFolds {
+  /** Folds one chunk per `more()`; true once the fold holds the store's newest fact. */
+  advance(slot: AgentFoldSlot, more: () => boolean): boolean;
+  /** The folded rows, oldest first (by `ts`, then `seq`), with every remaining fact folded first. */
+  current(slot: AgentFoldSlot): { seq: number; rows: Array<Record<string, unknown>>; newestTsMs: number };
+}
+
+/** The committed fold, or an empty one when none was committed, it has another version, or the store shrank under it. */
+function loadAgentFold(db: ReadModelDb, instance: string, max: number): AgentFoldState {
+  const record = readAgentFold(db, instance);
+  if (record !== undefined && record.lastSeq <= max) {
+    const state = JSON.parse(record.stateJson) as { version?: number; entries?: AgentFoldEntry[] };
+    if (state.version === AGENT_FOLD_STATE_VERSION && Array.isArray(state.entries)) return { seq: record.lastSeq, entries: state.entries, committed: record.lastSeq, dirty: false };
+  }
+  return { seq: 0, entries: [], committed: 0, dirty: false };
+}
+
+/**
+ * The per-store folds. A step reads only facts past the fold's `seq`; the state and the `seq` it consumed are
+ * committed together once caught up, or every {@link AGENT_FOLD_COMMIT_CHUNKS} chunks while catching up. A refused
+ * commit (a lost lease) is logged and the in-memory fold carries on; the committed pair stays the last whole one.
+ * `onStep` sees each step's range and the rows it read.
+ */
+export function createAgentFolds(opts: { chunk?: number; onStep?: (step: { instance: string; from: number; through: number; rows: number }) => void } = {}): AgentFolds {
+  const chunk = opts.chunk ?? AGENT_FOLD_CHUNK;
+  const span = AGENT_FOLD_COMMIT_CHUNKS * chunk;
+  const folds = new WeakMap<ReadModelDb, AgentFoldState>();
+  const foldOf = (slot: AgentFoldSlot): { fold: AgentFoldState; max: number } => {
+    const max = Number(slot.db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m);
+    let fold = folds.get(slot.db);
+    if (!fold || max < fold.seq) folds.set(slot.db, (fold = loadAgentFold(slot.db, slot.instance, max)));
+    return { fold, max };
+  };
+  const step = (slot: AgentFoldSlot, fold: AgentFoldState, through: number, max: number): void => {
+    const fresh = slot.db.prepare("SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND seq <= ? AND step LIKE 'panel.%' ORDER BY seq").all(fold.seq, through);
+    opts.onStep?.({ instance: slot.instance, from: fold.seq, through, rows: fresh.length });
+    for (const fact of fresh) fold.entries.push({ tsMs: Number(fact.ts_ms), seq: Number(fact.seq), row: JSON.parse(String(fact.body)) as Record<string, unknown> });
+    if (fresh.length > 0) fold.entries.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+    fold.seq = through;
+    fold.dirty ||= fresh.length > 0;
+    if (!fold.dirty || slot.lease === undefined || (through < max && through - fold.committed < span)) return;
+    try {
+      writeAgentFold(slot.db, slot.lease, slot.instance, { lastSeq: fold.seq, stateJson: JSON.stringify({ version: AGENT_FOLD_STATE_VERSION, entries: fold.entries }) });
+      fold.committed = fold.seq;
+      fold.dirty = false;
+    } catch (error) {
+      slot.log?.("agent.fold_commit_failed", { instance: slot.instance, seq: fold.seq, committed: fold.committed, error: (error as Error).message });
+    }
+  };
+  return {
+    advance: (slot, more) => {
+      const { fold, max } = foldOf(slot);
+      while (fold.seq < max) {
+        if (!more()) return false;
+        step(slot, fold, Math.min(max, fold.seq + chunk), max);
+      }
+      return true;
+    },
+    current: (slot) => {
+      const { fold, max } = foldOf(slot);
+      if (max > fold.seq) step(slot, fold, max, max);
+      return { seq: fold.seq, rows: fold.entries.map((entry) => entry.row), newestTsMs: fold.entries.at(-1)?.tsMs ?? Number.NEGATIVE_INFINITY };
+    },
+  };
+}
+
+/** The worker's one set of folds, shared by the agent view and the nav badge so neither counts past the other. */
+export const AGENT_FOLDS: AgentFolds = createAgentFolds();

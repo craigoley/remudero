@@ -1,0 +1,108 @@
+- id: W1-T7848
+  title: "MAIN HEALTH OBSERVES THE RULE SUITES — `rule-checks` runs only on pull_request and merge_group, so it is never in `main.health.observed`'s `observed_checks`, `decideBaseRed` reads main green for every rule red, and an inherited rule red is refreshed onto a main that still fails it; the W1-T6024 probe that could see it reads the shared light-gates log and grades unrunnable"
+  repo: remudero
+  depends_on: [W1-T7850]  # shares src/lib/sweep.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — main health carries a probe-observed rule-suite reading for main's tip
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the recommended follow-ups (main health never observes rule-checks)"
+  plan_refs: [W1-T4351, W1-T6024, W1-T6405, W1-T4399, W1-T4433, W1-T7850]
+  files: [scripts/list-rule-suites.mjs, src/lib/base-reproduction.ts, src/lib/sweep.ts, test/main-health-observes-the-rule-suites.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main e3256acda (2026-10-11).
+    WHY MAIN NEVER OBSERVES IT:
+      - The light-gates job (key `commitlint`) runs the rule population as its `rule-checks` step
+        (.github/workflows/ci.yml:1077-1083, `list-rule-suites.mjs --run`), but the job is guarded
+        `if: github.event_name == 'pull_request' || github.event_name == 'merge_group'` (ci.yml:1039).
+        A push to main never posts `rule-checks`, so the main-health rung's census
+        (src/lib/main-health-rung.ts:1600-1641) never lists it in `observed_checks`.
+      - `decideBaseRed` (src/lib/sweep.ts:8014) uses the census only while main is red (:8021-8028). With main
+        green, a rule red is `own` unless a stand-down was recorded, and then it is `refresh` (:8031-8032).
+        A head whose red a probe reproduced is also `refresh` once any later main reading is green on its own
+        head (sweep.ts:7999, :8035). Main reads green whenever its CI is green, so each of these refreshes onto
+        a main whose tree still fails the same rule suite.
+    THE PROBE THAT COULD SEE IT, AND WHY IT DOES NOT. The W1-T6024 probe in the fix rung
+    (sweep.ts:16442-16500) runs a red head's failing test files at main's tip before a fix is dispatched.
+    For a rule-checks red, `baseReproductionFiles` (src/lib/base-reproduction.ts:46) takes every test/ path
+    in the check's log tail. That tail is the whole light-gates job's failure region: the check is posted by
+    the job's report step, so its log is the job's log. Three things go wrong:
+      - Other gates' failures in the same job add their files.
+      - A helper path that is not a suite, such as test/setup/tmp-hygiene.ts, is added too. The probe drops
+        any candidate that is not `.test.ts` (src/run-task.ts:2149). `decideBaseReproduction` then grades
+        that file's missing outcome `unrunnable` (base-reproduction.ts:62), and an unrunnable verdict falls
+        through to a fix dispatch.
+      - The failing suite is named only on a `rule-checks: <suite>: failed` line printed when that suite
+        finishes (scripts/list-rule-suites.mjs:30-33). That can be far above the step's `##[error]`, outside
+        the 8 lines `extractCiFailureRegion` keeps (CI_STEP_ERROR_CONTEXT_LINES, run-task.ts:41690).
+    EVIDENCE, read-only from the core daemon's live ledger on the Azure host (2026-10-11T03:45Z):
+      - 34 retained `fix.dispatch` rows carry a `rule-checks` ci_failure (10-09T09:08Z to 10-11T03:41Z).
+        25 have a `sweep.base_reproduction` row for their head (the earliest retained probe row is
+        10-09T13:12Z, so the 9 without one are outside retention, not evidence of anything).
+        By distinct head: 19 clear, 1 partial, 3 unrunnable only, and 0 reproduced.
+        Each unrunnable-only probe set held test/setup/tmp-hygiene.ts: heads 92739fd5e, 5b135a223
+        and a9cef374b (W1-T7808, at main d7f527f62 and e3256acda).
+      - Inherited rule reds do happen, but rarely. There were 87 retained `sweep.base_red.stood_down` rows
+        since 10-04T12:56Z. 2 of them were `rule-checks`: #9724 at 10-06T23:35Z (main 9b5c67437) and #9918
+        at 10-07T18:25Z (main 2172377d1).
+    CHOSEN DESIGN: THE PROBE, NOT A PUSH LANE. The cost evidence:
+      - A push-lane run would cost the whole rule population on every main commit. On PR run 38107858590
+        (2026-10-11), the light-gates `rule-checks` step ran 03:17:51Z to 03:22:45Z, about 4.9 min.
+      - main took 423 first-parent commits on 10-08 and 10-09, about 210 a day. So a push lane would cost
+        roughly 17 runner-hours a day. It would also need its own job, with its own checkout and `npm ci`,
+        because the other light gates are diff-scoped and stay PR-only.
+      - The probe runs only the failing suites, only when a PR is red on them, and its result is already
+        cached per main sha and file (probeCacheKey, base-reproduction.ts:68).
+    WHAT WOULD RE-OPEN THE PUSH LANE. Inherited rule reds becoming frequent enough that per-PR probes cost
+    more than the push-lane runs. The `main.rule_checks.observed` rows this task writes are the count to
+    compare.
+  design: |
+    1. NAME THE FAILING SUITES WHERE THE TAIL KEEPS THEM. `runRuleSuites` (scripts/list-rule-suites.mjs) collects
+       the suites that failed. On a failing run it prints one last line, `rule-checks: failed suites: <suite> ...`,
+       just before it returns 1. That puts the line next to the step's `##[error]`, inside the region
+       `extractCiFailureRegion` keeps.
+    2. PROBE ONLY THOSE SUITES. Add `failingRuleSuitesFromCiFailures` to src/lib/base-reproduction.ts. It reads that
+       line from a failure named `rule-checks`. For such a failure, `baseReproductionFiles` uses that suite list
+       and never every test/ path in the shared log. A path that is not a `.test.ts` file is never a probe
+       candidate for any check. A rule-checks failure with no such line keeps today's extraction.
+    3. RECORD WHAT THE PROBE SAW ABOUT MAIN. In the fix rung's probe block (sweep.ts:16442-16500), when the probed
+       failure is `rule-checks`:
+       - a `reproduced` verdict appends `main.rule_checks.observed` with state "red" (main_sha, failing_suites,
+         pr_number, head_sha);
+       - a `clear` verdict appends one with state "green" and the suites probed.
+       There is one row per main sha and suite set, deduped from the ledger.
+    4. FOLD IT INTO MAIN'S READING. `mainLatestRunFromLedger` (sweep.ts:7936) folds in the newest
+       `main.rule_checks.observed` row whose main_sha equals the reading's `sha`, which is main's head:
+       - red: "rule-checks" joins `failingChecks` and `observedChecks`, the state reads "red", and the reason
+         names the probed suites;
+       - green: "rule-checks" joins `observedChecks` only.
+       A row for any other main sha is ignored. Main has moved, and the next probe decides. So `decideBaseRed`
+       waits on an inherited rule red instead of refreshing onto a main that still fails it. A known-passing
+       check beside it is still the PR's own red (:8023). A clear probe at a newer tip ends the wait,
+       and the existing refresh follows.
+    Tests go in the new file test/main-health-observes-the-rule-suites.test.ts, with `test(` titles exactly as in
+    the proofs below. The existing base-red and base-reproduction suites must stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/main-health-observes-the-rule-suites.test.ts"
+    - claim: "a failing rule-checks run names its failing suites on a last line the failure region keeps"
+      proof: 'grep: test("W1-T7848: a failing rule-checks run names its failing suites on its last line" in test/main-health-observes-the-rule-suites.test.ts'
+    - claim: "a rule-checks probe set holds only the failing suites, never a helper path or another gate's file"
+      proof: 'grep: test("W1-T7848: a rule-checks probe set holds only the failing suites" in test/main-health-observes-the-rule-suites.test.ts'
+    - claim: "a reproduced rule-checks probe makes main's reading red on rule-checks at that main sha"
+      proof: 'grep: test("W1-T7848: a reproduced rule suite reads main red on rule-checks at that sha" in test/main-health-observes-the-rule-suites.test.ts'
+    - claim: "decideBaseRed waits on an inherited rule red while main's CI reads green"
+      proof: 'grep: test("W1-T7848: an inherited rule red waits while main CI reads green" in test/main-health-observes-the-rule-suites.test.ts'
+    - claim: "an observation for an older main sha changes nothing at the new tip"
+      proof: 'grep: test("W1-T7848: a rule observation for an older main sha is ignored" in test/main-health-observes-the-rule-suites.test.ts'
+  falsifier: |
+    Leave `baseReproductionFiles` as it is. A rule-checks log tail naming test/setup/tmp-hygiene.ts beside the
+    failing suite then probes unrunnable, as heads 5b135a223 and a9cef374b did, and the probe-set test fails.
+    Drop the fold from `mainLatestRunFromLedger`. A green main reading plus a red `main.rule_checks.observed` row
+    for the same sha then decides `refresh` or `own`, and the wait test fails. Fold rows for any sha, and the
+    older-sha test fails.

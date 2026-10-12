@@ -75,15 +75,15 @@ test("closureByClass: the merge rate is REFUSED below the population floor and t
   assert.equal(docs.merged, 2);
   assert.equal(docs.open, 1);
   assert.equal(docs.filed, "not supplied", "no filing dates were given, so filed says so rather than reading 0");
-  assert.deepEqual(docs.mergeRate, { kind: "refused", merged: 2, denominator: 3, floor: CLOSURE_POPULATION_FLOOR });
+  assert.deepEqual(docs.mergeRate, { kind: "refused", merged: 2, denominator: 2, floor: CLOSURE_POPULATION_FLOOR });
   assert.equal(CLOSURE_POPULATION_FLOOR, 5, "P48's floor");
-  assert.match(mergeRateCell(docs.mergeRate), /REFUSED \(population 3 below floor 5, P48\)/);
+  assert.match(mergeRateCell(docs.mergeRate), /REFUSED \(population 2 below floor 5, P48; 2 of 2 attempts\)/);
 
   const src = rows.find((r) => r.taskClass === "src")!;
   assert.equal(src.merged, 1);
   assert.equal(src.open, 4);
-  assert.deepEqual(src.mergeRate, { kind: "rate", value: 0.2, merged: 1, denominator: 5 }, "at the floor the rate is stated over its denominator");
-  assert.equal(mergeRateCell(src.mergeRate), "0.2 (1 of 5)");
+  assert.deepEqual(src.mergeRate, { kind: "refused", merged: 1, denominator: 2, floor: CLOSURE_POPULATION_FLOOR }, "the dispatched-attempt population, not the open backlog, is the denominator");
+  assert.equal(mergeRateCell(src.mergeRate), "REFUSED (population 2 below floor 5, P48; 1 of 2 attempts)");
   assert.equal(src.costPerMerge, 7, "every in-window src run's cost (5 + 2), refused runs included, over 1 merge; the pre-window run is excluded");
   assert.equal(src.lastMergeTs, ts(3));
   assert.equal(docs.lastMergeTs, ts(4), "the newest credited run's start ts");
@@ -122,7 +122,7 @@ test("renderClosureByClass: a markdown table under the heading, with the refusal
   const md = renderClosureByClass(rows);
   assert.ok(md.startsWith("## Closure by task class\n"));
   assert.match(md, /\| class \| filed \| merged \| open \| merge rate \| cost per merge \| last merge \|/);
-  assert.match(md, /\| docs \| not supplied \| 2 \| 1 \| REFUSED \(population 3 below floor 5, P48\) \| \$2\.000 \| 2026-09-04T00:00:00\.000Z \|/);
+  assert.match(md, /\| docs \| not supplied \| 2 \| 1 \| REFUSED \(population 2 below floor 5, P48; 2 of 2 attempts\) \| \$2\.000 \| 2026-09-04T00:00:00\.000Z \|/);
   assert.match(renderClosureByClass([]), /^## Closure by task class\n\nNo task class observed/);
 });
 
@@ -248,7 +248,7 @@ test("renderGather prints both tables and the marker carries the guard zero-stre
     g.closureByClass.map((r) => [r.taskClass, r.merged, r.open, r.mergeRate.kind]),
     [
       ["docs", 1, 1, "refused"],
-      ["src", 1, 4, "rate"],
+      ["src", 1, 4, "refused"],
     ],
     "the SHIPPED union credits the merges and the open classes fill the denominator",
   );
@@ -266,7 +266,7 @@ test("renderGather prints both tables and the marker carries the guard zero-stre
   const guardsAt = md.indexOf("\n## Guard fire counts since marker\n");
   assert.ok(closureAt > 0, "the closure heading is printed");
   assert.ok(guardsAt > closureAt, "the guard heading is printed, after the closure table");
-  assert.match(md, /\| src \| not supplied \| 1 \| 4 \| 0\.2 \(1 of 5\) \| \$2\.200 \| 2026-09-04T00:00:00\.000Z \|/);
+  assert.match(md, /\| src \| not supplied \| 1 \| 4 \| REFUSED \(population 2 below floor 5, P48; 1 of 2 attempts\) \| \$2\.200 \| 2026-09-04T00:00:00\.000Z \|/);
   assert.match(md, /\| sandbox \| 0 \| \(none\) \| \(none\) \| 10 \| candidate for retirement/);
 
   const next: RetroMarker = { ts: ts(4), learnings_count: 0, runs_seen: 3, guard_zero_streak: guardZeroStreakRecord(g.guardFireCounts) };
@@ -331,7 +331,7 @@ test("retroCommand --dry-run prints the two operator tables and carries the prio
     assert.equal(code, 0);
     const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
     assert.match(printed, /## Closure by task class/);
-    assert.match(printed, /\| retro-dry-run-fixture \| not supplied \| 0 \| 0 \| REFUSED \(population 0 below floor 5, P48\) \| n\/a \(0 merged\) \| \(none\) \|/);
+    assert.match(printed, /\| retro-dry-run-fixture \| not supplied \| 0 \| 0 \| REFUSED \(population 1 below floor 5, P48; 0 of 1 attempts\) \| n\/a \(0 merged\) \| \(none\) \|/);
     assert.match(printed, /## Guard fire counts since marker/);
     assert.match(printed, /\| containment \| 0 \| \(none\) \| \(none\) \| 10 \| candidate for retirement/);
     assert.match(printed, /\| isolation \| 1 \| inherited-functions \| W1-T-CMD1 \| 0 \|/);

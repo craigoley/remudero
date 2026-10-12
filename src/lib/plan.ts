@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
@@ -102,6 +105,24 @@ export interface TaskRiskRuling {
 export const TASK_TYPES = ["recon", "implement", "diagnose", "review", "manual"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
+export interface SymptomQuery {
+  pattern: string;
+  direction: "increase" | "decrease";
+}
+
+function validateSymptomQuery(value: unknown, id: string): SymptomQuery | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") throw new PlanError(`task ${id}: invalid symptom_query`);
+  const { pattern, direction } = value as Record<string, unknown>;
+  if (typeof pattern !== "string" || !pattern.trim() || pattern.length > 200 ||
+    /\([^()]*[+*][^()]*\)[+*]/.test(pattern) || (direction !== "increase" && direction !== "decrease")) {
+    throw new PlanError(`task ${id}: symptom_query requires a ledger-grep pattern and increase|decrease direction`);
+  }
+  try { new RegExp(pattern); }
+  catch (error) { throw new PlanError(`task ${id}: invalid symptom_query pattern: ${String(error)}`); }
+  return { pattern, direction };
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -109,6 +130,7 @@ export interface Task {
   depends_on: string[];
   plan_refs?: string[];
   goal?: string;
+  symptom_query?: SymptomQuery;
   /** The PR corpus a machine-filed CI-learning shard was mined from. Written by the ci-learning
    *  rung on all 42 such shards and, until this field existed, DROPPED by the loader — so a title
    *  claiming "36 PULL REQUESTS" reached consumers with none attached. */
@@ -129,6 +151,8 @@ export interface Task {
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
   dispatch_hold?: boolean;
+  not_before?: string;
+  precondition?: TaskPrecondition;
   attempts: number;
   /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
    *  source (b) in `deriveStatus`). Never written by the machine. */
@@ -169,6 +193,106 @@ export interface Task {
    *  {@link Plan} instead of re-reading and re-parsing every shard to find it. Optional because a
    *  `Task` built by hand (fixtures, tests) never went through a parse and has no file to name. */
   sourcePath?: string;
+}
+
+export interface TaskPrecondition {
+  read: string[];
+  expect: string;
+}
+
+export interface TaskPreconditionOptions {
+  clock?: Clock;
+  readPrecondition?: (args: string[]) => string;
+}
+
+export type UnmetTaskPrecondition =
+  | { reason: "not-before"; not_before: string }
+  | { reason: "invalid-not-before" | "invalid-precondition" | "read-failed"; error: string }
+  | { reason: "recursive-read" }
+  | { reason: "unexpected-result"; expected: string; actual: string };
+
+/** BACKSTOP: kill a stalled precondition read so it cannot hold the dispatcher indefinitely. */
+export const PRECONDITION_TIMEOUT_MS = 5_000;
+/** PRIMARY CONTROL: bound expected and captured precondition output to 64 KiB. */
+export const PRECONDITION_MAX_BYTES = 64 * 1024;
+const PRECONDITION_READ_GUARD = "RMD_TASK_PRECONDITION_READ";
+const PRECONDITION_RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+
+function validateNotBefore(value: unknown, id: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}(?:T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.test(value) ||
+      !Number.isFinite(Date.parse(value)) ||
+      fixedClock(Date.parse(`${value.slice(0, 10)}T00:00:00Z`)).iso().slice(0, 10) !== value.slice(0, 10)) {
+    throw new PlanError(`task ${id}: not_before must be a valid ISO date or timestamp with a timezone`);
+  }
+  return value;
+}
+
+function validatePrecondition(value: unknown, id: string): TaskPrecondition | undefined {
+  if (value === undefined) return undefined;
+  const p = value as TaskPrecondition | null;
+  if (!p || !Array.isArray(p.read) || p.read.length < 1 || p.read.length > 32 ||
+      !p.read.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 1024 && !arg.includes("\0")) ||
+      typeof p.expect !== "string" || p.expect.trim().length === 0 || Buffer.byteLength(p.expect) > PRECONDITION_MAX_BYTES) {
+    throw new PlanError(`task ${id}: precondition must be {read: [rmd read arguments], expect: nonempty string} within the reader bounds`);
+  }
+  const [verb, ...args] = p.read;
+  const allowed = (verb === "--help" && args.length === 0) ||
+    ((verb === "status" || verb === "doctor") && (args.length === 0 || (args.length === 1 && args[0] === "--json"))) ||
+    (verb === "ledger-grep" && args.length === 1) ||
+    ((verb === "trace" || verb === "pr-owner") && args.length === 1 && !args[0].startsWith("-"));
+  if (!allowed) throw new PlanError(`task ${id}: precondition.read must name an allowed rmd read (--help, status, doctor, ledger-grep, trace, pr-owner)`);
+  return { read: [...p.read], expect: p.expect };
+}
+
+export type PreconditionCommandRunner = (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding) => string;
+
+/** W1-T5632: `timeoutMs` is the kill bound, injected by tests; production callers pass nothing. */
+export function readTaskPrecondition(args: string[], run: PreconditionCommandRunner = execFileSync,
+  timeoutMs: number = PRECONDITION_TIMEOUT_MS): string {
+  validatePrecondition({ read: args, expect: "validation" }, "precondition-reader");
+  return run(PRECONDITION_RMD_BIN, args, {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: PRECONDITION_MAX_BYTES,
+    killSignal: "SIGKILL",
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, RMD_SELF_SYNC_DONE: "1", [PRECONDITION_READ_GUARD]: "1" },
+  });
+}
+
+export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions = {}): UnmetTaskPrecondition | undefined {
+  if (task.not_before !== undefined) {
+    try {
+      validateNotBefore(task.not_before, task.id);
+      const now = (opts.clock ?? systemClock).now();
+      if (!Number.isFinite(now)) throw new PlanError("precondition clock is not finite");
+      // expiring-fixture: exempt -- valid date fixtures inject fixedClock and exercise the boundary.
+      if (now < Date.parse(task.not_before)) return { reason: "not-before", not_before: task.not_before };
+    } catch (error) {
+      return { reason: "invalid-not-before", error: String(error) };
+    }
+  }
+  if (task.precondition === undefined) return undefined;
+  let precondition: TaskPrecondition;
+  try {
+    precondition = validatePrecondition(task.precondition, task.id)!;
+  } catch (error) {
+    return { reason: "invalid-precondition", error: String(error) };
+  }
+  if (process.env[PRECONDITION_READ_GUARD] === "1") return { reason: "recursive-read" };
+  try {
+    const output = (opts.readPrecondition ?? readTaskPrecondition)([...precondition.read]);
+    if (Buffer.byteLength(output) > PRECONDITION_MAX_BYTES) throw new PlanError("precondition output exceeds the reader bound");
+    const actual = output.trim();
+    const expected = precondition.expect.trim();
+    if (actual !== expected) return { reason: "unexpected-result", expected: expected.slice(0, 1024), actual: actual.slice(0, 1024) };
+  } catch (error) {
+    return { reason: "read-failed", error: String(error).slice(0, 1024) };
+  }
+  return undefined;
 }
 
 /**
@@ -241,31 +365,104 @@ export interface MachineFilingAdmissionContext {
 
 const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
+/** What may own a ci-friction cause: code under src/ or scripts/, or — since the gardener resolves a
+ *  check to the workflow job that declares it (#10428) — that workflow file. A workflow-owned remedy
+ *  still parks for the judge; drain routes its build to an operator (W1-T5351). */
+const CI_FRICTION_OWNER = /^(?:src|scripts)\/|^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/** The machine remedy families whose record names the code that owns a cost plus the NEW regression
+ *  test proving it fell: ci-friction (a CI round's cause) and flow-regression (a slowed PR stage, owned
+ *  by the sweep or the CI workflow, flow-gardener.ts's STAGE_OWNER). */
+const CODE_OWNED_REMEDY_ORIGINS = ["ci-friction:", "flow-regression:"] as const;
+
 function isCiFrictionRemedyProposal(task: Task): boolean {
   const files = task.files ?? [];
   return (
-    task.origin?.startsWith("ci-friction:") === true &&
+    CODE_OWNED_REMEDY_ORIGINS.some((prefix) => task.origin?.startsWith(prefix) === true) &&
+    files.some((f) => CI_FRICTION_OWNER.test(f)) &&
+    files.every((f) => CI_FRICTION_OWNER.test(f) || NEW_TEST_FILE.test(f))
+  );
+}
+
+/** A hot-file restructuring (W1-T4803): the hot file its origin names, first, plus the NEW regression
+ *  test proving two pull requests no longer conflict on it, and `.gitattributes` when a merge driver is
+ *  the remedy. The hot file is never a source module (hot-file-gardener.ts's hotFileRemedy). */
+function isHotFileRemedyProposal(task: Task): boolean {
+  const files = task.files ?? [];
+  const hot = task.origin?.startsWith("hot-file:") === true ? task.origin.slice("hot-file:".length) : undefined;
+  return hot !== undefined && files[0] === hot && files.slice(1).every((f) => NEW_TEST_FILE.test(f) || f === ".gitattributes");
+}
+
+/** The origins of the draft -> measure -> escalate ladder (flow-remedy-gardener.ts's LadderKind prefixes): the flow
+ *  gardener's blocker remedies and, W1-T7421, the fix-lane gardener's defect-class remedies share one admitted shape. */
+const LADDER_REMEDY_ORIGINS = ["flow-blocker:", "fix-lane:"] as const;
+
+function isFlowBlockerRemedyShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return (
+    task.author_class === "machine" &&
+    task.status !== "blocked" &&
+    (task.depends_on ?? []).length === 0 &&
+    LADDER_REMEDY_ORIGINS.some((prefix) => task.origin?.startsWith(prefix) === true) &&
     files.some((f) => /^(src|scripts)\//.test(f)) &&
     files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
   );
 }
 
+function isFlowBlockerRemedyProposal(task: Task): boolean {
+  return task.verify === "human" && isFlowBlockerRemedyShape(task);
+}
+
+/** The machine-filing judge's `proceed` ruling releases a parked flow remedy to verify:auto; its new test
+ *  path stays admissible. The ruling's pin is checked by machineAuthorVerifyViolation in the same lint. */
+function isJudgeReleasedFlowBlockerRemedy(task: Task): boolean {
+  return task.verify === "auto" && task.risk_ruling?.action === "proceed" && isFlowBlockerRemedyShape(task);
+}
+
 function isParkedMachineProposal(task: Task): boolean {
-  if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" && (task.depends_on ?? []).length === 0 && isCiFrictionRemedyProposal(task)) {
-    return true;
-  }
+  if (isFlowBlockerRemedyProposal(task)) return true;
+  if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
+      (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
-    task.files?.length === 1 &&
-    ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
-      ((task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) &&
-        task.files[0] === "src/lib/affected-suites.ts") ||
-      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
-      (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))
+    (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
+      (task.files?.length === 1 &&
+        ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+          (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
+          (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
+}
+
+/** Where a narrow selector edge repair's regression test lives. Every narrow edge adds a line to
+ *  src/lib/affected-suites.ts that no existing test exercises, so the filer declares this test beside
+ *  it (#10457): #10073, #10250, #10306 and #10441 were each covered by hand. */
+export const SELECTOR_SHADOW_MISS_TEST_PATH = "test/the-affected-suite-selector-runs-in-shadow.test.ts";
+
+/** A selector-shadow edge repair: the selector alone (filed before #10457), or the selector and its
+ *  regression test, in that order, as selectorShadowMissTask writes it. */
+function isSelectorShadowEdgeShape(task: Task): boolean {
+  const files = task.files ?? [];
+  if (files[0] !== "src/lib/affected-suites.ts") return false;
+  if (task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) {
+    return files.length === 1 || (files.length === 2 && files[1] === SELECTOR_SHADOW_MISS_TEST_PATH);
+  }
+  return isSelectorShadowStructuralShape(task);
+}
+
+/** A structural selector repair (W1-T4839): the selector and the NEW regression test it must add. */
+function isSelectorShadowStructuralShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("selector-shadow-structural:") === true && files.length === 2 &&
+    files[0] === "src/lib/affected-suites.ts" && /^test\/affected-suites-selects-[\w.-]+\.test\.ts$/.test(files[1]!);
+}
+
+/** A flake incident (W1-T6406): the one existing test file whose intermittent failure it names. */
+function isFlakeIncidentShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("flake-incident:") === true && files.length === 1 && NEW_TEST_FILE.test(files[0]!);
 }
 
 function req<T>(v: T | undefined, field: string, id: string): T {
@@ -449,6 +646,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       repo: req(e.repo as string, "repo", id),
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
       goal: typeof e.goal === "string" ? e.goal : undefined,
+      symptom_query: validateSymptomQuery(e.symptom_query, id),
       plan_refs: Array.isArray(e.plan_refs) ? (e.plan_refs as string[]) : undefined,
       ci_learning_prs: Array.isArray(e.ci_learning_prs)
         ? (e.ci_learning_prs as unknown[]).filter((n): n is number => typeof n === "number")
@@ -460,6 +658,8 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
+      not_before: validateNotBefore(e.not_before, id),
+      precondition: validatePrecondition(e.precondition, id),
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,
       budget_usd: e.budget_usd as number | undefined,
@@ -619,33 +819,119 @@ export function loadPlan(
 export interface QuarantinedTask {
   id: string;
   files: string[];
-  reason: "duplicate_id" | "depends_on_quarantined";
+  reason: "duplicate_id" | "depends_on_quarantined" | "shard_invalid";
+  error?: string;
 }
 
-/** W1-T4409 — {@link loadPlan} for a long-running daemon: a duplicated id and its dependents are held out and
- *  reported, never thrown, so one bad filing cannot take the daemon down. Every other rule still throws. */
+/** W1-T4409 — {@link loadPlan} for a long-running daemon: a duplicated id, an unloadable shard and their dependents
+ *  are held out and reported, never thrown, so one bad filing cannot take the daemon down. Everything else throws. */
 export function loadPlanQuarantiningDuplicates(
   path: string,
   io: FileIntegrityIO = defaultIntegrityIO,
   shardDir: string = join(dirname(path), "tasks.d"),
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
   const duplicateFiles = new Map<string, string[]>();
-  const merged = readMergedPlan(path, io, shardDir, (id, earlierPath, laterPath) => {
-    recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath);
-  });
-  return quarantineDuplicates(merged.tasks, duplicateFiles, path);
+  const invalid: QuarantinedTask[] = [];
+  const merged = readMergedPlan(
+    path,
+    io,
+    shardDir,
+    (id, earlierPath, laterPath) => recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath),
+    (file, err, text) => invalid.push(...invalidShard(file, err, text)),
+  );
+  return quarantineDuplicates(merged.tasks, duplicateFiles, path, invalid);
 }
 
-/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine, for the core daemon. */
-export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>): {
+type CachedPlanBlob = {
+  hash: string;
+  label: string;
+  tasks: Task[];
+  duplicates: string[];
+  error?: { prefix: "yaml" | "task" | "plain"; message: string };
+};
+
+/** One path's current pin only. A merge replaces the entries after validation succeeds. */
+export class PlanBlobCache {
+  entries = new Map<string, CachedPlanBlob>();
+  parsedBlobs = 0;
+  reusedBlobs = 0;
+}
+
+function cachedBlobParser(cache: PlanBlobCache, next: Map<string, CachedPlanBlob>, counts: { parsedBlobs: number; reusedBlobs: number }): typeof parseTasksFromYaml {
+  return (text, label, onDuplicate) => {
+    // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
+    const path = label.slice(label.indexOf(":") + 1);
+    const hash = createHash("sha256").update(text, "utf8").digest("hex");
+    let entry = cache.entries.get(path);
+    if (entry?.hash === hash) {
+      counts.reusedBlobs++;
+      if (entry.label !== label) entry = { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
+    } else {
+      counts.parsedBlobs++;
+      entry = { hash, label, tasks: [], duplicates: [] };
+      try {
+        entry.tasks = parseTasksFromYaml(text, label, (id) => entry!.duplicates.push(id));
+      } catch (err) {
+        if (!(err instanceof PlanError)) throw err;
+        // Strip only the diagnostic's generated prefix, never occurrences in the author's YAML.
+        const yamlPrefix = `plan is not valid YAML (${label}): `;
+        const taskPrefix = `${label}: task `;
+        entry.error = err.message.startsWith(yamlPrefix)
+          ? { prefix: "yaml", message: err.message.slice(yamlPrefix.length) }
+          : err.message.startsWith(taskPrefix)
+            ? { prefix: "task", message: err.message.slice(taskPrefix.length) }
+            : { prefix: "plain", message: err.message };
+      }
+    }
+    next.set(path, entry);
+    for (const id of entry.duplicates) onDuplicate?.(id);
+    if (entry.error) {
+      const prefix = entry.error.prefix === "yaml" ? `plan is not valid YAML (${label}): ` : entry.error.prefix === "task" ? `${label}: task ` : "";
+      throw new PlanError(prefix + entry.error.message);
+    }
+    return entry.tasks;
+  };
+}
+
+/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine; `blobs[0]`, the monolith, stays fatal.
+ *  W1-T6262: optional per-path content reuse; all duplicates and dependencies are checked on every merge. */
+export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>, cache?: PlanBlobCache): {
   plan: Plan;
   quarantined: QuarantinedTask[];
 } {
   const duplicateFiles = new Map<string, string[]>();
-  const tasks = mergeBlobTasks(blobs, (id, earlierLabel, laterLabel) =>
-    recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
+  const invalid: QuarantinedTask[] = [];
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
+  const tasks = mergeBlobTasks(
+    blobs,
+    (id, earlierLabel, laterLabel) => recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
+    (label, err, text) => invalid.push(...invalidShard(label, err, text)),
+    cache ? cachedBlobParser(cache, next, counts) : parseTasksFromYaml,
   );
-  return quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan");
+  const read = quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
+  if (cache) {
+    cache.entries = next;
+    Object.assign(cache, counts);
+  }
+  return read;
+}
+
+type OnInvalidShard = (file: string, err: PlanError, text: string) => void;
+
+function invalidShard(file: string, err: PlanError, text: string): QuarantinedTask[] {
+  const ids = [...new Set([...text.matchAll(/^- +id: *["']?([^\s"'#]+)/gm)].map((m) => m[1]!))];
+  return (ids.length > 0 ? ids : [file]).map((id) => ({ id, files: [file], reason: "shard_invalid", error: err.message }));
+}
+
+function parseShard(text: string, file: string, onDuplicate: ((id: string) => void) | undefined, onInvalid: OnInvalidShard | undefined, parse: typeof parseTasksFromYaml = parseTasksFromYaml): Task[] {
+  try {
+    return parse(text, file, onDuplicate);
+  } catch (err) {
+    if (!onInvalid || !(err instanceof PlanError)) throw err;
+    onInvalid(file, err, text);
+    return [];
+  }
 }
 
 function recordDuplicate(into: Map<string, string[]>, id: string, earlier: string, later: string): void {
@@ -658,10 +944,14 @@ function quarantineDuplicates(
   all: Task[],
   duplicateFiles: Map<string, string[]>,
   fallbackPath: string,
+  invalid: QuarantinedTask[],
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
-  if (duplicateFiles.size === 0) return { plan: validatedPlan(all), quarantined: [] };
-  const quarantined: QuarantinedTask[] = [...duplicateFiles].map(([id, files]) => ({ id, files, reason: "duplicate_id" }));
-  const held = new Set(duplicateFiles.keys());
+  if (duplicateFiles.size === 0 && invalid.length === 0) return { plan: validatedPlan(all), quarantined: [] };
+  const quarantined: QuarantinedTask[] = [
+    ...[...duplicateFiles].map(([id, files]): QuarantinedTask => ({ id, files, reason: "duplicate_id" })),
+    ...invalid,
+  ];
+  const held = new Set([...duplicateFiles.keys(), ...invalid.map((q) => q.id)]);
   for (let grew = true; grew; ) {
     grew = false;
     for (const t of all) {
@@ -679,6 +969,7 @@ function readMergedPlan(
   io: FileIntegrityIO,
   shardDir: string,
   onDuplicate?: (id: string, earlierPath: string | undefined, laterPath: string) => void,
+  onInvalidShard?: OnInvalidShard,
 ): Plan {
   let text: string;
   try {
@@ -701,7 +992,7 @@ function readMergedPlan(
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
-    for (const t of parseTasksFromYaml(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)))) {
+    for (const t of parseShard(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)), onInvalidShard)) {
       const earlier = byId.get(t.id);
       if (earlier) {
         if (!onDuplicate) {
@@ -769,11 +1060,7 @@ export function loadPlanAtRef(
   } catch {
     shardListing = "";
   }
-  const shardRelPaths = shardListing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
-    .sort();
+  const shardRelPaths = shardPathsFromListing(shardListing);
   // ONE `git cat-file --batch` for every shard, never one `git show` per shard: the spawn count
   // is what made this O(tasks ever filed) on a path the write-scoped approve gate runs
   // synchronously (see {@link readBlobsAtRef} for the measurement).
@@ -788,11 +1075,77 @@ export function loadPlanAtRef(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
+  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
+}
+
+/** The shard paths `git ls-tree --name-only` listed: yaml only, sorted. Shared by {@link loadPlanAtRef} and its awaited form. */
+function shardPathsFromListing(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
+    .sort();
+}
+
+function withShardBlobs(
+  blobs: Array<{ label: string; text: string }>,
+  ref: string,
+  shardRelPaths: string[],
+  shardBlobs: string[],
+): Array<{ label: string; text: string }> {
   shardRelPaths.forEach((shardRelPath, i) => {
     blobs.push({ label: `${ref}:${shardRelPath}`, text: shardBlobs[i] });
   });
+  return blobs;
+}
 
-  return mergePlanBlobs(blobs);
+/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the sync default's 64 MiB buffer. */
+export function defaultGitRunnerAsync(repoRoot: string): (args: string[], stdin?: string) => Promise<string> {
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(stdout);
+      });
+      // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+    });
+}
+
+/**
+ * {@link loadPlanAtRef} with every git call AWAITED (W1-T7743): the same plan, the same {@link PlanError}s, the same
+ * shard listing, one `cat-file --batch` and {@link mergePlanBlobs} merge, but no `execFileSync` on the caller's event
+ * loop. The daemon's per-tick plan reload and the reviewer's at-head read use this form.
+ */
+export async function loadPlanAtRefAsync(
+  repoRoot: string,
+  planRelPath: string,
+  ref = "HEAD",
+  runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
+): Promise<Plan> {
+  let monolithBlob: string;
+  try {
+    monolithBlob = await runGit(["show", `${ref}:${planRelPath}`]);
+  } catch (err) {
+    throw new PlanError(`cannot read plan file at ${ref}:${planRelPath} in ${repoRoot}: ${String(err)}`);
+  }
+  const blobs: Array<{ label: string; text: string }> = [{ label: `${ref}:${planRelPath}`, text: monolithBlob }];
+  const shardRelDir = join(dirname(planRelPath), "tasks.d");
+  let shardListing = "";
+  try {
+    shardListing = await runGit(["ls-tree", "--name-only", ref, `${shardRelDir}/`]);
+  } catch {
+    shardListing = ""; // no tasks.d/ at this ref: the same tolerance loadPlanAtRef applies
+  }
+  const shardRelPaths = shardPathsFromListing(shardListing);
+  let shardBlobs: string[];
+  try {
+    shardBlobs = await readBlobsAtRefAsync(runGit, ref, shardRelPaths);
+  } catch (err) {
+    throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
+  }
+  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
 }
 
 /**
@@ -826,8 +1179,24 @@ export type GitBlobRunner = (args: string[], stdin?: string) => string;
  */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const request = relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
-  const raw = runGit(["cat-file", "--batch"], request);
+  return parseBlobBatch(runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+}
+
+/** {@link readBlobsAtRef} through an AWAITED runner: the same one `cat-file --batch`, request and framing. */
+export async function readBlobsAtRefAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  ref: string,
+  relPaths: string[],
+): Promise<string[]> {
+  if (relPaths.length === 0) return [];
+  return parseBlobBatch(await runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+}
+
+function blobBatchRequest(ref: string, relPaths: string[]): string {
+  return relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+}
+
+function parseBlobBatch(raw: string, ref: string, relPaths: string[]): string[] {
   const buf = Buffer.from(raw, "utf8");
   const texts: string[] = [];
   let off = 0;
@@ -861,11 +1230,14 @@ export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): P
 function mergeBlobTasks(
   blobs: Array<{ label: string; text: string }>,
   onDuplicate?: (id: string, earlierLabel: string, laterLabel: string) => void,
+  onInvalidShard?: OnInvalidShard,
+  parse: typeof parseTasksFromYaml = parseTasksFromYaml,
 ): Task[] {
   const tasks: Task[] = [];
   const labelOf = new Map<string, string>();
-  for (const { label, text } of blobs) {
-    for (const t of parseTasksFromYaml(text, label, onDuplicate && ((id) => onDuplicate(id, label, label)))) {
+  for (const [i, { label, text }] of blobs.entries()) {
+    const sameFile = onDuplicate && ((id: string) => onDuplicate(id, label, label));
+    for (const t of parseShard(text, label, sameFile, i === 0 ? undefined : onInvalidShard, parse)) {
       const earlier = labelOf.get(t.id);
       if (earlier !== undefined) {
         if (!onDuplicate) throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);
@@ -988,8 +1360,11 @@ export function machineFilingAdmissionViolations(
 
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
-  const newTestAllowed = isCiFrictionRemedyProposal(task);
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
+  const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
+    isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
+  // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
+  const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

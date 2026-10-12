@@ -1,19 +1,22 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { parseDocument } from "yaml";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
+import { checkoutHeadStamp } from "./checkout-head.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { gardenLedgerBucket } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
-import { renderMachineShard } from "./machine-filing.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
@@ -21,9 +24,11 @@ import {
   ciFrictionRemedyRationale,
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
+  ownerSearchTerms,
   parseCiFrictionOrigin,
   type CiFrictionCauseState,
   type CiFrictionOwner,
+  type CiFrictionOwnershipEvidence,
   type CiFrictionRemedyTask,
   type OwnerSearch,
   type RemedyRound,
@@ -31,6 +36,7 @@ import {
   replayCiFrictionLadder,
 } from "./ci-friction-remedy.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { trailerTaskIds } from "./field-trials-github.js";
 import type { LedgerRecord } from "./retro.js";
 
 /**
@@ -134,7 +140,50 @@ export const CI_FRICTION_LEDGER_STEPS: readonly string[] = [
   "fix.base_refreshed", "ci-friction.remedy_escalated", "ci-friction.scorecard",
 ];
 
-export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): LedgerRecord[] {
+/** Bump whenever {@link CI_FRICTION_LEDGER_STEPS} or {@link ciFrictionHeadWitnesses} changes: each keys a durable
+ *  per-rotation digest ({@link ledgerRotationDigests}), and a stale one must not answer for the new reduction. */
+export const CI_FRICTION_DIGEST_VERSION = "1";
+
+/** One rotation's head-to-PR witnesses, reduced the way the association recovery below reads them: the first
+ *  row per head sha that names a pull request, as `{ step, head_sha, pr_number }`. */
+export function ciFrictionHeadWitnesses(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const seen = new Set<string>();
+  const witnesses: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (typeof row.head_sha !== "string" || seen.has(row.head_sha)) continue;
+    const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
+    if (pr === undefined) continue;
+    seen.add(row.head_sha);
+    witnesses.push({ step: row.step, head_sha: row.head_sha, pr_number: pr });
+  }
+  return witnesses;
+}
+
+/** The durable rotation digests the ci-friction history read answers its archives from. */
+export interface CiFrictionRotationDigests {
+  steps: LedgerRotationHook;
+  witnesses: LedgerRotationHook;
+}
+
+export function ciFrictionRotationDigests(stateDir: string, fsDeps?: LedgerGrepFsDeps): CiFrictionRotationDigests {
+  const wanted = new Set(CI_FRICTION_LEDGER_STEPS);
+  return {
+    steps: ledgerRotationDigests(stateDir, (rows) => rows.filter((row) => wanted.has(row.step as string)),
+      { holder: "ci-friction-steps", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+    witnesses: ledgerRotationDigests(stateDir, ciFrictionHeadWitnesses,
+      { holder: "ci-friction-head-witnesses", reducerVersion: CI_FRICTION_DIGEST_VERSION }, fsDeps).rotationRecords,
+  };
+}
+
+/**
+ * The gardener's whole ledger history. Archived rotations are answered from durable digests, so a pass after
+ * the first decompresses only rotations cut since the last one; the rows are the full union's, unchanged.
+ */
+export function readCiFrictionLedgerRecords(
+  stateDir: string,
+  reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  digests: CiFrictionRotationDigests = ciFrictionRotationDigests(stateDir),
+): LedgerRecord[] {
   const checked = (options: Parameters<typeof readLedgerUnionRecordsSync>[1]): LedgerRecord[] => {
     const read = reader(stateDir, options);
     if (!read.ok) {
@@ -147,7 +196,7 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
     }
     return read.rows as LedgerRecord[];
   };
-  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true });
+  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.steps });
   const byRun = runPrIndex(rows);
   const byHead = headPrIndex(rows);
   const missing = new Set<string>();
@@ -159,7 +208,8 @@ export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof rea
   // the retained dispatches need, preserving that attribution without keeping every unrelated row.
   const pattern = new RegExp([...missing].map(head => JSON.stringify(head).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
   const recovered = new Set<string>();
-  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true })) {
+  // The pattern narrows the live file; each archive answers with its witnesses, which the head check below narrows.
+  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true, rotationRecords: digests.witnesses })) {
     if (typeof row.head_sha !== "string" || !missing.has(row.head_sha) || recovered.has(row.head_sha)) continue;
     const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
     if (pr === undefined) continue;
@@ -289,6 +339,12 @@ function causeFromDispatchMode(mode: unknown): CiFrictionCause {
  *  removed so two rounds of the same failure share one signature. `undefined` when neither exists. */
 export function ciFailureSignature(logTail: string): string | undefined {
   const lines = logTail.split("\n");
+  const pooled = poolOrTimeoutSignature(lines);
+  if (pooled !== undefined) return pooled;
+  // A test runner's log speaks only through its own failure markers: a line a passing test printed
+  // on purpose (a fixture's "worktree materialization failed", #10392) is never its failure.
+  const runner = testRunnerFailureSignature(lines);
+  if (runner !== undefined) return runner;
   const failing = lines.filter((l) => /not ok|✖|FAIL|fail(?:ed|ure)?\b|Error|refused|BLOCKED/.test(l));
   // The file a failure line names, else (a stack frame under it) the first file the tail names.
   for (const l of failing.length > 0 ? [...failing, ...lines] : []) {
@@ -302,6 +358,83 @@ export function ciFailureSignature(logTail: string): string | undefined {
     .replace(/\d+/g, "N")
     .trim();
   return first ? first.slice(0, 120) : undefined;
+}
+
+/** W1-T8038: the runner's own words for a job killed at its ceiling or cancelled (sweep.ts keeps the
+ *  same pattern as RUNNER_TIMEOUT_LINE; this module must not import it, so it is stated twice). */
+const CI_RUNNER_TIMEOUT_LINE =
+  /exceeded the maximum execution time|The (?:operation|job|run) was canceled|received a shutdown signal|SHARD HANG\W+the matrix was cancelled/i;
+
+/** W1-T8038: the signature of a pool defect, a pooled failure that passes isolated, or a job killed at
+ *  its ceiling — the shapes whose red names no test on its own. `undefined` when the tail is none of them
+ *  (or is a timeout that nevertheless names a real failing test), so the ordinary arms decide. */
+export function poolOrTimeoutSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)(?: \(first failing alongside it: ([^)]+)\))?/.exec(b)).find((m) => m);
+  if (defect) {
+    const leaker = defect[1]!;
+    return leaker === "not isolated to one file"
+      ? "pool defect: leak not isolated to one file"
+      : `pool defect: ${leaker} leaks${defect[2] ? ` into ${defect[2]}` : ""}`;
+  }
+  const poolFailed = bodies.some((b) => /^pure-test-pool: the pool of \d+ file\(s\) failed/.test(b));
+  const isolatedPassed = bodies.some((b) => /^pure-test-pool: (?:every pooled file passes isolated|rerun run complete)/.test(b));
+  const alsoFailsIsolated = bodies.some((b) => /^pure-test-pool: the pooled files also fail isolated/.test(b));
+  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
+  if (poolFailed && isolatedPassed && !alsoFailsIsolated) {
+    const firstNotOk = bodies.findIndex((b) => /^not ok \d+ - /.test(b));
+    const named = firstNotOk < 0 ? undefined : bodies.slice(firstNotOk).map((b) => testFileRe.exec(b)?.[1]).find((f) => f !== undefined);
+    return `pool failure: ${named ?? "pooled not ok"} fails pooled, passes isolated`;
+  }
+  if (!bodies.some((b) => CI_RUNNER_TIMEOUT_LINE.test(b))) return undefined;
+  const runner = testRunnerFailureSignature(lines);
+  if (runner !== undefined && runner !== RED_WITH_NO_FAILING_TEST) return runner;
+  const failZero = bodies.some((b) => /^(?:#|ℹ) fail 0\b/.test(b) || /^pure-test-pool: \w+ run complete\b.*# fail 0\b/.test(b));
+  const ran = bodies.some((b) => /^(?:#|ℹ) (?:tests|pass) [1-9]/.test(b) || /^pure-test-pool: \w+ run complete\b/.test(b));
+  if (failZero && ran) return "timed out after a passing summary";
+  for (let i = bodies.length - 1; i >= 0; i -= 1) {
+    const unfinished = /Last started unfinished test: (?!unavailable)(.+?)(?: \(.*\))?\.?$/.exec(bodies[i]!)?.[1]
+      ?? /Last test started: (?!none\b)(.+?)\.?$/.exec(bodies[i]!)?.[1];
+    if (unfinished) return `timed out during ${unfinished}`.slice(0, 120);
+  }
+  return "timed out with no test result";
+}
+
+/** The signature of a red check whose log is a test runner's but names no failing test. */
+export const RED_WITH_NO_FAILING_TEST = "red with no failing test";
+
+/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
+ *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
+ *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
+  if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
+  const named: string[] = [];
+  let firstNamedAt = -1;
+  for (const [i, b] of bodies.entries()) {
+    const name = /^\s*not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]
+      ?? /^\s*✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(b)?.[1]
+      ?? /^FLAKE-RETRY: .* — (?!\(no test name)(.+)$/.exec(b)?.[1]
+      ?? /COVERAGE-REPORT-FAILED: .*/.exec(b)?.[0];
+    if (name !== undefined && !/^failing tests:?$/.test(name.trim())) {
+      if (firstNamedAt < 0) firstNamedAt = i;
+      named.push(name.trim());
+    }
+  }
+  const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
+  const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
+  if (file !== undefined) return file;
+  // A failing test named only by its title: the stack frame under the failure names its file. Only
+  // lines FROM the first failure on are read, and never a passing `ok`/`# Subtest` line.
+  if (firstNamedAt >= 0) {
+    for (const b of bodies.slice(firstNamedAt)) {
+      if (/^\s*(?:ok \d+ - |# Subtest: )/.test(b)) continue;
+      const frameFile = testFileRe.exec(b)?.[1];
+      if (frameFile !== undefined) return frameFile;
+    }
+  }
+  const first = named[0]?.replace(/\b[0-9a-f]{7,40}\b/g, "").replace(/\d+/g, "N").trim();
+  return first ? first.slice(0, 120) : RED_WITH_NO_FAILING_TEST;
 }
 
 /** A refused commit's reason, stripped of its volatile parts, so every round refused the same way
@@ -514,18 +647,25 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
   const merges = new Map<string, string>();
   for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE, "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
     const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map((v) => v.trim()).filter(Boolean)) {
-      // `git log` is newest first, so the last write is the earliest merge naming the task.
-      if (at) merges.set(id, at);
+    for (const id of (ids ?? "").split(",").map((value) => value.trim()).filter(Boolean)) if (at) merges.set(id, at);
+  }
+  // Source registration needs a delivery on main's first-parent history. A feature commit's
+  // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
+  const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
+  for (const block of git(["log", refName, CI_FRICTION_HISTORY_SINCE,
+    "--format=%x01%cI%x09%H%x00%B%x00", "--name-only", "--first-parent", "--diff-merges=first-parent", "--max-count=4096"]).split("\x01")) {
+    const fields = block.split("\x00");
+    if (fields.length !== 3) continue;
+    const [at, revision] = fields[0]!.split("\t");
+    if (!at || !Number.isFinite(Date.parse(at)) || !revision || !/^[0-9a-f]{40}$/.test(revision)) continue;
+    const commit = { at, revision, changed: fields[2]!.split("\n").filter(line => /^(src|scripts)\//.test(line)) };
+    for (const id of trailerTaskIds(fields[1])) {
+      let group = builds.get(id);
+      if (group === undefined) { group = []; builds.set(id, group); }
+      group.push(commit);
     }
   }
   const tasks: CiFrictionRemedyTask[] = [];
-  let flips: Map<string, string> | undefined;
-  const flipOf = (path: string): string | undefined => {
-    // Only a merged task with no trailer needs this walk, so it runs at most once and only then.
-    flips ??= pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...paths]), "oldest");
-    return flips.get(path);
-  };
   for (const path of paths) {
     let parsed: ReturnType<typeof loadPlanFromYaml>;
     try {
@@ -538,9 +678,37 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      let mergedAt = merges.get(task.id);
-      if (!mergedAt && task.status === "merged") mergedAt = flipOf(path);
+      const mergedAt = merges.get(task.id);
       tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(mergedAt ? { mergedAt } : {}) });
+    }
+  }
+  const fallbackPaths = [...new Set(tasks.filter(task => task.status === "merged" && !task.mergedAt && task.path).map(task => task.path!))];
+  if (fallbackPaths.length > 0) {
+    const flips = pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...fallbackPaths]), "oldest");
+    for (const task of tasks) {
+      if (task.status === "merged" && !task.mergedAt && task.path) task.mergedAt = flips.get(task.path);
+    }
+  }
+  let sourceReads = 0;
+  for (const task of tasks) {
+    const owner = task.files.find((file) => /^(?:src|scripts)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|js|sh)$/.test(file)
+      && !file.endsWith(".test.ts") && !file.split("/").some((part) => part === "." || part === ".."));
+    const build = owner ? [...(builds.get(task.id) ?? [])].reverse().find((entry) => entry.changed.includes(owner)) : undefined;
+    if (!owner || !build) {
+      task.preventionSource = { state: "unavailable", reason: "no-credited-owning-source-build" };
+    } else if (sourceReads >= 32) {
+      task.preventionSource = { state: "unavailable", reason: "source-registration-read-cap" };
+    } else {
+      sourceReads += 1;
+      try {
+        const blob = git(["rev-parse", `${build.revision}:${owner}`]).trim();
+        task.preventionSource = /^[0-9a-f]{40}$/.test(blob)
+          ? { id: task.origin, taskId: task.id, causeKey: parseCiFrictionOrigin(task.origin)!.key,
+            path: owner, blob, mergeRevision: build.revision, mergedAt: build.at, workScope: "fix-worker-attempt" }
+          : { state: "unavailable", reason: "owning-source-blob-invalid" };
+      } catch {
+        task.preventionSource = { state: "unavailable", reason: "owning-source-blob-unreadable" };
+      }
     }
   }
   return tasks;
@@ -566,17 +734,187 @@ export function readCiFrictionPlanState(repoRoot: string, git?: CiFrictionGit): 
   return { tasks, ...(degraded ? { degraded } : {}), ...(unreadable.length > 0 ? { unreadable } : {}) };
 }
 
-/** The production owner search: literal `git grep -c` over fetched main's `src/` and `scripts/`, never a
- *  test file. A term no file names is an empty list, never an error. */
+/** Whether a job runs on the merge queue's group commit: its workflow declares `merge_group`, and a job
+ *  `if:` that branches on `github.event_name` names it. An `if:` that never reads the event is not a filter. */
+export function runsOnMergeGroup(on: unknown, jobIf: unknown): boolean {
+  const events = typeof on === "string" ? [on]
+    : Array.isArray(on) ? on.filter((event): event is string => typeof event === "string")
+    : on && typeof on === "object" ? Object.keys(on) : [];
+  if (!events.includes("merge_group")) return false;
+  if (typeof jobIf !== "string" || !jobIf.includes("github.event_name")) return true;
+  return /==\s*['"]merge_group['"]/.test(jobIf);
+}
+
+/** Why a check's declared workflow owner was not resolved, as a suffix for its escalation; undefined when it was not a gap. */
+function workflowGap(search: OwnerSearch, key: string, details: readonly string[]): string | undefined {
+  const family = key.startsWith("check:") ? ownerSearchTerms(key, details).at(-1) : undefined;
+  const gap = family === undefined ? undefined : search.workflowGaps?.().find(entry => entry.family === family);
+  return gap ? `; ${gap.reason}` : undefined;
+}
+
+/** GitHub's matrix expansion, as far as naming checks needs it: the product of each key's list, less
+ *  `exclude`, plus `include` (extending each original combination it does not contradict, else a new one). */
+export function expandWorkflowMatrix(matrix: unknown): Array<Record<string, unknown>> | string {
+  if (matrix === undefined) return [{}];
+  if (!matrix || typeof matrix !== "object" || Array.isArray(matrix)) return "matrix is not a literal mapping";
+  const spec = matrix as Record<string, unknown>;
+  const keys = Object.keys(spec).filter(key => key !== "include" && key !== "exclude");
+  let rows: Array<Record<string, unknown>> = keys.length > 0 ? [{}] : [];
+  for (const key of keys) {
+    const values = spec[key];
+    if (!Array.isArray(values)) return `matrix.${key} is not a literal list`;
+    rows = rows.flatMap(row => values.map(value => ({ ...row, [key]: value })));
+  }
+  const entries = (field: "include" | "exclude"): Array<Record<string, unknown>> | string => {
+    const list = spec[field] ?? [];
+    return Array.isArray(list) && list.every(item => item && typeof item === "object" && !Array.isArray(item))
+      ? list as Array<Record<string, unknown>> : `matrix.${field} is not a literal list of mappings`;
+  };
+  const exclude = entries("exclude");
+  const include = entries("include");
+  if (typeof exclude === "string") return exclude;
+  if (typeof include === "string") return include;
+  rows = rows.filter(row => !exclude.some(entry => Object.entries(entry).every(([key, value]) => row[key] === value)));
+  const originals = rows.length;
+  for (const entry of include) {
+    let extended = false;
+    for (const row of rows.slice(0, originals)) {
+      if (Object.entries(entry).every(([key, value]) => !keys.includes(key) || row[key] === value)) {
+        Object.assign(row, entry);
+        extended = true;
+      }
+    }
+    if (!extended) rows.push({ ...entry });
+  }
+  return rows;
+}
+
+/** The check names one job reports: its `name` rendered over each matrix combination, or why it cannot be. */
+export function workflowJobCheckNames(name: string, matrix: unknown): string[] | string {
+  if (!name.includes("${{")) return [name];
+  const rows = expandWorkflowMatrix(matrix);
+  if (typeof rows === "string") return rows;
+  const names = new Set<string>();
+  for (const row of rows) {
+    let failure: string | undefined;
+    const rendered = name.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (_, expression: string) => {
+      const key = /^matrix\.([\w-]+)$/.exec(expression)?.[1];
+      const value = key === undefined ? undefined : row[key];
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+      failure ??= `\${{ ${expression} }} has no literal value`;
+      return "";
+    });
+    if (failure !== undefined) return failure;
+    names.add(rendered);
+  }
+  return names.size > 0 ? [...names] : "matrix expands to no combination";
+}
+
+/** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
+ *  Missing paths are absence and failed git reads refuse the pass; a workflow shape it cannot name, or two
+ *  owners it cannot tell apart, is a gap for that check alone ({@link OwnerSearch.workflowGaps}). */
 export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
+  let revision: string | undefined;
+  const pinned = (): string => {
+    if (!revision) {
+      const source = git(["rev-parse", "--verify", `${refName}^{commit}`]).trim();
+      if (!/^[0-9a-f]{40}$/.test(source)) throw new Error(`ci-friction ownership: invalid revision for ${refName}`);
+      revision = source;
+    }
+    return revision;
+  };
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const workflowWitnesses = new Map<string, unknown>();
+  const workflowGaps = new Map<string, string>();
+  let workflowDocs: Array<{ file: string; document: ReturnType<typeof parseDocument> }> | undefined;
+  const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
+    pin: () => gitCiFrictionOwnerSearch(git, refName),
+    workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
+    workflowOwner: (family) => {
+      const source = pinned();
+      // The revision is pinned, so each workflow is read and parsed once per search, not once per check.
+      workflowDocs ??= git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
+        .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort()
+        .map(file => ({ file, document: parseDocument(git(["show", `${source}:${file}`])) }));
+      const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean }> = [];
+      // A workflow shape this reader cannot name is a gap for the checks it might own, never a failed pass:
+      // `related` gaps are jobs whose unexpandable name could be this check; `unread` ones are whole files.
+      const related: string[] = [];
+      const unread: string[] = [];
+      for (const { file, document } of workflowDocs) {
+        if (document.errors.length > 0) {
+          unread.push(`${file}: ${document.errors.map(error => error.message.split("\n")[0]).join("; ")}`);
+          continue;
+        }
+        const workflow = document.toJS();
+        if (!workflow || typeof workflow !== "object" || !workflow.jobs || typeof workflow.jobs !== "object" || Array.isArray(workflow.jobs)) {
+          unread.push(`${file}: unsupported jobs input`);
+          continue;
+        }
+        for (const [jobId, raw] of Object.entries(workflow.jobs)) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            unread.push(`${file}: unsupported job ${jobId}`);
+            continue;
+          }
+          const job = raw as { name?: unknown; if?: unknown; uses?: unknown; strategy?: { matrix?: unknown } };
+          const name = job.name === undefined ? jobId : job.name;
+          if (typeof name !== "string") {
+            unread.push(`${file}: unsupported name for ${jobId}`);
+            continue;
+          }
+          const declared = workflowJobCheckNames(name, job.strategy?.matrix);
+          if (typeof declared === "string") {
+            const prefix = name.split("${{")[0]!.replace(/[ (/-]+$/, "");
+            if (!prefix || identity(prefix) === identity(family) || identity(family).startsWith(`${identity(prefix)}-`) || identity(jobId) === identity(family))
+              related.push(`${file}:${jobId}: ${declared}`);
+            continue;
+          }
+          // A reusable-workflow caller (`uses:`) never reports its own name: its checks are `<name> / <called job>`.
+          const caller = typeof job.uses === "string";
+          if (!declared.some(check => caller ? family.toLowerCase().startsWith(`${check.toLowerCase()} / `) : identity(check) === identity(family))) continue;
+          matches.push({ file, jobId, witness: { file, jobId, name, matrix: name.includes("${{") ? job.strategy?.matrix : undefined },
+            queued: runsOnMergeGroup(workflow.on, job.if) });
+        }
+      }
+      // Two jobs may report one check name: ci.yml's `ci-gate` produces the required context on every PR
+      // push and on the merge queue's group commit, while ci-gate.yml's `ci-gate` only re-aggregates on a
+      // body `edited` event. The producer the merge queue gates on owns the check; the others are re-run
+      // variants of it. Throwing here instead (2026-10-09) failed every ci-friction inventory.
+      const queued = matches.filter(match => match.queued);
+      const owners = matches.length > 1 && queued.length === 1 ? queued : matches;
+      const gap = related.length > 0 ? `workflow ownership unsupported for ${family} at ${source}: ${related.join(", ")}`
+        : owners.length > 1 ? `workflow ownership ambiguous for ${family} at ${source}: ${owners.map(match => `${match.file}:${match.jobId}`).join(", ")}`
+        : owners.length === 0 && unread.length > 0 ? `workflow ownership unreadable for ${family} at ${source}: ${unread.join(", ")}`
+        : undefined;
+      if (gap !== undefined) {
+        workflowGaps.set(family, gap);
+        return undefined;
+      }
+      const match = owners[0];
+      if (!match) return undefined;
+      const variants = matches.filter(other => other !== match).map(other => `${other.file}:${other.jobId}`);
+      workflowWitnesses.set(`${identity(family)}:${match.file}`, match.witness);
+      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`
+        + (variants.length > 0 ? ` and runs it on merge_group (re-run variant not on the queue: ${variants.join(", ")})` : "")] };
+    },
+    evidence: (key, details, owner) => {
+      const source = pinned();
+      const family = key.startsWith("check:") ? ownerSearchTerms(key, details).at(-1) : undefined;
+      const witnesses = (owner?.files ?? []).map(file => ({ file,
+        witness: (family ? workflowWitnesses.get(`${identity(family)}:${file}`) : undefined) ?? git(["rev-parse", `${source}:${file}`]).trim() }));
+      return { revision: source, fingerprint: digest({ key, witnesses }) };
+    },
     filesContaining: (term) => {
+      const source = pinned();
       let out = "";
       try {
-        out = git(["grep", "-c", "-F", "-e", term, refName, "--", "src", "scripts"]);
+        // -w: a term found only inside larger identifiers ("ci" in "decision") names no code path.
+        out = git(["grep", "-c", "-F", "-w", "-e", term, source, "--", "src", "scripts"]);
       } catch (e) {
         // `git grep` exits 1 when nothing matches: no owner, which the ladder escalates.
-        if ((e as { status?: number }).status !== 1) throw e;
+        const failure = e as { status?: number; stderr?: unknown };
+        if (failure.status !== 1 || String(failure.stderr ?? "").trim()) throw e;
       }
       return out.split("\n").flatMap((line) => {
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
@@ -588,14 +926,11 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       });
     },
     fileExists: (file) => {
-      try {
-        git(["cat-file", "-e", `${refName}:${file}`]);
-        return true;
-      } catch (error) {
-        // `cat-file -e` signals a missing path only by failing: absent, and nothing else is claimed.
-        void error;
-        return false;
-      }
+      const source = pinned();
+      const listed = git(["ls-tree", "-r", "--name-only", source, "--", file]).split("\n");
+      if (!listed.includes(file)) return false;
+      git(["cat-file", "-e", `${source}:${file}`]);
+      return true;
     },
   };
 }
@@ -717,13 +1052,21 @@ export function appendCiFrictionTrendRow(logPath: string, atIso: string, priced:
 export type CiFrictionGardenClass = "draft";
 export const CI_FRICTION_GARDEN_CLASSES: readonly CiFrictionGardenClass[] = ["draft"];
 
+export interface CiFrictionOwnershipReconsideration {
+  origin: string;
+  oldRefusal: string;
+  evidence: CiFrictionOwnershipEvidence;
+  owner: CiFrictionOwner;
+  decision: "draft";
+}
+
 /** One cause the pass acts on: drafted at a rung against its owner, or escalated to a person. */
 export interface CiFrictionGardenAction extends GardenAction<CiFrictionGardenClass> {
   price: CiFrictionCausePrice;
   origin: string;
   rung: number;
   /** Where the cause stands — a `draft` carries its owner, an `escalate` its reason. */
-  decision: { kind: "draft"; owner: CiFrictionOwner; prior?: CiFrictionDraft["prior"] } | { kind: "escalate"; why: string; prior?: CiFrictionDraft["prior"] };
+  decision: { kind: "draft"; owner: CiFrictionOwner; prior?: CiFrictionDraft["prior"]; reconsideration?: CiFrictionOwnershipReconsideration } | { kind: "escalate"; why: string; prior?: CiFrictionDraft["prior"]; holdReason?: "no-owner" | "ladder-exhausted"; evidence?: CiFrictionOwnershipEvidence };
   /** Every cause priced in the pass, which ranks this one's dispatch priority. */
   priced?: CiFrictionCausePrice[];
 }
@@ -740,6 +1083,7 @@ export interface CiFrictionCauseLine {
 
 export interface CiFrictionInventory {
   priced: CiFrictionCausePrice[];
+  preventionSources?: { registrations: import("./prevention-source-evidence.js").PreventionSourceRegistration[]; unavailable: number };
   /** The cause this pass would act on, if any. */
   next?: { price: CiFrictionCausePrice; origin: string; rung: number; decision: CiFrictionGardenAction["decision"] };
   /** Where each of the costliest causes stands. */
@@ -749,6 +1093,8 @@ export interface CiFrictionInventory {
   handFixState?: { state: "observed" | "unmeasured"; count: number };
   /** Legacy field kept for the overseer's filing receipts: the cause (and rung) this pass acts on. */
   untracked?: CiFrictionCausePrice;
+  /** Checks whose declared workflow owner could not be resolved, and why; each resolved to no owner. */
+  workflowGaps?: Array<{ family: string; reason: string }>;
 }
 
 export interface CiFrictionGardenSources {
@@ -762,7 +1108,7 @@ export interface CiFrictionGardenSources {
   ownerSearch: OwnerSearch;
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
-  mintTaskId: (filingBranch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
 }
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
@@ -785,6 +1131,7 @@ export function ciFrictionLadder(input: {
   tasks: readonly CiFrictionRemedyTask[];
   receipts: ReadonlySet<string>;
   escalated: ReadonlySet<string>;
+  holds?: readonly LedgerRecord[];
   ownerSearch: OwnerSearch;
   nowMs: number;
 }): Pick<CiFrictionInventory, "next" | "ladder"> {
@@ -807,20 +1154,38 @@ export function ciFrictionLadder(input: {
     line.rung = s.rung;
     if (s.prior?.effect) line.effect = s.prior.effect.reason;
     const origin = ciFrictionRungOrigin(key, s.rung);
-    if (input.escalated.has(origin)) {
+    const held = input.escalated.has(origin);
+    if (held) line.state = "escalated";
+    const hold = input.holds?.filter(row => row.step === "ci-friction.remedy_escalated" && row.origin === origin).at(-1);
+    const legacyRefusal = `no code in src/ or scripts/ names ${key}, so no remedy can be drafted against it`;
+    const noOwnerHold = hold && (hold.hold_reason === "no-owner" || (hold.hold_reason === undefined && hold.why === legacyRefusal));
+    if (held && (s.state !== "draft" || !noOwnerHold)) {
       line.state = "escalated";
       continue;
     }
     if (next) continue;
     if (s.state === "escalate") {
-      next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior } };
+      next = { price, origin, rung: s.rung, decision: { kind: "escalate", why: `${s.rung - 1} remedy rung(s) did not move ${key}`, prior: s.prior, holdReason: "ladder-exhausted" } };
       continue;
     }
     const details = remedyRounds.filter((r) => r.causeKey === key && r.detail).map((r) => r.detail!);
     const owner = locateCiFrictionOwner(key, details, input.ownerSearch);
+    const evidence = input.ownerSearch.evidence?.(key, details, owner);
+    let reconsideration: CiFrictionOwnershipReconsideration | undefined;
+    if (held) {
+      line.state = "escalated";
+      const previous = hold?.ownership_evidence as CiFrictionOwnershipEvidence | undefined;
+      const consumed = input.holds?.some(row => row.step === "ci-friction.scorecard" &&
+        Array.isArray(row.ownership_reconsiderations) && row.ownership_reconsiderations.some(item =>
+          item?.origin === origin && item?.evidence?.fingerprint === evidence?.fingerprint));
+      if (!owner || !evidence || consumed || previous?.fingerprint === evidence.fingerprint || typeof hold?.why !== "string") continue;
+      reconsideration = { origin, oldRefusal: hold.why, evidence, owner, decision: "draft" };
+      line.state = "draft";
+    }
     next = owner
-      ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior } }
-      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: `no code in src/ or scripts/ names ${key}, so no remedy can be drafted against it`, prior: s.prior } };
+      ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior, ...(reconsideration ? { reconsideration } : {}) } }
+      : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
+        + (workflowGap(input.ownerSearch, key, details) ?? ""), prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";
   }
   return { next, ladder };
@@ -874,10 +1239,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
   const clock: Clock = deps.clock ?? systemClock;
   return {
     name: "ci-friction",
+    landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch.fileExists),
     classes: CI_FRICTION_GARDEN_CLASSES,
     review: { draft: "filing a new task from priced friction is a judgement call — the machine-filing judge or a person decides the remedy." },
     cheapFingerprint: () => {
-      const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const head = checkoutHeadStamp(deps.repoRoot, clock);
       const live = ledgerLivePath(deps.stateDir);
       const report = gateFireRatesPath(deps.stateDir);
       const fileStamp = (path: string): string => {
@@ -903,13 +1269,14 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     inventory: () => {
       const records = sources.ledgerRecords();
+      const plan = sources.planState();
+      const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
       const ledgerRounds = ciFrictionRoundsFromLedger(records);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
-        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), sources.ownerSearch)];
+        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), ownerSearch)];
       const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
-      const plan = sources.planState();
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
       if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
       const { next, ladder } = ciFrictionLadder({
@@ -918,19 +1285,28 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         tasks: plan.tasks,
         receipts: new Set(landedCiFrictionOrigins(records)),
         escalated: new Set(escalatedCiFrictionOrigins(records)),
-        ownerSearch: sources.ownerSearch,
+        holds: records,
+        ownerSearch,
         nowMs: clock.now(),
       });
-      return { priced, rounds, ladder, ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+      const workflowGaps = ownerSearch.workflowGaps?.() ?? [];
+      if (workflowGaps.length > 0) deps.log("ci-friction.workflow_ownership_unresolved", { gaps: workflowGaps });
+      const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
+      const preventionSources = { registrations, unavailable: plan.tasks.length - registrations.length };
+      return { priced, rounds, ladder, preventionSources, ...(workflowGaps.length > 0 ? { workflowGaps } : {}), ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
     },
     // The ladder decides whether work remains — never a recorded fingerprint alone, which a pass that
     // drew no action or failed to land could have left behind.
     unfinished: (inv) => inv.next !== undefined,
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.next ? inv.next.origin : ""}`,
     candidates: (inv) => draftCandidates(inv),
-    scorecard: (inv) => {
+    scorecard: (inv, plan) => {
       appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
       return {
+        ownership_reconsiderations: plan.actions.flatMap(action => action.decision.kind === "draft" && action.decision.reconsideration ? [action.decision.reconsideration] : []),
+        prevention_sources: inv.preventionSources?.registrations ?? [],
+        prevention_source_unavailable: inv.preventionSources?.unavailable ?? null,
+        prevention_source_scope: "owning-file-build-not-runtime-or-efficacy",
         causes: inv.priced.length,
         total_minutes: Math.round(inv.priced.reduce((s, p) => s + p.minutes, 0) * 10) / 10,
         // The receipt key: the cause and, above rung 1, its rung — `landedCiFrictionOrigins` reads it back.
@@ -939,20 +1315,23 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ladder: inv.ladder,
         hand_fixes: inv.handFixState ?? { state: "unmeasured", count: null },
         priced: inv.priced,
+        ...(inv.workflowGaps ? { workflow_ownership_unresolved: inv.workflowGaps } : {}),
         ...(inv.degraded ? { degraded: inv.degraded } : {}),
       };
     },
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && plan.actions[0].decision.kind !== "escalate" ? 1 : 0, sources.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (action.decision.kind === "escalate") {
         // No PR: the receipt row holds the cause at this rung so the next pass moves on to the next one.
         const issue = deps.escalate ? deps.escalate(ciFrictionEscalation(action)) : undefined;
-        deps.log("ci-friction.remedy_escalated", { origin: action.origin, rung: action.rung, why: action.decision.why, issue_url: issue ?? null });
+        deps.log("ci-friction.remedy_escalated", { origin: action.origin, rung: action.rung, why: action.decision.why,
+          hold_reason: action.decision.holdReason, ownership_evidence: action.decision.evidence, issue_url: issue ?? null });
         return undefined;
       }
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
-      const taskId = sources.mintTaskId(ws.branch);
+      const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
@@ -968,6 +1347,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
       const relPath = relative(ws.root, shardPath);
+      // lint-plan's verdict before the draft reaches disk (#10446); the spec's `landingRefusal` re-reads the landing.
+      const refused = machineShardFilingRefusal(contents, relPath, {
+        pathExists: (path) => existsSync(join(ws.root, path)), pathExistsAtBase: sources.ownerSearch.fileExists,
+      });
+      if (refused !== undefined) throw new Error(`ci-friction gardener: drafted record failed machine-filing admission (${refused})`);
       mkdirSync(shardDir, { recursive: true });
       writeFileSync(shardPath, contents);
 

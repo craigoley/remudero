@@ -6,7 +6,7 @@
   verify: auto
   risk: medium
   priority: 3
-  status: queued
+  status: merged
   attempts: 0
   origin: "oper#core-daemon-loop-profile-2026-09-30"
   files: [src/lib/github-transport.ts, test/an-async-gh-read-waits-its-cadence-gap-without-blocking.test.ts]
