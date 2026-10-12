@@ -12,7 +12,7 @@
   origin: "operator console follow-up 2026-10-02: action recovery across devices, replicas and restart"
   plan_refs: [W1-T3855, W1-T3882, W1-T4763]
   files: [src/lib/panel-actions.ts, src/lib/assistant-action-discovery.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts, test/assistant-action-discovery.test.ts, test/route-wiring.test.ts, test/every-served-route-is-in-the-contract.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at main 975275e4d2f8029dc858d842a779c7f80b0b78c1: assistantControlPaths hashes

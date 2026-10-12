@@ -35,3 +35,17 @@ export function finishJudgedRun(args: readonly string[], spawnOpts: unknown, sta
   writeFileSync(destination.slice(DESTINATION.length), `${JSON.stringify({ version: 1, summary, testFiles: files, fileSummaries: files })}\n`);
   return { status };
 }
+
+/**
+ * The inline sibling for the review's proof runner (src/lib/review.ts), whose judge's tally rides the
+ * child's stdout: the line a fake proof spawner appends to its canned stdout so the run reads as one
+ * in which every test file the argv names finished. Empty for an argv with no inline judge.
+ */
+export function inlineJudgedTally(args: readonly string[], cwd: string): string {
+  if (!args.some((arg) => arg.startsWith("--test-reporter=data:"))) return "";
+  const at = args.indexOf("--test-name-pattern");
+  const named = at < 0 ? args : [...args.slice(0, at), ...args.slice(at + 2)];
+  const files = named.filter((arg) => !arg.startsWith("-") && /\.test\.[cm]?[jt]s$/.test(arg)).map((file) => resolve(cwd, file));
+  const summary = { tests: Math.max(files.length, 1), failed: 0, passed: Math.max(files.length, 1) };
+  return `\n${JSON.stringify({ version: 1, summary, testFiles: files, fileSummaries: files })}\n`;
+}

@@ -2,6 +2,7 @@
   title: "A RESTART LATCHED WHILE A LANE HAS NO SAFE BOUNDARY IDLES EVERY FREED LANE"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,8 +11,18 @@
   band_meaning: span
   origin: "operator session 2026-10-10: core daemon ledger 19:35-20:33Z, lane running W1-T7734 (W1-T7697 design 3)"
   plan_refs: [W1-T7697, W1-T6274, W1-T5761, W1-T4416, W1-T4662, W1-T3793, W1-T147]
-  files: [src/lib/daemon.ts, src/run-task.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts]
-  status: queued
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts
+    - test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts
+    # session build 2026-10-12: existing latch/refill tests that encode the old held-refill behaviour; each red without the change
+    - test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts
+    - test/the-daemon-freshness-reads-never-block-the-loop.test.ts
+    - test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts
+    - test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts
+    - test/owner-dispatch-threading.test.ts
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

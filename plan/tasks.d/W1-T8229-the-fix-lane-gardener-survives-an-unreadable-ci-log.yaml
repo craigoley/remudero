@@ -6,11 +6,11 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
-  risk: medium  # Rule 19: one concern — an unreadable CI log is missing evidence for one head, never a failed pass
+  risk: high  # Rule 19: one concern — an unreadable CI log is missing evidence for one head, never a failed pass; high (was medium) because the amended files: now also edit #10628's existing gardener test, which lint-plan counts as a second concern
   origin: "operator ruling 2026-10-09 (a gardener watches the fix bots; operator interventions are the headline signal) + 2026-10-11 detection research: the watcher itself was dark all day"
   plan_refs: [W1-T7421, W1-T7616, W1-T4802, W1-T7650]
-  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts]
-  status: queued
+  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts]  # amended 2026-10-11: restart checkpoint refused this path at 22:54:56Z and 23:43:46Z
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
@@ -31,6 +31,14 @@
         failing id is a UUID, so it came from `external_id`, which is not an Actions job id.
       - :256 calls `ghTextAsync([... /actions/jobs/<id>/logs])` with no catch. One unreadable log throws out of the
         whole evidence read, so the pass records `fix-lane.gardener_failed` and inventories nothing.
+    AMENDED 2026-10-11 (operator-approved pattern, as W1-T7806): files: adds
+    test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts. Its test "the native evidence
+    reader uses the async transport at the exact recorded head" feeds a check run with `external_id: "46"` and
+    asserts the gardener reads actions/jobs/46/logs, which is the exact behaviour design 1 removes, so the build must
+    update that fixture. With the file undeclared, both runs' restart checkpoints were refused (verdict no_pr, reason
+    restart_checkpoint_failed, 22:54:56Z and 23:43:46Z), detail:
+      "restart checkpoint refused: test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts"
+    and the work was lost (W1-T8008 owns keeping undeclared work).
   design: |
     No fixed threshold is involved. This is a read that must degrade instead of failing.
     1. A NUMERIC JOB ID OR NONE. Take the Actions job id only from a numeric source: a `details_url` path segment

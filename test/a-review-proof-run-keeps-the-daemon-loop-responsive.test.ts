@@ -18,6 +18,7 @@ import {
   resolveNameFilteredCandidatesAsync,
 } from "../src/lib/review.js";
 import { discriminateReviewReuse, discriminateReviewReuseAsync } from "../src/lib/sweep.js";
+import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -71,7 +72,7 @@ function browserFixture(manifest: string | undefined, cliSource = "process.exit(
 async function runBrowserProof(dir: string): Promise<void> {
   const proof = parseWhitelistedProof("unit test: test/browser.test.ts");
   assert.ok(proof);
-  assert.equal(await execWhitelistedProofAsync(proof, dir, 2_000, async () => browserTap), "pass");
+  assert.equal(await execWhitelistedProofAsync(proof, dir, 2_000, async (_command, args, cwd) => browserTap + inlineJudgedTally(args, cwd)), "pass");
 }
 
 test("W1-T4772: a timer keeps firing while a review proof child runs, witnessed after child readiness", async () => {

@@ -11,7 +11,7 @@
   origin: "2026-10-11 detection research: the SRE pipeline has links that no writer feeds"
   plan_refs: [W1-T4384, W1-T4386, W1-T4390, W1-T5651, W1-T5355]
   files: [src/lib/incident-invariants.ts, test/incident-invariants.test.ts, test/every-incident-rule-reads-a-step-something-writes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

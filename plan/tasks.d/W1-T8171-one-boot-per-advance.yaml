@@ -12,7 +12,7 @@
   plan_refs: [W1-T5764, W1-T6249, W1-T6282, W1-T6093, W1-T6598, W1-T4945, W1-T3240, W1-T147]
   files: [src/lib/daemon.ts, src/lib/deploy-judge.ts, src/run-task.ts, test/one-boot-per-advance.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy).

@@ -2,6 +2,7 @@
   title: "A CODEX WORKER OVER ITS STDERR BUDGET KEEPS ITS RUN — W1-T6352 made stdout's retention budget truncate instead of fail, but stderr still tears the worker down past the fixed CODEX_WORKER_STDERR_MAX_BYTES (256 KiB): W1-T7806's build ended `failed` at 2026-10-11T20:08:38Z on 277,986 bytes of stderr, its work discarded and charged as a worker failure"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -11,7 +12,7 @@
   origin: "operator approval 2026-10-11 (coordinator follow-up during the restart-churn filing): live W1-T7806 failure 20:08:38Z"
   plan_refs: [W1-T6352, W1-T4595, W1-T3490, W1-T3502, W1-T3787, W1-T7806]
   files: [src/lib/worker-provider.ts, test/a-codex-worker-over-its-stderr-budget-keeps-its-run.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

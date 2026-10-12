@@ -1028,12 +1028,12 @@ export interface DaemonDeps {
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
-  reloadPlan?: () => Plan | null;
+  reloadPlan?: () => Plan | null | Promise<Plan | null>;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number } };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
    *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
@@ -1135,8 +1135,11 @@ export interface DaemonDeps {
   readTerminalPreDispatchRefusalRevisions?: () => ReadonlyMap<string, string>;
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
-  /** Run ONE task through the existing run-task path (default = runTask). */
-  runOne: (taskId: string) => Promise<RunResult>;
+  /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
+   *  the dispatch phase's restart latch, read by the run at each worker boundary. */
+  runOne: (taskId: string, options?: {
+    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
    *  Optional — omitted, a wide batch is bounded by `laneCount` alone (W1-T343). */
@@ -1664,8 +1667,14 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
   }
 }
 
-function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
-  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
+/** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
+ *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
+function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
+  { syncSpawnTop?: unknown; syncSpawnMs?: number } {
+  try {
+    const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
+    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms };
+  } catch { return {}; /* Reason: observability only. */ }
 }
 
 /**
@@ -1690,8 +1699,10 @@ function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown 
  */
 export function reportLoopLag(
   sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
-    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
-    syncSpawnTop?: unknown },
+    /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
+    syncSpawnTop?: unknown;
+    /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
+    syncSpawnMs?: number },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1704,6 +1715,7 @@ export function reportLoopLag(
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
       last_step_before_block: sample.lastStepBeforeBlock,
       ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
+      ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1753,7 +1765,7 @@ export function startInterphaseReviewClock(
           const result = await wait(quantumMs);
           reportLoopLag(
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
-              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), ...takeSyncSpawn(deps, "review_clock") },
             log,
           );
           if (result === "wake") {
@@ -2126,7 +2138,7 @@ function startInFlightTicker(
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
             { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
-              syncSpawnTop: peekSyncSpawnTop(deps) },
+              ...takeSyncSpawn(deps, "ticker") },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -2357,6 +2369,8 @@ export interface SweepLiveness {
   /** True while a `deps.sweep()` promise is still executing, INCLUDING after its await was
    *  abandoned by the wall-clock bound. */
   inFlight: boolean;
+  /** W1-T8170: successful completion, including a pass that settled after its wait bound. */
+  lastCompletedAtMs?: number;
 }
 
 async function runGatedSweep(
@@ -2409,7 +2423,10 @@ async function runGatedSweep(
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
     // `finally`, so this derived promise can never become an unhandled rejection of its own.
-    if (liveness) void sweepPromise.then(() => { liveness.inFlight = false; }, () => { liveness.inFlight = false; });
+    if (liveness) void sweepPromise.then(() => {
+      liveness.inFlight = false;
+      liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+    }, () => { liveness.inFlight = false; });
     const startedAtMs = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<"abandoned">((resolve) => {
@@ -3230,7 +3247,7 @@ export async function runDaemon(
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
     (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
-      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
+      ...takeSyncSpawn(deps, "pulse") }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
@@ -3436,17 +3453,22 @@ export async function runDaemon(
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   const stopForFreshness = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
+    dispatchLatchAtMs?: number,
   ): Promise<DaemonSummary> => {
     // Install BEFORE the loop stops for restart, never after, so the relaunched process inherits deps
     // matching the new sha rather than the stale tree this process is still running (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
     }
-    // Every stale exit reaches the same bounded full-pass gate before returning. The restart is never
-    // suppressed by the pass, and no second implementation is introduced (W1-T1272).
-    // W1-T4998: a background pass still running IS that pass; its call returns within the same bound.
+    // A pass completed during the dispatch latch already reached the full sweep (W1-T8170/W1-T1272).
+    // A running pass is still awaited within its bound; other freshness exits keep their pass.
+    let preExitPass: "skipped_ran_since_latch" | "awaited_in_flight" | "ran" = "ran";
     if (backgroundSweep) {
+      preExitPass = "awaited_in_flight";
       await backgroundSweep;
+    } else if (dispatchLatchAtMs !== undefined && sweepLiveness.lastCompletedAtMs !== undefined &&
+      sweepLiveness.lastCompletedAtMs > dispatchLatchAtMs) {
+      preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
       await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
@@ -3457,7 +3479,7 @@ export async function runDaemon(
     const detail =
       `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
       `past this process's boot sha`;
-    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha });
+    log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass });
     return summary("stale", detail);
   };
 
@@ -3702,10 +3724,11 @@ export async function runDaemon(
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
-  const reloadPlanBinding = (): void => {
+  const reloadPlanBinding = async (): Promise<void> => {
     if (!deps.reloadPlan) return;
     try {
-      const fresh = deps.reloadPlan();
+      // W1-T7743: awaited, so the production reloader's git runs off the loop; a sync fake resolves at once.
+      const fresh = await deps.reloadPlan();
       if (fresh) {
         plan = fresh;
         deps.onPlanReload?.(fresh);
@@ -4225,7 +4248,7 @@ export async function runDaemon(
     // landing on origin/main and the daemon next booting is 106 minutes (impl-FZ). Position is the safety argument:
     // after the stop check, so a halted fleet does no I/O, and before any dispatch decision reads the plan. A throw
     // is caught and ledgered, never fatal. Forensics: docs/forensics/daemon.md.
-    reloadPlanBinding();
+    if (deps.reloadPlan) await reloadPlanBinding();
     // One snapshot per admission (W1-T340, W1-T4416; MASTER-PLAN §4B). The plan binding is mutable and reassigned by the
     // reload above, so code closing over the NAME reads whatever the most recent reload produced. That is invisible
     // at one lane and stops being invisible the moment a batch holds more than one: a lane's later reasoning would be
@@ -5551,17 +5574,18 @@ export async function runDaemon(
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map(admitted.map((t) => [t.id, dispatchPhaseStartedAtMs]));
-    const restartSlowLanes = new Set<string>();
+    const restartHoldouts = new Set<string>();
+    const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
-    const restartStillWaitingOnSlowLane = (): boolean => [...inFlightTasks].some((t) => restartSlowLanes.has(t.id));
+    const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
     // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
     const phaseBoundHolds = (): boolean => !inFlightFreshness && daemonClock.now() - dispatchPhaseStartedAtMs > refillBoundMs &&
       ![...inFlightTasks].some(slowLane);
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
-        // Only the cohort that already delayed the restart grants refill; new runs cannot renew it.
-        for (const t of inFlightTasks) if (slowLane(t)) restartSlowLanes.add(t.id);
+        // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
+        for (const t of inFlightTasks) restartHoldouts.add(t.id);
       }
       inFlightFreshness ??= freshness;
     };
@@ -5571,6 +5595,7 @@ export async function runDaemon(
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
     const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const governorParked = new Map<number, string>();
     const wakeParkedLanes = (): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
       // Deferred, so a throwing decision ends only its own lane (runLanePool), never strands a later parked one.
@@ -5578,7 +5603,7 @@ export async function runDaemon(
     };
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
-      restartSlowLanes.delete(finished.id);
+      restartHoldouts.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -5592,12 +5617,13 @@ export async function runDaemon(
     };
     const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
-      if (inFlightFreshness && !restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+      if (inFlightFreshness && !restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
       const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
@@ -5607,10 +5633,10 @@ export async function runDaemon(
       const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
-      // W1-T6274: a restart decided here holds every later refill this phase and ends it in the freshness stop.
+      // W1-T6274/W1-T7806: once the latched holdouts drain, every later refill is held for the restart.
       if (freshnessAction === "restart" && freshness?.stale) {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       let reason =
         refillClosed ??
@@ -5620,6 +5646,15 @@ export async function runDaemon(
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
+      // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
+      // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
+      if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
+        if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
+          phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        governorParked.set(lane, reason);
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+      }
+      governorParked.delete(lane);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -5646,7 +5681,7 @@ export async function runDaemon(
         const conclude = (): Task | undefined => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnSlowLane() ? "stale code" : undefined) ??
+            const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -5666,16 +5701,16 @@ export async function runDaemon(
           snapshots.push(nextSnapshot!);
           passIds.add(next.id);
           inFlightTasks.add(next);
+          if (inFlightFreshness) admittedUnderLatch.add(next.id);
           laneStartedAtMs.set(next.id, daemonClock.now());
           log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id,
-            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartSlowLanes] } : {}) });
+            ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
           log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
           attempted.push(next.id);
           return next;
         };
-        if (reason === undefined) {
+        const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            reloadPlanBinding();
             const refillPlan = plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
@@ -5694,8 +5729,11 @@ export async function runDaemon(
             // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
             readFailed(e);
           }
-        }
-        return conclude();
+          return conclude();
+        };
+        if (reason !== undefined) return conclude();
+        // W1-T7743: the reload is awaited (its git runs off the loop); a deps object with no reloader stays synchronous.
+        return deps.reloadPlan ? reloadPlanBinding().then(decideFromPlan) : decideFromPlan();
       };
       const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
@@ -5705,7 +5743,7 @@ export async function runDaemon(
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
         latchRestart(freshness);
-        if (!restartStillWaitingOnSlowLane()) refillClosed ??= "stale code";
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
       }
       wakeParkedLanes();
     };
@@ -5718,7 +5756,8 @@ export async function runDaemon(
       log("daemon.freshness_restart_waiting", {
         waiting_on: "in_flight_lanes",
         waited_ms: waitedMs,
-        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)) })),
+        lanes: [...inFlightTasks].map((t) => ({ task: t.id, age_ms: Math.max(0, nowMs - (laneStartedAtMs.get(t.id) ?? nowMs)),
+          holdout: restartHoldouts.has(t.id), admitted_under_latch: admittedUnderLatch.has(t.id) })),
         refill_held: refillClosed ?? null,
         report: restartWait.reported,
         old_sha: decided.oldSha,
@@ -5752,7 +5791,14 @@ export async function runDaemon(
         reason: "categorized refusal contract changed",
       });
       const startedAtMs = daemonClock.now();
-      return deps.runOne(id).then((outcome) => {
+      // W1-T7806: a run at a boundary reads the latch; a holdout reading it can yield, so it no longer holds refill.
+      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+        if (!inFlightFreshness) return undefined;
+        restartHoldouts.delete(id);
+        if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
+        wakeParkedLanes();
+        return inFlightFreshness;
+      } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
         if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
         return outcome;
@@ -5921,7 +5967,7 @@ export async function runDaemon(
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
-      return stopForFreshness(inFlightFreshness);
+      return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
 
     if (apiWindowHoldMs > 0) {

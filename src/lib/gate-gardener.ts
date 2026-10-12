@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -59,22 +60,46 @@ export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
 const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
 type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
 
+/** The slice of scripts/pure-test-pool.mjs (the test judge) the defuse run uses. A plain .mjs, so no types. */
+interface DefuseJudge {
+  prepareJudgedRun(): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string }; cleanup(): void };
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+// Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
+const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
+
 /** Run `file` under the repo's own test invocation plus scripts/clock-shift.mjs. A nonzero exit is
- *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red. */
+ *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red.
+ *  W1-T8380: an exit 0 is a pass only when the judge (scripts/pure-test-pool.mjs) heard `file` reach
+ *  its own summary. A file that exits 0 part-way — a real `process.exit(0)` — loses the very test a
+ *  shift was run to break, so that run reaches no verdict and throws with the judge's line. */
 export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number): boolean {
   const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays) };
   delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
   delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-  const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file];
+  const judge = loadDefuseJudge();
+  const judged = judge.prepareJudgedRun();
+  const args = judge.judgedNodeTestArgs(
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file],
+    judged.args,
+  );
   // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
   const load = readHostLoad();
   const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
   try {
-    execFileSync(child.file, child.args, { cwd: repoRoot, env, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
-    return true;
-  } catch (e) {
-    if (typeof (e as { status?: unknown }).status === "number") return false;
-    throw e;
+    try {
+      execFileSync(child.file, child.args, { cwd: repoRoot, env: { ...env, ...judged.env }, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
+    } catch (e) {
+      if (typeof (e as { status?: unknown }).status === "number") return false;
+      throw e;
+    }
+    const verdict = judge.judgeRun([file], { status: 0, pool: false, root: repoRoot, ...judged.read() });
+    if (verdict.complete) return true;
+    throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+  } finally {
+    judged.cleanup();
   }
 }
 

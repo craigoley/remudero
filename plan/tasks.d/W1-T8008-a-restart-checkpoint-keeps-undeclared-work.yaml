@@ -2,6 +2,7 @@
   title: "A RESTART CHECKPOINT NEVER LOSES WORK OVER UNDECLARED FILES — the W1-T7697 checkpoint commits only paths under task.files and then refuses the whole yield when the worker touched any other path, so W1-T7808 (10-10 22:26Z) and W1-T7837 (10-11 04:51Z) ended no_pr restart_checkpoint_failed and nothing was pushed"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -10,8 +11,12 @@
   band_meaning: span
   origin: "operator approval 2026-10-11 (coordinator follow-up): restart checkpoints lose work over undeclared files"
   plan_refs: [W1-T7697, W1-T5534, W1-T7959, W1-T401, W1-T502]
-  files: [src/run-task.ts, test/a-restart-checkpoint-keeps-undeclared-work.test.ts]
-  status: queued
+  files:
+    - src/run-task.ts
+    - test/a-restart-checkpoint-keeps-undeclared-work.test.ts
+    - src/lib/quiet-worker-watchdog.ts  # operator 2026-10-12: one-line widening of QuietRoundEndedError detail with undeclaredPaths (design item 2: the quiet-worker receipt carries the list)
+    - test/a-hung-worker-in-its-own-wait-loop-is-recovered.test.ts  # operator 2026-10-12: asserted the old refusal (the 10-11 15:09Z refused checkpoint file), so it must change
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

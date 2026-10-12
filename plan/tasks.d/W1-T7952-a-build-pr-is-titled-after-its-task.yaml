@@ -2,6 +2,7 @@
   title: "A BUILD PR IS TITLED AFTER ITS TASK, NEVER AFTER A CHECKPOINT — when every subject on a run branch is a `wip:` checkpoint, `prTitleFromBranchCommits` strips the marker and titles the PR after the checkpoint, so W1-T7807's 700-line watchdog merged as \"chore: tests and census repairs\" (#10785) and W1-T6085 as \"chore: yield at worker\" (#10834)"
   repo: remudero
   depends_on: []
+  dispatch_hold: true  # operator 2026-10-12: held for a session build — restart churn keeps interrupting it; release after the session PR merges or if the session hands it back
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -11,7 +12,7 @@
   origin: "operator approval 2026-10-11: file the recommended follow-ups (a fix round never degrades a PR's title)"
   plan_refs: [W1-T7807, W1-T6085, W1-T7697, W1-T7096, W1-T1012]
   files: [src/lib/unfinished-checkpoint.ts, src/run-task.ts, test/a-build-pr-is-titled-after-its-task.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

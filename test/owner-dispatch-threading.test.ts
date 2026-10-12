@@ -53,7 +53,8 @@ function extractFunctionBody(src: string, signature: string): string {
 
 test("STRUCTURAL: daemonCommand's runOne closure threads target.owner into runTask's opts — dropping just this line reproduces the partial-fix hazard", () => {
   const body = extractFunctionBody(runTaskSrc, "export async function daemonCommand(");
-  const runOneIdx = body.indexOf("runOne: (taskId) =>");
+  // W1-T7806: the closure also takes the daemon's per-run options (its restart latch).
+  const runOneIdx = body.search(/runOne: \(taskId(?:, \w+)?\) =>/);
   assert.ok(runOneIdx >= 0, "daemonCommand must still wire a runOne closure for DaemonDeps");
   const runOneBlock = body.slice(runOneIdx, body.indexOf("readUsage:", runOneIdx));
   assert.match(

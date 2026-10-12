@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: code-scanning alert #345 triage (operator packet item 5)"
   plan_refs: []
   files: [src/lib/sweep.ts, test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
