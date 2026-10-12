@@ -53948,6 +53948,12 @@ export interface AlertFixDispatchDeps {
    *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
    *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. */
   readPrBody?: (prUrl: string) => string;
+  /** W1-T8572: the main-repair fix dispatch's no-test-file open (that lane reuses this seam rather than declaring
+   *  another): the REST PR create, the pushed branch's diff against origin/main and its head subject. Optional, so a
+   *  fake that omits them gets the real reads; the alert-fix lane never calls them. */
+  fetch?: GhApiFetcher;
+  readDiff?: (worktreePath: string) => string | undefined;
+  readHeadSubject?: (worktreePath: string) => string;
 }
 
 /** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
@@ -54110,10 +54116,46 @@ export function mainRepairTaskId(offendingSha: string): string {
   return `main-repair-${offendingSha.slice(0, 12)}`;
 }
 
-/** W1-T6403 — the priority fix worker's prompt: repair main, never revert, and open one PR. */
-export function mainRepairFixPrompt(request: MainRepairFixRequest): string {
-  const taskId = mainRepairTaskId(request.offendingSha);
+/**
+ * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Each `request.testFiles` entry fails on main
+ * by definition (`baseReproductionFiles`), so `unit test: <path>` fails at base and passes at a repaired head: the
+ * discrimination proof-discrimination wants, written by the harness so a model's spelling never sits between a red
+ * main and its repair (#11096's prose proofs). Rendered through {@link renderAcceptanceBlock}, so it round-trips
+ * through `parseAcceptanceBlock` or throws; it throws on an empty list too, which the no-test-file path never reaches.
+ */
+export function mainRepairAcceptanceCriteria(request: Pick<MainRepairFixRequest, "testFiles">): string {
+  return renderAcceptanceBlock(request.testFiles.map((path) => ({ claim: `${path} passes again on the repaired head`, proof: `unit test: ${path}` })));
+}
+
+/** W1-T8572 — the line of the dispatcher-written body the fix worker replaces with its own prose, and nothing else. */
+export const MAIN_REPAIR_PROSE_PLACEHOLDER = "WORKER-PROSE: replace this one line with what broke on main and how this change repairs it.";
+/** W1-T8572 — the no-test-file body's one line under `Acceptance:` that the worker replaces with its bullets. */
+export const MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER = "WORKER-ACCEPTANCE: replace this one line with your `- <claim> | <proof>` bullets.";
+
+/** W1-T8572 — the body the dispatcher writes BEFORE the fix worker spawns: the prose placeholder, the Acceptance
+ *  block (rendered here when test files are known, a placeholder line for the worker's bullets when not), the
+ *  `origin:` line and the `Remudero-Task:` trailer last. */
+export function mainRepairFixBody(request: MainRepairFixRequest): string {
+  const block = request.testFiles.length > 0 ? mainRepairAcceptanceCriteria(request) : `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`;
+  return [
+    MAIN_REPAIR_PROSE_PLACEHOLDER,
+    "",
+    block,
+    "",
+    `origin: main-repair#${request.offendingSha}`,
+    "",
+    `Remudero-Task: ${mainRepairTaskId(request.offendingSha)}`,
+    "",
+  ].join("\n");
+}
+
+/** W1-T6403 — the priority fix worker's prompt: repair main, never revert. W1-T8572: the PR body is the dispatcher's
+ *  file at `bodyFile`. With failing test files known, the worker opens the PR with `--body-file` and writes only its
+ *  prose; with none, it writes its bullets under {@link PR_BODY_ACCEPTANCE_GRAMMAR} into that file, pushes, and leaves
+ *  the open to the dispatcher, which checks those proofs first. */
+export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
+  const known = request.testFiles.length > 0;
   return [
     "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
     `The default branch \`${request.branch}\` is RED at \`${request.headSha}\`. Every open PR's CI fails until it is green.`,
@@ -54133,27 +54175,93 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest): string {
     "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
     "Reproduce the failing test file(s) above first, then make the minimal correct change.",
     "",
+    `THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: ${bodyFile}`,
+    "It lives outside your checkout: never copy it in and never commit it. Its `origin:` line and its",
+    `trailer \`Remudero-Task: ${mainRepairTaskId(request.offendingSha)}\` are the dispatcher's; leave them as written.`,
+    `Replace ONLY the line \`${MAIN_REPAIR_PROSE_PLACEHOLDER}\` with your prose.`,
+    ...(known
+      ? ["Its Acceptance block is the dispatcher's too: never edit, add or remove a bullet in it."]
+      : [
+          `No failing test file was parsed, so replace the line \`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\``,
+          "with ONE executable bullet per check you repair, in this grammar:",
+          ...PR_BODY_ACCEPTANCE_GRAMMAR,
+          "The dispatcher reads those bullets before it opens the PR. An undialected proof is a defect it never",
+          "opens as written: it is replaced by a `grep:` of a line your pushed change adds, or no PR is opened.",
+        ]),
+    "",
     "Then, from the working directory:",
     "- git add the changed files && commit;",
     ...commitMessageContractLines(),
     "- `git push origin HEAD` (NOT -u); never push to main;",
-    "- open a PR with an EXPLICIT title: `gh pr create --title \"fix(scope): subject\" --fill --base main`.",
-    "  PR TITLE: a conventional-commit subject of <= 100 characters, written by you.",
-    ...bodyVsDiffContractLines(),
-    "  The PR body MUST include:",
-    "  - an `Acceptance:` block of `- <claim> | <proof>` bullets naming the failing test(s) that now pass;",
-    `  - \`origin: main-repair#${request.offendingSha}\` naming the red merge this repairs;`,
-    `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
-    "- End your REPORT with exactly: PR_URL: <the pull request url>",
+    ...(known
+      ? [
+          `- open the PR with an EXPLICIT title and the dispatcher's body: \`gh pr create --title "fix(scope): subject" --body-file ${bodyFile} --base main\`.`,
+          "  PR TITLE: a conventional-commit subject of <= 100 characters, written by you.",
+          ...bodyVsDiffContractLines(),
+          "- End your REPORT with exactly: PR_URL: <the pull request url>",
+        ]
+      : [
+          "- do NOT open a PR: the dispatcher opens it over REST from the body file above, titled with your",
+          "  commit's subject, so that subject must be a conventional-commit subject of <= 100 characters.",
+          ...bodyVsDiffContractLines(),
+          "- End your REPORT with a line `PUSHED: <your branch>`, and write no PR_URL line.",
+        ]),
   ].join("\n");
+}
+
+/** W1-T8572 — where the dispatcher writes the fix PR's body: a fresh file under `config.root/tmp`, outside the
+ *  worker's checkout, so `git add` can never commit it. */
+function mainRepairBodyFile(config: Config, taskId: string): string {
+  return join(config.root, "tmp", `main-repair-body-${taskId}-${systemClock.now()}.md`);
+}
+
+/** W1-T8572 — the one inert-proof row: what was inert, how many, and whether the body was rewritten or refused. */
+export const MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP = "main-repair.acceptance_defect";
+
+/** W1-T8572 — a no-test-file worker body, checked BEFORE the dispatcher opens it. A body whose proofs all execute is
+ *  returned as written. Otherwise its inert bullets ({@link inertAcceptanceProofs}: undialected, a demonstration, or
+ *  unparseable — a prose proof naming a test path counts, though `parseWhitelistedProof` reads it) are dropped and one
+ *  `grep:` of a line the pushed fix ADDS ({@link diffAnchor}) takes their place; with no such line the body is
+ *  refused. Never trusts `acceptanceAuthorTimeCheck`: its trailer arm returns `ok` before it reads the block. */
+export function checkMainRepairWorkerBody(
+  body: string,
+  diffText: string | undefined,
+): { body: string } | { body: string; defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "rewritten" } | { defect: "inert-proofs" | "no-proofs"; inert: string[]; resolution: "refused"; reason: DiffAnchorUnavailableReason } {
+  const criteria = parseAcceptanceBlock(body);
+  const inert = inertAcceptanceProofs(body);
+  if (criteria.length > 0 && inert.length === 0) return { body };
+  const defect = criteria.length === 0 ? "no-proofs" : "inert-proofs";
+  const anchor = diffAnchor(diffText);
+  if (anchor.kind === "unavailable") return { defect, inert, resolution: "refused", reason: anchor.reason };
+  const inertSet = new Set(inert);
+  const kept = criteria.filter((c) => !inertSet.has(c.proof ?? "")) as AcceptanceCriterion[];
+  const block = renderAcceptanceBlock([...kept, { claim: `the pushed repair adds this line to ${anchor.path}`, proof: anchor.proof }]);
+  const region = acceptanceBlockRegion(body);
+  const lines = body.split("\n");
+  const rewritten =
+    region === undefined
+      ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
+      : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
+  return { body: rewritten, defect, inert, resolution: "rewritten" };
+}
+
+/** W1-T8572 — the defect row for a no-test-file worker that opened its own PR instead of leaving the open to the
+ *  dispatcher: the body was never checked before it opened, so this records the breach and the body file's inert
+ *  proofs (`body === undefined` when the worker removed that file). */
+export function mainRepairWorkerOpenedDefect(prUrl: string, body: string | undefined): Record<string, unknown> {
+  const inert = body === undefined ? [] : inertAcceptanceProofs(body);
+  return { defect: "worker-opened", count: inert.length, inert_proofs: inert, resolution: "opened-unchecked", pr_url: prUrl, body_file_read: body !== undefined };
 }
 
 const REAL_MAIN_REPAIR_FIX_DEPS: AlertFixDispatchDeps = { ...REAL_ALERT_FIX_DISPATCH_DEPS, spawn: ledgeredNonDispatchSpawn("main-repair-fix") };
 
 /**
  * W1-T6403 — the priority fix PR for a red main: {@link dispatchAlertFixRun}'s fresh-branch path, one
- * worker on a branch off origin/main that commits, pushes and opens its own PR, which then enters the
- * normal review/CI/arm flow. Returns that PR's url, or undefined when the worker opened none.
+ * worker on a branch off origin/main that commits and pushes. W1-T8572: the dispatcher writes the PR body first
+ * ({@link mainRepairFixBody}). With failing test files known the worker opens the PR with that body; with none the
+ * dispatcher checks the worker's bullets ({@link checkMainRepairWorkerBody}), ledgers any inert proof, and opens the
+ * PR over REST with the body it checked, so the opening payload carries it. Returns the PR url, or undefined when
+ * none was opened.
  */
 export async function dispatchMainRepairFixRun(
   owner: string,
@@ -54170,8 +54278,11 @@ export async function dispatchMainRepairFixRun(
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const branch = `main-repair-fix-${request.offendingSha.slice(0, 12)}-${systemClock.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
+  const bodyFile = mainRepairBodyFile(config, taskId);
   try {
     await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    mkdirSync(dirname(bodyFile), { recursive: true });
+    writeFileSync(bodyFile, mainRepairFixBody(request));
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -54179,7 +54290,7 @@ export async function dispatchMainRepairFixRun(
     });
     // A red main blocks every merge, so this rides the fix route at the "high" band (blast-radius).
     const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
-    log("main-repair.dispatching", { branch, mount: fixMount.model, offending_sha: request.offendingSha });
+    log("main-repair.dispatching", { branch, mount: fixMount.model, offending_sha: request.offendingSha, body_file: bodyFile });
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
@@ -54191,10 +54302,16 @@ export async function dispatchMainRepairFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: mainRepairFixPrompt(request),
+      prompt: mainRepairFixPrompt(request, bodyFile),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
-    const prUrl = parseReport(workerTranscript(worker))?.prUrl;
+    let prUrl = parseReport(workerTranscript(worker))?.prUrl;
+    if (request.testFiles.length === 0) {
+      // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
+      // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
+      if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));
+      else prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps);
+    }
     if (!prUrl) {
       log("main-repair.no_pr", { subtype: worker.subtype });
       return undefined;
@@ -54203,6 +54320,7 @@ export async function dispatchMainRepairFixRun(
     log("main-repair.pr_opened", { pr_url: prUrl, origin: `main-repair#${request.offendingSha}` });
     return prUrl;
   } finally {
+    rmSync(bodyFile, { force: true });
     try {
       deps.worktreeRemove(repoDir, worktreePath);
     } catch (error) {
@@ -54211,8 +54329,64 @@ export async function dispatchMainRepairFixRun(
   }
 }
 
+/** W1-T8572 — the no-test-file open: read the worker's body, check it, ledger a defect, open the checked body over
+ *  REST. Undefined when the body is refused or the open fails, so the lane's fix-then-revert path continues. */
+async function openCheckedMainRepairPr(
+  owner: string,
+  repo: string,
+  request: MainRepairFixRequest,
+  branch: string,
+  worktreePath: string,
+  bodyFile: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: AlertFixDispatchDeps,
+): Promise<string | undefined> {
+  const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
+  if (diffText === undefined || diffText.trim() === "") {
+    log("main-repair.no_change", { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
+    return undefined;
+  }
+  const checked = checkMainRepairWorkerBody(readFileSync(bodyFile, "utf8"), diffText);
+  if ("defect" in checked) {
+    log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, {
+      defect: checked.defect,
+      count: checked.inert.length,
+      inert_proofs: checked.inert,
+      resolution: checked.resolution,
+      ...("reason" in checked ? { reason: checked.reason } : {}),
+    });
+  }
+  if (!("body" in checked)) return undefined;
+  try {
+    const title = (deps.readHeadSubject ?? ((wt: string) => hostWorktreeGitAtTopLevel(wt, ["log", "-1", "--format=%s", "HEAD"])))(worktreePath).trim();
+    const created = (await (deps.fetch ?? ((args: string[]) => ghJsonAsync(args)))(
+      ratifyPrCreateRestArgs(owner, repo, { title: title || `fix(main): repair ${request.offendingSha.slice(0, 12)}`, body: checked.body, head: branch, base: request.branch }),
+    )) as { html_url?: unknown };
+    if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
+    return created.html_url;
+  } catch (error) {
+    log("main-repair.pr_open_failed", { branch, error: String((error as Error)?.message ?? error) });
+    return undefined;
+  }
+}
+
+/** W1-T8572 — the revert PR's criteria, executable only: `unit test:` per failing test file the fix request had; with
+ *  none, a `grep:` of a line the revert's own diff restores ({@link diffAnchor}); with neither, the dialected
+ *  PR-open-time fallback. Never `ci:`, which no reviewer executes. */
+export function mainRepairRevertCriteria(
+  request: MainRepairRevertRequest,
+  evidence: { testFiles?: readonly string[]; revertDiff?: string } = {},
+): AcceptanceCriterion[] {
+  const sha = request.offendingSha.slice(0, 12);
+  const testFiles = evidence.testFiles ?? [];
+  if (testFiles.length > 0) return testFiles.map((path) => ({ claim: `${path} passes again with ${sha} reverted`, proof: `unit test: ${path}` }));
+  const anchor = diffAnchor(evidence.revertDiff);
+  if (anchor.kind === "anchored") return [{ claim: `reverting ${sha} restores its parent's ${anchor.path}`, proof: anchor.proof }];
+  return PR_OPEN_TIME_ACCEPTANCE_FALLBACK;
+}
+
 /** The revert PR body: the failing check, the fix PR, and why that fix was not enough. */
-export function mainRepairRevertBody(request: MainRepairRevertRequest): string {
+export function mainRepairRevertBody(request: MainRepairRevertRequest, evidence: { testFiles?: readonly string[]; revertDiff?: string } = {}): string {
   const taskId = mainRepairTaskId(request.offendingSha);
   const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR";
   return [
@@ -54224,17 +54398,17 @@ export function mainRepairRevertBody(request: MainRepairRevertRequest): string {
     "Opened by the red-main repair lane (W1-T6403) as an ordinary PR: review, CI and branch protection",
     "judge it like any other. It is closed automatically if main turns green on its own head first.",
     "",
-    "Acceptance:",
-    `- the failing check(s) pass with \`${request.offendingSha}\` reverted | ci: ${request.failingChecks.join(", ") || "ci-gate"}`,
+    renderAcceptanceBlock(mainRepairRevertCriteria(request, evidence)),
     "",
     `Remudero-Task: ${taskId}`,
   ].join("\n");
 }
-
 /**
  * W1-T6403 — ONE revert PR of the offending merge: `git revert --no-edit <sha>` on a fresh branch off
  * origin/main, the branch pushed (never forced, never to main) and the PR opened over REST through
  * `fetch`. A revert that does not apply cleanly is aborted and refused with its conflicting paths.
+ * W1-T8572: its body proves the revert with `unit test:` per failing test file the fix request had (`testFiles`)
+ * or a `grep:` of a line the revert restores, read from its own diff before the push ({@link mainRepairRevertCriteria}).
  */
 export async function openMainRepairRevertPr(
   owner: string,
@@ -54244,6 +54418,7 @@ export async function openMainRepairRevertPr(
   ledgerPath: string,
   runId: string,
   fetch: GhApiFetcher = (args) => ghJsonAsync(args),
+  testFiles: readonly string[] = [],
 ): Promise<MainRepairRevertOutcome> {
   const taskId = mainRepairTaskId(request.offendingSha);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -54268,12 +54443,16 @@ export async function openMainRepairRevertPr(
         conflictPaths,
       };
     }
+    const revertDiff = testFiles.length > 0 ? undefined : diffSinceMergeBase(worktreePath);
+    const evidence = { testFiles, ...(revertDiff === undefined ? {} : { revertDiff }) };
+    const anchor = testFiles.length > 0 ? undefined : diffAnchor(revertDiff);
+    if (anchor?.kind === "unavailable") log("main-repair.revert_anchor_unavailable", { offending_sha: request.offendingSha, reason: anchor.reason });
     await gitPushRunBranchAsync(worktreePath, { stdio: "ignore" });
     const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
     const created = (await fetch(
       ratifyPrCreateRestArgs(owner, repo, {
         title: `revert(main): ${subject}, the first red merge on ${request.branch}`,
-        body: mainRepairRevertBody(request),
+        body: mainRepairRevertBody(request, evidence),
         head: branch,
         base: request.branch,
       }),
@@ -54476,10 +54655,20 @@ export async function openMainRatchetRecordPr(
 }
 
 /** W1-T6403 — the daemon's {@link MainRepairLane}: the fix worker, the revert PR, and the recorded baseline above. */
-export function mainRepairLaneFor(owner: string, repo: string, config: Config, ledgerPath: string, runId: string): MainRepairLane {
+export function mainRepairLaneFor(
+  owner: string, repo: string, config: Config, ledgerPath: string, runId: string,
+  dispatchFix: typeof dispatchMainRepairFixRun = dispatchMainRepairFixRun,
+  openRevert: typeof openMainRepairRevertPr = openMainRepairRevertPr,
+): MainRepairLane {
+  // W1-T8572: the failing test files each fix request carried, so the revert of the same merge proves itself with them.
+  const testFilesBySha = new Map<string, readonly string[]>();
   return {
-    openFixPr: (request) => dispatchMainRepairFixRun(owner, repo, config, request, ledgerPath, runId),
-    openRevertPr: (request) => openMainRepairRevertPr(owner, repo, config, request, ledgerPath, runId),
+    openFixPr: (request) => {
+      testFilesBySha.set(request.offendingSha, request.testFiles);
+      return dispatchFix(owner, repo, config, request, ledgerPath, runId);
+    },
+    openRevertPr: (request) =>
+      openRevert(owner, repo, config, request, ledgerPath, runId, undefined, testFilesBySha.get(request.offendingSha) ?? []),
     recordRatchet: (request) => openMainRatchetRecordPr(owner, repo, config, request, ledgerPath, runId),
   };
 }
