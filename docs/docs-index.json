@@ -776,6 +776,12 @@
       "grepHint": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05"
     },
     {
+      "path": "docs/reservation-backed-skill-eval.md",
+      "title": "Reservation-backed skill eval qualification",
+      "summary": "The operator selected this policy on 2026-10-13: a separately approved, bounded",
+      "grepHint": "Reservation-backed skill eval qualification"
+    },
+    {
       "path": "docs/review-gate.md",
       "title": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main`, alongside `ci-gate`.",
