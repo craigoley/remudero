@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { ghShim } from "./helpers/gh-shim.js";
+import { rotateLedger } from "../src/lib/ledger.js";
 import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewDecisionDigest, type PromisedFollowUpObservation } from "../src/lib/review.js";
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
@@ -64,6 +65,71 @@ test("the PR creation time bounds a harvest when the live task start is unavaila
   assert.equal(reads, 1);
   assert.equal(result.state, "complete");
   assert.deepEqual(opened, ["ledger.ndjson", fresh]);
+});
+
+test("a rotated dispatch claim preserves the promise harvest's earliest archive bound", async t => {
+  const args = fixture(t), opened: string[] = [];
+  const report = "ledger.2026-10-12T11-00-00-000Z.ndjson.gz";
+  writeFileSync(join(args.dir, report), gzipSync(line(reportRow)));
+  writeFileSync(args.ledgerPath, line({ step: "run.start", task_id: taskId, ts: "2026-10-12T12:00:00.000Z" }) +
+    line({ step: "dispatch.claim", task_id: taskId, ts: firstRun }) +
+    line({ step: "unrelated", padding: "x".repeat(4_000) }));
+  assert.equal(rotateLedger(args.ledgerPath, { ceilingBytes: 2_000, smoothingWindowMs: 0,
+    now: () => new Date("2026-10-12T14:00:00.000Z") }).rotated, true);
+  assert.ok(readFileSync(args.ledgerPath, "utf8").split("\n").filter(Boolean)
+    .map(row => JSON.parse(row)).some(row => row.step === "dispatch.claim" && row.ts === firstRun));
+  const result = await recoverPromisedFollowUpReports(observation, { ...args,
+    prCreatedAt: "2026-10-12T13:00:00.000Z",
+    io: { readdirSync, existsSync, createReadStream: (path, options) => {
+      opened.push(basename(path)); return createReadStream(path, options);
+    } },
+  });
+  assert.deepEqual(opened, ["ledger.ndjson", report]);
+  assert.equal(result.state, "complete");
+  if (result.state === "complete") assert.deepEqual(result.harvested, reportRow.entries);
+  assert.equal(judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result }).state, "success");
+});
+
+test("a satisfied archive harvest does not lose its evidence to a later abort", async t => {
+  const args = fixture(t), opened: string[] = [], controller = new AbortController();
+  const report = "ledger.2026-10-12T11-00-00-000Z.ndjson.gz";
+  const later = "ledger.2026-10-12T12-00-00-000Z.ndjson.gz";
+  writeFileSync(join(args.dir, report), gzipSync(line(reportRow)));
+  writeFileSync(join(args.dir, later), gzipSync(line({ step: "unrelated" })));
+  const result = await recoverPromisedFollowUpReports(observation, { ...args,
+    prCreatedAt: firstRun, signal: controller.signal,
+    io: { readdirSync, existsSync, createReadStream: (path, options) => {
+      opened.push(basename(path));
+      if (basename(path) === later) controller.abort(new DOMException("cancelled", "AbortError"));
+      return createReadStream(path, options);
+    } },
+  });
+  assert.deepEqual(opened, ["ledger.ndjson", report]);
+  assert.equal(result.state, "complete");
+  if (result.state === "complete") {
+    assert.deepEqual(result.harvested, reportRow.entries);
+    assert.equal(result.harvestCorpusComplete, false, "satisfaction does not claim the unread corpus was exhausted");
+  }
+  assert.equal(judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result }).state, "success");
+});
+
+test("an archive harvest continues until every promise has a report", async t => {
+  const args = fixture(t), opened: string[] = [];
+  const first = "ledger.2026-10-12T11-00-00-000Z.ndjson.gz";
+  const second = "ledger.2026-10-12T12-00-00-000Z.ndjson";
+  const other = { ...promise, text: "file another child task" };
+  writeFileSync(join(args.dir, first), gzipSync(line(reportRow)));
+  writeFileSync(join(args.dir, second), line({ ...reportRow, entries: [{ type: "task", text: other.text }] }));
+  const result = await recoverPromisedFollowUpReports({ ...observation, promised: [promise, other] }, { ...args,
+    prCreatedAt: firstRun,
+    io: { readdirSync, existsSync, createReadStream: (path, options) => {
+      opened.push(basename(path)); return createReadStream(path, options);
+    } },
+  });
+  assert.deepEqual(opened, ["ledger.ndjson", first, second]);
+  assert.equal(result.state, "complete");
+  if (result.state === "complete") assert.equal(result.harvested?.length, 2);
+  assert.equal(judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result }).state, "success");
 });
 
 test("a harvest keeps a rotation cut exactly at its age bound without an older cursor", async t => {

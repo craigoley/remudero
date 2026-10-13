@@ -4972,6 +4972,12 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
           entries.set(JSON.stringify(entry), entry);
           if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
         }
+        if (!liveOnly) {
+          const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+          if (unreportedFollowUps(observation.promised, followUpReport(found), observation.planRecords).length === 0) {
+            return { ...observation, harvested: found, harvestCorpusComplete: false };
+          }
+        }
       }
       if (liveOnly && !liveRead) incomplete = true;
       const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
