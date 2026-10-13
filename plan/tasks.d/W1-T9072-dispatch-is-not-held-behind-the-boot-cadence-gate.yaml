@@ -1,0 +1,117 @@
+
+- id: W1-T9072
+  title: "DISPATCH IS NOT HELD BEHIND THE BOOT CADENCE GATE — tick 1 runs `await bootGateOpened` before it reaches dispatch, so every boot's lanes wait for W1-T5720's first full pass: over 72 h, 59 gated boots opened at a median 4.1 min (max 8.4) and first dispatched 0.4 min later, about 280 lane-min a day across 3 lanes"
+  repo: remudero
+  depends_on: [W1-T9069, W1-T8514]  # same-file serialization only: both change src/lib/daemon.ts's runDaemon (W1-T9069, filed in this PR, the dispatch phase's latch; P1 W1-T8514 is in flight)
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — tick 1's dispatch stops waiting for the first full pass; the gated cadences keep waiting
+  band_meaning: span
+  origin: "operator approval 2026-10-13 (\"Agree with all of this … keep automated flow\"): boot-speed research in ~/Remudero-notes/flow-remeasure-2026-10-13b/RESULTS.txt, filed beside layer 1 of the restart-churn fix (W1-T9069)"
+  plan_refs: [W1-T5720, W1-T8197, W1-T5724, W1-T4998, W1-T4002, W1-T3618, W1-T8235, W1-T9069, W1-T8514]
+  files:
+    - src/lib/daemon.ts
+    - test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
+    # W1-T5720's test asserts dispatch waits for the first full pass ("dispatch" is in its cadence loop); it reds without the change
+    - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
+    # W1-T8235 charges an idle slot to `boot_gate` from `daemon.boot_gate.deferred`; may need its fixture moved
+    - test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 90778c755 (src/lib/daemon.ts), against the core ledger union on host remudero
+    (~/rmd-state2/state, read 2026-10-13 ~11:58Z, niced). Symbols, not lines.
+    WHAT THE CODE DOES. W1-T5720's boot gate (`bootGateOpened`, `openBootGate`, `BOOT_CADENCE_GATE_BOUND_MS`) holds
+    `BOOT_GATED_CADENCES` and the deferred gardens until the first full pass settles (`daemon.boot_gate.opened`
+    trigger `first_pass`) or the backstop fires. In runDaemon's main loop, the first iteration runs
+    `await bootReviewPass; for (cadence of BOOT_GATED_CADENCES) deferBootCadence(cadence); await bootGateOpened;` and
+    only then reaches `startDueRungsTimer`, the per-iteration cadences and, further down the same iteration,
+    dispatch (`runnableCandidates`, the lane pool, `runOne`). So tick 1's dispatch waits for the first full pass too.
+    W1-T5720's design names "tick-1 cadences, intake, auto-triage, the retro trigger and the garden fan-out", not
+    dispatch. Its test does include it: in test/a-boot-reviews-before-it-runs-its-cadences.test.ts, "W1-T5720: a boot's
+    light pass and review admission run before any tick-1 cadence, released when the first full pass settles" loops
+    over ["measurement", "retro", "garden", "dispatch"] and asserts each waits for the first pass. So the wait is
+    tested behaviour, not an accident of ordering, and this task changes that assertion on purpose.
+    MEASURED over the union, 2026-10-10T11:45Z to 2026-10-13T11:58Z: 80 .gz rotations plus the live file opened (0
+    plain rotations exist). Duplicate lines that rotations repeat were removed. Positive controls: 69 `daemon.boot`
+    rows, 59 `daemon.boot_gate.opened` rows, and the newest row at 11:58:03Z against a read at ~11:58Z.
+      - 59 boots opened the gate, all with trigger `first_pass`, at a median `waited_ms` of 4.1 min (max 8.4). The other
+        10 exited before it opened (mostly the first of a double boot).
+      - First dispatch selection (`dispatch.lifetime_pressure`) came at a median 4.6 min after boot (n=58), a median
+        0.4 min after the gate (min 0.1). First `run.start` came at a median 4.9 min (n=57; one 55.9-min outlier on
+        2026-10-10 14:39Z). The first `sweep.pass` row came at a median 1.6 min.
+      - Cost: about 23 boots a day x 4.1 min x 3 lanes is about 280 lane-min a day. The session's independent
+        re-measure (10-12 12:00Z to 10-13 11:45Z, 28 boots) charged 321 lane-min to the `boot_gate` idle phase, with
+        boot to first `run.start` at a median 5.7 min over 20 boots.
+    WHAT DISPATCH READS THAT THE FIRST PASS PRODUCES, as far as read for filing (step 1 below finishes the audit):
+      - `SweepCycleOutcome.planOnlyRunBranchReceipts` (W1-T4002) is taken from `latestSweepOutcome`. Its doc says it is
+        "Absent/empty on a tick that ran no sweep ... every observed run branch keeps blocking exactly as it did":
+        missing receipts make dispatch MORE conservative, not less.
+      - `SweepCycleOutcome.reviewerCodeStale` feeds the stale-reviewer restart (W1-T3618). With no completed pass it
+        is absent, so tick 1 makes no restart from it, as on any tick before a pass completes.
+      - `refreshMerged`/`refreshMergedAsync`, `isOpenPr`, `isCreditIndeterminate`, `openPrCount` and
+        `readQueueAdmission` are deps closures over the board projection that boot loads. Whether each is current at
+        boot or refreshed only by the first full pass is what step 1 verifies.
+      - The duplicate-build guards: the run-branch read (`readRunBranchesFor("tick", …)`, a failed read refuses
+        nothing), dispatch claims, and `isOpenPr` (W1-T80). Each must still refuse on tick 1.
+    OVERLAP. W1-T8197 (queued P2 recon, never built) was filed to measure this same wait and recommend one
+    implementation. This task carries its question (step 1) as an implementation with a falsifier. W1-T5724 (queued P3)
+    makes the boot load less before the first pass, which shortens the wait but leaves dispatch behind it; the two are
+    complementary. W1-T4998 owns the no-wait contract for tick 1's admission when nothing is gated, and this task
+    extends it to the gated case. Coverage sweep: origin/main and all 341 remote heads, plan/ only, each head's count
+    compared with main's (main's counts are the control: boot_gate 3, bootGateOpened 1, "boot gate" 7). No head adds a
+    shard.
+  design: |
+    Operator rulings: no hard threshold or cap, keep automated flow.
+    1. AUDIT FIRST, IN THE TEST. For every input tick 1's dispatch reads (the list in the rationale, plus anything else
+       the options builder and `admitAtStart` read), establish whether it is valid at boot without the first full
+       pass. An input that is valid stays ungated. An input that genuinely needs the pass is gated ALONE: dispatch
+       proceeds without it in the conservative direction (as `planOnlyRunBranchReceipts` already does). If that
+       direction does not exist, only the tasks that input decides wait, with one named row per boot,
+       `daemon.boot_gate.dispatch_input_held`, naming the input. Dispatch as a whole never waits.
+    2. DISPATCH ON TICK 1. The first iteration no longer awaits `bootGateOpened` before dispatch. Tick 1 dispatches
+       from the state it has at boot: the board snapshot and ledger projection loaded at boot, the run-branch read,
+       claims and resumable handoffs, through every existing gate (host memory admission, governors, WIP budget,
+       file overlap).
+    3. THE CADENCES STILL WAIT. `BOOT_GATED_CADENCES` and the deferred gardens stay deferred until the first full pass
+       settles or the backstop fires, with the same `daemon.boot_gate.deferred` and `daemon.boot_gate.opened` rows. No
+       cadence is skipped. A gated cadence never runs while a dispatch phase is in flight, because the orphan sweep and
+       its peers today run only at the iteration top, never beside live lanes. So once the gate is open they run at the
+       next iteration top, as on every later tick. The deferred gardens still start at `openBootGate`, as today.
+    4. ONE LATENCY ROW PER BOOT. Write `daemon.boot_first_dispatch` once per process: boot_at, gate_open_ms (null while
+       still closed), first_selection_ms, first_run_start_ms (null when the first selection admitted nothing), and
+       admitted_count, or the selection's held reason when nothing ran. It is written at the first `runOne` start, or
+       at the first dispatch decision that admits nothing.
+    UNCHANGED: W1-T5720's light pass first with no initial sleep, and its review admission ahead of any cadence. The
+    backstop constant. W1-T4002's receipts semantics. The stale-reviewer restart path.
+    Tests go in the new file test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive runDaemon with fake deps as test/a-boot-reviews-before-it-runs-its-cadences.test.ts
+    does (`bootOnce`), with a first full pass that never settles. Use no live ledger, wall clock or network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts"
+    - claim: "with a first full pass that never settles, a runnable task gets run.start on tick 1"
+      proof: 'grep: test("W1-T9072: a runnable task starts on tick 1 while the first full pass has not settled" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+    - claim: "the gated cadences stay deferred until the first full pass or the backstop, and none runs while a tick-1 lane is in flight"
+      proof: 'grep: test("W1-T9072: the gated cadences stay deferred and never run beside a tick-1 lane" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+    - claim: "a task with an open PR, a pushed run branch or a live claim is still refused on tick 1 before the first pass"
+      proof: 'grep: test("W1-T9072: the duplicate-build guards still refuse on tick 1 before the first pass" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+    - claim: "each boot writes one boot-to-first-dispatch latency row"
+      proof: 'grep: test("W1-T9072: every boot writes one boot-to-first-dispatch row" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+    - claim: "daemon.ts writes the boot latency row"
+      proof: 'grep: daemon\.boot_first_dispatch in src/lib/daemon.ts'
+  falsifier: |
+    Fake deps whose first full pass never settles, with the backstop far away, and one runnable task. At origin/main no
+    `run.start` comes before `daemon.boot_gate.opened` (trigger backstop). With the change the task starts on tick 1,
+    while `checkMeasurementCadence` and `checkRetroTrigger` stay deferred until the gate opens. Restore
+    `await bootGateOpened` ahead of dispatch and the first test reds. Run the gated cadences on tick 1 instead and the
+    second reds. Give the open-PR, run-branch or claim fake a hit for the task and the third must see no start.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: compare
+    `daemon.boot_first_dispatch.first_run_start_ms` with this rationale's baseline (boot to first run.start median 4.9
+    min over 57 boots, 4.1 min of it gate wait), and the W1-T8235 `boot_gate` idle-phase lane-min per day before and
+    after. Healthy shape: first `run.start` follows the boot by about the time of the run-branch read and one
+    selection pass, not by the first full pass.
