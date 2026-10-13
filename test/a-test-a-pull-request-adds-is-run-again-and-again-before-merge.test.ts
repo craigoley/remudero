@@ -203,10 +203,16 @@ test("an absent or unreadable job-start stamp reads as unknown, never as nothing
 });
 
 test("shard 1 runs the guard mutation before the flake screen, and the job stamps its start before either", () => {
-  const ci = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")).jobs.ci as { steps: { name?: string; id?: string; run?: string }[] };
+  const text = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  const ci = parse(text).jobs.ci as { steps: { name?: string; id?: string; run?: string; env?: Record<string, string> }[] };
   const at = (needle: string) => ci.steps.findIndex((s) => s.run?.includes(needle));
   const stamp = ci.steps.findIndex((s) => s.id === "admission");
-  assert.match(ci.steps[stamp]!.run!.split("\n")[0]!, /^echo "RMD_JOB_STARTED_MS=\$\(date \+%s%3N\)" >> "\$\{GITHUB_ENV:-\/dev\/null\}"$/);
+  assert.match(ci.steps[stamp]!.run!.split("\n")[0]!, /^echo "started_ms=\$\(date \+%s%3N\)" >> "\$GITHUB_OUTPUT"$/);
+  // A step OUTPUT, never GITHUB_ENV: the guard mutation replays the admission body inside the real job,
+  // and each replay appended its own stamp to the job's GITHUB_ENV, so the screen read the last one (#11308).
+  assert.doesNotMatch(text, /RMD_JOB_STARTED_MS=/, "no step writes the stamp where a later step can rewrite it");
+  const screenStep = ci.steps.find((s) => s.run?.trim() === "node scripts/flake-screen.mjs --shard ${{ matrix.shard }}")!;
+  assert.equal(screenStep.env?.RMD_JOB_STARTED_MS, "${{ steps.admission.outputs.started_ms }}");
   assert.ok(stamp < at("node scripts/workflow-guard-mutation-ratchet.mjs"), "the stamp opens the window before the guard mutation spends from it");
   const screen = ci.steps.findIndex((s) => s.run?.trim() === "node scripts/flake-screen.mjs --shard ${{ matrix.shard }}");
   assert.ok(at("node scripts/workflow-guard-mutation-ratchet.mjs") < screen, "the screen runs last, on what is left");
