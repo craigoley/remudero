@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { crc32 } from "node:zlib";
 import { parse as parseYaml } from "yaml";
 import {
   FOLD_DEBT_DROPPED_STEP,
@@ -46,14 +47,45 @@ function entry(bytes: number): { id: string; text: string } {
   return { id, text: renderFoldDebtEntry(id, "CLAUDE.md", bytes, 46000, [`CLAUDE.md is ${bytes} bytes > cap 44000 bytes`], "2026-10-13T00:00:00.000Z") };
 }
 
-/** A GitHub Actions artifact zip made by the real `zip` binary, members at the archive root as upload-artifact stores them. */
+/** A GitHub Actions artifact zip with STORED members at the archive root, built in-process: the daemon
+ *  image that runs review proofs installs no `zip` binary (deploy/Dockerfile). */
 function artifactZip(members: Record<string, string>): Buffer {
-  const dir = scratch("zip");
-  for (const [name, text] of Object.entries(members)) writeFileSync(join(dir, name), text);
-  const out = join(dir, "artifact.zip");
-  const res = spawnSync("zip", ["-q", "-X", out, ...Object.keys(members)], { cwd: dir, encoding: "utf8" });
-  assert.equal(res.status, 0, res.stderr);
-  return readFileSync(out);
+  const parts: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(members)) {
+    const path = Buffer.from(name);
+    const data = Buffer.from(text);
+    const header = (size: number, signature: number) => {
+      const b = Buffer.alloc(size + path.length);
+      b.writeUInt32LE(signature, 0);
+      return b;
+    };
+    const local = header(30, 0x04034b50);
+    local.writeUInt32LE(crc32(data), 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(path.length, 26);
+    path.copy(local, 30);
+    const central = header(46, 0x02014b50);
+    central.writeUInt32LE(crc32(data), 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(path.length, 28);
+    central.writeUInt32LE(offset, 42);
+    path.copy(central, 46);
+    parts.push(local, data);
+    directory.push(central);
+    offset += local.length + data.length;
+  }
+  const listing = Buffer.concat(directory);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(directory.length, 8);
+  end.writeUInt16LE(directory.length, 10);
+  end.writeUInt32LE(listing.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, listing, end]);
 }
 
 interface Hosted { id: number; lane: "main" | "pr"; runId: number; headSha: string; zip: Buffer }
