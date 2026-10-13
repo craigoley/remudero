@@ -1039,17 +1039,14 @@ export function mostRecentApprovePr(
       branch: line.branch,
       prUrl: line.pr_url,
       prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined,
-      // W1-T9161: the process that wrote the row (appendLedger stamps both), so the join can tell an approve that is
-      // still deciding this PR from one that has exited. Absent on a row written before the stamp: no process named.
-      ...(typeof line.actor_pid === "number" ? { actorPid: line.actor_pid } : {}),
+      ...(typeof line.actor_pid === "number" ? { actorPid: line.actor_pid } : {}), // W1-T9161: appendLedger's own stamps
       ...(typeof line.host === "string" ? { host: line.host } : {}),
     };
   }
   return best;
 }
 
-/** W1-T9161: {@link mostRecentApprovePr}'s answer — the PR, and the approve process whose row named it. */
-export interface ApprovePrCandidate {
+export interface ApprovePrCandidate { // W1-T9161: the PR, and the approve process whose row named it
   branch: string;
   prUrl: string;
   prNumber?: number;
@@ -3061,15 +3058,11 @@ export interface RatifyGateway {
    *  {@link createRatificationBranch}. */
   findJoinablePr?(): { branch: string; prUrl: string; prNumber?: number } | undefined;
 
-  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s)
-   *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
-   *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
-   *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch.
-   *  W1-T9161: `undefined` when another approve moved the branch first and git refused this push as a
-   *  non-fast-forward. Nothing was joined, and {@link approveProposal} files this proposal through
-   *  {@link createRatificationBranch} and {@link openPlanPr} instead, the pre-W1-T4437 shape. The join is never
-   *  retried. */
+  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s) plus its folded
+   *  stamp as ONE NEW COMMIT on that still-open branch, never squashing or amending a prior approval's (design iii).
+   *  Returns the branch it was given; W1-T9161: `undefined` when git refused the push as a non-fast-forward, and
+   *  {@link approveProposal} then opens this proposal's own PR, never retrying the join. `prUrl` is that open PR,
+   *  whose body W1-T4706 rebuilds over the whole branch. */
   joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string | undefined;
 }
 
@@ -3237,8 +3230,7 @@ export function approveProposal(
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
   } else if (joinable !== undefined && gateway.joinRatificationBranch !== undefined) {
-    // W1-T9161: `undefined` is a join that lost the push to another approve; it falls through to its own PR below.
-    branch = gateway.joinRatificationBranch(joinable.branch, payload, joinable.prUrl);
+    branch = gateway.joinRatificationBranch(joinable.branch, payload, joinable.prUrl); // W1-T9161: undefined = lost the push
     joinedPr = branch === undefined ? undefined : joinable;
   }
   branch ??= skillFile && gateway.writeSkillFile ? gateway.writeSkillFile(classification.proposalId, skillFile) : gateway.createRatificationBranch(payload);

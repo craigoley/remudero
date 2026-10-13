@@ -163,20 +163,10 @@ export interface PushRunBranchOpts {
    *  {@link defaultGitCapture}. Consulted when `expectedHeadSha` is supplied, and by
    *  {@link leasedForcePushSteps} to derive the lease when `force` is set. */
   capture?: GitCapture;
-  /**
-   * W1-T9161 — THE BRANCH ON ORIGIN THIS PUSH LANDS ON, when it is not the worktree's own. A joining approve commits
-   * on its own local branch, cut from an open plan PR's tip, and lands that commit on the PR's branch. The push is
-   * `HEAD:refs/heads/<destination>` as a plain fast-forward: git's own rule refuses it when another writer moved the
-   * branch first ({@link isNonFastForwardRejection}), and a destination is never forced. The pre-push gate reads the
-   * destination from the refspec. Omitted, the push is exactly `origin HEAD`, as at every other call site.
-   */
-  destination?: string;
+  destination?: string; // W1-T9161: HEAD lands on refs/heads/<destination> as a plain fast-forward, never forced
 }
 
-/** W1-T9161: true when `err` is git refusing a plain push because the remote branch is no longer an ancestor of HEAD —
- *  `(fetch first)` when the new tip is unknown locally, `(non-fast-forward)` when it is known. Any other failure
- *  (a dead credential, an unreachable origin, the pre-push gate) is not a lost race, and reads false. */
-export function isNonFastForwardRejection(err: unknown): boolean {
+export function isNonFastForwardRejection(err: unknown): boolean { // W1-T9161: another writer moved the branch first
   return err instanceof PushFailedError && /\[rejected\][^\n]*\((?:fetch first|non-fast-forward)\)/.test(err.stderrText);
 }
 
