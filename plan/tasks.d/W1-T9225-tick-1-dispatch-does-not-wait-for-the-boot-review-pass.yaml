@@ -103,6 +103,7 @@
   acceptance:
     - claim: "the W1-T9072 test file passes with the new tests"
       proof: "unit test: test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts"
+      kind: guard  # the file exists at base (W1-T9072's 5 tests), so a path proof cannot discriminate; the two grep proofs below do
     - claim: "with a boot review pass that never settles, a runnable task gets run.start on tick 1, after the review pass started"
       proof: 'grep: test("W1-T9225: a runnable task starts on tick 1 while the boot review pass has not settled" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
     - claim: "the gated cadences stay deferred while the boot review pass is in flight, even once the gate has opened"
