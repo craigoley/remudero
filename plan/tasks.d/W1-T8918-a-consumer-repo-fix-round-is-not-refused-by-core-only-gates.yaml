@@ -1,0 +1,64 @@
+- id: W1-T8918
+  title: "A CONSUMER-REPO FIX ROUND IS NOT REFUSED BY CORE'S CENSUS BASELINES — the fix rung's pre-push census check runs core's census-precheck and the-affected-suite-reach-ratchet against any worktree, so every remudero-console fix push since 2026-10-10 fails on ENOENT for scripts/affected-reach-baseline.json, a core-only file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the fix rung's push gate for every enrolled repo; spans run-task's census check and both fix-rung call sites
+  band_meaning: span
+  origin: "operator session 2026-10-12/13: forensics on remudero-console #2072 (CONSOLE-T124), which the sweep closed after eight fix rounds made no diff (operator: file the fixes in parallel)"
+  plan_refs: [W1-T7182, W1-T5702, W1-T4693, W1-T8379, W1-T8833, W1-T8834]
+  files: [src/run-task.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-consumer-repo-fix-round-is-not-refused-by-core-only-gates.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12/13 on remudero-console #2072 (CONSOLE-T124), console daemon ledger and archived fix transcripts
+    (/mnt/rmd/remudero-console-state/state/transcripts/CONSOLE-T124/):
+      The build titled its test "...previews what happened, not the raw summary's first line" while the shard's proof
+      greps it("titles a proposal with its plain headline and previews what happened" — review FAILED on that one proof.
+      Fix round DAEMON-1791843363187.fix-1-1791848142881 (23:37Z) found the exact pattern, renamed line 57 and reported
+      FIX_OUTCOME: FIXED. The edit never landed: the pre-push census check refused it.
+      Round DAEMON-1791848612722.fix-2-1791848924269 (23:51Z) diagnosed the refusal and returned NEEDS_DESIGN:
+      "scripts/affected-reach-baseline.json is a core-repo artifact, absent from remudero-console ... The gate must stop running".
+      Eight fix rounds produced no diff; the sweep closed the PR at 00:16Z 10-13 ("Four rounds were refused by a census
+      precheck that fails because its fixture path is missing"). The operator re-applied the same one-line rename by hand
+      (5a859d2cf) and it merged at 00:35Z with remudero-review PASS.
+    SCOPE OF THE DEFECT: every fix.census_check row in the console ledger's recent rotations is refused (10 of 10 on
+    2026-10-12: CONSOLE-T124 x8, PR-2069 x2), each "census-suite: test/the-affected-suite-reach-ratchet.test.ts fails —
+    ... ENOENT: no such file or directory" for scripts/affected-reach-baseline.json. No console fix round can land.
+    ROOT CAUSE (verified on origin/main cb357d750): `fixCensusSnapshotSteps` (src/run-task.ts ~18425–18458) always runs
+    core's `scripts/census-precheck.mjs --root <worktree>` and then core's `test/the-affected-suite-reach-ratchet.test.ts`
+    (both from `repoRoot`, the harness checkout) against the worktree's census snapshot. W1-T7182 (#10516, 2026-10-10)
+    added the reach-ratchet run. The snapshot is written whenever the harness owns git (`writeFixCensusSnapshot`,
+    src/run-task.ts ~18332; call sites ~13295 sweep fix rung and ~18789 run-task fix lane) with no check of WHICH
+    repository the worktree belongs to, so a consumer repo is measured against core's census registry and core's
+    shrink-only baselines, which it does not have and must not carry.
+    NOT THE CAUSE: the fix prompt. The worker quoted the exact grep pattern and made the right one-line change; the
+    near-miss was found. W1-T8834 (build prompt names proof titles verbatim) prevents the original title drift.
+  design: |
+    1. src/run-task.ts: the fix rung runs core's census suites (census-precheck and the reach ratchet) ONLY when the
+       worktree is the harness's own repository. Decide by repository identity (the task's repo against the core repo
+       the harness serves, through the existing self-repo/registry helper), never by whether a baseline file happens
+       to exist: a core branch that deletes scripts/affected-reach-baseline.json must still be refused.
+    2. For any other repository the census check returns no refusal and ledgers `fix.census_check` with outcome
+       "not-applicable" and the repo, so the skip is visible, not silent. Both call sites (~13295, ~18789) skip
+       writing the snapshot for such a worktree, so no snapshot env reaches its worker either.
+    3. A consumer repo's OWN pre-push gates are out of scope here; if a consumer later declares census suites of its
+       own, they run from that repo's tree, not core's.
+    NOT IN SCOPE: W1-T8379's judged-run change to the same function (merge order is free; both keep the existing
+    refusal shape); re-pushing #2072's history.
+  acceptance:
+    - claim: "a fix round in a consumer repo whose tree lacks core's census baselines is not refused by the census check, and the skip is ledgered as not-applicable"
+      proof: 'grep: test("W1-T8918: a consumer-repo fix round is not refused by core-only gates" in test/a-consumer-repo-fix-round-is-not-refused-by-core-only-gates.test.ts'
+    - claim: "a core fix round still runs the census check, and a core branch that deletes the reach baseline is still refused"
+      proof: 'grep: test("W1-T8918: a core fix round still refuses a branch that deletes the reach baseline" in test/a-consumer-repo-fix-round-is-not-refused-by-core-only-gates.test.ts'
+    - claim: "neither fix-rung call site writes a census snapshot for a consumer-repo worktree"
+      proof: 'grep: test("W1-T8918: no census snapshot is written for a consumer-repo worktree" in test/a-consumer-repo-fix-round-is-not-refused-by-core-only-gates.test.ts'
+  falsifier: |
+    Build a gitRepo() consumer worktree with tests/ and no scripts/affected-reach-baseline.json, and drive the fix-rung
+    census check for a task whose repo is not the core repo. At origin/main it returns a census-suite refusal naming
+    the-affected-suite-reach-ratchet and ENOENT; with the change it returns no refusal and ledgers not-applicable. Gate
+    on file presence instead of repo identity and the second test reds (a core branch deleting the baseline passes).
