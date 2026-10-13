@@ -217,7 +217,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
@@ -13885,7 +13885,9 @@ export async function runFixRung(opts: {
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
         // The ci-friction gardener prices a ci-log round against each check and failing test.
-        ci_failures: (currentCiFailures ?? []).map((f) => ({ check: f.name, signature: ciFailureSignature(f.logTail) ?? null })),
+        // W1-T9057: plus the failing titles, a bounded excerpt and where the tail came from, so the filing
+        // the gardener drafts can show the rounds it priced instead of "(none recorded)".
+        ci_failures: (currentCiFailures ?? []).map(ciFailureLedgerEntry),
         // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
         conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
