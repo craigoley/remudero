@@ -1,0 +1,37 @@
+- id: W1-T8889
+  title: "SITE AND CONSOLE HAVE NO REAL MEMORY CAP AND THE WRONG SOFT ONE — both carry memory.max 9.25 GB (core's), so nothing bounds a runaway, while console throttles (high 2.0 GB, peak 2.61 GB, 553 high events) and site never does (high 1.75 GB, p90 1.25 GB, 0 events, no worker in 31 h): each satellite's memory.high is self-tuned from its own observed peaks, as core's already is, and its memory.max is bounded"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the satellites' cgroup sizing follows their measured use; core is unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: no VM resize; right-size what we have"
+  plan_refs: []
+  files: [deploy/recycle-container.sh, deploy/install-host-units.sh, test/a-satellite-cgroup-is-sized-from-its-own-peaks.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; cgroup files read via docker exec; daemon.alive 48 h.
+    OBSERVED:
+    - console: memory.high 2.0 GB, memory.peak 2.61 GB, 553 `high` events, swap peak 0.63 GB, current p50 1.26 / p90
+      1.93 GB, workers active in 60% of samples.
+    - site: memory.high 1.75 GB (1,879,048,192), peak 1.75 GB, 0 high events, current p90 1.25 GB, 0 active workers in
+      31 h.
+    - Both satellites: memory.max 9.25 GB, the same as core.
+    - Core's memory.high is already self-tuned (#10486, `host.memory_high`, memory-high-tuned-remudero-daemon.json).
+    OWNERSHIP: none for the satellites.
+  design: |
+    Extend core's memory.high self-tuner to site and console:
+    - high = clamp(p95 of the satellite's own current over 7 days × 1.15, floor 1.25 GB);
+    - max = high × 1.5, bounded at 3 GB.
+    The sum of satellite highs must not exceed their current sum: a rebalance, not a raise. Applied at the next recycle
+    through the existing recycle path. Ledgered.
+  acceptance:
+    - claim: "each satellite's memory.high is derived from its own measured peaks and its memory.max is bounded, without raising the satellites' combined soft limit"
+      proof: 'grep: test("W1-T8889: a satellite cgroup is sized from its own peaks" in test/a-satellite-cgroup-is-sized-from-its-own-peaks.test.ts'
+  falsifier: |
+    Leave memory.max at the core value: the fixture asserts a satellite max ≤ 3 GB and fails.

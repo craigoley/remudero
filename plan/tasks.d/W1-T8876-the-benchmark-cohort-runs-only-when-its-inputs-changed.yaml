@@ -1,0 +1,38 @@
+- id: W1-T8876
+  title: "THE BENCHMARK COHORT REWRITES A 29.6 MB CHECKPOINT ON THE DAEMON LOOP EVERY 30 SECONDS — buildBenchmarkCohortDaemonHooks defaults intervalMs to 30_000, so 2,543 passes in 48 h each synchronously parse and stringify state/benchmark-cohort-v1.json (~75 GB written per 48 h, two loop-lag stalls name it) while the cohort never leaves quarantine: the cohort runs only when its inputs changed, at most every 15 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — how often the cohort pass runs; its computation is unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: optimize and right-size what we have (I/O pressure ~9% full stall on the host)"
+  plan_refs: []
+  files: [src/run-task.ts, test/the-benchmark-cohort-runs-only-when-its-inputs-changed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; ledger 48 h, deduplicated.
+    OBSERVED:
+    - `buildBenchmarkCohortDaemonHooks` (src/run-task.ts): `intervalMs = deps.intervalMs ?? 30_000`.
+    - 2,543 `benchmark_cohort` passes in 48 h, each reading and rewriting the 29.6 MB state/benchmark-cohort-v1.json with
+      synchronous JSON.parse/stringify on the daemon's event loop.
+    - Two `daemon.loop_lag` stalls (4.9 s, 1.2 s) name it in `last_step_before_block`.
+    - The cohort state is permanently "quarantined" (never "complete").
+    - The host's I/O pressure (PSI io full avg60) runs ~8-10%.
+    OWNERSHIP: no shard paces the cohort.
+  design: |
+    1. The hook skips a pass unless its inputs changed since the last pass: the ledger's live inode/size or rotation count,
+       and the cohort config digest. Even then it runs at most once per 15 min (policy `benchmarkCohort.minIntervalMs`,
+       default 900000).
+    2. A skipped pass writes no row and touches no file (no per-skip ledger noise).
+    3. The checkpoint is written only when its serialized digest changed.
+  acceptance:
+    - claim: "the cohort pass runs at most once per 15 minutes and only when its ledger or config inputs changed, and an unchanged result does not rewrite the checkpoint"
+      proof: 'grep: test("W1-T8876: the benchmark cohort runs only when its inputs changed" in test/the-benchmark-cohort-runs-only-when-its-inputs-changed.test.ts'
+  falsifier: |
+    Restore the 30 s unconditional interval: the fixture clock advancing 10 minutes with unchanged inputs runs the pass 20
+    times, and the test fails.
