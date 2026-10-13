@@ -29,18 +29,14 @@
  *         `realpath(cwd)` with each "/" → "-", which is what {@link scratchSlugForCwd}
  *         computes.
  *
- * SAFETY. Because the exact regex is not isolable in the compiled binary, the reap
- * NEVER blindly deletes a constructed path. It (i) GUARDS that the target resolves
- * to exactly ONE segment strictly below the claude-<uid> root, so it is
- * structurally incapable of escaping that root, and (ii) only removes an entry that
- * ACTUALLY EXISTS — a mis-derived slug matches nothing and no-ops. A missed orphan
- * (e.g. a future cwd containing "." where a variant would differ) is caught by the
- * STEP 2 boot sweep on age. Every function here is best-effort and never throws:
- * teardown must not fail because a scratch dir could not be reaped.
+ * SAFETY. The exact regex is not isolable in the binary, so the reap NEVER blindly deletes a
+ * constructed path: the target must be ONE segment strictly below the claude-<uid> root and must
+ * ACTUALLY EXIST. A missed orphan is caught by the STEP 2 sweep once nothing in it is recent.
+ * Everything here is best-effort and never throws, so teardown never fails on a scratch dir.
  */
 import fs from "node:fs";
 import { tmpdir } from "node:os";
-import { relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 export interface ScratchOpts {
   /** Env to read CLAUDE_CODE_TMPDIR from (default process.env). */
@@ -167,15 +163,48 @@ export interface ScratchSweepOpts extends ScratchOpts {
 export interface ScratchSweepSummary {
   removed: string[];
   kept: string[];
+  /** Kept because an entry could not be read: staleness unproved. */
+  unproved: string[];
+}
+
+/** How deep the freshness walk reads: the CLI's `<slug>/<session>/<scratchpad|tasks>/<file>`. */
+export const SCRATCH_FRESHNESS_DEPTH = 3;
+
+/** Whether `dir` or anything within `depth` levels changed after `freshAfterMs`. A slug dir's own
+ *  mtime stays put while a live session writes deep inside it. `undefined`: an entry was unreadable. */
+export function scratchTreeIsFresh(
+  dir: string,
+  freshAfterMs: number,
+  f: Pick<typeof fs, "statSync" | "readdirSync"> = fs,
+  depth: number = SCRATCH_FRESHNESS_DEPTH,
+): boolean | undefined {
+  try {
+    const st = f.statSync(dir, { throwIfNoEntry: false });
+    if (!st) return false;
+    if (st.mtimeMs > freshAfterMs) return true;
+    if (depth === 0) return false;
+    for (const entry of f.readdirSync(dir, { withFileTypes: true })) {
+      const child = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const fresh = scratchTreeIsFresh(child, freshAfterMs, f, depth - 1);
+        if (fresh !== false) return fresh;
+      } else if ((f.statSync(child, { throwIfNoEntry: false })?.mtimeMs ?? 0) > freshAfterMs) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return undefined; // unreadable: freshness is unproved, so the sweep keeps the dir and names it
+  }
 }
 
 /**
  * STEP 2 backstop — boot sweep of the `claude-<uid>` root. Reaps scratchpad dirs
  * older than `maxAgeMs`, the orphans a CRASHED ORCHESTRATOR could not reap at
- * teardown (STEP 1 covers the common killed-worker case immediately). Same 24h
- * generosity as lib/tmp.ts's sweep, so a long-running LIVE session (recent mtime)
- * is never collateral. Same one-segment-below-root guard as the per-task reap. Best
- * effort throughout: an unreadable root or a per-entry error never throws.
+ * teardown (STEP 1 covers the common killed-worker case immediately). The root is shared
+ * with interactive Claude Code sessions, so a dir is stale only when nothing in it is recent
+ * ({@link scratchTreeIsFresh}); an unreadable one is kept and named in `unproved`. Same
+ * one-segment-below-root guard as the per-task reap. Never throws.
  */
 export function sweepStaleWorkerScratch(opts: ScratchSweepOpts = {}): ScratchSweepSummary {
   const f = opts.fsImpl ?? fs;
@@ -183,14 +212,15 @@ export function sweepStaleWorkerScratch(opts: ScratchSweepOpts = {}): ScratchSwe
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS;
   const removed: string[] = [];
   const kept: string[] = [];
+  const unproved: string[] = [];
   const root = claudeScratchRoot(opts);
-  if (!root) return { removed, kept };
+  if (!root) return { removed, kept, unproved };
 
   let entries: string[];
   try {
     entries = f.readdirSync(root);
   } catch {
-    return { removed, kept }; // root not created yet / unreadable — best-effort
+    return { removed, kept, unproved }; // root not created yet / unreadable — best-effort
   }
 
   for (const name of entries) {
@@ -216,6 +246,12 @@ export function sweepStaleWorkerScratch(opts: ScratchSweepOpts = {}): ScratchSwe
       kept.push(name); // recent mtime ⇒ a live session may still own it
       continue;
     }
+    const fresh = scratchTreeIsFresh(full, now() - maxAgeMs, f);
+    if (fresh !== false) {
+      kept.push(name);
+      if (fresh === undefined) unproved.push(name);
+      continue;
+    }
     try {
       f.rmSync(full, { recursive: true, force: true });
       removed.push(name);
@@ -223,5 +259,5 @@ export function sweepStaleWorkerScratch(opts: ScratchSweepOpts = {}): ScratchSwe
       kept.push(name); // a permissions hiccup on one entry never blocks the rest
     }
   }
-  return { removed, kept };
+  return { removed, kept, unproved };
 }

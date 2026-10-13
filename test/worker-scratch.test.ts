@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -11,7 +11,9 @@ import {
   DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS,
   isReapableScratchTarget,
   reapWorkerScratch,
+  SCRATCH_FRESHNESS_DEPTH,
   scratchSlugForCwd,
+  scratchTreeIsFresh,
   sweepStaleWorkerScratch,
 } from "../src/lib/worker-scratch.js";
 
@@ -159,6 +161,7 @@ test("boundedness backstop: the boot sweep reaps a STALE orphan but preserves a 
     mkdirSync(orphan, { recursive: true });
     writeFileSync(join(orphan, "big.bin"), "x".repeat(4096));
     const past = Date.now() / 1000 - 48 * 3600; // 48h ago — a crashed-orchestrator orphan
+    utimesSync(join(orphan, "big.bin"), past, past); // an orphan's contents are as old as the dir
     utimesSync(orphan, past, past);
 
     const before = readdirSync(root).length;
@@ -231,6 +234,7 @@ test("teardown sweep: a SIGKILLed test's rmd-* fixture orphan is reaped within t
     mkdirSync(orphan, { recursive: true });
     writeFileSync(join(orphan, "leaked.bin"), "x".repeat(4096));
     const stale = new Date(Date.now() - (DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS + 60_000));
+    utimesSync(join(orphan, "leaked.bin"), stale, stale); // an orphan's contents are as old as the dir
     utimesSync(orphan, stale, stale);
     const before = readdirSync(root).length;
     sweepStaleWorkerScratch({ ...opts, maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
@@ -259,4 +263,106 @@ test("teardown sweep: a task's OWN fresh SDK <slug> scratchpad AND a fresh fixtu
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ── a live session is judged by what it writes, not by its slug dir's own mtime ─────
+
+/** Backdate each of `paths`. utimes never touches a parent's mtime, so callers list children first. */
+function backdate(paths: string[], ageMs: number): void {
+  const past = new Date(Date.now() - ageMs);
+  for (const p of paths) utimesSync(p, past, past);
+}
+
+test("a live session's aged slug dir survives both sweeps while it still writes deep inside", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-scratch-live-session-"));
+  const opts = { env: { CLAUDE_CODE_TMPDIR: base }, uid: UID, platform: "linux" as const };
+  try {
+    mkdirSync(join(base, `claude-${UID}`), { recursive: true });
+    const root = claudeScratchRoot(opts)!;
+    // Claude Code's own shape: <slug>/<session>/scratchpad/<file>. The slug and session dirs
+    // were created days ago; only the file the session just wrote is recent.
+    const slug = join(root, "-home-user-remudero");
+    const session = join(slug, "c8a25d1a-session");
+    const scratchpad = join(session, "scratchpad");
+    mkdirSync(scratchpad, { recursive: true });
+    writeFileSync(join(scratchpad, "notes.md"), "written a minute ago");
+    backdate([scratchpad, session, slug], 13 * 24 * 3600 * 1000);
+    // A real orphan of the same shape, everything in it old.
+    const orphan = join(root, "-home-user-gone");
+    const orphanPad = join(orphan, "dead-session", "scratchpad");
+    mkdirSync(orphanPad, { recursive: true });
+    writeFileSync(join(orphanPad, "old.md"), "abandoned");
+    backdate([join(orphanPad, "old.md"), orphanPad, join(orphan, "dead-session"), orphan], 13 * 24 * 3600 * 1000);
+
+    const teardown = sweepStaleWorkerScratch({ ...opts, maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
+    assert.deepEqual(teardown.removed, ["-home-user-gone"], "the teardown sweep reaps only the orphan");
+    assert.deepEqual(teardown.unproved, []);
+    assert.ok(existsSync(join(scratchpad, "notes.md")), "the live session's scratch survives the 4h teardown sweep");
+    const boot = sweepStaleWorkerScratch(opts);
+    assert.deepEqual(boot.removed, [], "the 24h boot sweep leaves the live session too");
+    assert.ok(existsSync(join(scratchpad, "notes.md")));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("the freshness walk reads SCRATCH_FRESHNESS_DEPTH levels and no deeper", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-scratch-depth-"));
+  try {
+    const dir = join(base, "slug");
+    const levels = [dir];
+    for (let i = 0; i < SCRATCH_FRESHNESS_DEPTH; i++) levels.push(join(levels[levels.length - 1]!, `l${i + 1}`));
+    mkdirSync(levels[levels.length - 1]!, { recursive: true });
+    const deepest = levels[levels.length - 1]!;
+    const freshAfter = Date.now() - 60_000;
+    writeFileSync(join(deepest, "beyond.txt"), "one level past the walk");
+    backdate([...levels].reverse(), 48 * 3600 * 1000);
+    assert.equal(scratchTreeIsFresh(dir, freshAfter), false, "a fresh file one level past the bound is not read");
+    writeFileSync(join(levels[levels.length - 2]!, "within.txt"), "at the bound");
+    backdate([levels[levels.length - 2]!, ...levels.slice(0, -2).reverse()], 48 * 3600 * 1000);
+    assert.equal(scratchTreeIsFresh(dir, freshAfter), true, "a fresh file at the bound is read");
+    assert.equal(scratchTreeIsFresh(join(base, "missing"), freshAfter), false, "a vanished dir has nothing fresh in it");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a broken symlink inside an aged orphan has no mtime and does not keep it", () => {
+  const base = mkdtempSync(join(tmpdir(), "rmd-scratch-broken-link-"));
+  const opts = { env: { CLAUDE_CODE_TMPDIR: base }, uid: UID, platform: "linux" as const };
+  try {
+    mkdirSync(join(base, `claude-${UID}`), { recursive: true });
+    const root = claudeScratchRoot(opts)!;
+    const orphan = join(root, "-tmp-worker-gone");
+    mkdirSync(orphan, { recursive: true });
+    symlinkSync(join(base, "never-existed"), join(orphan, "dangling"));
+    backdate([orphan], 48 * 3600 * 1000);
+    const summary = sweepStaleWorkerScratch(opts);
+    assert.deepEqual(summary.removed, ["-tmp-worker-gone"]);
+    assert.deepEqual(summary.unproved, []);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable entry leaves staleness unproved: the dir is kept, named, and never deleted", () => {
+  const old = Date.now() - 48 * 3600 * 1000;
+  const dirStat = { isDirectory: () => true, mtimeMs: old };
+  const removed: string[] = [];
+  const fsImpl = {
+    realpathSync: (p: string) => p,
+    existsSync: () => true,
+    statSync: () => dirStat,
+    readdirSync: (p: string, o?: { withFileTypes?: boolean }) => {
+      if (!o?.withFileTypes) return ["-home-user-locked"];
+      if (p.endsWith("-home-user-locked")) return [{ name: "session", isDirectory: () => true }];
+      throw Object.assign(new Error(`EACCES: permission denied, scandir '${p}'`), { code: "EACCES" });
+    },
+    rmSync: (p: string) => void removed.push(p),
+  } as never;
+  const summary = sweepStaleWorkerScratch({ env: { CLAUDE_CODE_TMPDIR: "/x" }, uid: UID, platform: "linux", fsImpl });
+  assert.deepEqual(summary.unproved, ["-home-user-locked"]);
+  assert.ok(summary.kept.includes("-home-user-locked"));
+  assert.deepEqual(summary.removed, []);
+  assert.deepEqual(removed, [], "rmSync is never called on a dir whose freshness could not be read");
 });
