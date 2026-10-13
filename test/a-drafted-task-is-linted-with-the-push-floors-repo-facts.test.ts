@@ -39,8 +39,8 @@ const PROPOSAL_ID = "followup:W1-T5060-1790000000000";
 const ROOT = mkdtempSync(join(tmpdir(), "rmd-w1-t9039-"));
 mkdirSync(join(ROOT, "src", "lib"), { recursive: true });
 mkdirSync(join(ROOT, "test"), { recursive: true });
-writeFileSync(join(ROOT, "src", "lib", "ledger.ts"), "export function ledgerRowActor(row: unknown): string {\n  return String(row);\n}\n");
-writeFileSync(join(ROOT, "src", "lib", "panel.ts"), "import { ledgerRowActor } from './ledger.js';\nledgerRowActor(1);\n");
+writeFileSync(join(ROOT, "src", "lib", "ledger.ts"), "export function rowActorOf(row: unknown): string {\n  return String(row);\n}\n");
+writeFileSync(join(ROOT, "src", "lib", "panel.ts"), "import { rowActorOf } from './ledger.js';\nrowActorOf(1);\n");
 writeFileSync(join(ROOT, "test", "ledger.test.ts"), "// fixture\n");
 after(() => rmSync(ROOT, { recursive: true, force: true }));
 
@@ -79,7 +79,7 @@ function draft(shape: DraftShape): string {
   ].join("\n");
 }
 
-/** ledgerRowActor's cached draft: a NEW module whose only call proof greps the new file itself. */
+/** The ledgerRowActor proposal's cached draft: a NEW module whose only call proof greps the new file itself. */
 const UNCALLED_MODULE = draft({
   files: ["src/lib/ledgerCaller.ts", "test/ledger.test.ts"],
   proofs: [
@@ -102,10 +102,10 @@ const ALREADY_TRUE = draft({
   files: ["src/lib/ledger.ts", "test/ledger.test.ts"],
   proofs: [
     ["the actor is named", "unit test: the actor is named on a ledger row"],
-    ["the row names its actor", "grep: ledgerRowActor( in src/lib/ledger.ts"],
+    ["the row names its actor", "grep: rowActorOf( in src/lib/ledger.ts"],
   ],
 });
-const NOT_YET_TRUE = ALREADY_TRUE.replace("grep: ledgerRowActor( in src/lib/ledger.ts", "grep: ledgerRowActorName( in src/lib/ledger.ts");
+const NOT_YET_TRUE = ALREADY_TRUE.replace("grep: rowActorOf( in src/lib/ledger.ts", "grep: rowActorOfName( in src/lib/ledger.ts");
 
 /** W1-T5060's shape: the drafter copied `status: blocked` from the plan index, and declared no retirement. */
 const BLOCKED = draft({
