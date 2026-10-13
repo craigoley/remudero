@@ -32,17 +32,10 @@ export interface ChildEntryLaunch {
  * reason, so a corrupt or stale bundle is never executed. tsx is resolved from this package, as
  * checkProofChildArgv does, so a tree without its own node_modules still launches.
  */
-export function childEntryArgv(
-  root: string,
-  name: string,
-  sourceEntry: string,
-  args: readonly string[],
-  /** Seam for the currency judgement; the default loads scripts/build-child-entries.mjs's own childEntryIsCurrent. */
-  currencyCheck?: CurrencyCheck,
-): ChildEntryLaunch {
+export function childEntryArgv(root: string, name: string, sourceEntry: string, args: readonly string[]): ChildEntryLaunch {
   let verdict: ChildEntryCurrency;
   try {
-    verdict = (currencyCheck ?? loadCurrencyCheck())(root, name);
+    verdict = loadCurrencyCheck()(root, name);
   } catch (err) {
     verdict = { current: false, reason: `currency-check-unavailable: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
   }
