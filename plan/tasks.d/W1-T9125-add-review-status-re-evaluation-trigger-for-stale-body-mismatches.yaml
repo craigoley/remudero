@@ -9,7 +9,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0b5ea2e7a5e9f65f
   attempts: 0
   files:
     - src/lib/review.ts
