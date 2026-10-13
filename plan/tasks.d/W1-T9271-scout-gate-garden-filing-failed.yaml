@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.18
   status: queued
@@ -20,3 +20,14 @@
     The ledger step gate.garden_filing_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 8 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared file is a single new test file (test/scout-gate-garden-filing-failed.test.ts). The description gives no sign of secrets, credentials, auth, permissions, data or branch deletion, or changes to merge, deploy, infrastructure or review policy."
+      - "The task is a fix for a recurring ledger failure step. The acceptance is a grep check on a test name, so it can be verified automatically. The note says the PR still passes CI and review."
+      - "The rows name no file, so the fix location is unknown and the real change may go beyond the declared test file. The filing is machine-authored, and the scout family has no track record (0 merged, 0 declined). These are caveats, but they don't match any of the HIGH criteria."
+      - "No bounded change view was supplied, so I can't judge the real scope. I judge only what the description and gates state."
+    judged_at: "2026-10-13T19:08:10.748Z"
+    pin: "9581c002bbfc6a5d10f0ac9724cfd778a4d91b0334c3ef8170a2241e10d80b10"
