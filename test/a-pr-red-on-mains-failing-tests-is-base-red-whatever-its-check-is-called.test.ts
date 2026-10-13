@@ -30,6 +30,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 9567, prUrl: "https://github.com/craigoley/remudero/pull/9567", taskId: "W1-T9567",
     reviewState: "pending", checksState: "red", unmetCriteria: [], priorStrikes: 0,
+    createdAt: new Date(NOW - 90 * 60_000).toISOString(),
     lastActivityAt: new Date(NOW - 60_000).toISOString(), headSha: "f".repeat(40),
     headRefName: "run-W1-T9567-1", autoMergeArmed: false,
     ciFailures: [{ name: "coverage-ratchet", logTail: `not ok 1 - ${FILE_A}\nnot ok 2 - ${FILE_B}` }], ...over,
@@ -57,6 +58,9 @@ const allFail: Probe = (files) => files.map((file): BaseProbeFile => ({ file, ou
 const worktreeAddFails: Probe = () => { throw new Error("git worktree add failed"); };
 
 function harness(rows: Row[]) {
+  // W1-T8533: unrelated PR history covers this PR's entire lifetime for every refresh reader.
+  rows.unshift(...["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+    .map(step => ({ step, ts: new Date(NOW - 120 * 60_000).toISOString(), pr_number: 1, outcome: "skipped" })));
   const fixed: number[] = [];
   const refreshed: number[] = [];
   const probed: string[] = [];
@@ -104,7 +108,7 @@ test("W1-T6024: #9567 stays base red after a later unrunnable probe and takes on
   await h.sweep([pr()]);
   assert.deepEqual(h.refreshed, [9567], "one branch refresh once main is green");
   assert.deepEqual(h.fixed, [], "and no fix strike");
-  assert.equal(h.rows.filter((r) => r.step === BASE_RED_REFRESH_STEP).length, 1);
+  assert.equal(h.rows.filter((r) => r.step === BASE_RED_REFRESH_STEP && r.pr_number === 9567).length, 1);
   await h.sweep([pr()]);
   assert.deepEqual(h.refreshed, [9567], "the refresh is spent once per head");
 });

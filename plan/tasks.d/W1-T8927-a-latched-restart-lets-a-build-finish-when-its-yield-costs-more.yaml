@@ -1,0 +1,72 @@
+- id: W1-T8927
+  title: "A LATCHED RESTART LETS A BUILD FINISH WHEN ITS YIELD COSTS MORE THAN ITS REMAINING WORK — every in-flight run yields at its next boundary however close it is to its PR, and a yielded task waits a median 62 min to start again, so builds that need ~13 min take 98 min and PRs opened per day fell from 88 to 32"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high # changes when every in-flight build yields to a daemon restart; spans the daemon's drain and run-task's boundary yield
+  band_meaning: span
+  origin: "operator session 2026-10-13: PR-flow re-measure against the 2026-09-24 baseline (operator: go with all of your recommendations); measurement in ~/Remudero-notes/flow-remeasure-2026-10-13/RESULTS.md"
+  plan_refs: [W1-T8198, W1-T7806, W1-T8139, W1-T6274, W1-T5345, W1-T8164, W1-T8240, W1-T6093, W1-T4945, W1-T147]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts]
+  status: queued
+  priority: 1 # operator-2026-10-13: yields drive first-start->PR from 9 min (10-09) to 98 min (10-12); 37,140 task-min lost to yield->resume gaps since 10-10
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 (core ledger union 10-10..10-13 02:00Z, W1-T* tasks only; GitHub merged PRs 10-08..12):
+      PRs opened per day: 88 (10-09), 34, 39, 32 (10-12), while run starts ROSE 99 -> 133/145.
+      First start -> PR, median: 9 min (10-09), 18, 52, 98 min (10-12); tasks needing more than one start 2% -> 75%.
+      Runs ending handed_off/freshness_yield: 52 of 99 (10-09) ... 90 of 137 (10-12). Run length itself did not grow:
+      a run's median is 9-13 min every day.
+      Restart episodes 10-10..now: 47 (~16/day), mostly change-weighted (weight 20-39 >= threshold 18), taken through
+      W1-T6093's quiet window or upper_age. They are legitimate: the fleet merges daemon code continuously.
+      Yield -> next start of the SAME task: median 62 min, p75 156, p90 763; 37,140 task-minutes over 163 yields, and 60
+      yields not yet resumed. Of the median: yield -> boot 19 min (the drain), boot -> start 11, the rest queue wait.
+      Lifetime-pressure holds do NOT explain it: gaps with a hold between median 62, without 63 (W1-T8164 is still
+      worth building but does not move this number).
+    THE SHAPE, 2026-10-12/13: W1-T7728 (p0.95) yielded at 23:11, 00:05 and 01:04 — at every restart — and W1-T8825
+    yielded at 23:13 with waiting_on "preopen_gate": its implementation was finished and only the ~5 min gate was left;
+    it resumed at 01:14 and opened #11204 at 01:45. W1-T8198 (merged 19:43Z 10-12) already removed the PREMATURE
+    yields (restart yields with no restart within 10 min: 32 of 46 before, 0 after); what remains is that a real
+    latched restart yields every in-flight run at its next boundary however close it is to its PR, because
+    `restartAtWorkerBoundary` (the daemon's runOne closure, src/lib/daemon.ts ~6064; read in src/run-task.ts ~20014
+    and via `restartLatchDetail` ~3611) answers "latched" to every run alike.
+    WHY THIS IS THE BIGGEST DRAG: per restart, ~3 in-flight runs each lose a median 62 min of wall time and redo their
+    recon (every resumed run.start reads "recon-not-yet-run"), while the restart itself needs only the boot. A build
+    whose remaining work is shorter than its yield cost is cheaper to finish than to interrupt. On the PR side the
+    green-PR refresh drag (W1-T7735) and stranded-task detection (W1-T8240) are already queued.
+    OVERLAPS: W1-T8198 (merged as #11133; its shard status lags) made runs yield on the latch; this task decides WHICH
+    runs the latch asks. W1-T147 (the overnight recovery drill) shares only the two large modules daemon.ts and
+    run-task.ts, not this surface.
+  design: |
+    1. YIELD COST, FROM THE FLEET'S OWN HISTORY. A ledger-derived estimate of what a freshness yield costs the task
+       that takes it: the median gap from a `verdict` freshness_yield to the same task's next `run.start` over the
+       recent window (own history, `ownHistoryBound` style, W1-T8236), recomputed at boot like `dispatchRunHistory`.
+       No constant: with no readable history the latch behaves exactly as today (every run yields).
+    2. REMAINING WORK, BY PHASE. For an in-flight run, an estimate of its remaining time to `pr.opened` from runs
+       that reached a PR from the same phase (implementing / checkpointed / pre-open gate / pushing — the existing
+       waiting_on vocabulary), again from own history.
+    3. THE DECISION. `restartAtWorkerBoundary` answers "latched" to a run only when its expected remaining time is at
+       least its expected yield cost; otherwise the run is a HOLDOUT that continues to its PR (pr_open_yield frees
+       its lane, W1-T5345) or its own end. The drain (W1-T6274, W1-T7806 holdouts) waits for holdouts; a holdout that
+       overruns its own estimate is answered "latched" at its next boundary, so no run can hold a restart past what
+       its history predicted. A change to the daemon's OWN machinery (deploy-judge restartTrigger "change" from a
+       self-scoped commit) keeps today's behaviour: every run yields.
+    4. EVIDENCE. Each latch answer ledgers `daemon.restart_holdout` or `daemon.restart_yield_asked` with the run, its
+       phase, the two estimates and their sample sizes, so the trade is auditable and re-measurable.
+    Operator rulings: no hard threshold or cap (memory no-hard-thresholds); learned from the fleet's own history.
+    NOT IN SCOPE: the restart cadence itself (deploy-judge pressure) and surviving a restart in-process.
+  acceptance:
+    - claim: "a run whose expected remaining time is below the measured yield cost is not asked to yield by a latched restart and is ledgered as a holdout"
+      proof: 'grep: test("W1-T8927: a run near its PR is a holdout, not asked to yield" in test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts'
+    - claim: "a run whose expected remaining time is at least the yield cost, or that overruns its own estimate, is still asked to yield"
+      proof: 'grep: test("W1-T8927: a run far from its PR or past its estimate still yields" in test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts'
+    - claim: "with no readable history, or for a restart driven by the daemon's own machinery, every run yields exactly as before"
+      proof: 'grep: test("W1-T8927: no history or a self-scoped change keeps every run yielding" in test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts'
+  falsifier: |
+    Replay W1-T8825 at 2026-10-12T23:13Z: latched restart, run at waiting_on preopen_gate, history giving a pre-open
+    gate remaining median of ~5 min and a yield cost median of 62 min. At origin/main the latch answers "latched" and
+    the run yields (freshness_yield); with the change it is a holdout and reaches pr.opened. Answer "latched" to every
+    run regardless of estimates and the first test reds; hold every run forever and the second reds.

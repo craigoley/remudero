@@ -1476,8 +1476,12 @@ test("GET /v1/inbox: a proposal with an in-flight draft (state/inbox-draft-infli
     const body = (await res.json()) as { ready: unknown[]; drafting: Array<{ proposalId: string; spawnedAt: string }> };
     assert.deepEqual(body.ready, []);
     // W1-T4087: every item also carries its plain message; with nothing stored, its kind's template.
+    // W1-T8825: and its sender stamp - a bare id is no kind, and nothing recorded a time for it yet.
     assert.deepEqual(body.drafting, [
-      { proposalId: "P901", summary: "mid-draft", plain: plainTemplate({ id: "P901", summary: "mid-draft" }), spawnedAt },
+      {
+        proposalId: "P901", summary: "mid-draft", plain: plainTemplate({ id: "P901", summary: "mid-draft" }), spawnedAt,
+        from: { kind: "proposal", name: "Proposal" }, receivedAt: null, lastActivityAt: null, groupKey: "proposal",
+      },
     ]);
   });
 });

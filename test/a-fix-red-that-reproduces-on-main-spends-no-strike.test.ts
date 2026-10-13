@@ -25,6 +25,7 @@ function redPr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: 5528, prUrl: "https://github.com/acme/remudero/pull/5528", taskId: "W1-T5528",
     reviewState: "pending", checksState: "red", unmetCriteria: [], priorStrikes: 0,
+    createdAt: new Date(NOW - 90 * 60_000).toISOString(),
     lastActivityAt: new Date(NOW - 60_000).toISOString(), headSha: "a".repeat(40),
     headRefName: "run-W1-T5528-1", autoMergeArmed: false,
     ciFailures: [{ name: "ci", logTail: `not ok 1 - ${FILE}` }], ...over,
@@ -36,6 +37,9 @@ function peer(): OpenPrView {
 }
 
 function harness(rows: Row[] = [{ step: "main.health.observed", sha: MAIN, state: "undetermined" }]) {
+  // These cases exercise complete history; skipped rows on another PR cover each reader's live span.
+  const history = ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+    .map(step => ({ step, ts: new Date(NOW - 120 * 60_000).toISOString(), pr_number: 1, outcome: "skipped" }));
   const fixed: number[] = [];
   const refreshed: number[] = [];
   const deps: SweepDeps = {
@@ -46,7 +50,7 @@ function harness(rows: Row[] = [{ step: "main.health.observed", sha: MAIN, state
     },
     updateBranch: (pr) => { refreshed.push(pr.prNumber); return "updated"; },
     ledgerPath: "/dev/null/base-reproduction.ndjson", runId: "W1-T5528-test", now: () => NOW,
-    readLedger: () => [...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => MAIN,
+    readLedger: () => [...history, ...rows], appendLine: (_path, row) => { rows.push(row); }, readMainTip: () => MAIN,
   };
   return { rows, fixed, refreshed, deps, sweep: (prs = [redPr(), peer()]) => runSweep(prs, deps, DEFAULT_SWEEP_POLICY) };
 }
@@ -133,6 +137,7 @@ test("W1-T5528: a reproduced head that clears at a newer tip is refreshed once",
   await h.sweep();
   assert.deepEqual(h.fixed, []);
   assert.deepEqual(h.refreshed, [5528]);
+  assert.equal(h.rows.find((r) => r.step === "refresh.clearance")?.history, "live");
   const refresh = h.rows.find((r) => r.step === BASE_RED_REFRESH_STEP);
   assert.equal(refresh?.main_sha, NEXT);
   assert.equal(refresh?.outcome, "updated");

@@ -716,7 +716,7 @@ test("W1-T7807: a dispatch spawn is watched only when enabled, and wires every w
   // end_round checkpoint: a commit that refuses is not a checkpoint (W1-T8008: undeclared paths no longer refuse it).
   mode.commit = { committed: false, undeclared: [], reason: "nothing declared" };
   assert.deepEqual(await options.endRound?.("stalled"), { ended: false, reason: "checkpoint refused: nothing declared" });
-  assert.ok(calls.some((c) => c.startsWith("commit:/wt:src/a.ts:wip: yield at quiet worker") && c.includes("Remudero-Task: W1-T7807")));
+  assert.ok(calls.some((c) => c.startsWith("commit:/wt:src/a.ts:chore(checkpoint): yield at quiet worker") && c.includes("Remudero-Task: W1-T7807")));
   assert.equal(calls.filter((c) => c.startsWith("push:")).length, 0, "nothing is pushed after a refused commit");
   mode.commit = { committed: true, undeclared: ["x.ts", "y.ts"], reason: undefined };
   assert.deepEqual(await options.endRound?.("stalled"), { ended: true, checkpointSha: "abc123" });

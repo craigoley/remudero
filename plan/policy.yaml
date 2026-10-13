@@ -909,9 +909,9 @@ sweep:
       origin: "proposal"
       min: 0
       max: 100
-    # OBSERVED 2026-10-09: serve's cold start peaks at 7.5 GB; a cold start begins from nothing resident.
+    # OBSERVED 2026-10-11: serve cold-start peak 5,707 MiB; 6,144 MiB leaves 437 MiB margin.
     serveColdStartReserveMib:
-      value: 7680
+      value: 6144
       origin: "proposal"
       min: 0
       max: 16384

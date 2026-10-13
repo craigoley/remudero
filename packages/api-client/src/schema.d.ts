@@ -2938,6 +2938,96 @@ export interface components {
         pricedSubtotalUsd: number | null;
       })[];
     };
+    RepositoryFlowBucket: {
+      date: string;
+      opened: number | null;
+      merged: number | null;
+      deliveredTasks: number | null;
+      repairedPrs: number | null;
+      repairRounds: number | null;
+    };
+    /** Optional cached repository-flow-v1. PR events use GitHub clocks and native structured delivery credit, never worker verdicts. Repair counts are observed retained receipts, not verified historical absence or proof of recovery. Null is unknown, not zero. Source observation clocks are independent of materialization; absent on older producers. */
+    RepositoryFlow: {
+      version: "repository-flow-v1";
+      scope: "repository";
+      repository: string;
+      state: "reported" | "partial" | "not_collected";
+      reason: "missing_source" | "invalid_source" | "over_budget" | null | null;
+      materializedAt: string;
+      sources: {
+        openObservedAt: string | null;
+        closedObservedAt: string | null;
+        prCorpus: "complete" | "partial" | "unavailable";
+        prFreshness: "fresh" | "stale" | "unknown";
+        ledgerObservedAt: string | null;
+        ledgerCorpus: "observed" | "partial" | "unavailable";
+        earliestLedgerAt: string | null;
+        latestLedgerAt: string | null;
+        observedPrs: number | null;
+        observedRepairIdentities: number | null;
+      };
+      limits: {
+        prRows: 100000;
+        repairIdentities: 65536;
+        publicBytes: 65536;
+        evidencePerWindow: 64;
+      };
+      gaps: (string)[];
+      notCollected: {
+        firstPass: "initial-head and required-check policy evidence not collected";
+        repairLatency: "required-current-head recovery evidence not collected";
+        backlog: "historical daily backlog observations not collected";
+        efficiency: "delivered-work price and token attribution evidence not collected";
+      };
+      windows: ({
+        days: 7 | 30;
+        from: string;
+        through: string;
+        coverage: {
+          opened: "complete" | "observed" | "unknown";
+          merged: "complete" | "observed" | "unknown";
+          repairs: "observed" | "unknown";
+          partialCounts: "observed lower bounds; not complete historical totals";
+        };
+        buckets: (RepositoryFlowBucket)[];
+        summary: {
+          opened: number | null;
+          merged: number | null;
+          deliveredTasks: number | null;
+          repairedPrs: number | null;
+          repairRounds: number | null;
+          repairReasons: {
+            code: number | null;
+            flake: number | null;
+            infrastructure: number | null;
+            conflict: number | null;
+            unknown: number | null;
+          };
+          mergeLatency: {
+            unit: "ms";
+            samples: number;
+            p50Ms: number | null;
+            p90Ms: number | null;
+            missingCreatedAt: number;
+          };
+          openAge: {
+            unit: "ms";
+            censored: true;
+            asOf: string | null;
+            samples: number;
+            oldestMs: number | null;
+            missingCreatedAt: number;
+          };
+        };
+        evidence: ({
+          prNumber: number;
+          url: string;
+          kind: "opened" | "merged" | "repair";
+          at: string;
+        })[];
+        evidenceTruncated: boolean;
+      })[];
+    };
     /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
     AnalyticsView: {
       view: "analytics";
@@ -2969,6 +3059,7 @@ export interface components {
           repository?: string;
           metrics?: (AnalyticsViewMetric)[];
           gardenerSpend?: GardenerSpend;
+          repositoryFlow?: RepositoryFlow;
           reason?: string;
           details?: AnalyticsStoredDetails;
         })[];
@@ -3418,8 +3509,20 @@ export interface components {
         registryError?: string;
       };
     };
+    /** W1-T8825: who sent an inbox item - the producer id (a machine-judge item's filer family, else the proposal id's kind) and its fixed display name (src/lib/inbox-owner.ts). Never a proposal id. */
+    InboxSender: {
+      kind: string;
+      name: string;
+    };
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary?: string;
       plain?: PlainInboxMessage;
@@ -4190,6 +4293,13 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4202,6 +4312,13 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4212,6 +4329,13 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4235,6 +4359,13 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4252,6 +4383,13 @@ export interface components {
     };
     /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
     InboxFleetItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;

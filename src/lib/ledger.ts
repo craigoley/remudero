@@ -567,6 +567,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
   "automerge.stale_rollup_refresh_exhausted",
+  "automerge.stale_check_rerun", // W1-T8620: the once-per-(head, run id) job re-run; forgotten, it loops.
+  "automerge.merge_refusal_escalated", // W1-T8620: once per (head, refusal text); forgotten, it re-escalates.
   "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
@@ -660,6 +662,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
@@ -667,7 +670,6 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
-  "refresh.clearance", // refusedRefreshClearancesFromLedger prevents re-probing a decided refusal across passes/rotation.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
   "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
   "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
