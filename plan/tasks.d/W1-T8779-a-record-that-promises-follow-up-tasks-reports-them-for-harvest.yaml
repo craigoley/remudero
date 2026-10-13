@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: W1-T7729 (#11136) merged without its ADR's follow-ups; filed by hand as W1-T8775..W1-T8778"
   plan_refs: [W1-T7729, W1-T105, W1-T2456]
   files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, src/lib/worker.ts, src/run-task.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts, test/review-engine-revision-rearm.test.ts, test/inverse-scope-advisory-section.test.ts, test/unwired-export-advisory-section.test.ts, test/review-deletion-blind.test.ts, test/run-review-evidence-target.test.ts, test/review-status-pending.test.ts, test/scope-guard-overrun.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
