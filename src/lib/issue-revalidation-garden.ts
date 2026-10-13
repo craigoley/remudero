@@ -23,7 +23,7 @@
  * residue no producer owns.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -656,13 +656,18 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     hasReferent: opts.hasReferent,
     livenessVerdict: (gardener) => {
       const path = overseerStatePath(opts.stateDir);
+      // One descriptor for both the age and the content, so the two describe the same file.
+      let fd: number | undefined;
       try {
-        const mtime = statSync(path).mtimeMs;
-        const state = JSON.parse(readFileSync(path, "utf8")) as { episodes?: Record<string, { kind?: string; since?: string }> };
+        fd = openSync(path, "r");
+        const mtime = fstatSync(fd).mtimeMs;
+        const state = JSON.parse(readFileSync(fd, "utf8")) as { episodes?: Record<string, { kind?: string; since?: string }> };
         return livenessVerdictFromOverseerState(gardener, state, mtime, clock.now());
       } catch (e) {
         // An unreadable overseer state is an unknown verdict, never a resolved one.
         return { verdict: "unknown", reason: `the overseer's state could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})` };
+      } finally {
+        if (fd !== undefined) closeSync(fd);
       }
     },
     readModelVerdict: (taskId) => readModelVerdictFromRows(taskId, rows()),

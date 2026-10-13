@@ -205,7 +205,7 @@ import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGarden
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
-import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type RevalidationIssue, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
+import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
@@ -37752,6 +37752,49 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
+/** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
+ *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
+ *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
+ *  judge's spawn in tests. */
+export function issueRevalidationRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: {
+    loadPlan?: () => Plan;
+    reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
+    spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
+  } = {},
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+  const { owner, repo, repoRoot, stateDir, log } = ctx;
+  let plan: Plan | undefined;
+  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
+  return {
+    hasReferent: (issue) => {
+      const taskId = issueTaskId(issue) ?? "";
+      return /^PR-\d+$/.test(taskId) || planNow().byId.has(taskId) ||
+        prReferentFromIssueText(issue.body) !== undefined || prReferentFromIssueText(issue.title) !== undefined;
+    },
+    referentVerdicts: async (issues) => {
+      const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
+        ...seams.reconcile,
+        issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
+      });
+      return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
+        const pr = c.derived.prNumber !== undefined ? `PR #${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
+        if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
+        if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
+        if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+      }));
+    },
+    judgeText: (prompt, issueNumber) => {
+      const mounts = loadMounts(mountsPath(repoRoot));
+      return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
@@ -37938,36 +37981,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         { admission: { owner, repo, settings: config.contributorAdmission } });
     // W1-T8864: every open issue re-checked against current evidence. Shadow until the operator flips
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
-    case "issue-revalidation": {
-      let plan: Plan | undefined;
-      const planNow = (): Plan => (plan ??= loadPlan(resolveRepoLayout(repoRoot).planMonolith));
-      const hasReferent = (issue: RevalidationIssue): boolean => {
-        const taskId = issueTaskId(issue) ?? "";
-        return /^PR-\d+$/.test(taskId) || planNow().byId.has(taskId) ||
-          prReferentFromIssueText(issue.body) !== undefined || prReferentFromIssueText(issue.title) !== undefined;
-      };
-      const referentVerdicts = async (issues: readonly RevalidationIssue[]): Promise<ReadonlyMap<number, RevalidationVerdict>> => {
-        const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
-        const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
-          issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
-        });
-        return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
-          const pr = c.derived.prNumber !== undefined ? `PR #${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
-          if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
-          if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
-          if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
-          return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
-        }));
-      };
-      const judgeText = (prompt: string, issueNumber: number): Promise<string> => {
-        const mounts = loadMounts(mountsPath(repoRoot));
-        return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
-          settingsFile: join(repoRoot, "settings", "worker.json") })(prompt, issueNumber);
-      };
+    case "issue-revalidation":
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
-        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log, referentVerdicts, hasReferent, judgeText,
+        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
       }));
-    }
     case "evidence-coverage":
       return withDue(() => {
         try {

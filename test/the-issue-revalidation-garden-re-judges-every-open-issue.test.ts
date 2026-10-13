@@ -16,6 +16,7 @@ import {
   type RevalidationVerdict,
 } from "../src/lib/issue-revalidation-garden.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { issueRevalidationRunTaskPorts } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const HOUR = 3_600_000;
@@ -335,10 +336,13 @@ test("the production ports read GitHub, the overseer, the ledger and origin/main
     owner: "acme", repo: "remudero", stateDir, repoRoot: join(root, "missing"), log: () => {}, clock,
     referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "",
     readLedgerRows: () => { throw new Error("union unreadable"); },
+    readText: async () => restIssues,
     issues: {},
   });
+  await broken.listOpenIssues();
   const brokenFacts = broken.evidence(listed[0]!).facts;
   assert.ok(brokenFacts.some((f) => /could not be searched/.test(f)), brokenFacts.join("\n"));
+  assert.ok(brokenFacts.some((f) => /the ledger could not be read \(union unreadable\)/.test(f)), brokenFacts.join("\n"));
   await assert.rejects(broken.close(issueUrl(2), "c"), /cannot close/);
   await assert.rejects(broken.comment(issueUrl(2), "c"), /cannot comment/);
 });
@@ -374,4 +378,34 @@ test("the garden is registered, hourly at most, and its pass records pacing and 
   writeFileSync(stateDir, "not a directory");
   await issueRevalidationGardenPass(stateDir, throwing.ports, clock)();
   assert.deepEqual(throwing.rec.rows.map((r) => r.extra.stage), ["pass", "pacing"]);
+});
+
+test("the run-task ports derive referents through the reconciler, load the plan once, and judge on the escalation mount", async (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}issue-revalidation-runtask-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  let loads = 0;
+  const plan = { tasks: [], byId: new Map([["W1-T1", {}]]) } as never;
+  const states: Record<number, string> = { 100: "MERGED", 101: "CLOSED", 102: "OPEN" };
+  const github = { prByRef: (n: number) => (n in states ? { number: n, state: states[n], url: `https://github.com/acme/remudero/pull/${n}` } : undefined) } as never;
+  const spawned: Array<Record<string, unknown>> = [];
+  const p = issueRevalidationRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: process.cwd(), stateDir, log: () => {} }, {
+    loadPlan: () => { loads++; return plan; },
+    reconcile: { github, evidenceRootFor: () => undefined },
+    spawn: (async (args: Record<string, unknown>) => { spawned.push(args); return { text: "REVALIDATION_VERDICT: unknown" }; }) as never,
+  });
+  assert.equal(p.hasReferent(issue(1, escalation("BLOCKED", "PR-100"))), true);
+  assert.equal(p.hasReferent(issue(2, escalation("BLOCKED", "W1-T1"))), true);
+  assert.equal(p.hasReferent(issue(3, escalation("BLOCKED", "X"), { title: "see https://github.com/acme/remudero/pull/5" })), true);
+  assert.equal(p.hasReferent(issue(4, escalation("BLOCKED", "X"))), false);
+  assert.equal(loads, 1, "the plan loads once, on first use");
+  const verdicts = await p.referentVerdicts([100, 101, 102, 103].map((n) => issue(n, escalation("BLOCKED", `PR-${n}`))));
+  assert.deepEqual([...verdicts].map(([n, v]) => [n, v.verdict, v.citation ?? null]), [
+    [100, "resolved", "PR #100 merged (https://github.com/acme/remudero/pull/100)"],
+    [101, "resolved", "PR #101 closed without merging"],
+    [102, "still-true", null],
+    [103, "unknown", null],
+  ]);
+  assert.equal(await p.judgeText("the prompt", 7), "REVALIDATION_VERDICT: unknown");
+  assert.deepEqual(spawned[0]!.tools, []);
+  assert.equal(spawned[0]!.prompt, "the prompt");
 });
