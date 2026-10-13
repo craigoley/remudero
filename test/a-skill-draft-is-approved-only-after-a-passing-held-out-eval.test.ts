@@ -18,6 +18,7 @@ import {
   type SkillEvalRecord,
   type SkillFilePayload,
 } from "../src/lib/inbox.js";
+import { skillEvalVerdict } from "../src/lib/skill-eval.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const ID = "skill-draft:proc-gate";
@@ -82,6 +83,13 @@ test("a refusing held-out eval keeps a skill draft unapprovable without inviting
   const outcome = approve(ready(evalRecord({ verdict: "refuse", reason: "no-benefit", detail: "the mean gain is 0" })));
   assertRefused(outcome, /held-out eval refused this text \(no-benefit: the mean gain is 0\); decline it/);
   assert.doesNotMatch((outcome.result as { refusal: string }).refusal, /rmd skill-eval/, "a refusal is never laundered by a re-draw");
+});
+
+test("an eval that measured too few tasks asks for another run instead of a decline", () => {
+  const unmeasured = skillEvalVerdict([]);
+  assert.equal(unmeasured.verdict, "refuse", "the runner's own unmeasured verdict, so a renamed reason fails here");
+  const outcome = approve(ready(evalRecord({ verdict: unmeasured.verdict, reason: unmeasured.reason, detail: unmeasured.detail })));
+  assertRefused(outcome, new RegExp(`measured too few tasks to judge this text .*run \`rmd skill-eval ${ID} --confirm-spend\` again`));
 });
 
 test("a passing held-out eval for the stored text lets approval write the skill", () => {

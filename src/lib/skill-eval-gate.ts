@@ -7,7 +7,8 @@
  * CURRENT text. The record names the sha256 of the text it measured: the workshop rewrites a staged draft when its
  * procedure grows, and a pass earned by the older text says nothing about the newer one.
  *
- * A refusing verdict is not answered with "run it again": the eligible set grows as work merges, so re-running the
+ * A refusing verdict is not answered with "run it again", unless it measured too few tasks and so judged nothing.
+ * Otherwise the eligible set grows as work merges, so re-running the
  * same text until some draw passes would launder a refusal. A rewrite by the workshop is a new text and earns a new
  * eval. This gate reads only the LATEST record; refusing a second eval of an already-judged text is the verb's job.
  *
@@ -15,6 +16,10 @@
  * the drafter's dependency boundary (`drafter-never-sees-held-out-set`) keeps out of its reach.
  */
 import { createHash } from "node:crypto";
+
+/** skill-eval.ts's one `SkillEvalVerdictReason` that judged nothing: too few tasks were measurable, so the text may be
+ *  evaluated again. Restated, never imported; the suite pins it to the reason `skillEvalVerdict` really returns. */
+const UNMEASURED_REASON = "too-few-measurable-tasks";
 
 /** The fields of inbox.ts's `SkillEvalRecord` this gate reads. */
 export interface RecordedSkillEval {
@@ -35,6 +40,10 @@ export function skillEvalApprovalRefusal(proposalId: string, markdown: string, r
   if (record.draftSha256 !== createHash("sha256").update(markdown).digest("hex")) {
     return `${proposalId}'s recorded held-out eval measured an earlier text of the draft (sha256 `
       + `${record.draftSha256.slice(0, 12)}); the workshop has since rewritten it, so run ${evaluate} for this text or decline it`;
+  }
+  if (record.verdict !== "pass" && record.reason === UNMEASURED_REASON) {
+    return `${proposalId}'s held-out eval measured too few tasks to judge this text (${record.detail}); run ${evaluate} `
+      + "again once the fleet can attempt them, or decline it";
   }
   if (record.verdict !== "pass") {
     return `${proposalId}'s held-out eval refused this text (${record.reason}: ${record.detail}); decline it, or `
