@@ -4875,7 +4875,9 @@ export async function observePromisedFollowUps(args: {
     if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
     const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
     const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
-    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
+    const atBase = new Set(present.length ? (await runGit(["ls-tree", "--name-only", baseSha!, "--", ...present])).trim().split("\n").filter(Boolean) : []);
+    const baseBlobs = new Map<string, string>(); for (const path of present) if (atBase.has(path)) baseBlobs.set(path, await runGit(["show", `${baseSha}:${path}`]));
+    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!, path => baseBlobs.get(path) ?? "").map(promise => ({ ...promise, taskId: args.task.id }));
     if (taskPath !== undefined) {
       const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
       promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
@@ -4897,8 +4899,10 @@ export async function observePromisedFollowUps(args: {
     for (const path of filingPaths) planRecords.push(...followUpPlanRecords(await runGit(["show", `${baseSha}:${path}`])));
     if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
     const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
+    // The PR's own record counts beside records that list it in plan_refs (W1-T9283); it is kept last so filings come first.
+    const kept = planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && (task.id === promise.taskId || task.plan_refs?.includes(promise.taskId))));
     return { state: "complete", headSha, baseSha, promised: unique,
-      planRecords: planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId))) };
+      planRecords: [...kept.filter(task => task.id !== args.task.id), ...kept.filter(task => task.id === args.task.id)] };
   } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
 }
 
@@ -5324,7 +5328,7 @@ export function judgeReview(
     const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
     const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
     if (missing.length > 0) verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
-      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
+      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry; rewording or deleting the promise text does not satisfy it): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
       proof_exec: "not_executable" });
   }
   const testTheater = detectTestTheater(evidence.diff);
