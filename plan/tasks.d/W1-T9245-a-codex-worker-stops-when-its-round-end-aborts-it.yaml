@@ -1,0 +1,111 @@
+
+- id: W1-T9245
+  title: "A CODEX WORKER STOPS WHEN ITS ROUND END ABORTS IT — `spawnCodexWorker` never reads the spawn's AbortSignal, so after `end_round` pushes the checkpoint and aborts, a Codex worker runs on until its turn ends: 25 of 25 Codex round ends 2026-10-11..13 ran 57-1806 s past the abort (median 353 s, 178 lane-min), against 2-13 s for all 31 Claude ones; the latched restart waits on it, and its post-checkpoint edits are dropped"
+  repo: remudero
+  depends_on: []  # one provider-adapter change; no in-flight dispatch (refs/rmd-dispatch/*, 2026-10-13 16:25Z) and no open PR head touches src/lib/worker-provider.ts. Queued W1-T8677 and W1-T9067 also list the file; the file-overlap partition serializes them at dispatch
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the Codex adapter tears its process group down when the caller aborts; every Codex worker class (implement, fix, review) spawns through it
+  band_meaning: span
+  origin: "operator session 2026-10-13: diagnosis of W1-T9001, handed off on freshness_yield six times in one day without opening a PR; analysis in ~/Remudero-notes/w1-t9001-yield/"
+  plan_refs: [W1-T7697, W1-T7807, W1-T8008, W1-T8133, W1-T8139, W1-T8141, W1-T8397, W1-T8927, W1-T9069, W1-T9085, W1-T9089, W1-T1045, W1-T6352]
+  files:
+    - src/lib/worker-provider.ts
+    - test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main a28c3d23a against the core ledger union on host remudero (~/rmd-state2/state: every
+    ledger.2026-10-1[123]*.ndjson.gz rotation plus the live ledger.ndjson, read 2026-10-13 ~16:20Z, niced). Symbols,
+    not lines.
+    WHAT THE CODE DOES. The quiet-worker watchdog ends a round for a latched restart, a pending recycle, or a quiet
+    verdict through `endRound` in run-task.ts `watchDispatchSpawn`. It commits the worktree, pushes the checkpoint
+    (`pushRestartCheckpoint`), records the checkpoint sha in a `QuietRoundEndedError`, and then calls `abort.abort()`.
+    `guardSpawnWithQuietWatchdog` (src/lib/quiet-worker-watchdog.ts) passes that controller's signal to the spawn as
+    `args.signal`. The Claude path honours it: worker.ts `spawnWorker` chains `args.signal` into the SDK's
+    `options.abortController`. The Codex path does not. worker.ts spreads `args` into `spawnCodex`, but
+    `CodexSpawnArgs` (src/lib/worker-provider.ts) declares no `signal`, and `spawnCodexWorkerInPrivateTemp` never
+    reads one. Its only teardowns (`teardownOnce` -> `teardownProcessGroup`) are the output budget and `clockBound`.
+    The `codex exec` process group therefore runs until its own turn completes. The guard then throws the recorded
+    `QuietRoundEndedError`, and `roundEndedHandoffRows` writes the handoff at the checkpoint sha taken before the abort.
+    MEASURED: every `worker.recycle_yield` row with action end_round and decision acted, joined by run_id to the
+    run's next `worker.attempt` row (which ends the spawn), with the provider read from the run's last
+    `worker.assignment` (`worker_assignment.selected.provider`) before the yield. Window 2026-10-11T20:11Z to
+    2026-10-13T16:07Z. 56 round ends had both rows.
+      - Claude: 31 of 31 ended 2-13 s after the yield, 110 s in total.
+      - Codex: 25 of 25 ended 57-1806 s after the yield (median 353 s, p50 run W1-T9001-1791882608483). The total is
+        10,669 s = 178 lane-min, during which the lane is neither working for the task nor free.
+      Positive control: the same join reproduces each W1-T9001 run's handoff. In all four of W1-T9001's worker_round
+      handoffs on 2026-10-13, the `run.freshness_handoff` head_sha equals the `worker.recycle_yield` checkpoint_sha,
+      although the Codex worker kept emitting `worker.activity` / `worker.state working` rows for 353, 583, 798 and
+      754 s after the checkpoint.
+    THE EPISODE, 2026-10-13 15:54-16:07Z. 15:54:55 `daemon.freshness_decision` restart (upper_age, 9c499e429 ->
+    646a7d706). 15:54:58 `daemon.restart_yield_asked` W1-T9001 (self_scoped_change). 15:55:01 `worker.recycle_yield`
+    end_round, checkpoint 25d02fd2b. The Codex worker kept running and wrote 27 `worker.activity` rows. 15:58:34 and
+    16:00:18: the two freed lanes (W1-T9070, W1-T9102) were held as "stale code". 16:00:54 and 16:06:03:
+    `daemon.freshness_restart_waiting` named only W1-T9001 (holdout false). 16:07:35: `worker.attempt` failed with
+    QuietRoundEndedError, and the handoff head was still 25d02fd2b. The restart waited 12.6 min on a round it had
+    already ended, with two lanes idle (about 25 sibling lane-min). Whatever the worker wrote in those 12.6 min was
+    never committed: the next run restores the branch head (`implement.checkpoint_restored` source_head_sha), and the
+    worktree is reaped.
+    WHY IT MATTERS NOW. Codex (gpt-6.1-sol) is the auction's pick for much of the implement work: every W1-T9001
+    assignment on 2026-10-13 went to it (`allocationSharePercent` 53). W1-T9001 yielded six times that day (09:35, 11:19, 12:47,
+    14:12, 14:57, 16:07Z) on branches run-W1-T9001-1791882608483 .. -1791904881258. Each yield restored the previous
+    checkpoint (`implement.checkpoint_restored`; the diff grew from 276 to 619 lines), so the checkpoint itself is
+    not lost. But 41.5 lane-min of its 290 run-lane-min that day were Codex rounds running past their own end, and
+    the work done in them was thrown away.
+    COVERAGE SWEEP (origin/main a28c3d23a plus all 12 open PR heads, plan/ only, each head counted against main):
+    main's positive controls are 10 files naming end_round/endRound/QuietRoundEnded/recycle_yield and 15 naming
+    restart_holdout/estimate_elapsed/restartWorkHistory/freshness_yield. No head adds one. No shard pairs Codex with
+    the abort or round end. W1-T8139 (merged) made a latched restart end a boundary-less round. W1-T7807 (merged) is
+    the hung-worker judge. W1-T8133 (queued) resumes a quiet round end from its checkpoint. W1-T8397 (merged) is the
+    checkpoint push. All of them assume the abort stops the worker. W1-T9085..W1-T9089 (ADR 0007, build runs as
+    detached children) retire the RESTART trigger. They do not retire the recycle or quiet triggers, which still end
+    a round through the same abort.
+  design: |
+    Operator rulings: no fixed threshold or cap; keep automated flow.
+    1. THE ADAPTER HONOURS THE CALLER'S ABORT. `CodexSpawnArgs` gains `signal?: AbortSignal`, documented as the same
+       contract `spawnWorker` gives the Claude path. In `spawnCodexWorkerInPrivateTemp`, once the contained process
+       exists: if the signal has already been aborted, call `teardownOnce(contained.pid)` at once. Otherwise add a
+       once-listener that calls `teardownOnce(contained.pid)`, and remove the listener when the exit promise settles,
+       so a finished worker leaves no listener behind. The teardown goes through the same `teardownOnce`, so an abort
+       racing the output budget or `clockBound` tears down once. The process-group teardown already follows the
+       group-kill semantics `teardownProcessGroup` uses for the other two causes.
+    2. THE RESULT IS UNCHANGED FOR THE CALLER. An aborted spawn settles as the exit promise resolves. A signal exit is
+       already an error, never a clean exit (`codexWorkerExit`), and `guardSpawnWithQuietWatchdog` surfaces the
+       recorded `QuietRoundEndedError` rather than that error. So `roundEndedHandoffRows`, the verdicts and the
+       restore path are unchanged. Only the time between `worker.recycle_yield` and the spawn's `worker.attempt`
+       changes.
+    3. NO NEW BOUND. Nothing waits on a timer. The abort acts when it fires, as the Claude path already does.
+    NOT IN SCOPE: committing work done after the checkpoint (with the worker stopped, that window is seconds), the
+    holdout's cost model (W1-T8927, W1-T9069), and whether restarts end rounds at all (W1-T9085..W1-T9089).
+    Tests go in the new file test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive the real `spawnCodexWorker` with a fake contained process and a counting
+    `containment.teardown`, as test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts does. Use no live
+    process, network, or wall-clock wait.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts"
+    - claim: "aborting a running Codex spawn's signal tears its process group down once and the spawn settles"
+      proof: 'grep: test("W1-T9245: an abort mid-turn tears the codex process group down once" in test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts'
+    - claim: "a signal already aborted when the Codex worker spawns tears it down at once"
+      proof: 'grep: test("W1-T9245: a signal aborted before spawn tears the codex worker down at once" in test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts'
+    - claim: "a Codex spawn whose signal never aborts is not torn down and leaves no abort listener after it exits"
+      proof: 'grep: test("W1-T9245: an unaborted codex worker is never torn down and leaves no listener" in test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts'
+    - claim: "the Codex adapter reads the caller's abort signal"
+      proof: 'grep: args\.signal in src/lib/worker-provider.ts'
+  falsifier: |
+    Replay W1-T9001-1791904881258 at 15:55:01Z with a fake contained Codex process that keeps streaming
+    `worker.activity` events: abort the spawn's signal the way `endRound` does. At origin/main the counting teardown
+    stays at 0 and the spawn promise stays pending until the fake emits exit on its own. With the change, teardown
+    runs once in the same tick and the spawn settles. Remove the listener and the first test reds. Drop the
+    already-aborted check and the second reds. Tear down on any exit and the third reds.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: per round end, the gap from
+    `worker.recycle_yield` (end_round, acted) to the run's `worker.attempt`, split by
+    `worker_assignment.selected.provider`. The baseline is Codex 25/25 at 57-1806 s (median 353 s) and Claude 31/31 at
+    2-13 s, 2026-10-11T20:11Z..2026-10-13T16:07Z. Codex should fall into Claude's band. The secondary read is
+    `daemon.freshness_restart_waiting` rows whose only waiting lane already holds a `worker.recycle_yield`.

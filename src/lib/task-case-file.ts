@@ -1,7 +1,7 @@
 import { readdirSync } from "node:fs";
 import { basename } from "node:path";
 import { fixedClock } from "./clock.js";
-import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, type LedgerMalformedRowFinding,
+import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, malformedRowCouldBelong, ledgerRunBelongsToTask as ownedRun, type LedgerMalformedRowFinding,
   type LedgerUnionStreamIO } from "./ledger-union.js";
 import type { Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
@@ -90,9 +90,6 @@ export interface TaskCaseFile {
   next: { owner: string; action: string; source: string } | null;
 }
 
-const ownedRun = (taskId: string, runId: unknown): runId is string =>
-  typeof runId === "string" && (runId === taskId || runId.startsWith(`${taskId}-`));
-
 /** A damaged row's source, bounded the way the benchmark cohort bounds one: a basename, a count, and
  * a time bound that is null as soon as one damaged row's timestamp could not be read. */
 export interface CaseMalformedSource {
@@ -103,14 +100,7 @@ export interface CaseMalformedSource {
   maxTimestamp: string | null;
 }
 
-/** A damaged row could be this task's only when it names the task or one of its runs, or when it
- * names no identity at all and its time cannot be read or falls inside the task's window. */
-export function malformedRowCouldBelong(finding: LedgerMalformedRowFinding, taskId: string, windowStart: string): boolean {
-  if (finding.taskId === taskId || ownedRun(taskId, finding.runId) || (finding.namedTaskIds ?? []).includes(taskId)) return true;
-  if (finding.taskId !== undefined || finding.runId !== undefined) return false;
-  const at = finding.timestamp === undefined ? Number.NaN : Date.parse(finding.timestamp);
-  return Number.isNaN(at) || at >= Date.parse(windowStart);
-}
+export { malformedRowCouldBelong };
 
 /** Heartbeat steps. No case-file field reads them: `buildTaskCaseFile` joins run.start, worker.assignment,
  * worker.attempt, pr.opened and verdict, and `taskShapeCovariates` counts run.start and fix.dispatch. The

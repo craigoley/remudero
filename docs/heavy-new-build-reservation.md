@@ -14,7 +14,7 @@ A nonce and a content hash correlate records; neither authenticates a shared wri
 Cross-account/container readers and network filesystems are not an approved backend.
 The earlier v1 flat files and experimental SQLite journal are not auto-migrated.
 
-Records are complete directory envelopes named `heavy-build-<id>[-closed|-delivered].json`,
+Records are complete directory envelopes named `heavy-build-<id>[-closed|-delivered|-escalation].json`,
 each containing a single `record.json`. A private unique staging directory is fully
 written/flushed before one directory rename publishes it. Every cooperative writer
 publishes a nonempty final envelope, so POSIX rename refuses replacement; concurrent
@@ -45,15 +45,28 @@ escalated at expiry. A completion at/after expiry records escalation, never hide
 as release/success. A terminal record is consulted before wall-clock validation, so
 clock rollback cannot revive a completed hold. A future unclosed READY time is UNKNOWN.
 
-An escalated terminal record is also an outbox entry. Notification delivery uses the
-stable event id `<request-id>:escalated`. A delivery acknowledgement is published only
-after the sink returns successfully. A throw/crash before acknowledgement is retried
-on a later read/restart, and **does not reopen the hold**. This is at-least-once delivery,
-not exactly-once: sinks must deduplicate by event id, and a sink that returns before
-durably accepting its event cannot claim durable external delivery. The receipt only
-certifies this API's successful sink call, not a human notification or finished gate.
-Thenable/async sink returns are not acknowledged: delivery requires synchronous durable
-acceptance, or the escalation stays pending for a supported sink to retry.
+An escalated terminal record is also an outbox entry with stable event id
+`<request-id>:escalated`. A void, false, promise or forged sink return cannot acknowledge
+it. `heavyReadyEscalationSink` fsyncs an immutable `-escalation` inbox envelope and its
+parent before returning an explicit event/hash-bound ACK. The reader independently
+reads that envelope before recording `-delivered`. Old ACKs without a durable inbox
+receipt are retained but retried, not trusted or deleted. Post-rename flush failures
+are retried before acknowledgement. This certifies durable LOCAL inbox acceptance,
+NOT human notification, remote delivery, a finished gate or available capacity.
+A throw/crash before ACK retries the same event without reopening the expired hold.
+
+The independent deadline worker requires a SEPARATE opt-in:
+`RMD_HEAVY_READY_DEADLINE_SERVICE=1`, captured once at natural startup with an explicit
+private READY directory. Unset remains OFF, including for an already-configured gate.
+No configuration is activated by publication. Its own thread scans even when the
+main loop blocks or no NEW admission occurs, recording the original READY60 expiry,
+not a fresh retry deadline. A missing, crashed, stopped or stale worker is UNKNOWN
+at the NEW-only gate. The discovery/retry cadence (1 s) and silence backstop (5 s)
+are proposals, not replacement deadlines or measured capacity. The thread is unref'd;
+process exit is recovered by the next opted-in startup from immutable records.
+It never runs model attempts, acquires capacity, consumes grants, cancels active
+fleet work, changes worker limits or notifies GitHub. `stop()` closes only its own
+thread. Core adoption still requires consumer/backend and native qualification.
 
 Closure's logical time is sampled at the API call; the publication winner is selected
 at the atomic envelope rename. Pre-deadline release can race with expiry: the first

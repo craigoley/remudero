@@ -1,0 +1,62 @@
+- id: W1-T9232
+  title: "A BUILD HEAD THAT LACKS ITS OWN TASK RECORD IS REFRESHED FROM MAIN AND RE-REVIEWED, NOT ESCALATED AS CONTRADICTORY — #11374 (W1-T9071) was built on a run-W1-T9071 branch cut at 11:57Z, before its shard merged (#11327, 13:27Z); review read the plan at the PR head, found no W1-T9071, skipped the reviewer as head-task-metadata-unavailable, failed with no criteria, and the sweep escalated it as contradictory until a hand merge of main fixed it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # review's verdict path and the sweep's disposition / base-refresh routing
+  band_meaning: span
+  origin: "operator session 2026-10-13 (standing approval: go ahead with the recommended follow-ups to fix and improve all of this): found while fixing #11374"
+  plan_refs: [W1-T9071, W1-T3387, W1-T2846, W1-T3029, W1-T440, W1-T9001]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-build-head-missing-its-own-task-record-is-refreshed-not-escalated.test.ts, test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts, test/event-driven-semantic-review.test.ts]
+  status: queued
+  priority: 1 # operator-2026-10-13: a build whose branch predates its own shard fails closed and needs a hand merge; the fix is a self-healing base refresh
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 (core ledger, read-only; origin/main):
+      - #11374's only build commit 20f729800 (12:48Z, trailer `Remudero-Task: W1-T9071`) sits on
+        run-W1-T9071-1791893167140, cut from main at 5f8d3f178 (11:57Z). The task's shard
+        plan/tasks.d/W1-T9071-*.yaml reached main only with #11327 (db5982ab9, 13:27Z). The core daemon did NOT
+        dispatch it early — its rows are `dispatch.skipped run-branch-already-pushed` (13:49Z, 14:01Z, 14:32Z) and
+        later `dispatch.claim_released … held by another lane`: another session hand-built it before the filing
+        merged. Any builder (fleet, hand, or another session) can produce this shape.
+      - review-PR11374 (15:02Z): `review.reviewer.skipped reason=head-task-metadata-unavailable`, then
+        `review.posted` FAIL with no criteria to judge; the sweep (15:08Z) disposed it as
+        "review failing with no actionable unmet criteria (contradictory) — escalating" (src/lib/sweep.ts
+        CONTRADICTORY_REASON). It stayed red until a hand `merge main` (aa0ac99e9) brought the shard in; the next
+        review passed both criteria and it merged at 15:37Z.
+      - How review gets there: src/run-task.ts derives taskId from the trailer or the run branch (W1-T2846), then
+        `resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid)` reads the plan AT
+        THE PR HEAD. A head older than its shard yields no criteria and no risk/budget, so the reviewer is skipped
+        (`head-task-metadata-unavailable`, "a plan-resolution fault, not an untasked PR") and the verdict fails.
+      - Frequency over ~36 h of rotations: 1 W1-T build (W1-T9071). The other head-task-metadata-unavailable rows are
+        TRIAGE-* and main-repair PRs, which have no shard by design and must keep today's behaviour. Rare, but each
+        occurrence fails closed and needs a person.
+  design: |
+    1. REVIEW NAMES THE CAUSE. When taskId is derived and the plan at the PR head has no record for it, read the plan
+       at origin/main (the same resolver at the base ref). If origin/main HAS the task, the verdict is pending (not
+       FAIL) with a distinct cause `own-task-record-missing-at-head` and the derived repair "refresh the branch from
+       main"; the reviewer skip row carries that cause. If origin/main also lacks it, keep today's behaviour exactly
+       (a task id with no record anywhere is a real fault). TRIAGE-* / main-repair / PR-<n> identities are untouched.
+    2. THE SWEEP REFRESHES AND RE-REVIEWS. A PR whose latest review carries `own-task-record-missing-at-head` is
+       routed to the existing base refresh (`deps.updateBranch`, the path that logs `sweep.base_fixed.refresh` /
+       `branch.update_requested`), then re-reviewed on the new head — never disposed as CONTRADICTORY_REASON. A
+       refresh that fails (conflict) or a second miss on the refreshed head keeps the current escalation, with this
+       cause named in the reason instead of "contradictory".
+    3. LEDGER. Both decisions are visible: `review.reviewer.skipped` with the new cause, and the sweep's disposition
+       row naming `own-task-record-missing-at-head → base refresh`.
+  acceptance:
+    - claim: "a task-bearing head whose plan lacks its own task while origin/main has it is pending with the own-task-record cause, not a failure"
+      proof: 'grep: test("W1-T9232: a head missing its own task record is pending, not failed" in test/a-build-head-missing-its-own-task-record-is-refreshed-not-escalated.test.ts'
+    - claim: "the sweep refreshes such a PR from main and re-reviews instead of escalating it as contradictory"
+      proof: 'grep: test("W1-T9232: the sweep refreshes a head missing its own task record" in test/a-build-head-missing-its-own-task-record-is-refreshed-not-escalated.test.ts'
+    - claim: "a task id with no record on origin/main either keeps today's failure, and untasked PRs are unchanged"
+      proof: 'grep: test("W1-T9232: a task with no record anywhere still fails as before" in test/a-build-head-missing-its-own-task-record-is-refreshed-not-escalated.test.ts'
+  falsifier: |
+    gitRepo() fixture: origin/main carries plan shard W1-T9999; a PR head branched before it (no shard) carries a
+    commit trailered `Remudero-Task: W1-T9999`. At base, review fails with no criteria and the sweep disposes it as
+    CONTRADICTORY_REASON — the first two tests assert the pending own-task-record cause and a recorded
+    `deps.updateBranch` call (fake) followed by a re-review. Remove the shard from origin/main too: the third test
+    asserts today's failure is unchanged, and a TRIAGE-* identity still takes the untasked path.

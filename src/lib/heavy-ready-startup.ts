@@ -2,12 +2,15 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpat
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { configPath, resolveHeavyReadyDirectory, type Config } from "./config.js";
 import { heavyNewBuildGate, type HeavyBuildHold } from "./heavy-build-reservation.js";
+import { HEAVY_READY_SILENCE_MS, startHeavyReadyDeadlineService } from "./heavy-ready-deadline.js";
+import { systemClock } from "./clock.js";
 
 /** Separate from config.json: older checkouts reject unknown config fields. Read ONCE at startup. */
 export const HEAVY_READY_STARTUP_FILENAME = "heavy-ready-startup-v1.json";
 const MAX_STARTUP_BYTES = 4096;
 type StartupReading = { state: "absent" } | { state: "configured"; dir: string } | { state: "unavailable"; reason: string };
 type StartupLog = (step: string, fields: Record<string, unknown>) => unknown;
+export type HeavyReadyStartupGate = (() => HeavyBuildHold | undefined) & { stop?: () => Promise<void> };
 const detail = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 /** Descriptor-bounded, read-only opt-in. Absence is disabled; unreadable is never absence. */
@@ -61,10 +64,30 @@ export function captureHeavyNewBuildStartupGate(
   log: StartupLog,
   config: Pick<Config, "heavyReadyDirectory">,
   opts: { env?: NodeJS.ProcessEnv; startupFile?: string } = {},
-): () => HeavyBuildHold | undefined {
-  const explicit = resolveHeavyReadyDirectory(config, opts.env ?? process.env);
-  if (explicit !== undefined) return heavyNewBuildGate(log, { dir: explicit });
-  const reading = readHeavyReadyStartupFile(opts.startupFile ?? join(dirname(configPath()), HEAVY_READY_STARTUP_FILENAME));
+): HeavyReadyStartupGate {
+  const env = opts.env ?? process.env;
+  const explicit = resolveHeavyReadyDirectory(config, env);
+  const reading: StartupReading = explicit !== undefined ? { state: "configured", dir: explicit }
+    : readHeavyReadyStartupFile(opts.startupFile ?? join(dirname(configPath()), HEAVY_READY_STARTUP_FILENAME));
   if (reading.state === "unavailable") return () => { throw new Error(`heavy READY startup observation unavailable: ${reading.reason}`); };
-  return heavyNewBuildGate(log, { dir: reading.state === "configured" ? reading.dir : undefined });
+  const gate = heavyNewBuildGate(log, { dir: reading.state === "configured" ? reading.dir : undefined });
+  // A separate second opt-in; existing READY config does NOT silently start a new service.
+  if (env.RMD_HEAVY_READY_DEADLINE_SERVICE === undefined) return gate;
+  if (env.RMD_HEAVY_READY_DEADLINE_SERVICE !== "1" || reading.state !== "configured") {
+    return () => { throw new Error("heavy READY deadline service configuration unavailable"); };
+  }
+  try {
+    const service = startHeavyReadyDeadlineService({ enabled: true, dir: reading.dir })!;
+    const guarded: HeavyReadyStartupGate = () => {
+      const observed = service.observation(), now = systemClock.now();
+      if (!observed || observed.atMs > now || now - observed.atMs > HEAVY_READY_SILENCE_MS || observed.reading.state === "unavailable") {
+        throw new Error("heavy READY independent deadline observation unavailable");
+      }
+      return gate();
+    };
+    guarded.stop = service.stop;
+    return guarded;
+  } catch (error) {
+    return () => { throw new Error(`heavy READY deadline startup unavailable: ${detail(error)}`); };
+  }
 }

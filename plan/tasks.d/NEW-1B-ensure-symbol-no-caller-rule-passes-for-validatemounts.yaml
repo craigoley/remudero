@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire NEW-1B — It depends on NEW-1A, which will never be built.
   attempts: 0
   files:
     - src/lib/mounts.ts
