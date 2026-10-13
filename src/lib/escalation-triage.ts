@@ -106,7 +106,7 @@ function ruleOutcome(e: TriageSubject, evidence: TriageEvidence): TriageOutcome 
       reason: "a stale-proof refusal whose recommendation is a plan-only proof amendment",
     };
   }
-  if (evidence.rekick && evidence.rekick.newFailureSinceLastStrike && evidence.rekick.priorRekicks === 0) {
+  if (e.class === "BLOCKED" && evidence.rekick && evidence.rekick.newFailureSinceLastStrike && evidence.rekick.priorRekicks === 0) {
     return {
       kind: "auto_resolve",
       action: "rekick_once",
@@ -165,7 +165,7 @@ export function triageEscalation(
     if (modelVerdict?.decision === "demote" && typeof modelVerdict.reason === "string") {
       return { kind: "digest", decidedBy: "model", reason: modelVerdict.reason };
     }
-    if (modelVerdict?.decision === "deliver") {
+    if (modelVerdict?.decision === "deliver" && typeof modelVerdict.reason === "string") {
       return { kind: "deliver", decidedBy: "model", reason: modelVerdict.reason };
     }
     return { kind: "deliver", decidedBy: "default", reason: "no rule applied and no model verdict" };
@@ -205,6 +205,11 @@ export function parseEscalationTriagePolicy(root: unknown): EscalationTriagePoli
   const block = (root as { escalationTriage?: unknown } | null | undefined)?.escalationTriage;
   if (block === null || typeof block !== "object") return DEFAULT_ESCALATION_TRIAGE_POLICY;
   const { mode, maxAutoResolvesPerPass } = block as Record<string, unknown>;
+  if ((mode !== undefined && mode !== "act" && mode !== "shadow") ||
+      (maxAutoResolvesPerPass !== undefined && (typeof maxAutoResolvesPerPass !== "number" ||
+        !Number.isInteger(maxAutoResolvesPerPass) || maxAutoResolvesPerPass < 0))) {
+    return DEFAULT_ESCALATION_TRIAGE_POLICY;
+  }
   const cap =
     typeof maxAutoResolvesPerPass === "number" && Number.isInteger(maxAutoResolvesPerPass) && maxAutoResolvesPerPass >= 0
       ? Math.min(maxAutoResolvesPerPass, DEFAULT_MAX_AUTO_RESOLVES_PER_PASS)

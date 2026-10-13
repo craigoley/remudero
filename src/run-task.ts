@@ -2433,6 +2433,7 @@ export function buildSweepEffects(
   | "repushAbsent"
   | "updateBranch"
   | "readyDraft"
+  | "draftRefusalAmendments"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "stackPrerequisite"
@@ -3198,6 +3199,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -46529,7 +46531,7 @@ export async function sweepEscalationTriage(
     const deps = { issues, ledgerPath, runId };
     const cfg = runtime(deps);
     const relabel = io.relabel ?? ((url, label) => {
-      assertLiveWriteAllowed("gh-issue-edit", "routing an escalation after triage");
+      assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
       ghExec(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
         "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], { stdio: "pipe" });
     });
@@ -46541,7 +46543,8 @@ export async function sweepEscalationTriage(
       const subject = birth.triage_subject as Escalation;
       if (!subject || !Array.isArray(subject.options)) continue;
       const pr = openPrs.find((p) => p.taskId === subject.taskId || p.prNumber === prReferentFromIssueText(subject.detail + subject.summary));
-      const referentStateNow = pr ? JSON.stringify({ head: pr.headSha, disposition: pr.disposition }) : "referent state unavailable";
+      const referentStateNow = pr ? JSON.stringify({ head: pr.headSha, review: pr.reviewState,
+        checks: pr.checksState, mergeable: pr.mergeable, mergeableState: pr.mergeableState }) : "referent state unavailable";
       const siblingSummaries = open.filter((sibling) => sibling.url !== issue.url &&
         sibling.body?.includes(`**Task:** ${subject.taskId}\n`)).map((sibling) => sibling.title ?? sibling.url).sort();
       const stateKey = createHash("sha256").update(JSON.stringify([issue.url, issue.body, referentStateNow, siblingSummaries, cfg.mode])).digest("hex");
@@ -57209,11 +57212,17 @@ export async function main(
   // process-boundary concerns the task record calls out: the freshness gate above, and the
   // exit code translation right here.
   realDeps();
-  if (!deps.dispatch) configureEscalationTriage((escalationDeps) => {
-    const config = loadConfig();
-    const { owner, repo } = resolveOwnerRepo();
-    return buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo })(escalationDeps);
-  });
+  if (!deps.dispatch) {
+    let runtime: ReturnType<typeof buildEscalationTriageRuntime> | undefined;
+    configureEscalationTriage((escalationDeps) => {
+      if (!runtime) {
+        const config = loadConfig();
+        const { owner, repo } = resolveOwnerRepo();
+        runtime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
+      }
+      return runtime(escalationDeps);
+    });
+  }
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
   await flushThenExit(

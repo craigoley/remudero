@@ -1413,19 +1413,13 @@ export function escalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGatewa
   return runStepsAsync(escalateSteps(e, deps, true));
 }
 
-/** The precision tier this class has earned, read fresh off the ledger. `undefined` when the ledger
- *  is unreadable — an unreadable input never digests anything (W1-T8868). */
+/** An unreadable precision ledger propagates to the funnel's deliver fallback. */
 function ledgerClassTier(e: Escalation, ledgerPath: string): TriageEvidence["classTier"] {
   if (e.class === "MANUAL" || e.class === "HARD_STOP") return undefined;
-  try {
-    const lines = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-      step: "panel.escalation_marked_handled", refuseIncomplete: true,
-    });
-    return escalationClassSignal(lines.rows, e.class).tier;
-  } catch (err) {
-    void err; // no readable ledger → no tier evidence → the digest rule does not fire
-    return undefined;
-  }
+  const lines = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: "panel.escalation_marked_handled", refuseIncomplete: true,
+  });
+  return escalationClassSignal(lines.rows, e.class).tier;
 }
 
 /** Where a triaged escalation is routed when the triage ACTS (see {@link triageRoute}). */
@@ -1570,9 +1564,8 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   return url;
 }
 
-/** THE JUDGED CHOKE POINT (W1-T349) — {@link escalate} plus the residual escalation judge. Producers
- *  opt in; anyone still calling {@link escalate}/{@link tryEscalate} gets today's unjudged
- *  needs-human behaviour. ORDER MATTERS: dedup runs FIRST, through the exact same {@link
+/** The async triage funnel with an explicit residual judge. Shadow still delivers every outcome.
+ *  ORDER MATTERS: dedup runs FIRST, through the exact same {@link
  *  lookupDuplicateEscalation} search, so the judge never sees a duplicate (and never runs at all on
  *  an unreadable surface — W1-T2912). A `demote` opens the issue fleet-notice-labelled with the
  *  judge's reason as the first comment; anything else — deliver, an exempt class, or a judge failure

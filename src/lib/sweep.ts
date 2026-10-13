@@ -20808,7 +20808,7 @@ export interface StaleEscalationRejudgeOptions {
   /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
    *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
    *  the type this rung hands back ({@link EscalationJudgeDecision}) cannot even express "close". */
-  demote: (url: string, reason: string) => void;
+  demote: (url: string, reason: string) => void | Promise<void>;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -21027,7 +21027,7 @@ export async function runStaleEscalationRejudge(
       continue;
     }
     try {
-      deps.demote(c.issueUrl, verdict.reason);
+      await deps.demote(c.issueUrl, verdict.reason);
       demoted++;
       results.push({
         issueUrl: c.issueUrl,
@@ -21051,7 +21051,7 @@ export async function runStaleEscalationRejudge(
         stateKey: c.stateKey,
         outcome: "demote-failed",
         decision: verdict.decision,
-        reason: verdict.reason,
+        reason: `demotion failed: ${String(err)}`,
       });
     }
   }

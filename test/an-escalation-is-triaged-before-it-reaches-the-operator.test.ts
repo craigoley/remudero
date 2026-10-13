@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,8 @@ import {
   triageEscalation,
 } from "../src/lib/escalation-triage.js";
 import { runStaleEscalationRejudge } from "../src/lib/sweep.js";
+import { buildEscalationTriageRuntime } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
 
 function ledger(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-")), "ledger.ndjson");
@@ -278,4 +280,74 @@ test("W1-T8868: the stale rejudge records shadow triage without demoting", async
   assert.equal(demoted, 0);
   assert.equal(result.demoted, 0);
   assert.equal(rows(lp).find((r) => r.step === "escalation.triaged")?.triage_outcome, "digest");
+});
+
+test("W1-T8868: unreadable history delivers before a rule or model can hide the issue", async () => {
+  const lp = ledger();
+  writeFileSync(lp, "not a ledger row\n");
+  const issues = gateway();
+  let executed = 0;
+  let judged = 0;
+  await escalateWithJudge(staleProof(), {
+    issues, ledgerPath: lp, runId: "r",
+    judge: async () => { judged++; return { decision: "demote", reason: "can wait" }; },
+    triage: { mode: "act", pass: newTriagePass(), execute: {
+      plan_amendment_pr: () => { executed++; return "opened"; },
+    } },
+  });
+  assert.equal(executed, 0);
+  assert.equal(judged, 0);
+  assert.ok(issues.calls[0].labels.includes(NEEDS_HUMAN_LABEL));
+});
+
+test("W1-T8868: a rekick requires a block and malformed policy cannot enable actions", () => {
+  assert.equal(triageEscalation(esc({ class: "GRILL" }), {
+    rekick: { newFailureSinceLastStrike: true, priorRekicks: 0 },
+  }).kind, "deliver");
+  assert.equal(parseEscalationTriagePolicy({ escalationTriage: {
+    mode: "act", maxAutoResolvesPerPass: "five",
+  } }).mode, "shadow");
+  const outcome = triageEscalation(esc(), {}, { decision: "deliver", reason: undefined } as never);
+  assert.equal(outcome.kind, "deliver");
+  assert.equal(typeof outcome.reason, "string");
+});
+
+test("W1-T8868: stale demotion awaits the write and records a rejected write", async () => {
+  let completed = false;
+  const lp = ledger();
+  const result = await runStaleEscalationRejudge([{
+    issueUrl: "https://github.com/craigoley/remudero/issues/1", escalation: esc(),
+    ageMs: 7 * 60 * 60 * 1000, referentStateNow: "still open", siblingSummaries: [], stateKey: "head1",
+  }], {
+    ledgerPath: lp, runId: "sweep", judge: async () => ({ decision: "demote", reason: "can wait" }),
+    demote: async () => {
+      await Promise.resolve();
+      completed = true;
+      throw new Error("label write refused");
+    },
+    triage: { mode: "act" },
+  });
+  assert.equal(completed, true);
+  assert.equal(result.demoted, 0);
+  assert.equal(result.results[0].outcome, "demote-failed");
+  assert.match(result.results[0].reason!, /label write refused/);
+});
+
+test("W1-T8868: the runtime shares five actions across birth and stale issues", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-triage-runtime-"));
+  const runtime = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: () => ({ escalationTriage: { mode: "act", maxAutoResolvesPerPass: 5 } }),
+    readRows: () => [], seenAt: () => undefined, windowMs: () => 1,
+    amend: async (e) => `${e.taskId}: amendment opened; decline it to undo`,
+  });
+  const lp = ledger();
+  const issues = gateway();
+  for (let i = 0; i < 6; i++) {
+    await escalateAsync({ ...staleProof(), taskId: `W1-T${i}` }, {
+      issues, ledgerPath: lp, runId: "pass", triage: runtime({ issues, ledgerPath: lp, runId: "pass" }),
+    });
+  }
+  assert.equal(rows(lp).filter((r) => r.step === "escalation.auto_resolve_attempted").length, 5);
+  assert.ok(issues.calls.slice(0, 5).every((c) => c.labels.includes(FLEET_NOTICE_LABEL)));
+  assert.ok(issues.calls[5].labels.includes(NEEDS_HUMAN_LABEL));
 });
