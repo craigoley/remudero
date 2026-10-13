@@ -245,7 +245,6 @@ export type ReadModelWorkerMessage =
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
   | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" }
   | ({ type: "view_lane"; view: string } & ReadModelLaneMove)
-  /** Worker-local legacy inputs, consumed by the fast comparator and never relayed to serve or its ledger. */
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer;
@@ -678,7 +677,6 @@ export interface ReadModelTicker {
   tick(): void;
   /** Compares one sampled shadow request against the latest body; false when there was nothing to compare. */
   shadow(request: ShadowRequest): boolean;
-  /** Captures the owning unit's matched inputs without creating a second readiness writer. */
   prepareShadow(request: ShadowRequest): ShadowRequest | undefined;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
@@ -1196,7 +1194,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = viewEtag(name, version, stale, data);
     const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-    // A newly made unit's legacy reader owns this reference, even when its published value is unchanged.
     latest.set(id, body);
     if (lastEtag.get(id) === etag) return;
     const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
@@ -1807,7 +1804,6 @@ export function threadViews(opts: {
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
       if (msg.type === "shadow_prepared") {
-        // Keep fileShadowStore and all counters on their existing single fast-lane writer.
         return fast.worker?.postMessage({ type: "shadow", request: msg.request } satisfies ReadModelViewsInput);
       }
       if (msg.type === "view_lane") {
@@ -1859,7 +1855,6 @@ export function threadViews(opts: {
   return {
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => {
-      // Worker-local legacy readers live beside their unit; comparison still belongs only to fast.
       const instance = new URLSearchParams(request.key).get("instance") ?? undefined;
       const owner = heavyUnits.has(JSON.stringify([request.view, undefined]))
         || heavyUnits.has(JSON.stringify([request.view, instance])) ? heavy : fast;
