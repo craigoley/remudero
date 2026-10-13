@@ -480,8 +480,17 @@ archive_worktree_head() {
   local -a bundle_refs=(HEAD)
   [ "$mode" = branches ] && bundle_refs+=(--branches)
   [ "$mode" = all ] && bundle_refs+=("${all_refs[@]}")
-  if ! rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
-     ! verify_worktree_bundle "$wt" "$tmp" "$refs"; then
+  # one retry: a transient failure (a background gc, a racing ref update) must not read as "cannot
+  # be archived", and the first failure's reason goes to stderr so a KEEP is never unexplained
+  local attempt bundle_err="" built=0
+  for attempt in 1 2; do
+    rm -f -- "$tmp"
+    if bundle_err="$(rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" 2>&1 >/dev/null)" && \
+       verify_worktree_bundle "$wt" "$tmp" "$refs"; then built=1; break; fi
+    printf 'rmd-host-cleanup: bundle of %s failed (attempt %s): %s\n' "$wt" "$attempt" "${bundle_err:-verification mismatch}" >&2
+    sleep 1
+  done
+  if [ "$built" != 1 ]; then
     rm -f -- "$tmp"
     return 1
   fi
