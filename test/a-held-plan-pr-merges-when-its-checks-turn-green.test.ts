@@ -19,6 +19,7 @@ import {
   heldPlanPrFromLedger,
   type ArmDeps,
 } from "../src/lib/arm-auto-merge.js";
+import { selectLightPassPlanMerge, selectLightPassPlanMerges } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { lightPassActionable } from "../src/run-task.js";
@@ -191,6 +192,20 @@ test("W1-T9212: the re-evaluation never arms and takes the one-plan-merge claim"
   const result = await armAutoMergeDetailedAsync(heldA.prUrl, "W1-T9421", seams as unknown as ArmDeps<true>);
   assert.equal(result.outcome, "direct-merged");
   assert.deepEqual(calls, ["mergeDirect"], "the plan PR is merged directly and never armed");
+});
+
+test("W1-T9212: selectLightPassPlanMerge returns the longest-held plan PR, the head of the pass's order", () => {
+  const never = planPr(9411);
+  const held = planPr(9412);
+  const ledgerLines = [heldRow(held, { mergeable_state: "blocked", remedy: "retry-later" })];
+  const chosen = selectLightPassPlanMerge([never, held], DEFAULT_SWEEP_POLICY, NOW, ledgerLines);
+  assert.equal(chosen?.prNumber, 9412, "a held plan PR outranks one never held, though its number is higher");
+  assert.deepEqual(
+    selectLightPassPlanMerges([never, held], DEFAULT_SWEEP_POLICY, NOW, ledgerLines).map((p) => p.prNumber),
+    [9412],
+    "the never-held PR keeps the one-per-pass bound",
+  );
+  assert.equal(selectLightPassPlanMerge([], DEFAULT_SWEEP_POLICY, NOW, []), undefined, "no plan PR, no choice");
 });
 
 test("W1-T9212: heldPlanPrFromLedger names the trigger and the first hold at this head", () => {
