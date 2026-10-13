@@ -55,7 +55,22 @@ export interface ThreadMessage {
   extra?: ThreadMessageExtra;
 }
 
+/** W1-T9252: what an operator did on an item, or what the fleet did in answer. The first five are the
+ *  operator's (`from: "operator"`); the rest are the daemon's. */
+export type ThreadEventKind =
+  | "reframed" | "declined" | "restored" | "approved" | "released"
+  | "redrafted" | "task_filed" | "released_to_fleet" | "refused";
+
+export interface ThreadEvent {
+  kind: ThreadEventKind;
+  /** The source ledger row's `run_id|step|ts`: one event per row, however often a writer runs. */
+  key: string;
+}
+
+const OPERATOR_EVENT_KINDS: ReadonlySet<ThreadEventKind> = new Set(["reframed", "declined", "restored", "approved", "released"]);
+
 export interface ThreadMessageExtra {
+  event?: ThreadEvent;
   did?: { action: InboxThreadAction; undo?: string };
   suggestedAction?: InboxThreadAction;
   question?: boolean;
@@ -190,6 +205,30 @@ export function appendThreadReplyOnce(
   if (prior) return { kind: prior.body === body ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
   appendThreadMessage(identity, "reply", body, deps, { ...extra, replyId });
   return { kind: "appended", seq: current.messages.length + 1 };
+}
+
+/**
+ * W1-T9252 — THE ONE WRITER of an operator action or a fleet outcome on an item's thread. Idempotent on
+ * `event.key`: a retried verb, a re-run boot backfill and a crash-replay each leave one message. Operator
+ * kinds are `reply` messages (rendered `from: "operator"`), the fleet's are `escalation` ones. `ts` is the
+ * source row's time, so a backfilled event sorts where it happened. An operator event whose text the
+ * operator already typed into the thread as a plain reply is that reply's echo and is not written again.
+ * THROWS when the store cannot be read, like {@link appendThreadMessage}; callers decide whether that is fatal.
+ */
+export function appendThreadEvent(
+  proposalId: string,
+  event: ThreadEvent,
+  text: string,
+  deps: ThreadStoreDeps,
+  ts?: number,
+): "appended" | "existing" {
+  const current = readThread(inboxThreadId(proposalId), deps);
+  if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
+  if (current.messages.some((message) => message.extra?.event?.key === event.key)) return "existing";
+  const operator = OPERATOR_EVENT_KINDS.has(event.kind);
+  if (operator && current.messages.some((message) => message.role === "reply" && !message.extra?.event && message.body.trim() === text.trim())) return "existing";
+  appendThreadMessage(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event });
+  return "appended";
 }
 
 export const INBOX_THREAD_CLASS = "inbox";
