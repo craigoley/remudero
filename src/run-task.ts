@@ -3126,6 +3126,7 @@ import {
   gitPushRunBranch,
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
+  isNonFastForwardRejection,
   LanePushForeignHeadError,
   runStepsAsync,
   runStepsSync,
@@ -52394,6 +52395,19 @@ export async function approveCommand(
     addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
     return (addedWorktreePath = path);
   };
+  // W1-T9161: a join or a resume cuts THIS run's own tree on this run's own branch from `base`, so no two approves
+  // ever claim one path or create one local branch.
+  const addOwnTreeAt = (dir: string, base: string): string => {
+    const own = approveRunBranch(runId);
+    return addApproveWorktree(dir, join(worktreesDir(config), own), own, base);
+  };
+  // W1-T9161: the tree a lost join added, with its never-pushed local branch, so the fallback can cut the same name.
+  const dropOwnTree = (dir: string, path: string): void => {
+    worktreeRemove(dir, path);
+    removeRunLock(path);
+    hostWorktreeGit(dir, ["branch", "-D", approveRunBranch(runId)]);
+    addedWorktreePath = worktreePath = undefined;
+  };
   // A fresh, locked worktree on this run's branch at origin/main — shared by the two skill paths (W1-T4338's write,
   // the lifecycle retirement), which write under .claude/skills/ rather than filing plan shards.
   const freshSkillApproveWorktree = (): { branch: string; path: string } => {
@@ -52409,7 +52423,11 @@ export async function approveCommand(
   // which ref that worktree was checked out AT (a fresh `origin/main` vs. an already-open PR's own
   // tip) and whether the result is pushed as a NEW branch or a new commit on an existing one.
   // Shared here so the mint/shard/stamp/advisory sequence can never drift between the two.
-  const materializeAndCommitApproveFragment = (worktreePath: string, payload: RatificationPayload, purposeLabel: string): void => {
+  // W1-T9161: `filingBranch` is the branch the shards land on, which a join's own local branch is not: the remote
+  // reservation names it, so the reserved ids match the PR that files them.
+  const materializeAndCommitApproveFragment = (
+    worktreePath: string, payload: RatificationPayload, purposeLabel: string, filingBranch: string,
+  ): void => {
     const subjectId = deriveTaskReferent(payload.proposalId);
     const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
     if (subject?.status === "blocked" && subject.retirement) {
@@ -52452,7 +52470,7 @@ export async function approveCommand(
                 approveReserveFrom,
                 count,
                 gatedRemoteRefReserver({
-                  lane: "approve", log,
+                  lane: "approve", log, filingBranch,
                   run: (args) => {
                     const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -52536,6 +52554,12 @@ export async function approveCommand(
     findJoinablePr() {
       const candidate = mostRecentApprovePr(readLedgerLines(ledgerPath));
       if (!candidate) return undefined;
+      // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
+      // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
+      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+        log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
+        return undefined;
+      }
       const open = probeExistingPlanPr(ghJson, owner, repo, candidate.branch);
       if (!open) return undefined;
       let headSha: string | undefined;
@@ -52556,7 +52580,8 @@ export async function approveCommand(
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
       // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
-      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, `origin/${branch}`);
+      // W1-T9161: this run's OWN tree and local branch, cut from the resumed branch's remote tip. Nothing is pushed.
+      worktreePath = addOwnTreeAt(dir, `origin/${branch}`);
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
@@ -52582,7 +52607,7 @@ export async function approveCommand(
       const branch = approveRunBranch(runId);
       // W1-T2621: see completeRatificationBranch's identical note, above.
       worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main");
-      materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
+      materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`, branch);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       return branch;
@@ -52596,10 +52621,23 @@ export async function approveCommand(
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, `origin/${branch}`);
-      materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
-      preflightApprovePush(worktreePath, branch, payload.proposalId);
-      gitPushRunBranch(worktreePath);
+      // W1-T9161: this run's OWN tree and local branch, cut from the PR's remote tip, never `-b <the PR's branch>` at
+      // `worktrees/<the PR's branch>`: that path and branch belong to whichever run created or last held them.
+      const ownTree = (worktreePath = addOwnTreeAt(dir, `origin/${branch}`));
+      materializeAndCommitApproveFragment(ownTree, payload, `joined ${branch}`, branch);
+      preflightApprovePush(ownTree, branch, payload.proposalId);
+      try {
+        gitPushRunBranch(ownTree, { destination: branch });
+      } catch (e) {
+        if (!isNonFastForwardRejection(e)) throw e;
+        // Another approve moved the PR's tip first. Release the ids, drop this tree and its unpushed branch, and let
+        // approveProposal file through createRatificationBranch: a fresh origin/main tree and its own PR.
+        log("approve.join_lost", { proposal_id: payload.proposalId, branch, released_ids: idBlock?.ids ?? [] });
+        idBlock?.releaseAll();
+        idBlock = undefined;
+        dropOwnTree(dir, ownTree);
+        return undefined;
+      }
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
       try {
