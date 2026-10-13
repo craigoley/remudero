@@ -2,7 +2,7 @@
 - id: W1-T9069
   title: "A LATCHED RESTART REFILLS A FREED LANE WITH WORK THAT ENDS BEFORE IT — W1-T8927's holdout closes refill as \"stale code\" for the whole latch and logs `daemon.restart_holdout` on every 5-s watchdog poll, so on 2026-10-13 two freed lanes idled 45 lane-min behind one 35-min holdout and the latch wrote 281 rows; over 72 h, 68 freed lanes idled 647 lane-min while a sibling still ran"
   repo: remudero
-  depends_on: [W1-T8514]  # same-file serialization only: P1 W1-T8514 (src/lib/drain.ts, src/lib/daemon.ts) is in flight (run-W1-T8514-* branches, not merged); queued P2.5 W1-T8172 (daemon.ts) changes the drain AFTER the last lane settles and does not wait on this
+  depends_on: [W1-T8514, W1-T9072]  # same-file serialization only: P1 W1-T8514 (src/lib/drain.ts, src/lib/daemon.ts) is in flight (run-W1-T8514-* branches, not merged); queued P2.5 W1-T8172 (daemon.ts) changes the drain AFTER the last lane settles and does not wait on this
   type: implement
   verify: auto
   principles: {tdd: strict}

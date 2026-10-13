@@ -2,7 +2,7 @@
 - id: W1-T9072
   title: "DISPATCH IS NOT HELD BEHIND THE BOOT CADENCE GATE — tick 1 runs `await bootGateOpened` before it reaches dispatch, so every boot's lanes wait for W1-T5720's first full pass: over 72 h, 59 gated boots opened at a median 4.1 min (max 8.4) and first dispatched 0.4 min later, about 280 lane-min a day across 3 lanes"
   repo: remudero
-  depends_on: [W1-T9069, W1-T8514]  # same-file serialization only: both change src/lib/daemon.ts's runDaemon (W1-T9069, filed in this PR, the dispatch phase's latch; P1 W1-T8514 is in flight)
+  depends_on: []  # operator ruling 2026-10-13 (session-build urgent fixes): this edits only the tick-1 boot-gate await in runDaemon, a region neither W1-T9069 (restart closure, refill under latch) nor in-flight W1-T8514 (pack reservation) touches; W1-T9069 now depends on this task, so the two daemon.ts changes still serialize
   type: implement
   verify: auto
   principles: {tdd: strict}
