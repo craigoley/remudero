@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: console inbox review (\"it was supposed to feel like an e-mail inbox\"); mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
   plan_refs: [W1-T4087, W1-T4088, W1-T4086]
   files: [src/lib/panel-graph.ts, src/lib/inbox-owner.ts, test/an-inbox-item-names-who-sent-it-and-when.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

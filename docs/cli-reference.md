@@ -59,6 +59,7 @@ usage:
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
   rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
+  rmd skill-eval <proposal-id> --confirm-spend   # Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
@@ -572,6 +573,16 @@ rmd replay-goldens --confirm-spend --ledger <path> [--limit N]
 ```
 
 W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.
+
+### `rmd skill-eval`
+
+Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
+
+```
+rmd skill-eval <proposal-id> --confirm-spend
+```
+
+Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
 
 ### `rmd check-acceptance`
 

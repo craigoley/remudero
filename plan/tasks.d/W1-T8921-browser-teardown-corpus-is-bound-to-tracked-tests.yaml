@@ -88,5 +88,5 @@
     - claim: Browser-source discovery has an explicit tracked test-corpus reader
       proof: 'grep: function trackedBrowserTestSources in test/lib/browser-test-corpus.ts'
   files: [test/serve-browser-teardown.test.ts, test/lib/browser-test-corpus.ts, test/browser-test-corpus.test.ts]
-  status: queued
+  status: merged
   attempts: 0
