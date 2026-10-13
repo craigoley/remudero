@@ -59,29 +59,29 @@ test("a fixture ledger with operator pushes on fleet PRs and a refusal class yie
   const refusalCause = `commit-refused:${BRANCH_MOVED}`;
   const f = fixture(root, { planState: () => ({ tasks: [openRemedy(refusalCause)] }) });
   const inv = f.spec.inventory();
-  assert.equal(inv.priced[0]!.key, "operator-intervention:push", "three operator pushes outprice a 2 h refusal and a 0.5 h unstated round");
+  assert.equal(inv.priced[0]!.key, "undisposed:none", "three operator pushes outprice a 2 h refusal and a 0.5 h unstated round");
   assert.equal(inv.priced[0]!.hours > 3 * OPERATOR_INTERVENTION_HOURS * 0.9, true, "each intervention is priced");
-  assert.deepEqual(inv.priced.map(p => p.key).sort(), ["fix-outcome:unstated", refusalCause, "operator-intervention:push"].sort());
+  assert.deepEqual(inv.priced.map(p => p.key).sort(), ["fix-outcome:unstated", refusalCause, "undisposed:none"].sort());
   assert.equal(inv.ladder.find(l => l.cause === refusalCause)!.state, "in_progress", "the refusal class's remedy is open");
   const actions = f.spec.candidates(inv, () => 0);
   assert.equal(actions.length, 1, "exactly one draft per pass");
-  assert.equal(actions[0]!.origin, "fix-lane:operator-intervention:push");
+  assert.equal(actions[0]!.origin, "fix-lane:undisposed:none");
   const scorecard = f.spec.scorecard(inv, { actions, acting: ["draft"] });
   const landing = f.spec.apply(workspace(root), { actions: [...actions, ...actions], acting: ["draft"] }, scorecard)!;
   assert.equal(f.minted(), 1, "one task id minted for one draft");
   assert.equal(landing.paths.length, 1);
   const text = readFileSync(join(root, landing.paths[0]!), "utf8");
   assert.equal(ciFrictionRecordVerdict(text, "fix-lane fixture").ok, true);
-  assert.match(text, /origin: "fix-lane:operator-intervention:push"/);
+  assert.match(text, /origin: "fix-lane:undisposed:none"/);
   assert.doesNotMatch(text, /commit-refused/, "no draft is filed for the class whose remedy is open");
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1);
   assert.match(landing.title, /^chore\(plan\): draft a fix-lane remedy for /);
   // with the top class's remedy open too, the next-priced class is the one drafted, still exactly one.
-  const both = fixture(root, { planState: () => ({ tasks: [openRemedy(refusalCause), openRemedy("operator-intervention:push")] }) });
+  const both = fixture(root, { planState: () => ({ tasks: [openRemedy(refusalCause), openRemedy("undisposed:none")] }) });
   const next = both.spec.candidates(both.spec.inventory(), () => 0);
   assert.deepEqual(next.map(a => a.origin), ["fix-lane:fix-outcome:unstated"]);
   // every class open: nothing is drafted.
-  const all = fixture(root, { planState: () => ({ tasks: ["operator-intervention:push", refusalCause, "fix-outcome:unstated"].map(openRemedy) }) });
+  const all = fixture(root, { planState: () => ({ tasks: ["undisposed:none", refusalCause, "fix-outcome:unstated"].map(openRemedy) }) });
   assert.deepEqual(all.spec.candidates(all.spec.inventory(), () => 0), []);
 });
 
@@ -92,7 +92,7 @@ test("dropping the operator-intervention reader leaves the intervention-only cla
   const none = fixture(root, { interventions: () => ({ ok: true, interventions: [] }) }, only);
   assert.deepEqual(none.spec.candidates(none.spec.inventory(), () => 0), []);
   const withPushes = fixture(root, {}, only);
-  assert.deepEqual(withPushes.spec.candidates(withPushes.spec.inventory(), () => 0).map(a => a.origin), ["fix-lane:operator-intervention:push"]);
+  assert.deepEqual(withPushes.spec.candidates(withPushes.spec.inventory(), () => 0).map(a => a.origin), ["fix-lane:undisposed:none"]);
   const unreadable = fixture(root, { interventions: () => ({ ok: false, reason: "graphql: rate limited" }) });
   const inv = unreadable.spec.inventory();
   unreadable.spec.scorecard(inv, { actions: [], acting: [] });
@@ -116,7 +116,7 @@ test("the pass writes one fixlane.report row per class and the markdown beside i
   assert.equal(refusal.count, 1);
   assert.equal(refusal.open_remedy, "in_progress");
   assert.equal(Number(refusal.hours) > 1.5, true);
-  assert.equal(rows.find(r => r.class === "operator-intervention:push")!.interventions, 3);
+  assert.equal(rows.find(r => r.class === "undisposed:none")!.interventions, 3);
   assert.equal(rows.find(r => r.class === null)!.interventions, 3, "the summary row carries the headline count");
   const md = readFileSync(join(root, FIXLANE_REPORT_FILE), "utf8");
   assert.match(md, /Operator interventions in the window: 3 \(target 0\)/);
@@ -128,7 +128,7 @@ test("an operator intervention is attributed to the defect class of its PR and a
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const f = fixture(root, { interventions: () => ({ ok: true, interventions: [push(10, -7)] }) });
   const inv = f.spec.inventory();
-  assert.equal(inv.priced.some(p => p.key === "operator-intervention:push"), false, "a push on a PR with a defect event is not its own class");
+  assert.equal(inv.priced.some(p => p.key === "undisposed:none"), false, "a push on a PR with a defect event is not its own class");
   const refusal = inv.priced.find(p => p.key === `commit-refused:${BRANCH_MOVED}`)!;
   const base = fixture(root, { interventions: () => ({ ok: true, interventions: [] }) }).spec.inventory().priced.find(p => p.key === refusal.key)!;
   assert.equal(refusal.hours - base.hours > 0.9 * OPERATOR_INTERVENTION_HOURS, true, "the attributed intervention adds its weight to the class");

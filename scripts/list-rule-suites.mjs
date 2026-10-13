@@ -11,10 +11,11 @@ export function ruleSuites(repoRoot = root) {
   return listRuleSuites(repoRoot);
 }
 
-/** Execute one file at a time. Node's multi-file test runner may schedule files concurrently. */
+/** Execute one file at a time. Node's multi-file test runner may schedule files concurrently. A failing
+ *  run's last line names every failed suite (W1-T7848): the sweep's base-reproduction probe reads it. */
 export function runRuleSuites(repoRoot = root, run = spawnSync) {
   const suites = ruleSuites(repoRoot);
-  let failed = false;
+  const failed = [];
   for (const suite of suites) {
     console.log(`rule-checks: ${suite}`);
     const result = run(process.execPath, [
@@ -27,13 +28,15 @@ export function runRuleSuites(repoRoot = root, run = spawnSync) {
     ], { cwd: repoRoot, stdio: "inherit" });
     if (result.error) {
       console.error(`rule-checks: ${suite}: ${result.error.message}`);
-      failed = true;
+      failed.push(suite);
     } else if (result.status !== 0) {
       console.error(`rule-checks: ${suite}: failed (${result.status ?? result.signal ?? "unknown status"})`);
-      failed = true;
+      failed.push(suite);
     }
   }
-  return failed ? 1 : 0;
+  if (failed.length === 0) return 0;
+  console.error(`rule-checks: failed suites: ${failed.join(" ")}`);
+  return 1;
 }
 
 /** The CLI: `--list` (the default) prints the population, `--run` executes it via `run`. */
