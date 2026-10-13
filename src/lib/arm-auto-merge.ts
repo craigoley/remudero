@@ -430,7 +430,8 @@ export function mergeDirectViaRest(
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  const head = securityMergeHead(prUrl, securityRead, expectedHead);
+  const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", ["api", path],
+    { encoding: "utf8", stdio: "pipe" })))), expectedHead);
   exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
 }
 
@@ -607,6 +608,9 @@ export function realArmDeps(
   // One existing synchronous CLI transport port; daemon actions replace these methods with
   // awaited ports in realArmDepsAsync, including contributor admission.
   const runGh = ghExec;
+  // The synchronous CLI owns this existing bounded transport; do not introduce an
+  // independent sync default reader. Every daemon merge effector below uses the async port.
+  const readSecurity = (path: string): unknown => JSON.parse(runGh(["api", path], { encoding: "utf8", stdio: "pipe" }));
   return {
     contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
       (path) => readAdmissionRest(path, runGh))),
@@ -623,7 +627,7 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      const head = securityMergeHead(prUrl);
+      const head = securityMergeHead(prUrl, readSecurity);
       runGh(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])], {
         encoding: "utf8",
         stdio: "pipe",
@@ -661,7 +665,7 @@ export function realArmDeps(
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      const head = securityMergeHead(prUrl);
+      const head = securityMergeHead(prUrl, readSecurity);
       runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),

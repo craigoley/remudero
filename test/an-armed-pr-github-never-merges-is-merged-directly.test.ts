@@ -76,6 +76,7 @@ function harness(t: TestContext) {
     Object.assign(live, changes);
     shim.addRoute({ when: "/pulls/5492", stdout: JSON.stringify(live) });
     shim.addRoute({when:'/check-runs?',stdout:JSON.stringify(securityCheck(live.head.sha))});
+    shim.addRoute({when:'/pulls/5492/files?',stdout:'[{"filename":"src/example.ts"}]'});
   };
   return { pass, rows, merges, shim, review, setLive, logs, ledgerPath, deps };
 }
@@ -168,7 +169,7 @@ test("W1-T5492: a merge queue enqueues the idle pr without a direct merge", asyn
   h.shim.addRoute({ when: "/rules/branches/main", stdout: '[{"type":"merge_queue"}]' });
   await h.pass();
   assert.equal(h.merges().length, 0);
-  assert.ok(h.shim.calls().includes(`pr merge ${PR_URL}`));
+  assert.ok(h.shim.calls().includes(`pr merge ${PR_URL} --match-head-commit ${HEAD}`));
   assert.equal(h.rows("automerge.armed_idle_enqueued").length, 1);
 });
 

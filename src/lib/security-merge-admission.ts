@@ -1,4 +1,4 @@
-import { ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghJsonAsync } from "./github-transport.js";
 import { RmdError } from "./errors.js";
 // @ts-expect-error — shared metadata program is dependency-free ESM outside tsconfig source roots.
 import { readSecurityMergeDecision, readSecurityMergeDecisionSync } from "../../scripts/lib/code-scanning-merge-adapter.mjs";
@@ -24,7 +24,7 @@ function allowedHead(result: { headSha?: string; decision: { mergeAllowed?: bool
 /** Exact-head source guard on normal merge effectors; no flag, status write or live rollout.
  * Server-side trusted-producer enforcement and durable UNKNOWN escalation remain separate.
  */
-export function securityMergeHead(prUrl: string, read: (path: string) => unknown = path => ghJson(["api", path]), expectedHead?: string): string | undefined {
+export function securityMergeHead(prUrl: string, read: (path: string) => unknown, expectedHead?: string): string | undefined {
  const target = targetFor(prUrl);
  return target ? allowedHead(readSecurityMergeDecisionSync({...target,expectedHead}, read)) : undefined;
 }
