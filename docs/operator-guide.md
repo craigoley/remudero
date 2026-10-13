@@ -13,6 +13,21 @@ not driving it turn by turn.
 
 ## The commands (`rmd`, `bin/rmd`)
 
+For a strict no-change investigation, use the explicit inspection entry point:
+
+```sh
+rmd inspect --state-dir /absolute/state ledger-grep 'retro'
+rmd inspect --state-dir /absolute/state skill effectiveness proof-preflight
+```
+
+It requires an existing absolute state directory and bypasses CLI invocation
+logging, temporary-directory cleanup, credential refresh and checkout self-sync.
+Only `ledger-grep` and `skill effectiveness` are admitted; write verbs, lifecycle
+actions and unknown flags are refused. No missing config or state is provisioned.
+The readers still require complete archive-plus-live history. Ordinary CLI verbs
+retain their existing behavior; `RMD_SELF_SYNC_DONE=1` alone is not this no-change
+entry point because it does not disable invocation logging or housekeeping.
+
 All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 `src/run-task.ts`.
 
@@ -1078,7 +1093,9 @@ redeliver a failed webhook, so use **Redeliver** after correcting a `401`, `403`
 A build that fails readiness never serves (`serve.handoff_aborted`). A promoted build that crashes is
 replaced from the previous slot (`serve.handoff_rolled_back`). A cold start, or a crash replacement, has
 nothing serving to protect, so its generation is promoted as soon as it listens and serves degraded until ready
-(`serve.cold_start_degraded` names the unmet criteria, `serve.cold_start_ready` follows); only a
+(`serve.cold_start_degraded` names the unmet criteria; while it stays degraded, a
+`serve.cold_start_still_degraded` row every 66 s, at most 5, carries each unmet criterion's detail,
+such as the board's reason; `serve.cold_start_ready` follows); only a
 generation that never listens or dies first exits (`serve.cold_start_failed`). The ledger rows are `serve.handoff_*`,
 `serve.generation_*` and `serve.drain_phase`.
 

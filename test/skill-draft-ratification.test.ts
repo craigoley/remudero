@@ -6,6 +6,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,6 +30,7 @@ import {
   type Proposal,
   type RatificationPayload,
   type RatifyGateway,
+  type SkillEvalRecord,
   type SkillFilePayload,
 } from "../src/lib/inbox.js";
 import { stageSkillDraft, workerAllowlistFromSettings, describeWorkerSkillReachability, type SkillDraft } from "../src/lib/skill-workshop.js";
@@ -75,11 +77,18 @@ function recordingGateway(opts: { withWriter?: boolean } = {}): RatifyGateway & 
   return gateway;
 }
 
+/** A passing held-out eval recorded for exactly `skillFile`'s text: approval requires one (skill-eval-gate.ts). */
+const passingEval = (skillFile: SkillFilePayload): SkillEvalRecord => ({
+  draftSha256: createHash("sha256").update(skillFile.markdown).digest("hex"), heldOutSetHash: "h", taskIds: ["T1", "T2", "T3"],
+  verdict: "pass", reason: "held-out-benefit", detail: "d", delta: 0.5, measurableTasks: 3, totalCostUsd: 1, evaluatedAt: "2026-10-13T00:00:00Z",
+});
+
 const readySkill = (skillFile: SkillFilePayload = SKILL): InboxClassification => ({
   proposalId: "skill-draft:proc-1",
   state: "ready",
   reasons: [],
   skillFile,
+  skillEval: passingEval(skillFile),
 });
 
 test("a proposal carrying a skillFile payload routes approval to writeSkillFile and never to createRatificationBranch, before openPlanPr runs", () => {
@@ -238,7 +247,7 @@ test("rmd approve pushes the staged skill draft's SKILL.md verbatim on its own b
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
     mkdirSync(join(root, "state"), { recursive: true });
-    const proposal: Proposal = { id: "skill-draft:proc-1", summary: "s", evidenceAnchors: [], skillFile: SKILL };
+    const proposal: Proposal = { id: "skill-draft:proc-1", summary: "s", evidenceAnchors: [], skillFile: SKILL, skillEval: passingEval(SKILL) };
     writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }, null, 2), "utf8");
 
     const code = await withLiveWritesAllowed(() =>

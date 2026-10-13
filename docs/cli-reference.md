@@ -35,6 +35,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
@@ -334,6 +335,16 @@ rmd ledger-grep <pattern>
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
 
+### `rmd inspect`
+
+Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
+
+```
+rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>
+```
+
+Explicit read-only entry point for ledger-grep and skill effectiveness only. Requires an existing absolute --state-dir; never provisions HOME config or state. Runs before CLI invocation logging, temp cleanup, credential refresh and source freshness. Unknown verbs, lifecycle writes and unsupported flags are refused before dispatch. Reads the complete archive-plus-live union and refuses incomplete history. Ordinary command behavior is unchanged.
+
 ### `rmd progress-watchdog`
 
 Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
@@ -582,7 +593,7 @@ Attempt a staged skill draft with and without it on held-out tasks; record the v
 rmd skill-eval <proposal-id> --confirm-spend
 ```
 
-Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
+Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
 
 ### `rmd check-acceptance`
 

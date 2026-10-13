@@ -139,7 +139,7 @@ const BASELINE_COMMAND_NAMES = [
   "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs",
   "hand-worktree",
   "host-alert",
-  "impossible-canary", "inbox", "inbox-bakeoff", "init", "install-checkout", "issues",
+  "impossible-canary", "inbox", "inbox-bakeoff", "init", "inspect", "install-checkout", "issues",
   "garden",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
@@ -182,6 +182,7 @@ const BASELINE_COMMAND_NAMES = [
 // 2026-10-11: `host-alert` — the host watchdog's own alarms, tiered and spooled for the daemon — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
 // `skill-eval` — a staged skill draft attempted with and without it on held-out merged tasks — joins the registry.
+// `inspect` — explicit, allowlisted state reads before CLI housekeeping — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
   // literal rides with it: two PRs each adding a verb raise the same number from the same base, git

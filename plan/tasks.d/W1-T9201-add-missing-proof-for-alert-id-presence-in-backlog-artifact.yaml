@@ -1,0 +1,27 @@
+- id: W1-T9201
+  title: Add missing proof for alert-id presence in backlog artifact
+  repo: remudero
+  depends_on:
+    - W1-T101
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-13 proposal on proof-debt:W1-T4339, ratified via rmd approve:
+  
+    One cross-file invariant (the alert id spot-checked in review must be the id proof-queue-audit
+    locates in the backlog artifact) cannot be satisfied piecewise, so the task stays whole at
+    risk:high per the
+ #588 merits test.
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/proof-queue-audit.ts
+    - src/lib/review.ts
+  acceptance:
+    - claim: Proof-queue-audit can locate the spot-checked alert id in the backlog artifact
+      proof: "grep: alertId in src/lib/proof-queue-audit.ts"
+    - claim: Review passes the spot-checked alert id through to the audit lookup
+      proof: "grep: alertId in src/lib/review.ts"
+  origin: architect

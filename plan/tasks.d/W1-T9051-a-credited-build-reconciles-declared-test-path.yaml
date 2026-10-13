@@ -1,0 +1,37 @@
+- id: W1-T9051
+  title: "CREDITED-TEST-PATH ACCEPTS A CONSOLIDATION THAT DELETES THE TEST IT DECLARED — a task that folds old tests into one names them in files:, the PR deletes them, and the gate refuses a test path that by design no longer exists at head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — credited-test-path on a consolidation; spans the linter and the author gate that feeds it
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit (PR #10787 consolidation)"
+  plan_refs: [W1-T6087]
+  files: [src/lib/task-linter.ts, scripts/acceptance-author-gate.mjs, test/a-credited-build-reconciles-declared-test-path.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12, PR #10787 (W1-T6087). The task consolidated several census tests into one and named them in
+    `files:`. The PR deleted them, and `credited-test-path` in acceptance-author-gate refused. A worker cannot edit plan
+    records, so the only way through was a hand edit narrowing `files:`.
+    VERIFIED: `creditedTestPathViolations` (src/lib/task-linter.ts) requires every `files:` test path to exist at the PR
+    head, with no notion that the diff deleted it on purpose.
+  design: |
+    1. `creditedTestPathViolations` takes `opts.creditedDeletedFiles`. It skips a test path that comes ONLY from `files:`
+       and that the diff deletes, provided at least one proof test path exists at head (the consolidation target shipped).
+       Proof test paths stay strict.
+    2. acceptance-author-gate.mjs computes the deleted paths with
+       `git diff --name-only -z --no-renames --diff-filter=D base...head` and passes them through `evaluateGate`.
+  acceptance:
+    - claim: "a consolidation that deletes a declared test path is not refused by credited-test-path"
+      proof: "grep: test(\"W1-T9051: a consolidation that deletes a declared test path is not refused by credited-test-path\" in test/a-credited-build-reconciles-declared-test-path.test.ts"
+    - claim: "a proof's own test path is still required at head"
+      proof: "grep: test(\"W1-T9051: a proof's test path is still required at head even when the diff deletes it\" in test/a-credited-build-reconciles-declared-test-path.test.ts"
+  falsifier: |
+    Lint a task whose `files:` names test/old-a.test.ts and test/new.test.ts, whose proof names test/new.test.ts, against
+    a diff deleting old-a. At origin/main it is refused; with the change it passes. A diff deleting test/new.test.ts is
+    still refused.

@@ -196,7 +196,7 @@ async function driveRealApprove(ids: string[], resumeRunId?: string): Promise<{ 
   ids.forEach((id, i) => {
     drafts[id] = {
       proposalId: id,
-      fragmentYaml: `- id: NEW-1\n  title: ${["a quiet zebra crossing", "an amber lantern shelf"][i]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example-${i}.ts]\n`,
+      fragmentYaml: `- id: NEW-1\n  title: ${["a quiet zebra crossing", "an amber lantern shelf"][i]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/${["ledger", "relint"][i]}.ts]\n`,
       stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
       anchorFingerprint: "",
     };
@@ -236,7 +236,9 @@ test("W1-T5356: a prune from another process during an approve resume's add skip
   const runId = "APPROVE-P-T5356-RESUME-1790000000000";
   const { mid } = await driveRealApprove(["P-T5356-RESUME"], runId);
   assertSkippedMidAdd(mid);
-  assert.ok(mid.registered[0]!.endsWith(`/${approveRunBranch(runId)}`), "the add the prune met completes the prior run's own branch");
+  // W1-T9161: the resume cuts its OWN tree from the prior run's pushed branch, never that branch's own path.
+  assert.match(mid.registered[0]!, /\/run-APPROVE-P-T5356-RESUME-\d+-[0-9a-f]{12}$/, "the add the prune met is the resume lane's own");
+  assert.ok(!mid.registered[0]!.endsWith(`/${approveRunBranch(runId)}`), "and not the prior run's path");
 });
 
 test("W1-T5356: a prune from another process during an approve-batch gateway's add skips the path", async () => {

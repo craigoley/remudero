@@ -46,7 +46,20 @@ function measure(
     if (overrides.DAEMON_CONFIG === "junk") writeFileSync(config, '{"data-root": "relative"}');
     const stub = (name: string, body: string) =>
       writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
-    stub("git", 'case "$*" in *push*) [ "\${GIT_PUSH_FAIL:-}" = 1 ] && exit 1 ;; esac; printf "fixture-sha\\n"');
+    stub("git", `
+case "$*" in
+  *hash-object*) cat > "$FIXTURE/payload" ;;
+  *mktree*) cat >/dev/null ;;
+  *push*)
+    n=$(cat "$FIXTURE/push-count" 2>/dev/null || printf 0); n=$((n + 1))
+    printf '%s' "$n" > "$FIXTURE/push-count"
+    printf 'push:%s\\n' "$n" >> "$FIXTURE/events"
+    [ "\${GIT_PUSH_FAIL:-}" = 1 ] && exit 1
+    [ "\${GIT_SECOND_PUSH_FAIL:-}" = 1 ] && [ "$n" = 2 ] && exit 1
+    cp "$FIXTURE/payload" "$FIXTURE/published.$n"
+    cp "$FIXTURE/payload" "$FIXTURE/published" ;;
+esac
+printf 'fixture-sha\\n'`);
     // A whole filesystem's root reports FSROOT "/"; a bind of a subdirectory reports that subdirectory.
     stub("findmnt", `
 [ "\${FINDMNT_ABSENT:-}" = 1 ] && exit 127
@@ -73,6 +86,7 @@ case "$*" in
 esac`);
     stub("du", `
 p="\${@: -1}"
+[ "\${PUBLISH:-}" = 1 ] && printf 'du:%s\\n' "$p" >> "$FIXTURE/events"
 [ "$p" = "\${SLOW_DU:-}" ] && sleep "\${SLOW_DU_S:-10}"
 case "$p" in
   /var/lib/docker) exit 1 ;;
@@ -123,7 +137,8 @@ printf '%s\\t%s\\n' "$n" "$p"`);
     assert.equal(result.status, opts.status ?? 0, `${result.error ?? ""}\n${result.stderr}`);
     opts.inspect?.(dir);
     if ((opts.status ?? 0) !== 0) return {};
-    const beat = Object.fromEntries(result.stdout.split("\n").filter((line) => line.includes("="))
+    const payload = overrides.PUBLISH === "1" ? readFileSync(join(dir, "published"), "utf8") : result.stdout;
+    const beat = Object.fromEntries(payload.split("\n").filter((line) => line.includes("="))
       .map((line) => { const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)]; }));
     assert.equal(beat.install_dir, dir, "dependency probes must stay in the isolated install");
     assert.equal(beat.tsx_present, "no", "a host-installed tsx cannot contaminate this fixture");
@@ -258,12 +273,16 @@ function walked(beatOverrides: Record<string, string>, state?: string): { beat: 
   return { beat, walks };
 }
 
+// The beat ages `walk_epoch` against its own `CONSUMER_NOW_S="$(date +%s)"`, a child's real clock
+// scripts/clock-shift.mjs cannot move, so the fixture epoch is read from that same `date`.
+const beatNowS = (): number => Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim());
+
 test("a measuring beat skips the du walk while the consumers' disks have not moved since the last walk", () => {
   const first = walked({});
   assert.equal(first.beat.consumer_walk_state, "walked", "no prior state always walks");
   const used = Number(first.beat.consumer_walk_signature);
   assert.ok(used > 0, "the signature is a statfs sum, read without a walk");
-  const now = Math.floor(Date.now() / 1000);
+  const now = beatNowS();
   const quiet = walked({}, `walk_used_kb=${used}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=0\n`);
   assert.equal(quiet.beat.consumer_walk_state, "unchanged");
   assert.equal(quiet.walks, 0, "an unmoved disk must not be walked");
@@ -273,7 +292,7 @@ test("a measuring beat skips the du walk while the consumers' disks have not mov
 
 test("a measuring beat walks when the consumers' disks moved by more than their noise, or the backstop expired", () => {
   const used = Number(walked({}).beat.consumer_walk_signature);
-  const now = Math.floor(Date.now() / 1000);
+  const now = beatNowS();
   const moved = walked({}, `walk_used_kb=${used - 500000}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=1000\n`);
   assert.equal(moved.beat.consumer_walk_state, "walked");
   assert.ok(moved.walks > 0);
@@ -321,4 +340,36 @@ test("a walk that finishes inside its budget is unchanged, and a malformed budge
     assert.equal(beat.consumer_walk_state, "walked", `budget ${JSON.stringify(budget)}`);
     assert.equal(beat.consumer_npm_cache_kb, "10", `budget ${JSON.stringify(budget)} must not spend the walk at once`);
   }
+});
+
+
+test("liveness is published before a consumer walk and the completed sizes supplement the same beat", () => {
+  measure({ PUBLISH: "1" }, { inspect: (dir) => {
+    const events = readFileSync(join(dir, "events"), "utf8").trim().split("\n");
+    assert.equal(events[0], "push:1", "the first consumer cannot delay the first confirmed publication");
+    assert.ok(events.some(line => line.startsWith("du:")), "positive control: the real script ran its consumer walks");
+    assert.equal(events.at(-1), "push:2", "the completed walk is published after its sizes are known");
+    const early = readFileSync(join(dir, "published.1"), "utf8");
+    const final = readFileSync(join(dir, "published.2"), "utf8");
+    assert.match(early, /^daemon_verdict=/m);
+    assert.match(early, /^consumer_walk_state=pending$/m);
+    assert.doesNotMatch(early, /^consumer_.*_kb=/m, "unmeasured sizes are absent");
+    assert.match(final, /^consumer_worktrees_kb=42000$/m);
+    assert.match(final, /^consumer_walk_state=walked$/m);
+    assert.equal(/^beat_ts=(.*)$/m.exec(early)?.[1], /^beat_ts=(.*)$/m.exec(final)?.[1]);
+    assert.equal(readFileSync(join(dir, "state-root/state/heartbeat-last.txt"), "utf8").trim(),
+      /^beat_ts=(.*)$/m.exec(early)?.[1], "the confirmed liveness push advances the previous-beat receipt");
+  } });
+});
+
+test("a failed consumer supplement preserves the published liveness and a failed first push never walks", () => {
+  const beat = measure({ PUBLISH: "1", GIT_SECOND_PUSH_FAIL: "1" }, { inspect: (dir) => {
+    assert.equal(readFileSync(join(dir, "push-count"), "utf8"), "2");
+    assert.match(readFileSync(join(dir, "published.1"), "utf8"), /^daemon_verdict=/m);
+  } });
+  assert.equal(beat.consumer_walk_state, "pending");
+  assert.equal(beat.consumer_worktrees_kb, undefined, "a failed supplement cannot claim published sizes");
+  measure({ PUBLISH: "1", GIT_PUSH_FAIL: "1" }, { status: 1, inspect: (dir) => {
+    assert.deepEqual(readFileSync(join(dir, "events"), "utf8").trim().split("\n"), ["push:1"]);
+  } });
 });

@@ -1,0 +1,122 @@
+
+- id: W1-T9225
+  title: "TICK-1 DISPATCH DOES NOT WAIT FOR THE BOOT REVIEW PASS — W1-T9072 removed `await bootGateOpened` but kept `await bootReviewPass` ahead of dispatch, so the first boot on that code (2026-10-13 15:12Z, pid 1113890) reached its first selection 8.3 min after boot, behind 5 reviews, against a pre-W1-T9072 median of 4.9 min to first run.start"
+  repo: remudero
+  depends_on: []  # operator direction 2026-10-13 (fix at the root, session-build urgent fixes): W1-T9072 is merged (933ca7bbc, #11351). This edits only tick 1's boot-review await in runDaemon. In-flight W1-T8514 (run-W1-T8514-* heads, pack reservation) touches daemon.ts but none of `bootReviewPass`/`bootGate*`/`boot_first_dispatch` (0 hits in each head's daemon.ts diff); W1-T9069 has no branch
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — tick 1's dispatch stops awaiting the boot review pass; the review pass still starts first and still precedes the gated cadences
+  band_meaning: span
+  origin: "operator session 2026-10-13: the first boot on W1-T9072's code wrote `daemon.boot_first_dispatch` with `first_selection_ms: 500364` and `gate_open_ms: null`; a gap in W1-T9072, which the session built"
+  plan_refs: [W1-T9072, W1-T5720, W1-T4998, W1-T4732, W1-T8235, W1-T8197, W1-T5724, W1-T8514, W1-T9069]
+  files:
+    - src/lib/daemon.ts
+    - test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
+    # W1-T5720's test asserts the boot's review ADMISSION precedes dispatch and each cadence; admission still precedes, but its fixture may need the review pass held open
+    - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 3334099e9 (src/lib/daemon.ts, src/run-task.ts), against the core ledger on host remudero
+    (~/rmd-state2/state/ledger.ndjson, read 2026-10-13 ~15:29Z, niced). Symbols, not lines.
+    WHAT THE CODE DOES. In runDaemon's main loop, tick 1 starts `bootReviewPass` (an IIFE over
+    `deps.sweepLight?.({ reviewOnly: true })`) and later, in the block guarded by `bootGateTrigger === undefined &&
+    !bootCadencesDeferred`, runs `await bootReviewPass;` before it writes the deferral rows and before it reaches
+    dispatch. W1-T9072 (933ca7bbc) deleted the `await bootGateOpened` that followed it and kept this one. The await
+    dates from W1-T5720 (efb58eb60, an inline `await deps.sweepLight?.({ reviewOnly: true })`), and #9616 (c3e47692e)
+    hoisted it into `bootReviewPass` with the comment "Start, don't await: a slow review must not serialize the
+    background full sweep behind it". It still awaited it before the cadences. While `await bootGateOpened` followed,
+    the review wait hid inside the longer gate wait. With the gate wait gone, the review wait is the whole wait.
+    WHY W1-T5720 ORDERED IT. W1-T5720's rationale: the loop ticks a median 2 times per lifetime, so every iteration-top
+    cadence, intake, auto-triage, retro trigger and garden fan-out piled onto tick 1 ahead of the first full pass, and
+    the first `review.posted` came 15.1 min (p90 39.7) after `daemon.boot`. Its design orders REVIEWS BEFORE THE
+    CADENCES. It never names dispatch, and neither does `BOOT_GATED_CADENCES`.
+    MEASURED, one boot: the first on W1-T9072's code. `daemon.boot` 15:12:29.8Z, pid 1113890, head 9c499e429 (933ca7bbc
+    is its ancestor). It was the only `daemon.boot` row from 13:00Z to 15:29Z. Controls: the live file spans
+    2026-09-28T19:33Z to 15:28:59Z (13,415 lines), and the pid's `daemon.boot`, `daemon.boot_first_dispatch` and
+    `daemon.tick_phases` rows are all in it.
+      - 15:12:46.3Z: tick 1 starts (`boot_at`). The pid writes no row until one `daemon.headroom` at 15:16.
+      - 15:17:28 to 15:17:52Z: 5 `sweep.review_eligible` (PRs 11382, 11381, 11383, 11374, 11338).
+      - 15:18:01 to 15:18:03Z: 5 `sweep.review_admitted`.
+      - `review.posted` at 15:19:21 (11382), 15:19:47 (11381) and 15:20:49 (11383). `sweep.post_review.done` came at
+        15:21:0x.
+      - 15:21:06.8Z: the first `dispatch.lifetime_pressure` row, which is the first selection. `daemon.tick_phases`
+        reads `ms_to_admission: 513247`, `ms_in_cadences: 0`, `sweep_in_flight: true`.
+      - 15:21:21.3Z: `daemon.boot_first_dispatch` reads `first_selection_ms: 500364`, `first_run_start_ms: 514975`,
+        `gate_open_ms: null`, `admitted_count: 1`. Then `run.start` for W1-T9001, W1-T9070 and W1-T9102 at 15:22:02-03Z.
+      - 15:22:46Z: `daemon.boot_gate.opened` with trigger `backstop` and `waited_ms: 600000`.
+      Selection came 500 s after tick 1 began, with 0 ms in cadences and the gate still closed. Only the boot review
+      pass filled that interval. About 4.7 min of it went to the light pass before its first eligibility row (it
+      wrote no rows then), and 3.1 min to the reviews. Compare W1-T9072's baseline: boot to first `run.start` was a
+      median 4.9 min over 57 boots.
+      Correction to the session's note: none of the 5 boot reviews wrote a `sweep.review_started` row in the boot
+      window. The 5 rows are `sweep.review_eligible` and `sweep.review_admitted`. The first `sweep.review_started`
+      rows came at 15:25:27Z and 15:25:49Z, from later passes.
+    DISPATCH READS NOTHING THE REVIEW PASS PRODUCES. The light pass from `buildSweepLightHook` in src/run-task.ts
+    returns `Promise<void>`. With `reviewOnly` set, `readyPrs` and `requeueOnlyPrs` are empty, and `lightPassActionable`
+    closes everything except post-review. Its effects are GitHub statuses, auto-merge arms and ledger rows. Dispatch's
+    inputs are the ones W1-T9072's comment lists: the tick's own `refreshMerged` projection, the per-tick run-branch read,
+    and the claim inside `runOne`. Two inputs come from the first FULL pass and fail safe without it:
+    `planOnlyRunBranchReceipts` and `reviewerCodeStale`. No dispatch input reads the light pass. A review that merges a
+    PR changes `isMerged` only through the next `refreshMerged`, as on any tick.
+    NO NEW RESOURCE CONFLICT. Reviews already run beside live lanes on every later tick. W1-T4732's review clock runs
+    light passes while lanes are in flight, and this boot's own `sweep.review_started` at 15:25:27Z reads
+    `active_workers: 3, host_worker_budget: 8, review_reservations: 1`. Reviews and builds share one worker budget, and
+    host memory admission and the governors judge every lane start against measured headroom. A boot that reviews and
+    builds at once is that same case.
+    WHY W1-T9072'S FALSIFIER MISSED IT. In test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts the fixture
+    wires `sweepLight: async () => {}`, so the boot review pass settles at once and the await costs nothing. Only the
+    first FULL pass never settles there.
+    OVERLAP. W1-T8197 (recon, status blocked) measures why dispatch waits for the first full pass. W1-T5724 (queued P3)
+    makes the boot load less before the first pass. Neither changes this await. Coverage sweep at 15:30Z, plan/ only.
+    origin/main hits `bootReviewPass` in 1 file (W1-T9072) and "boot review" in 2 (W1-T5720, W1-T8197). Across all 343
+    remote heads, 44 diff plan/ against main, and none adds a line matching
+    `bootReviewPass|boot review|boot_first_dispatch|boot_gate|bootGate|review pass.*dispatch`. Positive control: the
+    same pattern finds 19 added lines in W1-T9072's filing commit b6c4bf069.
+  design: |
+    Operator rulings: no hard threshold or cap, keep automated flow.
+    1. DISPATCH DOES NOT AWAIT THE BOOT REVIEW PASS. Tick 1 still STARTS `bootReviewPass` where it does today: before the
+       reconciler's scheduler turns, before any phase ticker can wake, and before dispatch. So its review admission still
+       comes first. Then tick 1 writes its deferral rows and goes on to dispatch without awaiting the pass. Keep the
+       promise beyond tick 1, so a later iteration can see whether it has settled.
+    2. THE REVIEW PASS STILL PRECEDES THE GATED CADENCES. The `BOOT_GATED_CADENCES` at the iteration top run only once
+       the gate is open (first full pass or backstop, as today) AND the boot review pass has settled. While either is
+       pending they stay deferred: the iteration skips them, never awaits them, and dispatch goes on. A cadence never
+       runs on an iteration where the boot review pass is still in flight. Each `daemon.boot_gate.deferred` row says
+       which of the two it waits for. The deferred gardens still start at `openBootGate`, as today.
+    3. ADMISSION, NOT ORDER, ARBITRATES RESOURCES. The boot review workers and tick 1's lanes go through the existing
+       admission: the worker budget, host memory admission, the governors and the WIP budget, as reviews and lanes do on
+       every later tick. If the build measures a real conflict (for example, memory headroom when 5 reviews and 3 builds
+       start in the same minute), it gates the start on the MEASURED headroom through that existing admission. It never
+       gates on review completion and adds no fixed cap or count.
+    4. KEEP `daemon.boot_first_dispatch` as it is: one row per boot with the same fields. `first_selection_ms` should now
+       follow tick 1 by the run-branch read and one selection pass, not by the review pass.
+    UNCHANGED: W1-T5720's light pass first with no initial sleep, and its review admission ahead of dispatch and every
+    cadence. The boot gate, its backstop constant and its rows. W1-T9072's tick-1 dispatch and duplicate-build guards.
+    #9616's rule that a slow boot review never serializes the background full sweep.
+    TESTS. Add them to test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts with `test(` titles exactly as in
+    the proofs below. Drive runDaemon with fake deps whose boot review pass (`sweepLight` with `reviewOnly`) never
+    settles. Use no live ledger, wall clock or network.
+  acceptance:
+    - claim: "the W1-T9072 test file passes with the new tests"
+      proof: "unit test: test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts"
+      kind: guard  # the file exists at base (W1-T9072's 5 tests); a path proof cannot discriminate, so the two grep proofs below do
+    - claim: "with a boot review pass that never settles, a runnable task gets run.start on tick 1, after the review pass started"
+      proof: 'grep: test("W1-T9225: a runnable task starts on tick 1 while the boot review pass has not settled" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+    - claim: "the gated cadences stay deferred while the boot review pass is in flight, even once the gate has opened"
+      proof: 'grep: test("W1-T9225: the gated cadences wait for the boot review pass as well as the gate" in test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts'
+  falsifier: |
+    Fake deps whose boot review pass never settles, a first full pass that settles at once and one runnable task. At
+    origin/main 3334099e9 no `run.start` comes and `daemon.boot_first_dispatch` is never written, because tick 1 stops at
+    `await bootReviewPass`. With the change the task starts on tick 1, and the "light-pass:review-only" event comes before
+    "dispatch". Restore `await bootReviewPass` ahead of dispatch and the first test reds. Run the gated cadences once the
+    gate opens without waiting for the review pass, and the second test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger union, with no numeric pass mark: compare
+    `daemon.boot_first_dispatch.first_selection_ms` per boot with this rationale's 500364 ms and W1-T9072's 4.9-min
+    median to first run.start. Also read `daemon.tick_phases.ms_to_admission` on tick 1. Healthy shape: first selection
+    within seconds of tick 1, boot reviews posted in the same minutes as before, and `sweep.review_started` rows on the
+    boot pass whose `active_workers` count the tick-1 lanes.

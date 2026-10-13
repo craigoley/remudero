@@ -94,12 +94,28 @@ test("randomized rows compare withheld runs against every other eligible run, an
 test("with a control cohort, a skill that fits the budget reaches a verdict at the horizon", () => {
   const rows = [];
   for (let i = 0; i < SKILL_EFFECTIVENESS_HORIZON; i++) {
-    rows.push(selectionRow(`t-${i}`, { selected: true, withheld: false }), verdict(`t-${i}`, i < 8 ? "merged" : "blocked_ci"));
-    rows.push(selectionRow(`c-${i}`, { selected: false, withheld: true }), verdict(`c-${i}`, i < 3 ? "merged" : "blocked_ci"));
+    rows.push(selectionRow(`t-${i}`, { selected: true, withheld: false }), verdict(`t-${i}`, i < 8 ? "merged" : "no_diff"));
+    rows.push(selectionRow(`c-${i}`, { selected: false, withheld: true }), verdict(`c-${i}`, i < 3 ? "merged" : "no_diff"));
   }
   const favorable = buildSkillEffectivenessReport(rows, "proc");
   assert.equal(favorable.status, "REVIEW-CANDIDATE");
   assert.equal(favorable.basis, "favorable-comparison");
+});
+
+test("randomized pending shipments stay in their assigned arms without claiming a benefit", () => {
+  const rows = [];
+  for (let i = 0; i < SKILL_EFFECTIVENESS_HORIZON; i++) {
+    rows.push(selectionRow(`t-pending-${i}`, { selected: true, withheld: false }), verdict(`t-pending-${i}`, i < 8 ? "merged" : "handed_off"));
+    rows.push(selectionRow(`c-pending-${i}`, { selected: false, withheld: true }), verdict(`c-pending-${i}`, i < 3 ? "merged" : "blocked_ci"));
+  }
+  const uncertain = buildSkillEffectivenessReport(rows, "proc");
+  assert.equal(uncertain.assignment, "randomized");
+  assert.equal(uncertain.selected.observed_eligible_runs, SKILL_EFFECTIVENESS_HORIZON);
+  assert.equal(uncertain.control.observed_eligible_runs, SKILL_EFFECTIVENESS_HORIZON);
+  assert.equal(uncertain.selected.pending_merge_runs, 2);
+  assert.equal(uncertain.control.pending_merge_runs, 7);
+  assert.equal(uncertain.status, "INSUFFICIENT EVIDENCE");
+  assert.equal(uncertain.basis, "pending-shipment");
 });
 
 test("legacy rows alone keep the observational comparison", () => {

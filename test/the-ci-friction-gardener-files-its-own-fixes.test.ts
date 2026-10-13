@@ -310,6 +310,9 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
     }),
     log: () => {},
     seed: 1,
+    // The pass runs at its own last round, as above. Unpinned, the trend row is stamped by the
+    // wall clock and the `| 2026-` count below reads 0 from 2027-01-01T00:00Z on.
+    clock: clockFromMillisFn(() => Date.parse("2026-09-24T04:25:00.000Z")),
   };
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => [
@@ -647,7 +650,7 @@ test("a ci-log round is priced against each red check and the failing test file 
     "7816:ci-log:coverage-shard": 5,
     "7816:ci-log:commitlint": 5,
     "7817:ci-log:coverage-ratchet": 2,
-    "7818:ci-log:coverage-shard:test-house-layout-test-ts:flaky": 1,
+    "7818:test:test/house-layout.test.ts:flaky": 1,
   });
   assert.equal(ciFailureSignature("2026-09-29T13:05:00.1Z Error: census abc1234def refused 12 rows"), "Error: census  refused N rows");
   assert.equal(ciFailureSignature("all green"), undefined);

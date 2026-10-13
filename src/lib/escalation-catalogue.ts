@@ -3,6 +3,7 @@ import type { CrashLoopVerdict, StarvationCensus, StarvationClearedInfo } from "
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
+import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
 import type { PostReviewStallVerdict } from "./sweep.js";
@@ -877,5 +878,69 @@ export function escalateStarvationCleared(
     issue_url: issueUrl,
     delivered,
     ...(failure ? { failure } : {}),
+  });
+}
+
+/** The step `inbox-replay.ts` exports as `REPLAY_ESCALATED_STEP`, spelled here so this module does not load the inbox. */
+const REPLAY_ESCALATED_STEP = "inbox.replay_escalated";
+
+/**
+ * W1-T9041 — a band-replay proposal no re-draft could clear. The replay (inbox-replay.ts) re-drafts a not-ready
+ * proposal once per change in its lint or guidance; a re-draft under today's lint and guidance that still fails is
+ * one nothing automatic will move, so it is named here with its violations grouped by check.
+ *
+ * DEDUP mirrors `escalateCircuitBreak`: this module's own `inbox.replay_escalated` row, keyed by proposal and
+ * violation set, is written whether or not delivery succeeds, so a failing transport never re-delivers. The replay's
+ * store records the set before calling, so a rotated-away row cannot re-arm it either.
+ */
+export function escalateReplayStranded(
+  stranded: ReplayStranded,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === REPLAY_ESCALATED_STEP && l.proposal_id === stranded.proposalId && l.violation_key === stranded.violationKey,
+  );
+  if (already) return;
+  const checks = Object.entries(stranded.violations).map(([check, messages]) => `[${check}] ${messages.join("; ")}`);
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: stranded.proposalId,
+      runId: ctx.runId,
+      summary: `${stranded.proposalId}: the band replay's re-draft still fails ${stranded.violationKey}`,
+      detail:
+        `W1-T9041: the W1-T8714 band replay re-drafted ${stranded.proposalId} (${stranded.family}) under today's draft ` +
+        `lint and guidance, and the draft still fails ${stranded.sameAsOffered ? "the same checks it was re-offered on" : "the lint"}. ` +
+        `The replay re-drafts again only when the lint or its guidance changes, so until then this proposal ` +
+        `stays unfiled. Unresolved, by check: ${checks.join(" | ")}`,
+      options: [
+        {
+          label: "reframe it",
+          detail: `Give the drafter what it is missing with \`rmd reframe ${stranded.proposalId} --feedback "<text>"\`, which re-drafts it with your feedback.`,
+        },
+        {
+          label: "decline it",
+          detail: `If the finding is not worth a task, \`rmd decline ${stranded.proposalId} --reason "<text>"\` closes it and the replay records it superseded.`,
+        },
+      ],
+      recommendation: "reframe it",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: stranded.proposalId,
+    step: REPLAY_ESCALATED_STEP,
+    proposal_id: stranded.proposalId,
+    family: stranded.family,
+    violations: stranded.violations,
+    violation_key: stranded.violationKey,
+    same_as_offered: stranded.sameAsOffered,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
   });
 }

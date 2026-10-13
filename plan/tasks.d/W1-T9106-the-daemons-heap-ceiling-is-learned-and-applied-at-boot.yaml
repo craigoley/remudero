@@ -1,0 +1,43 @@
+- id: W1-T9106
+  title: "THE DAEMON'S HEAP CEILING IS LEARNED AND APPLIED AT BOOT ONCE A RESTART COSTS ONLY A BOOT — the daemon still starts with --max-old-space-size=8192 against a live set near 0.9 GiB, so V8 keeps garbage resident up to RSS p90 2.5 GiB; W1-T8883 learns a ceiling but only reports it"
+  repo: remudero
+  depends_on: [W1-T8883, W1-T9086]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — applying the learned daemon heap ceiling
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T8401, W1-T8883, W1-T9086]
+  files: [bin/rmd, src/lib/daemon-memory-policy.ts, test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    ADR 0007 decision C, offset 2 (lever A follow-on; #10695 set heap-growing-percent 50 and stripped the ceiling from
+    children). Operator ruling 2026-10-10: never raise core's memory.max; reduce usage.
+    MEASURED: daemon.memory_policy rows on 2026-10-13 show heap_size_limit 8,791,261,184 and node_options_before
+    `--max-old-space-size=8192` at every boot; daemon.alive (core, 1,955 rows) heap used p50 910 MiB, RSS p50 1,933,
+    p90 2,539.
+    WHY ONLY NOW: a tighter ceiling risks a heap-limit exit. With build runs as adopted children (the adoption task), such
+    an exit costs one boot and no run, so a learned ceiling is safe to apply and can correct itself.
+  design: |
+    1. W1-T8883's learned proposal is written to `<state>/daemon-heap-ceiling.json` with its basis (window, samples,
+       live peak and spread) by the daemon.
+    2. bin/rmd, for the daemon verb only, replaces the inherited `--max-old-space-size` in NODE_OPTIONS with the learned
+       ceiling when the file is current for this instance. Absent or unreadable keeps the inherited value, and
+       daemon.memory_policy names `ceiling_source`.
+    3. A `daemon.heap_pressure_exit` with basis v8_limit, or a heap out-of-memory exit, raises the next ceiling from its
+       evidence (the live set at exit plus its observed spread). The ceiling is never lowered inside the learning
+       window and never exceeds the memory.high share the daemon governor uses (`restartShare`).
+    4. Applied only while run children are on with adoption live; otherwise it stays report-only, as W1-T8883.
+  acceptance:
+    - claim: "the launcher applies a current learned ceiling to the daemon verb only"
+      proof: 'grep: test("W1-T9106: the launcher applies the learned ceiling to the daemon verb only" in test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts'
+    - claim: "a heap-limit exit raises the next ceiling, and an absent file keeps the inherited value"
+      proof: 'grep: test("W1-T9106: a heap-limit exit raises the next ceiling" in test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts'
+    - claim: "the ceiling is not applied while runs execute in-process"
+      proof: 'grep: test("W1-T9106: the ceiling is not applied while runs are in-process" in test/the-daemons-heap-ceiling-is-learned-and-applied-at-boot.test.ts'
+  falsifier: |
+    Apply the ceiling with runs in-process: the third test sees it applied with mode shadow.

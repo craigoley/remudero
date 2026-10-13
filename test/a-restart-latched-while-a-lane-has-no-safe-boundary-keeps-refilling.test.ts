@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
-import { runDaemon, type DaemonDeps, type DaemonFreshness } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonFreshness, type RestartBoundary } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { daemonCommand, runTask, type RunResult } from "../src/run-task.js";
@@ -16,7 +16,7 @@ import { ghShim } from "./helpers/gh-shim.js";
 const minute = 60_000;
 const stale = { stale: true as const, oldSha: "a".repeat(40), newSha: "b".repeat(40),
   changes: [{ sha: "b".repeat(40), subject: "fix: refresh", files: ["src/lib/daemon.ts", "package.json"] }] };
-type BoundaryOptions = { restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined };
+type BoundaryOptions = { restartAtWorkerBoundary: RestartBoundary };
 const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: true, verdict: "merged", costUsd: 0 });
 
 function deferred<T>() {
@@ -60,10 +60,10 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
   } as DaemonDeps, { laneCount: 3, max: 12 });
   return {
     run, started, rows, boundaries,
-    boundary: (id: string) => {
+    boundary: (id: string, waitingOn?: string) => {
       const options = boundaries.get(id);
       assert.ok(options, "the daemon supplies its live restart to every run");
-      return options.restartAtWorkerBoundary();
+      return options.restartAtWorkerBoundary(waitingOn ? { waitingOn, runId: `${id}-fixture` } : undefined);
     },
     settle: async (id: string, age: number) => {
       nowMs = start + age * minute;
@@ -122,6 +122,41 @@ test("W1-T7806: refill stays open under a latch with no run history", async () =
     await h.settle("B", 6);
     await h.settle("C", 8);
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E"]);
+  } finally { await h.cleanup(); }
+});
+
+test("W1-T8927: measured holdouts wait for current lanes without renewing the drain through refill", async () => {
+  const now = Date.now();
+  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({
+    ts: new Date(now - age * minute).toISOString(), ...fields,
+  });
+  const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
+    staleSinceMs: now - 120 * minute };
+  let materialVisible = false;
+  const h = phase(true, {
+    checkFreshness: () => materialVisible ? material : { stale: false },
+    readRestartHistory: () => [
+      row(200, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
+      row(138, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
+      row(100, { step: "run.phase", waiting_on: "preopen_gate", run_id: "completed" }),
+      row(95, { step: "pr.opened", run_id: "completed" }),
+    ],
+  }, 3);
+  try {
+    await flush();
+    materialVisible = true;
+    await latch(h);
+    assert.equal(h.boundary("A", "preopen_gate"), undefined);
+    await h.settle("B", 6);
+    await h.settle("C", 7);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    await h.tick(8);
+    const waiting = h.rows.findLast(({ step }) => step === "daemon.freshness_restart_waiting")?.extra;
+    assert.deepEqual(waiting?.lanes, [{ task: "A", age_ms: 5 * minute, holdout: true, admitted_under_latch: false }]);
+    await h.tick(10);
+    assert.equal(h.boundary("A", "preopen_gate"), material);
+    await h.settle("A", 10);
+    assert.equal((await h.run).stopReason, "stale");
   } finally { await h.cleanup(); }
 });
 

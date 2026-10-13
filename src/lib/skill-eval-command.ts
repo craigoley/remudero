@@ -37,7 +37,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, sealedPairedAttemptDispatcher, type Pair
 import { loadPlan, type Task } from "./plan.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { replayOptIn } from "./replay-harness.js";
-import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput } from "./skill-eval.js";
+import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput,
+  type SkillEvalVerdictReason } from "./skill-eval.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillFileStagedAtMs, type InjectableSkill } from "./skill-workshop.js";
 import { withTempDir } from "./tmp.js";
 
@@ -45,6 +46,9 @@ export const SKILL_EVAL_USAGE = "usage: rmd skill-eval <proposal-id> --confirm-s
 
 /** Logged instead of a proposal write when the staged text changed while its eval ran. */
 export const SKILL_EVAL_STALE_STEP = "skill_eval.stale";
+
+/** The one verdict reason that judged nothing: too few tasks were measurable, so the same text may be run again. */
+export const SKILL_EVAL_UNMEASURED_REASON: SkillEvalVerdictReason = "too-few-measurable-tasks";
 
 /** The steps the corpus reads: `review.posted` carries the scorer, `verdict.merged`/`verdict` the merge credit. */
 const CORPUS_STEPS = ["review.posted", "verdict.merged", "verdict"] as const;
@@ -132,6 +136,13 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
   if (stagedAtMs === null) {
     return refuse(2, "not-stamped", `${proposalId}'s skill file carries no parseable skillFileStagedAt `
       + `(${JSON.stringify(proposal.skillFileStagedAt ?? null)}); let the skill workshop's next pass stamp it`);
+  }
+  // A text is judged once. The eligible set grows as work merges, so a second draw of the same text could only
+  // launder the first verdict; the workshop's next rewrite is a new text and earns a new eval.
+  const prior = proposal.skillEval;
+  if (prior !== undefined && prior.draftSha256 === sha256(skillFile.markdown) && prior.reason !== SKILL_EVAL_UNMEASURED_REASON) {
+    return refuse(2, "already-judged", `${proposalId}'s current text was already judged ${prior.verdict} (${prior.reason}) at `
+      + `${prior.evaluatedAt}; a second draw could only launder that verdict, so evaluate the workshop's next rewrite instead`);
   }
 
   // The draft as production would load it once approved: the same loader, over a temp tree. Never .claude/skills/,

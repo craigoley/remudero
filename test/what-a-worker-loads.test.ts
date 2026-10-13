@@ -108,6 +108,7 @@ test("W1-T2759: the implement prompt over a fixture task carries no line from CL
     "matched_learnings",
     "skills",
     "capability_context",
+    "admitted_outside_files",
     "task_body",
   ]);
   const rendered = parts.map((p) => p.value).join("\n");

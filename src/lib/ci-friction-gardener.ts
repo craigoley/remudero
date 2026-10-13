@@ -471,11 +471,25 @@ function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, 
     ? own.map((f) => ({ check: f.check as string, signature: typeof f.signature === "string" ? f.signature : undefined }))
     : (typeof r.head_sha === "string" ? redByHead.get(r.head_sha) ?? [] : []).map((check) => ({ check, signature: undefined as string | undefined }));
   if (failures.length === 0) return [{ kind: "check", name: "ci-log" }];
-  return failures.map(({ check, signature }) => ({
-    kind: "check",
-    name: `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
-  }));
+  // W1-T9056: an aggregator is red only because a producer was, so once a producer names its failure the
+  // aggregator is dropped from the round's split rather than taking a share of it.
+  const producerNamed = failures.some((f) => f.signature && !CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(f.check)));
+  const names = new Set<string>();
+  for (const { check, signature } of failures) {
+    if (producerNamed && CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(check))) continue;
+    const flakySuffix = signature && flaky.has(signature) ? ":flaky" : "";
+    // A failing test file is one cause whichever check it ran in; any other signature stays per-check.
+    names.add(signature && CI_TEST_FILE_SIGNATURE.test(signature)
+      ? `test:${signature}${flakySuffix}`
+      : `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${flakySuffix}`);
+  }
+  return [...names].map((name) => ({ kind: "check" as const, name }));
 }
+
+/** W1-T9056: checks red only because a producer check was — never a cause of their own when one names it. */
+const CI_AGGREGATOR_FAMILIES: ReadonlySet<string> = new Set(["coverage-ratchet", "ci-required", "ci-gate"]);
+/** A signature that is exactly a failing test file's path (what {@link testRunnerFailureSignature} returns for one). */
+const CI_TEST_FILE_SIGNATURE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
 /** `head_sha -> the red checks the sweep saw on it`, from `sweep.disposed` (its `red_checks`, or
  *  the check its reason names, "<check> failed on <sha>"). */

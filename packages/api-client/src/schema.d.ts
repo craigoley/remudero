@@ -4262,10 +4262,22 @@ export interface components {
         status: RouteReadStream;
       };
     };
-    /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
+    /** An existing inbox write route, attached at serve time when valid for the item's lane. */
+    PlainOptionAction: {
+      method: "POST";
+      path: string;
+      /** Fixed string fields to include in the request body. */
+      fields: Record<string, string>;
+      /** The free-text field the console must collect before posting. */
+      input?: "reason" | "feedback" | "text";
+    };
+    /** One served inbox choice (src/lib/inbox-plain.ts's `ServedPlainOption`). */
     PlainOption: {
       label: string;
       consequence: string;
+      /** Untagged stored options are served as reply suggestions without an action. */
+      intent: "approve" | "decline" | "reframe" | "reply" | "keep";
+      action?: PlainOptionAction;
     };
     /** W1-T4087: an inbox item's plain-language message (src/lib/inbox-plain.ts's `PlainInboxMessage`) -- the model writer's text when it passed the plain-message check, otherwise the item kind's template. The raw proposal summary is never promoted to it. */
     PlainInboxMessage: {
@@ -4280,6 +4292,8 @@ export interface components {
       options: (PlainOption)[];
       /** Who wrote it -- the model writer or the per-kind template. */
       source: "writer" | "template";
+      /** Optional cache provenance, not verification of the writer's factual claims. */
+      sourceFingerprint?: string;
     };
     /** One task a READY proposal's drafted fragment would file (src/lib/panel-graph.ts's `InboxDraftedTask`). */
     InboxDraftedTask: {

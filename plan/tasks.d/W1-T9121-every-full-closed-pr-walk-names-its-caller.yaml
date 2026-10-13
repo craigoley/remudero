@@ -1,0 +1,82 @@
+- id: W1-T9121
+  title: "EVERY FULL-MODE CLOSED-PR WALK NAMES ITS CALLER IN THE LEDGER — at 11:58Z on 2026-10-13 a pulls?state=closed&sort=updated walk reached page=90 inside the core daemon's sweep phase (daemon.alive 11:59:01Z: phase sweep, 67 s of synchronous spawns), and nothing recorded which of about 20 board-gateway constructions ran it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the shared board walk ledgers a full walk with its caller; it spans the walk (open-prs-rest.ts), the gateway that runs it (status.ts), the named call sites (run-task.ts) and the new test
+  band_meaning: span
+  origin: "found 2026-10-13 by an operator session watching the core daemon container; operator standing direction: fix at the root, automated flow. W1-T9113's note names this as the cheapest next step"
+  plan_refs: [W1-T9113, W1-T9100, W1-T2323, W1-T2873, W1-T265, W1-T1207]
+  files:
+    - src/lib/open-prs-rest.ts
+    - src/lib/status.ts
+    - src/run-task.ts
+    - test/every-full-closed-pr-walk-names-its-caller.test.ts
+  status: queued
+  priority: 2  # instrumentation; the follow-up (seed or remove the walk it names) is the fix
+  attempts: 0
+  rationale: |
+    THE SIGHTING. 2026-10-13 11:58Z, core daemon container: `gh api repos/.../pulls?state=closed&sort=updated…&page=90`
+    during the first tick after the 11:53:18Z boot; `daemon.alive` at 11:59:01Z reads `phase: "sweep"` with 67 s of
+    synchronous spawns. W1-T9113 measured the cold closed walk at 91 pages today (page 90 returned 100 rows at 13:17Z
+    and Link named 91 as last), so this was a full walk near its end, about 150 MB.
+    WHO IT IS NOT (each from the record that ruled it out):
+      - the retro trigger: deferred on every tick 10-10..13 (W1-T9113; and the retro-gate task filed beside this one);
+      - the daemon's own board gateway: 34 of 35 closed-half `board_gateway.fetch_bytes` rows on 10-13 are `delta`
+        with one call, and the one `full` is serve's (W1-T9113);
+      - ci-friction's hand-fix read: 29 pages, in a garden child (W1-T9100);
+      - `readRunBranchClosedPrsOutput` (8 pages) and status.ts `listPullsByState("closed", 1000)` (10 pages): both
+        stop far short of page 90.
+    READ on origin/main 97611ebf4 (symbols, not lines):
+      - THE SHARED HELPER. `boardPrsWalk` (src/lib/open-prs-rest.ts), behind `fetchBoardPrsRest` and
+        `fetchBoardPrsRestAsync`, is the only closed-PR walk in src/ that pages to the end of the closed set: its mode
+        is `full` whenever `known` is empty, at `BOARD_FULL_PAGE_SIZE` 100, until a short page (or `BOARD_MAX_PAGES`).
+        It returns `{calls, mode, truncated, half}` but writes nothing, so a full walk is invisible unless its caller
+        happens to log `board_gateway.fetch_bytes`.
+      - ITS CALLERS. status.ts's `buildBatchedGithub` (the merged-half prewarm and the per-half refresh) and the
+        retro's `retroShippedGithubGatewayAsync` (src/run-task.ts). `buildBatchedGithub` is constructed in 14 places in
+        src/run-task.ts and in now-view.ts, reader-agreement.ts, repository-flow.ts and serve.ts. A construction with
+        no `snapshotCache` starts cold, so its first closed read is a full walk.
+      - CANDIDATES FOR 11:58Z (constructions reachable from the daemon's sweep or a child it spawns, no
+        `snapshotCache`): `creditProjectionWithReadState`, `defaultBoardReviewItems`, `defaultWipeTestMergedState`,
+        `buildSweepHook`, `buildCreditCandidates`, `buildEscalationReconcileCandidates`, `inboxCommand`, and any `rmd`
+        child the sweep spawns in that container.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 344 open origin heads for boardPrsWalk, "full walk",
+    page=90 and closed_pr. Control: main reads 4 shards for "full walk". One head reads more: plan-file-1791897336437
+    (#11353, W1-T9113, since merged), which proposes this row in its note and does not file it.
+  design: |
+    No cap, no sampling and no new bound: a row per full walk, nothing else changes.
+    1. THE WALK REPORTS ITSELF. `fetchBoardPrsRest` and `fetchBoardPrsRestAsync` time the walk and, when the result's
+       `mode` is `full` and it walked the closed half, append `github.closed_pr_full_walk` {caller, half, pages (the
+       closed half's page count), rows, duration_ms, truncated}. The ledger adds actor, pid and run id as for every
+       row, which is what attributes a walk made by a spawned `rmd` child. The sink is injectable and defaults to the
+       ledger append the rest of status.ts uses; a failed append never fails the walk.
+    2. THE CALLER IS NAMED, OR DERIVED. Both functions and `buildBatchedGithub` take an optional `caller` string, passed
+       through to the walk. Each construction named in the rationale passes its own function name. A walk with no
+       `caller` derives one from the stack: the first frame outside open-prs-rest.ts and status.ts, as `file:function`,
+       so an unnamed construction (or a new one) is still attributed, never `unknown`.
+    3. DELTA WALKS STAY SILENT. A `delta` walk writes nothing new; `board_gateway.fetch_bytes` already covers them.
+    Tests go in test/every-full-closed-pr-walk-names-its-caller.test.ts, with `test(` titles verbatim as in the proofs
+    below. Drive `fetchBoardPrsRest` with a fake fetcher that serves numbered pages and a recording sink.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-full-closed-pr-walk-names-its-caller.test.ts"
+    - claim: "a full closed walk writes one row with its caller, page count and duration"
+      proof: 'grep: test("W1-T9121: a full closed walk writes one row naming its caller" in test/every-full-closed-pr-walk-names-its-caller.test.ts'
+    - claim: "a walk with no caller option names the first frame outside the board modules"
+      proof: 'grep: test("W1-T9121: an unnamed walk derives its caller from the stack" in test/every-full-closed-pr-walk-names-its-caller.test.ts'
+    - claim: "a delta walk and an open-only walk write no row"
+      proof: 'grep: test("W1-T9121: a delta walk writes no full-walk row" in test/every-full-closed-pr-walk-names-its-caller.test.ts'
+    - claim: "the shared walk writes the named row"
+      proof: "grep: closed_pr_full_walk in src/lib/open-prs-rest.ts"
+  falsifier: |
+    Log only when a caller is passed and the stack test finds no row for an unnamed walk. Log on every walk and the
+    delta test finds a row. Count all pages rather than the closed half's and the first test's page count includes the
+    open half's page.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union: `github.closed_pr_full_walk` rows by
+    `caller` and actor. The follow-up is then obvious and is not this task: seed the named caller from the board
+    snapshot as W1-T9113 does for the retro, or answer it from the board's incremental closed index.

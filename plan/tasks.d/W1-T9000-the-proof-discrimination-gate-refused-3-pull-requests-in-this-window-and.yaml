@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,14 @@
     - claim: "the lane that trips the proof-discrimination gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:11139:proof-discrimination in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:11139:proof-discrimination. The proof-discrimination gate went red on #11139 and was repaired; the repair touched deploy/Dockerfile, docs/adr/0006-precompiled-daemon-child-entries.md, docs/adr/README.md, docs/docs-index.json, plan/tasks.d/W1-T8575-a-main-repair-pr-is-never-held-for-the-red-it-repairs.yaml, plan/tasks.d/W1-T8711-host-serve-scope.yaml, plan/tasks.d/W1-T8714-a-drafted-task-raised-to-risk-high-declares-its-band.yaml, plan/tasks.d/W1-T8715-a-blocked-runs-dependents-are-read-from-the-current-plan.yaml, plan/tasks.d/W1-T8722-a-lane-opened-pr-body-with-no-acceptance-block-is-a-named-defect.yaml, scripts/build-child-entries.mjs, src/lib/proof-grammar.ts, src/run-task.ts, test/a-daemon-child-entry-is-precompiled.test.ts, test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts, plan/feedback/evidence-coverage-feedback-summary-cost.yaml, plan/tasks.d/W1-T6117-triage-post-pr-handoff-crash-safe.yaml, plan/tasks.d/W1-T8198-a-daemon-run-yields-on-the-daemons-restart-latch.yaml, plan/tasks.d/W1-T8684-cached-repository-flow-and-pr-repair-evidence.yaml, plan/tasks.d/W1-T8707-repository-quality-backlog-and-efficiency-evidence.yaml, src/lib/gardener-spend.ts, src/lib/proof-amendment.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/a-scope-amendment-lints-before-it-pushes.test.ts, test/browser-test-corpus.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml, which holds learnings entries (documentation-like data). The description and files list show no touch of secrets, credentials, auth, permissions, deletion, merge/deploy/infrastructure policy, or irreversible actions."
+      - "The acceptance criterion is a grep check for a specific learnings entry (ci-learning:11139:proof-discrimination), so the result can be verified mechanically from what is shown."
+      - "The ci-learning family has a good record (20 merged, 1 declined, Beta mean 0.91), and the change adds a learning entry rather than loosening the proof-discrimination gate itself. The PR still passes CI and review."
+      - "No operator-only decision is requested, and no bounded change view was supplied, so there is no sign of an unusual shape in the actual change."
+    judged_at: "2026-10-13T08:57:57.536Z"
+    pin: "005a6dc23f920fc640fe1230c6fec3afed6cf7d302a120c02f61de8fabee987f"

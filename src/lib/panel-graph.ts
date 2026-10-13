@@ -109,7 +109,7 @@ import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbo
 import { writeAtomic } from "./fs-race-safe.js";
 import { judgementFamily } from "./machine-filing-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
-import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
+import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -1745,7 +1745,7 @@ export interface InboxReadyItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
-  plain: PlainInboxMessage;
+  plain: ServedPlainInboxMessage;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
 }
@@ -1757,7 +1757,7 @@ export interface InboxDraftingItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
-  plain: PlainInboxMessage;
+  plain: ServedPlainInboxMessage;
   spawnedAt: string;
 }
 
@@ -1767,13 +1767,13 @@ export interface InboxDraftingItem extends InboxSender {
  * one entered on reasoning that has since been shown wrong.
  *
  * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
- * and must never read as work in progress. Nothing here is actionable except restore.
+ * and must never read as work in progress. Restore, reframe and thread replies remain available.
  */
 export interface InboxDeclinedItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
-  plain: PlainInboxMessage;
+  plain: ServedPlainInboxMessage;
   /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
   reason: string;
 }
@@ -1786,7 +1786,7 @@ export interface InboxNotReadyItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
-  plain: PlainInboxMessage;
+  plain: ServedPlainInboxMessage;
   reasons: PredicateFailure[];
   state?: "not_ready" | "deferred_with_trigger";
   trigger?: InboxClassification["trigger"];
@@ -1798,7 +1798,7 @@ export interface InboxFleetItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
-  plain: PlainInboxMessage;
+  plain: ServedPlainInboxMessage;
   lane: "ready" | "drafting" | "notReady" | "declined";
   /** W1-T4089: the fleet lane's latest decision, when it has made one. */
   decision?: FleetLaneDecision;
@@ -1956,7 +1956,7 @@ function prepareInboxPass(
       draftSpawnedAt: (id) => inflight[id],
       fragmentMemo,
     });
-    const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1];
+    const taskId = /^(?:verify-human|machine-judge):([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1];
     const receipt = taskId && !releasedHumanTasks.has(taskId) ? archiveReleases.get(taskId) : undefined;
     return receipt && classification.state === "retired" && classification.retiredReason?.includes("was released to the fleet")
       ? { ...classification, retiredReason: `${classification.retiredReason}; retained ledger receipt: ${receipt}` }
@@ -2242,6 +2242,9 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     return inboxSender(id, { family: known?.family, receivedAt: known?.receivedAt ?? null, activity: [known?.lastActivityAt] });
   };
 
+  // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
+  const servedPlain = (proposal: { id: string; summary: string }, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id);
+
   const ready: InboxReadyItem[] = [];
   const drafting: InboxDraftingItem[] = [];
   const notReady: InboxNotReadyItem[] = [];
@@ -2255,25 +2258,25 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
-        plain: plainInboxMessage(proposal, plainStore),
+        plain: servedPlain(proposal, "ready"),
         stampLine: classification.draft?.stampLine,
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
     } else if (classification.state === "drafting") {
-      drafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
+      drafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });
     } else if (classification.state === "declined") {
       declined.push({
         ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
-        plain: plainInboxMessage(proposal, plainStore),
+        plain: servedPlain(proposal, "declined"),
         reason: classification.declinedReason ?? "declined by an operator",
       });
     } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       notReady.push({
-        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
+        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), reasons: classification.reasons,
         state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
         resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
       });
@@ -2951,29 +2954,86 @@ export function fleetLaneStoreForDisplay(stateDir: string): ReturnType<typeof re
   }
 }
 
-/** Real {@link RatifyCliGateway}: shells out to the repo's own `bin/rmd`, matching a terminal
- *  invocation exactly. stdout/stderr are appended to a per-call log under `<logDir>`, since no
- *  operator terminal is watching this run — a failing spawn still leaves a trace. */
-export function ratifyCliGateway(repoRoot: string, logDir: string): RatifyCliGateway {
+export type RatifyCliTree = {
+  ledgerPath: string;
+  freshTree: <T>(action: (tree: { path: string; sha: string }) => Promise<T>) => Promise<T>;
+  spawn?: typeof spawn;
+};
+
+export interface RatifyCliHandle extends RatifyCliGateway {
+  approve(proposalId: string): Promise<void> | undefined;
+  reframe(proposalId: string, feedback: string): Promise<void> | undefined;
+  inFlight(proposalId: string): boolean;
+}
+
+/** Real {@link RatifyCliGateway}: spawns `bin/rmd`, output appended to a per-call log under `<logDir>`. W1-T9065: with
+ *  `seams` it spawns from a clean tree at the fetched origin/main (run-task.ts's freshOriginMainTreeRunner) with
+ *  `RMD_SELF_SYNC_DONE=1`, true there and not a bypass; each hand-off's fate is a ledger row and its promise never rejects. */
+export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: RatifyCliTree): RatifyCliHandle {
   const rmdBin = join(repoRoot, "bin", "rmd");
-  const spawnDetached = (args: string[], label: string) => {
+  const openLog = (label: string) => {
     mkdirSync(logDir, { recursive: true });
     // A proposal id can hold a path (`symbol-no-caller:src/lib/retro.ts:x`); the log name must stay one file.
-    const logFd = openSync(join(logDir, `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`), "a");
+    const name = `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`;
+    return { name, fd: openSync(join(logDir, name), "a") };
+  };
+  const spawnDetached = (args: string[], label: string) => {
+    const log = openLog(label);
     try {
-      const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", logFd, logFd] });
+      const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", log.fd, log.fd] });
       child.unref();
     } finally {
-      closeSync(logFd);
+      closeSync(log.fd);
     }
+  };
+  const running = new Map<string, number>();
+  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string): Promise<void> => {
+    running.set(proposalId, (running.get(proposalId) ?? 0) + 1);
+    const record = (step: string, extra: Record<string, unknown>) => {
+      try {
+        appendPanelLedger(s.ledgerPath, step, proposalId, "ratify-gateway", { verb: args[0], ...extra });
+      } catch (err) {
+        process.stderr.write(`${JSON.stringify({ step, task_id: proposalId, verb: args[0], ...extra, ledger_error: String(err) })}\n`);
+      }
+    };
+    const runChild = (tree: { path: string; sha: string }) => new Promise<void>((resolve, reject) => {
+      const log = openLog(label);
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = (s.spawn ?? spawn)(join(tree.path, "bin", "rmd"), args, {
+          cwd: tree.path, detached: true, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+        });
+      } finally {
+        closeSync(log.fd);
+      }
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        record("ratify.cli_exited", { code, signal, log: log.name, sha: tree.sha });
+        resolve();
+      });
+      if (child.pid !== undefined) record("ratify.cli_started", { pid: child.pid, log: log.name, sha: tree.sha });
+      child.unref();
+    });
+    return s.freshTree(runChild)
+      .catch((err: unknown) => record("ratify.handoff_failed", { reason: String((err as Error)?.message ?? err) }))
+      .finally(() => {
+        const left = (running.get(proposalId) ?? 1) - 1;
+        if (left > 0) running.set(proposalId, left);
+        else running.delete(proposalId);
+      });
   };
   return {
     approve(proposalId) {
+      if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
+      return undefined;
     },
     reframe(proposalId, feedback) {
+      if (seams) return handOff(seams, proposalId, ["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
       spawnDetached(["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
+      return undefined;
     },
+    inFlight: (proposalId) => running.has(proposalId),
   };
 }
 

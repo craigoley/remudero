@@ -20,8 +20,12 @@ import { installFixtureDuGuard } from "./helpers/fixture-du.js";
 
 const SCRIPT = "scripts/fleet-heartbeat.sh";
 
+// The beat ages every row against its own `NOW_EPOCH="$(date -u +%s)"` — a child's real clock that
+// scripts/clock-shift.mjs cannot move — so the rows are dated from that same `date`, read per row,
+// never from this process's `Date.now()` (see test/fleet-heartbeat.test.ts `NOW`).
 function isoAgo(seconds: number): string {
-  return new Date(Date.now() - seconds * 1000).toISOString();
+  const nowMs = Number(spawnSync("date", ["-u", "+%s"], { encoding: "utf8" }).stdout.trim()) * 1000;
+  return new Date(nowMs - seconds * 1000).toISOString();
 }
 
 /** Seed a ledger and run the beat in dry-run, returning its published key=value payload. */

@@ -1,0 +1,138 @@
+- id: W1-T9065
+  title: "THE FLEET LANE'S RMD APPROVE RUNS IN AN ORIGIN/MAIN TREE AND A REFUSED SELF-SYNC IS A LEDGER ROW — ratifyCliGateway spawns approve in the daemon's detached, behind checkout, where the self-sync guard refuses before the verb runs and writes no row: 1,171 of 1,742 approve logs since 2026-09-23 hold only that refusal, the lane counts each as filed, and no inbox proposal has filed since 2026-10-08T03:42Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a lane approve runs, and when it cannot, says so; it spans the approve gateway (panel-graph.ts), the CLI entry's self-sync sink (run-task.ts) and the lane's hand-off check (fleet-lane.ts)
+  band_meaning: span
+  origin: "found 2026-10-13 diagnosing the W1-T8714 replay; operator standing direction: fix at root"
+  plan_refs: [W1-T4089, W1-T445, W1-T486, W1-T1134, W1-T8714, W1-T9039, W1-T9041, W1-T193, W1-T2220]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/fleet-lane.ts
+    - src/run-task.ts
+    - test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts
+  status: queued
+  priority: 0.5  # urgent, operator session 2026-10-13: a silent outage — the fleet lane has filed no inbox proposal since 2026-10-08, and nothing in the ledger says why
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced, in the core daemon's state (~/rmd-state2/state).
+      - LEDGER UNION: 512 dated .ndjson.gz rotations (2026-09-23T18:07Z to 2026-10-13T10:49Z) plus the live
+        ledger.ndjson. No plain rotated .ndjson files exist. The newest `ratify.approved` is
+        2026-10-08T03:42:17.668Z. `self_sync.*` rows: 0. Positive control, same pass: 4,108 `ratify.approved`,
+        2,309 `fleet_lane.decided`, 1,623 `inbox.draft_fellthrough`, 472 `approve.error`, and `fleet_lane.decided`
+        rows up to 2026-10-13T11:18Z.
+      - APPROVE LOGS (state/logs/approve-*.log, one per `ratifyCliGateway` spawn): 1,742 since 2026-09-23T12:16Z.
+        1,171 hold "rmd is behind origin/main (...) but this checkout is on a DETACHED HEAD, not `main` --
+        refusing to auto-sync". Every refusal names a DETACHED HEAD. In the 24 h to 11:30Z, 73 approve logs were
+        written: 59 hold only that refusal, 1 holds it beside other lines, and 13 ran the verb. Control: the 13
+        that ran show the verb's own output, a worktree "HEAD is now at ..." line, an `approve.error` stack or a
+        `ratify.approve_refused` message. Per day since 2026-10-01, the refused share runs from 69% to 98%.
+      - ONE FINDING, TWELVE TIMES: adoption:symbol-no-caller:src/lib/ledger.ts:ledgerRowActor was decided `file`
+        once a day from 2026-10-01 to 2026-10-13, at 06:20:18Z today, and each `fleet_lane.decided` row reads
+        "The fleet turned this finding into planned work." 11 of its 12 logs hold only the self-sync refusal. The
+        one that ran (2026-10-08T06:18Z) wrote `approve.error` for the W1-T8714 band split.
+    WHY, READ on origin/main 40169ce42 (symbols, not lines):
+      - `ratifyCliGateway` (src/lib/panel-graph.ts) spawns `<repoRoot>/bin/rmd approve <id>` with `cwd: repoRoot`,
+        detached, with stdout and stderr appended to the log, and the inherited env. It does not set
+        `RMD_SELF_SYNC_DONE`. The fleet lane's `approve` dep (src/run-task.ts, `fleetLane:`) roots it at the daemon's
+        own checkout. deploy/entrypoint.sh checks that checkout out `--detach` on every boot.
+      - The CLI `main` (src/run-task.ts) runs `checkCliFreshness` (src/lib/self-sync.ts) for every verb outside
+        daemon/serve/deploy-run/sync and `READ_ONLY_FRESHNESS_EXEMPT_VERBS`. `approve` is deliberately not exempt
+        (W1-T1134: it decides and acts on the plan). Once origin/main moves past the boot sha, the W1-T445 branch
+        guard refuses a detached HEAD, `main` prints the message and exits 1, and no verb code runs. While HEAD still
+        equals origin/main the check returns `up-to-date` before the branch guard, which is why some approves still
+        run after a recycle.
+      - `main` passes no `log` to `checkCliFreshness`, so the W1-T486 `self_sync.refused` sink is the default no-op.
+        self-sync.ts deliberately acquires no ledger (docs/forensics/self-sync.md#selfsyncdepslog): `loadConfig()`
+        can call `resolveClaudeBin()`. The refusal reaches only the approve log.
+      - `triageFleetLaneSteps` (src/lib/fleet-lane.ts) writes `fleet_lane.decided file` and the store entry, then
+        calls `deps.approve`, a fire-and-forget spawn. It never looks for an outcome. The hand-off counts against
+        the pace room as filed, and the finding is offered again only after the store's one-day window.
+    HOW THE DAEMON'S OTHER rmd CHILDREN AVOID THIS: `buildFreshTreeReviewRunner` (src/run-task.ts) fetches origin
+    main, builds a clean detached worktree at that sha (`reviewer-<sha12>`, links the toolchain with
+    `prepareWorktreeToolchain`, holds it under `withReviewerWorktreeLease`), and `spawnRmdReviewForFreshTree`
+    spawns that tree's own bin/rmd with `RMD_SELF_SYNC_DONE: "1"`. The guard's skip is then correct, not a bypass:
+    the child's checkout already is origin/main. plan.ts, plan-pr-emitter.ts, operator-mcp.ts and retro-subprocess.ts
+    also set the same env on the rmd children they spawn.
+    THE BYPASS ALONE IS NOT SAFE TODAY: `approveCommand` classifies with `loadPlan(join(repoRoot, "plan",
+    "tasks.yaml"))`, the working tree of the checkout it runs in, through `loadProposalForRatify`. The console route
+    reads `loadPlanAtRef` at HEAD. Neither reads origin/main. Only the shards are written in a fresh worktree at
+    origin/main. Setting `RMD_SELF_SYNC_DONE=1` in the behind checkout would classify readiness against a stale
+    plan, which is the decision the gate exists to protect.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 330 open origin heads for ratifyCliGateway,
+    self_sync.refused, RMD_SELF_SYNC_DONE, "refusing to auto-sync" and approve_unrecorded, and src/ on every head
+    for RMD_SELF_SYNC_DONE in panel-graph.ts. Control: main reads 3 ratifyCliGateway and 61 RMD_SELF_SYNC_DONE hits
+    in plan/. Only PR #11312's head reads more, in the notes of W1-T9039 and W1-T9041, which name this as separate.
+    W1-T9039 owns the lint refusals at the plan-PR preflight that stop the approves that do run. W1-T9041 owns the
+    band replay's outcome record. This task and W1-T9041 both touch fleet-lane.ts and run-task.ts, so dispatch
+    serializes them by `files:`.
+  design: |
+    No new bound and no timer.
+    1. THE LANE'S APPROVE RUNS IN AN ORIGIN/MAIN TREE, AS THE REVIEWER DOES. `ratifyCliGateway` fetches origin main
+       and spawns approve from a clean detached worktree at the fetched sha (`approve-<sha12>`). The worktree is built
+       and checked the way `buildFreshTreeReviewRunner` builds `reviewer-<sha12>`: fetch, inspect or add,
+       `prepareWorktreeToolchain`. Share that code rather than copying it. The spawn uses that tree's bin/rmd, `cwd`
+       the tree, and env `RMD_SELF_SYNC_DONE: "1"`, as `spawnRmdReviewForFreshTree` does. The tree is held for the
+       child's life and released when it exits, as the reviewer lease does. WHY THE SKIP IS SAFE: the child's
+       repoRoot is origin/main, so its `loadPlan`, `loadProposalForRatify`, `readRiskPolicy` and
+       `gitGrepAnchorTrue` all read origin/main. The freshness gate's purpose, never deciding on a stale plan, then
+       holds by construction. A fetch or worktree failure is not a silent skip: the gateway writes
+       `ratify.handoff_failed` with the reason and spawns nothing. `reframe` takes the same path. serve.ts and
+       read-model-slow-lane.ts keep calling `ratifyCliGateway` unchanged.
+    2. A REFUSED SELF-SYNC IS A LEDGER ROW. The CLI `main` passes `checkCliFreshness` a `log` that appends a
+       `self_sync.refused` row carrying `verb`, `reason`, `old_sha`, `new_sha` and `detached`, with never a path,
+       per W1-T486. The ledger path comes from the EXISTING config's `root`, read without creating the config or
+       calling `resolveClaudeBin`, falling back to the documented default root. A ledger that cannot be written
+       prints the same row as one JSON line on stderr, so it lands in the approve log at the least.
+       `checkCliFreshness`'s predicate and message do not change (W1-T446 owns them).
+    3. A HAND-OFF THAT LEFT NO OUTCOME IS A RECORDED FAILURE, AND IS RETRIED. `ratifyCliGateway`'s spawn reports the
+       child's exit: the gateway writes `ratify.cli_exited` with `proposal_id`, `code` and the log file name. Each
+       pass, before its FILE step, the lane checks its `file` decisions against the outcome rows written for that
+       proposal since the decision: `ratify.approved`, `ratify.approve_refused`, `approve.error`,
+       `self_sync.refused` and `ratify.handoff_failed`. If the child has exited (an exit row, or its recorded pid is
+       gone after a daemon restart) and no outcome row exists, the lane writes `fleet_lane.approve_unrecorded` with
+       the exit code and log name. It also drops the store entry, so the finding is offered on the next pass, not a
+       day later. Such a hand-off does not count against the pace room. A hand-off still running is left alone. The
+       retry is change-triggered: a second unrecorded failure at the same origin/main sha waits until main moves, so
+       a deterministic failure cannot spin. A hand-off with an outcome row keeps today's behaviour.
+    Tests go in a new file, test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts, with `test(` titles
+    verbatim as in the proofs below. Use the shared gitRepo fixtures with a local git identity. Build an origin, and
+    a daemon checkout detached at an older sha while origin/main moves ahead. Drive `ratifyCliGateway` with an
+    injected spawn that records cwd, env and argv. Run the real `checkCliFreshness` in the recorded cwd with the
+    recorded env. Drive `triageFleetLane` over a fixture state dir and ledger.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts"
+    - claim: "a lane approve from a detached checkout behind origin/main runs in a tree at origin/main, where the self-sync check does not refuse it"
+      proof: 'grep: test("W1-T9065: a lane approve from a detached behind checkout runs at origin/main" in test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts'
+    - claim: "the approve child classifies against origin/main's plan, not the stale checkout's"
+      proof: 'grep: test("W1-T9065: the approve child reads the origin/main plan" in test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts'
+    - claim: "a self-sync refusal at the CLI entry writes a self_sync.refused ledger row with its reason"
+      proof: 'grep: test("W1-T9065: a refused self-sync writes a self_sync\.refused row" in test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts'
+    - claim: "an approve that exited with no outcome row is recorded as unrecorded and offered again on the next pass"
+      proof: 'grep: test("W1-T9065: an approve with no outcome row is recorded and retried" in test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts'
+    - claim: "a failed hand-off does not count against the lane's pace room"
+      proof: 'grep: test("W1-T9065: a failed hand-off does not spend pace room" in test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts'
+    - claim: "the approve gateway sets the self-sync guard for its origin/main child"
+      proof: "grep: RMD_SELF_SYNC_DONE in src/lib/panel-graph.ts"
+    - claim: "the lane names an approve that left no outcome"
+      proof: 'grep: fleet_lane\.approve_unrecorded in src/lib/fleet-lane.ts'
+  falsifier: |
+    Spawn approve in the daemon's checkout without the env, and the first test's real `checkCliFreshness` returns
+    `refused` with reason off-main, as 1,171 approve logs read. Set `RMD_SELF_SYNC_DONE=1` but keep `cwd` at the
+    behind checkout, and the plan-read test classifies against the stale plan. Leave `main`'s `log` unset, and the
+    refusal test reads no `self_sync.refused` row. Keep the lane fire-and-forget, and the retry test sees the
+    finding held for a day with its hand-off counted as filed, as ledgerRowActor was twelve times.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union and state/logs, with no numeric pass
+    mark: approve logs that hold only the self-sync refusal (healthy shape: none written after the deploy);
+    `self_sync.refused` rows by `verb` (healthy shape: present whenever any CLI verb is refused, and none for
+    `approve`); `fleet_lane.approve_unrecorded` rows (healthy shape: rare, each followed by a retry or an outcome);
+    `ratify.approved` rows from fleet approves (healthy shape: present again). Until W1-T9039 lands, most approves
+    that now run will end in its plan-PR preflight refusal. That is an outcome row, not an unrecorded hand-off.
+    ASIDE, NOT IN THIS TASK: the refusal text is printed twice per log, once by `checkCliFreshness`'s `warn` and
+    once by `main`'s `console.error`.
