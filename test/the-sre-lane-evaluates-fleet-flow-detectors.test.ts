@@ -48,7 +48,7 @@ function events(stateDir: string) {
 }
 
 test("test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts", () => {
-  assert.deepEqual(SRE_LANE_DETECTORS, []);
+  assert.deepEqual(SRE_LANE_DETECTORS.map((d) => d.id), ["idle-capacity"]);
   assert.equal(ownHistoryBound([1, 2, 3, 4, 5, 6, 7, 8, 9, 100], { minSamples: 3, maxSamples: 10 }), 9);
   assert.equal(ownHistoryBound([100, 100, 1, 2, 3], POLICY), 100);
   assert.equal(ownHistoryBound([100, 100, 1, 2, 3], { minSamples: 3, maxSamples: 3 }), 3);
