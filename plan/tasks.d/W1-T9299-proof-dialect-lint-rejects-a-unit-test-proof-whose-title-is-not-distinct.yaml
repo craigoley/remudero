@@ -1,0 +1,31 @@
+- id: W1-T9299
+  title: Proof-dialect lint rejects a `unit test:` proof whose title is not distinct or is over-long, so the same test-title correction does not recur
+  repo: remudero
+  depends_on:
+    - W1-T246
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/task-linter.ts
+    - src/lib/proof-grammar.ts
+    - test/proof-title-form.test.ts
+  acceptance:
+    - claim: The task linter flags a `unit test:` proof whose title exceeds a fixed length bound, and the finding names the task and the proof.
+      proof: "unit test: linter flags an over-length unit test proof title"
+    - claim: The task linter flags two proofs in one task that share an identical `unit test:` title, and the finding names the duplicated title.
+      proof: "unit test: linter flags duplicate unit test proof titles within one task"
+    - claim: A task with distinct, length-bounded proof titles passes the linter without findings.
+      proof: "unit test: linter accepts distinct bounded unit test proof titles"
+  origin: followup:DAEMON-1789932902089:2026-09-20T20:21:28.208Z:0
+  rationale: >-
+    From the 2026-09-20 follow-up on https://github.com/craigoley/remudero/pull/6258, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: none identified in scope — the fix is a mechanical proof-form
+    correction (distinct, length-bounded test titles) with a matching precedent already in the
+    plan; no separate follow-up task is warranted. — from PLAN-create (run DAEMON-1789932902089,
+    https://github.com/craigoley/remudero/pull/6258)
