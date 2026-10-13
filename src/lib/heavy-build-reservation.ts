@@ -21,6 +21,8 @@ export interface HeavyBuildHold {
 }
 interface HeavyReadyClosure { version: 2; requestHash: string; nonce: string; kind: "released" | "escalated"; atMs: number }
 type HeavyReadyLog = (step: string, fields: Record<string, unknown>) => unknown;
+/** A local durable outbox receipt, NOT proof that a human or remote service was notified. */
+export interface HeavyEscalationAck { durable: true; eventId: string; receiptSha256: string }
 export type HeavyReservationReading =
   | { state: "clear"; observed: number; pendingEscalations: number }
   | { state: "held"; observed: number; pendingEscalations: number; hold: HeavyBuildHold }
@@ -168,7 +170,7 @@ function censusHeavyRecords(dir: string): string[] {
     for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
       if (++entries > HEAVY_MAX_DIRECTORY_ENTRIES) throw new Error("heavy READY directory census incomplete at bounded entry limit; governed archival required");
       if (!entry.name.startsWith("heavy-build-")) continue;
-      const match = /^heavy-build-([a-f0-9]{64})(-(?:closed|delivered))?\.json$/.exec(entry.name);
+      const match = /^heavy-build-([a-f0-9]{64})(-(?:closed|delivered|escalation))?\.json$/.exec(entry.name);
       if (!match || !entry.isDirectory()) throw new Error("malformed or nonregular heavy READY directory entry");
       (match[2] ? receipts : requests).add(match[1]!);
     }
@@ -178,17 +180,54 @@ function censusHeavyRecords(dir: string): string[] {
 }
 
 /** A terminal record is an outbox entry. Delivery is at-least-once, with a stable event id. */
+function heavyEscalationFields(request: HeavyBuildReservation): Record<string, unknown> {
+  return { event_id: `${request.id}:escalated`, request_id: request.id, ready_at_ms: request.readyAtMs,
+    expires_at_ms: request.expiresAtMs, scope: "NEW-implement-only" };
+}
+
+/** Fsync-backed local escalation inbox. Uses the SAME private backend and immutable closure.
+ * The reader independently checks the stored receipt before accepting the returned ACK. */
+export function heavyReadyEscalationSink(dir: string): HeavyReadyLog {
+  return (step, fields) => {
+    if (step !== "heavy_ready.escalated" || typeof fields.request_id !== "string" || !/^[a-f0-9]{64}$/.test(fields.request_id)) {
+      throw new Error("unsupported heavy READY escalation event");
+    }
+    const identity = heavyDirectoryIdentity(dir);
+    const request = validateHeavyRequest(readOptionalHeavyRecord(heavyRecordPath(dir, fields.request_id)));
+    const closure = validateHeavyClosure(readOptionalHeavyRecord(heavyRecordPath(dir, request.id, "-closed")), request);
+    const expected = heavyEscalationFields(request);
+    if (request.id !== fields.request_id || closure?.kind !== "escalated" || heavyRecordDigest(fields) !== heavyRecordDigest(expected)) {
+      throw new Error("unbound heavy READY escalation event");
+    }
+    const receiptSha256 = heavyRecordDigest(expected);
+    if (heavyRecordDigest(publishHeavyRecord(heavyRecordPath(dir, request.id, "-escalation"), expected).value) !== receiptSha256) {
+      throw new Error("foreign heavy READY escalation receipt");
+    }
+    flushHeavyDirectory(dirname(heavyRecordPath(dir, request.id, "-escalation")));
+    flushHeavyDirectory(dir); // Retry a previous publication's post-rename fsync failure.
+    assertHeavyDirectoryIdentity(dir, identity);
+    return { durable: true, eventId: `${request.id}:escalated`, receiptSha256 } satisfies HeavyEscalationAck;
+  };
+}
+
 function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, closure: HeavyReadyClosure, log?: HeavyReadyLog): boolean {
   const ackPath = heavyRecordPath(dir, request.id, "-delivered"), ack = readOptionalHeavyRecord(ackPath);
   const expected = { version: 2, closureHash: heavyRecordDigest(closure), eventId: `${request.id}:escalated` };
+  const fields = heavyEscalationFields(request), receiptPath = heavyRecordPath(dir, request.id, "-escalation");
+  const receipt = readOptionalHeavyRecord(receiptPath), receiptSha256 = heavyRecordDigest(fields);
+  if (receipt !== undefined && heavyRecordDigest(receipt) !== receiptSha256) throw new Error("foreign heavy READY escalation receipt");
   if (ack !== undefined) {
     if (heavyRecordDigest(ack) !== heavyRecordDigest(expected)) throw new Error("foreign heavy READY delivery acknowledgement");
-    return true;
+    // Historical v2 ACKs were emitted for void loggers. Keep them, but require the new
+    // independently read durable receipt before treating them as acknowledged.
+    if (receipt !== undefined) {
+      flushHeavyDirectory(dirname(receiptPath));flushHeavyDirectory(dir);
+      return true;
+    }
   }
   if (!log) return false;
   try {
-    const accepted = log("heavy_ready.escalated", { event_id: expected.eventId, request_id: request.id,
-      ready_at_ms: request.readyAtMs, expires_at_ms: request.expiresAtMs, scope: "NEW-implement-only" });
+    const accepted = log("heavy_ready.escalated", fields);
     if (accepted !== null && (typeof accepted === "object" || typeof accepted === "function") &&
         typeof (accepted as { then?: unknown }).then === "function") {
       void Promise.resolve(accepted).catch(() => {
@@ -198,6 +237,9 @@ function deliverHeavyEscalation(dir: string, request: HeavyBuildReservation, clo
       });
       throw new Error("heavy READY delivery requires synchronous durable acceptance");
     }
+    const acceptance = accepted as Partial<HeavyEscalationAck> | null | undefined;
+    if (acceptance?.durable !== true || acceptance.eventId !== expected.eventId || acceptance.receiptSha256 !== receiptSha256 ||
+        heavyRecordDigest(readOptionalHeavyRecord(receiptPath)) !== receiptSha256) return false;
     if (heavyRecordDigest(publishHeavyRecord(ackPath, expected).value) !== heavyRecordDigest(expected)) throw new Error("foreign heavy READY delivery acknowledgement");
     return true;
   } catch { return false; /* No acknowledgement: restart/next read retries. Never reopens admission. */ }
@@ -216,6 +258,9 @@ export function readHeavyNewBuildHold(opts: { dir: string; now?: number; log?: H
       let closure = validateHeavyClosure(readOptionalHeavyRecord(heavyRecordPath(opts.dir, id, "-closed")), request);
       if (closure?.kind !== "escalated" && readOptionalHeavyRecord(heavyRecordPath(opts.dir, id, "-delivered")) !== undefined) {
         throw new Error("heavy READY delivery acknowledgement has no escalated closure");
+      }
+      if (closure?.kind !== "escalated" && readOptionalHeavyRecord(heavyRecordPath(opts.dir, id, "-escalation")) !== undefined) {
+        throw new Error("heavy READY escalation receipt has no escalated closure");
       }
       // Terminal before wall-clock validation: clock rollback never resurrects a closed request.
       if (!closure && request.readyAtMs > now) throw new Error("heavy READY time is in the future; clock/provenance unavailable");
