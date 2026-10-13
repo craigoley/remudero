@@ -16,6 +16,7 @@ test("owned kernel contract binds one fresh lease and refuses unknown population
   const descriptors = new Map<number, string>(), platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   const previousSlot = process.env.RMD_TEST_SLOT_DIR;
   let childGone = false;
+  let renameAfterLeafOpen = false, swappedDescriptor: number | undefined;
   const procStat = (pid: number): string => {
     const values = Array<string>(20).fill("0");
     values[0] = pid === childPid && childGone ? "Z" : "S";
@@ -27,21 +28,30 @@ test("owned kernel contract binds one fresh lease and refuses unknown population
     const p = String(path);
     if (p === "/proc/self/cgroup") return procFile;
     if (p === parent || p.startsWith(parent + '/')) return physical + p.slice(parent.length);
-    const fd = /^\/proc\/self\/fd\/(\d+)\/(.+)$/.exec(p);
-    if (fd && descriptors.has(Number(fd[1]))) return join(descriptors.get(Number(fd[1]))!, fd[2]!);
+    const fd = /^\/proc\/self\/fd\/(\d+)(?:\/(.+))?$/.exec(p);
+    if (fd && descriptors.has(Number(fd[1]))) return fd[2] === undefined ? descriptors.get(Number(fd[1]))! : join(descriptors.get(Number(fd[1]))!, fd[2]);
     return path;
   };
   Object.defineProperty(process, "platform", { value: "linux" });process.env.RMD_TEST_SLOT_DIR = join(root, "slots");
   t.mock.method(fs, "openSync", ((path: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
-    const mapped = map(path), fd = real.openSync(mapped, flags, mode);descriptors.set(fd, String(mapped));return fd;
+    const mapped = map(path), fd = real.openSync(mapped, flags, mode);descriptors.set(fd, String(mapped));
+    if (renameAfterLeafOpen && String(mapped).startsWith(physical + '/rmd-eval-') && typeof flags === 'number' && (flags & fs.constants.O_DIRECTORY) !== 0) {
+      renameAfterLeafOpen = false;swappedDescriptor = fd;real.renameSync(mapped, String(mapped) + '-renamed');
+      descriptors.set(fd, String(mapped) + '-renamed'); // Synthetic /proc/fd follows the genuine already-open inode after rename.
+      real.mkdirSync(mapped, { mode: 0o700 });
+    }
+    return fd;
   }) as typeof fs.openSync);
   t.mock.method(fs, "lstatSync", ((path: fs.PathLike, options?: fs.StatOptions) => real.lstatSync(map(path), options)) as typeof fs.lstatSync);
-  t.mock.method(fs, "realpathSync", ((path: fs.PathLike) => String(path).startsWith(parent) ? String(path) : real.realpathSync(path)) as typeof fs.realpathSync);
-  t.mock.method(fs, "statfsSync", ((path: fs.PathLike, options?: fs.StatFsOptions) => String(path).startsWith(parent)
+  t.mock.method(fs, "realpathSync", ((path: fs.PathLike) => {
+    const actual = real.realpathSync(map(path));
+    return actual.startsWith(physical) ? parent + actual.slice(physical.length) : actual;
+  }) as typeof fs.realpathSync);
+  t.mock.method(fs, "statfsSync", ((path: fs.PathLike, options?: fs.StatFsOptions) => String(map(path)).startsWith(physical)
     ? { ...real.statfsSync(physical), type: 0x63677270 } : real.statfsSync(path, options)) as typeof fs.statfsSync);
   t.mock.method(fs, "mkdirSync", ((path: fs.PathLike, options?: fs.MakeDirectoryOptions | fs.Mode) => {
     const mapped = map(path), result = real.mkdirSync(mapped, options);
-    if (String(path).startsWith(parent + '/rmd-eval-')) {
+    if (String(mapped).startsWith(physical + '/rmd-eval-')) {
       for (const [name, value] of [["cgroup.events", "populated 0\n"], ["cgroup.procs", ""], ["cgroup.kill", ""]]) {
         real.writeFileSync(join(String(mapped), name!), value!, { mode: 0o600 });
       }
@@ -78,6 +88,9 @@ test("owned kernel contract binds one fresh lease and refuses unknown population
   real.writeFileSync(procFile, '0::/not-an-isolated-service\n');
   assert.throws(() => createOwnedRunCgroup({ enabled: true, parent }), /own isolated user-service parent/);
   real.writeFileSync(procFile, `0::${group}\n`);
+  renameAfterLeafOpen = true;
+  assert.throws(() => createOwnedRunCgroup({ enabled: true, parent }), /identity\/backend unavailable/, 'validate the opened descriptor, never a earlier pathname check');
+  assert.ok(swappedDescriptor !== undefined);assert.throws(() => real.fstatSync(swappedDescriptor!), /EBADF/, 'failed descriptor validation closes only its own opened descriptor');
   const empty = createOwnedRunCgroup({ enabled: true, parent })!;
   assert.equal(empty.read().state, 'empty-unqualified');assert.equal(empty.settleCapacity().released, false);
   assert.equal(empty.close(), true);assert.equal(empty.read().state, 'unknown');

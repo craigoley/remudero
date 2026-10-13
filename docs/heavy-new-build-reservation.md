@@ -114,12 +114,19 @@ and stops further attempts. Cancellation during grading/cleanup never becomes a
 judged proposal. Its result explicitly says `capacityReleaseAllowed: false`:
 cooperative SDK settlement cannot certify synchronous setup, graders, or escaped
 descendants gone. No production configuration supplies this control today; the
-existing CLI retains its quiet/spend gates.
+existing CLI retains its quiet/spend gates. Independently of this optional control,
+failed cleanup makes the attempt unmeasurable, stops the remaining attempt loop and
+returns cancelled without publishing a judgement or authorizing capacity release.
+Default-off must never mean that unknown cleanup is a successful run.
 
 `createOwnedRunCgroup` is separately OFF by default. An enabled caller must be inside
 its OWN `rmd-heavy-run-<UUID>.service` with an explicitly delegated existing cgroup
 parent, never the daemon, serving, SSH or another service's group. It creates only a
-private unique leaf. A child bootstrap joins ITSELF before dependencies, SDK calls,
+private unique leaf. Parent/leaf ownership and backend checks use the already-open
+directory descriptors, not a pathname checked before opening it. Creation, control
+operations and removal resolve inside the pinned parent; replaced or renamed opened
+directories are refused, with their descriptors closed on initialization failure.
+A child bootstrap joins ITSELF before dependencies, SDK calls,
 probes, grading and cleanup. The supervisor never migrates a foreign PID or itself.
 `cancel()` writes only that identity-checked leaf's `cgroup.kill`; the kernel includes
 detached process groups and nested cgroups. An unobserved empty group is unqualified,
@@ -143,3 +150,8 @@ The original READY60 and all earlier failed/closed gates remain intact.
 Kernel reference: [cgroup v2 control files](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 define whole-tree kill and the `populated` witness. Hosted tests, review, source merge,
 natural safe startup adoption and live benefit remain separate claims.
+
+[CodeQL's file-system race guidance](https://codeql.github.com/codeql-query-help/javascript/js-file-system-race/)
+recommends descriptor-based operations to remove check-then-open races. Neither the
+descriptor hardening nor its synthetic race tests claim a malicious-same-account
+migration sandbox or full native admission qualification.

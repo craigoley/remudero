@@ -291,7 +291,7 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
     reasons.push(reason);
     control?.cancel(`eval-cleanup-unverified: ${reason}`);
   }
-  return { taskId: item.taskId, ...slot, verdict: control?.checkpoint() === false ? "unmeasurable" : verdict,
+  return { taskId: item.taskId, ...slot, verdict: reasons.some(reason => reason.startsWith("cleanup-failed:")) || control?.checkpoint() === false ? "unmeasurable" : verdict,
     costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,
     breach, headSha: attempt?.headSha ?? null, reasons };
 }
@@ -324,6 +324,7 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
   }
   const attempts: SkillEvalAttempt[] = [];
   let committedUsd = 0;
+  let cleanupUnverified: string | undefined;
   attemptsLoop: for (const item of selection.items) {
     if (control?.checkpoint() === false) break;
     const dispatch = input.dispatcherFor(item);
@@ -339,10 +340,12 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
       input.log(SKILL_EVAL_STEPS.attempt, { ...tag, task_id: attempt.taskId, arm: attempt.arm, trial: attempt.trial,
         position: attempt.position, verdict: attempt.verdict, cost_usd: attempt.costUsd, served_model: attempt.servedModel,
         breach: attempt.breach, head_sha: attempt.headSha, reasons: attempt.reasons });
+      cleanupUnverified = attempt.reasons.find(reason => reason.startsWith("cleanup-failed:"));
+      if (cleanupUnverified !== undefined) break attemptsLoop;
     }
   }
-  if (control?.checkpoint() === false) {
-    const detail = String(control.signal.reason).slice(0, 200);
+  if (cleanupUnverified !== undefined || control?.checkpoint() === false) {
+    const detail = cleanupUnverified === undefined ? String(control!.signal.reason).slice(0, 200) : `eval-cleanup-unverified: ${cleanupUnverified}`;
     input.log(SKILL_EVAL_STEPS.cancelled, { ...tag, detail, attempts: attempts.length, committed_usd: committedUsd,
       capacity_release_allowed: false, termination: "unverified" });
     return { state: "cancelled", attempts, detail, capacityReleaseAllowed: false };
