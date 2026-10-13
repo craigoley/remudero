@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +23,8 @@ import {
   triageEscalation,
 } from "../src/lib/escalation-triage.js";
 import { runStaleEscalationRejudge } from "../src/lib/sweep.js";
-import { buildEscalationTriageRuntime } from "../src/run-task.js";
+import { buildEscalationTriageRuntime, sweepEscalationTriage } from "../src/run-task.js";
+import { pendingKicks } from "../src/lib/fleet-control.js";
 import type { Config } from "../src/lib/config.js";
 
 function ledger(): string {
@@ -354,4 +357,198 @@ test("W1-T8868: the runtime shares five actions across birth and stale issues", 
   assert.equal(rows(lp).filter((r) => r.step === "escalation.auto_resolve_attempted").length, 5);
   assert.ok(issues.calls.slice(0, 5).every((c) => c.labels.includes(FLEET_NOTICE_LABEL)));
   assert.ok(issues.calls[5].labels.includes(NEEDS_HUMAN_LABEL));
+});
+
+// ── the production executors, driven through their real defaults ─────────────────────────────
+
+const PLAN_TEXT = [
+  "- id: W1-TK", "  title: queued fixture", "  repo: r", "  type: implement", "  status: queued",
+  "- id: W1-TD", "  title: done fixture", "  repo: r", "  type: implement", "  status: done", "",
+].join("\n");
+
+function runtimeRoot(plan = PLAN_TEXT): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-triage-exec-"));
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), plan);
+  return root;
+}
+
+const ACT_POLICY = () => ({ escalationTriage: { mode: "act", maxAutoResolvesPerPass: 5 } });
+
+test("W1-T8868: feedback_reply and its observation use the daemon client built from the service token", async () => {
+  const root = runtimeRoot();
+  const submitted: Array<Record<string, unknown>> = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += String(chunk); });
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.method === "POST" && req.url === "/v1/feedback") {
+        const parsed = JSON.parse(body) as { replyTo?: string };
+        submitted.push({ auth: req.headers.authorization, ...parsed });
+        res.end(JSON.stringify({ ok: true, entry: { id: "9", reply_to: parsed.replyTo } }));
+      } else if (req.method === "GET" && req.url?.startsWith("/v1/feedback")) {
+        res.end(JSON.stringify({ entries: [{ id: "7", status: "answered", answered_by: "9" }] }));
+      } else {
+        res.statusCode = 404;
+        res.end("{}");
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", "service-tokens.json"), JSON.stringify({ write: "tok-write" }));
+    const config = { root, consoleUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` } as Config;
+    const lp = ledger();
+    const settings = buildEscalationTriageRuntime({ root, config, owner: "o", repo: "r" }, {
+      readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1,
+    })({ issues: gateway(), ledgerPath: lp, runId: "r" });
+    const grill = citationGrill();
+    const effect = await settings.execute!.feedback_reply!(grill);
+    assert.match(effect, /feedback#9 answers feedback#7/);
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].replyTo, "7");
+    assert.match(String(submitted[0].auth), /tok-write/);
+    assert.match(String(await settings.observe!(grill, "feedback_reply", effect)), /feedback#7 is answered by feedback#9/);
+    assert.equal(await settings.observe!(grill, "plan_amendment_pr", "x"), undefined, "a proposed amendment is not yet a resolved block");
+    // A referent that does not match the task id is refused before any write.
+    await assert.rejects(settings.execute!.feedback_reply!({ ...grill, taskId: "TRIAGE-8" }), /feedback referent is unreadable/);
+    assert.equal(submitted.length, 1);
+    // An unavailable service token cannot build the client.
+    writeFileSync(join(root, "state", "service-tokens.json"), JSON.stringify({ write: "" }));
+    await assert.rejects(settings.execute!.feedback_reply!(grill), /service write token unavailable/);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("W1-T8868: rekick_once requests one kick for a dispatchable task and refuses a closed one", () => {
+  const root = runtimeRoot();
+  const settings = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1,
+  })({ issues: gateway(), ledgerPath: ledger(), runId: "r" });
+  const effect = settings.execute!.rekick_once!(esc({ taskId: "W1-TK" }));
+  assert.match(effect as string, /one dispatch requested for W1-TK/);
+  assert.deepEqual(pendingKicks(root).map((k) => [k.taskId, k.origin, k.repo]), [["W1-TK", "escalation-triage", "r"]]);
+  assert.throws(() => settings.execute!.rekick_once!(esc({ taskId: "W1-TD" })), /task is not dispatchable/);
+  assert.throws(() => settings.execute!.rekick_once!(esc({ taskId: "W1-TNONE" })), /task is not dispatchable/);
+  assert.equal(pendingKicks(root).length, 1, "a refused task leaves no second kick");
+  // An injected kick seam replaces the marker write.
+  const kicked: string[] = [];
+  const injected = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1, kick: (e) => { kicked.push(e.taskId); },
+  })({ issues: gateway(), ledgerPath: ledger(), runId: "r" });
+  injected.execute!.rekick_once!(esc({ taskId: "W1-TD" }));
+  assert.deepEqual(kicked, ["W1-TD"]);
+});
+
+test("W1-T8868: apply_default records the recommendation, is observed, and refuses once it no longer applies", async () => {
+  const root = runtimeRoot();
+  const lp = ledger();
+  const settings = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => 0, windowMs: () => 1,
+  })({ issues: gateway(), ledgerPath: lp, runId: "r" });
+  const grill = citationGrill();
+  const effect = await settings.execute!.apply_default!(grill);
+  assert.match(effect, /default recorded: .*file-as-task/);
+  assert.ok(rows(lp).some((r) => r.step === "escalation.default_applied" && r.option === "file-as-task" && r.origin === "default"));
+  const observed = JSON.parse(String(await settings.observe!(grill, "apply_default", effect))) as Record<string, unknown>;
+  assert.deepEqual([observed.taskId, observed.option, observed.origin], ["TRIAGE-7", "file-as-task", "default"]);
+  const unseen = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1,
+  })({ issues: gateway(), ledgerPath: ledger(), runId: "r" });
+  await assert.rejects(Promise.resolve().then(() => unseen.execute!.apply_default!(grill)), /default no longer applies/);
+});
+
+test("W1-T8868: evidence counts earlier re-kicks by head or contract revision and detects a new failure cause", () => {
+  const root = runtimeRoot();
+  const history = [
+    { step: "fix.dispatch", task_id: "W1-TK", head_sha: "h1", mode: "ci-log" },
+    { step: "escalation.auto_resolve_attempted", task_id: "W1-TK", triage_action: "rekick_once", head_sha: "h1" },
+    { step: "escalation.auto_resolve_attempted", task_id: "W1-TK", triage_action: "rekick_once", head_sha: "h0", contract_revision: "c1" },
+    { step: "escalation.auto_resolve_attempted", task_id: "W1-TK", triage_action: "rekick_once", head_sha: "h0", contract_revision: "c9" },
+  ];
+  const settings = buildEscalationTriageRuntime({ root, config: { root } as Config, owner: "o", repo: "r" }, {
+    readPolicy: ACT_POLICY, readRows: () => history, seenAt: () => undefined, windowMs: () => 1,
+  })({ issues: gateway(), ledgerPath: ledger(), runId: "r" });
+  const evidence = settings.evidence!(esc({ taskId: "W1-TK", headSha: "h1", contractRevision: "c1", cause: "conflict" }));
+  assert.deepEqual(evidence.rekick, { priorRekicks: 2, newFailureSinceLastStrike: true });
+  assert.equal(evidence.defaultApplies, false);
+});
+
+test("W1-T8868: plan_amendment_pr over the real sweep effects holds the task and reports an unopened amendment", async () => {
+  const root = runtimeRoot();
+  // `state` is a plain file, so the hold write fails and the effect's own log line reaches the ledger.
+  writeFileSync(join(root, "state"), "not a directory");
+  const lp = ledger();
+  writeFileSync(lp, "");
+  const settings = buildEscalationTriageRuntime(
+    { root, config: { root, claudeBin: "/bin/true" } as Config, owner: "o", repo: "r" },
+    { readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1 },
+  )({ issues: gateway(), ledgerPath: lp, runId: "RUN-T8868" });
+  await assert.rejects(settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TK" }), /amendment not opened: (no_shard|error)/);
+  assert.ok(rows(lp).some((r) => r.step === "sweep.refusal_amendment.hold_failed" && r.task_id === "W1-TK" && r.run_id === "RUN-T8868"));
+  await assert.rejects(settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TD" }), /amendment not opened: task_closed/);
+});
+
+// ── the daemon-loop rejudge sweep ────────────────────────────────────────────────────────────
+
+function sweepFixture(amend: () => Promise<string>) {
+  const root = runtimeRoot();
+  const lp = ledger();
+  const url = "https://github.com/craigoley/remudero/issues/41";
+  const subject = staleProof();
+  const comments: string[] = [];
+  const relabels: Array<[string, string]> = [];
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const issues = {
+    listOpen: (label: string) => label === NEEDS_HUMAN_LABEL ? [{ number: 41, url, title: subject.summary, body: `**Task:** ${subject.taskId}\n` }] : [],
+    comment: (_url: string, body: string) => { comments.push(body); },
+  } as unknown as IssueGateway;
+  const birth = {
+    ts: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), step: "escalation.issue_opened",
+    task_id: subject.taskId, issue_url: url, triage_subject: subject,
+  };
+  const context = { root, config: { root } as Config, owner: "o", repo: "r", ledgerPath: lp, runId: "SWEEP-T8868" };
+  const runtime = buildEscalationTriageRuntime(context, {
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1, amend,
+  });
+  const run = () => sweepEscalationTriage(context, [], (step, extra) => { logged.push({ step, extra }); }, {
+    rows: [birth], issues, runtime, relabel: (u, label) => { relabels.push([u, label]); },
+  });
+  return { run, url, lp, comments, relabels, logged };
+}
+
+test("W1-T8868: the rejudge sweep auto-resolves an old issue and relabels it fleet-notice", async () => {
+  const f = sweepFixture(async () => "https://github.com/o/r/pull/1 proposes the proof amendment; decline the PR to undo");
+  await f.run();
+  assert.deepEqual(f.relabels, [[f.url, FLEET_NOTICE_LABEL]]);
+  assert.match(f.comments[0], /plan_amendment_pr/);
+  assert.ok(rows(f.lp).some((r) => r.step === "escalation.auto_resolve_started" && r.issue_url === f.url));
+  assert.ok(rows(f.lp).some((r) => r.step === "escalation.rejudged" && r.issue_url === f.url));
+  assert.deepEqual(f.logged.filter((l) => /failed/.test(l.step)), []);
+});
+
+test("W1-T8868: a failed auto-resolve in the rejudge sweep puts the issue back on needs-human", async () => {
+  const f = sweepFixture(async () => { throw new Error("amendment refused"); });
+  await f.run();
+  assert.deepEqual(f.relabels, [[f.url, NEEDS_HUMAN_LABEL]]);
+  const failed = f.logged.find((l) => l.step === "sweep.escalation_auto_resolve.failed");
+  assert.equal(failed?.extra?.issue_url, f.url);
+  assert.match(String(failed?.extra?.reason), /auto-resolve declined/);
+});
+
+test("W1-T8868: an unreadable issue listing is logged by the rejudge sweep, never thrown", async () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const root = runtimeRoot();
+  const issues = { listOpen: () => { throw new Error("listing unavailable"); } } as unknown as IssueGateway;
+  await sweepEscalationTriage(
+    { root, config: { root } as Config, owner: "o", repo: "r", ledgerPath: ledger(), runId: "SWEEP-T8868" },
+    [], (step, extra) => { logged.push({ step, extra }); }, { rows: [], issues },
+  );
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].step, "sweep.escalation_triage.failed");
+  assert.match(String(logged[0].extra?.reason), /listing unavailable/);
 });
