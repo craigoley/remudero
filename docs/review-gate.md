@@ -77,6 +77,15 @@ a call's arguments still names untouched sibling calls, including the W1-T3239
 shared-reader case. This rubric is advisory; the required review verdict remains
 owned by the deterministic judge.
 
+## Concern companions
+
+The shared companion policy counts `test/setup/` and `test/helpers/` implementation
+files as concerns. Behavior-named suites accompany those helpers, just as they
+accompany product source. Files ending in `.test.*` or `.spec.*` remain suites,
+including suites inside helper directories. A diff containing only suites still
+counts each suite stem, and two distinct helper or product stems remain two concerns.
+The review rubric and task linter read the same policy.
+
 ## Required contexts
 
 ```

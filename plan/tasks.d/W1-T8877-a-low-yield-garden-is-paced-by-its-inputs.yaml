@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator ruling 2026-10-12: optimize and right-size what we have"
   plan_refs: []
-  files: [src/lib/host-resource-gardener.ts, src/lib/garden-registry.ts, test/a-low-yield-garden-is-paced-by-its-inputs.test.ts]
+  files: [src/lib/host-resource-gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/a-low-yield-garden-is-paced-by-its-inputs.test.ts, test/a-garden-pass-spawns-only-when-its-inputs-changed.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -32,6 +32,11 @@
        hourly.
     2. flow-remedy: the same inputs-changed pacing, with a 30-min floor.
     3. An idle (inputs-unchanged) decision writes one rate-limited lifecycle row per hour, not per tick.
+    Wire both real production passes and their due probes in buildRegisteredGarden; the host-resource pass currently
+    exposes no due probe. Reuse the persistent garden-pacing record and the existing flow cheap fingerprint. The host
+    input identity reads local heartbeat refs (including packed refs and worktree common refs) plus sample-file identity
+    without a subprocess or network read. Its hourly fallback still fetches remote beats. Cover this composition in the
+    existing due-probe suite, which already imports run-task, rather than growing the importer census with a new suite.
   acceptance:
     - claim: "host-resource and flow-remedy run only when their inputs changed and never more than every 30 minutes, still at least hourly for host-resource, and idle decisions are rate-limited"
       proof: 'grep: test("W1-T8877: a low-yield garden is paced by its inputs" in test/a-low-yield-garden-is-paced-by-its-inputs.test.ts'
