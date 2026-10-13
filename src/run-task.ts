@@ -13293,8 +13293,9 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
-    const censusSnapshotPath = fixHarnessOwnsGit ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
-    if (fixHarnessOwnsGit && !deps.writeFixCensusSnapshot) {
+    const fixCensusApplies = fixCensusAppliesToRepo(opts.reviewBase.repo, deps.log);
+    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
@@ -18330,6 +18331,30 @@ const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
 
+/** W1-T8918: core's census suites (census-precheck and the reach ratchet) measure core's own registry and shrink-only
+ *  baselines, so they run only for the harness's own repository. Decided by repository IDENTITY — the task's repo
+ *  against the repo the harness serves — never by whether a baseline file exists: a core branch that deletes
+ *  scripts/affected-reach-baseline.json must still be refused. A repo that is not core's is ledgered
+ *  `fix.census_check` "not-applicable" so the skip is visible. An unnamed repo or an unresolvable core identity
+ *  keeps the check (fail closed), and says why. */
+export function fixCensusAppliesToRepo(
+  repo: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  resolveSelf: () => { owner: string; repo: string } = resolveOwnerRepo,
+): boolean {
+  if (repo === undefined) return true;
+  let coreRepo: string;
+  try {
+    coreRepo = resolveSelf().repo;
+  } catch (error) {
+    log("fix.census_check", { outcome: "core-identity-unresolved", repo, reason: String(error) });
+    return true;
+  }
+  if (repo === coreRepo) return true;
+  log("fix.census_check", { outcome: "not-applicable", repo, core_repo: coreRepo });
+  return false;
+}
+
 export function writeFixCensusSnapshot(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -18787,7 +18812,7 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits ? writeFixCensusSnapshot(cwd, log) : undefined;
+    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? writeFixCensusSnapshot(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,

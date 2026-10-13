@@ -3509,8 +3509,20 @@ export interface components {
         registryError?: string;
       };
     };
+    /** W1-T8825: who sent an inbox item - the producer id (a machine-judge item's filer family, else the proposal id's kind) and its fixed display name (src/lib/inbox-owner.ts). Never a proposal id. */
+    InboxSender: {
+      kind: string;
+      name: string;
+    };
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary?: string;
       plain?: PlainInboxMessage;
@@ -4281,6 +4293,13 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4293,6 +4312,13 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4303,6 +4329,13 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4326,6 +4359,13 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -4343,6 +4383,13 @@ export interface components {
     };
     /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
     InboxFleetItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
