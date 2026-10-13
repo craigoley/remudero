@@ -1183,16 +1183,16 @@ export function* hydrateCodeqlHeadAlertsSteps(
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────
- * Workflow run observations (W1-T2340) — the producer for `OpenPrView.workflowRuns`.
- *
- * `stalledRunReason` (lib/sweep.ts) joins a run's own conclusion against its jobs' statuses: a job left
- * non-terminal inside an already-concluded run will never move, because a terminal run schedules
- * nothing further. The rollup cannot answer that — it is check-runs, and such a run contributes entries
- * that merely look pending. A `KNOWN_UNWIRED` entry was refused because `stalledRunReason(undefined)`
- * returns `undefined`, so it would ship a detector that never fires. The cost bound is read off the
- * predicate, never picked: across PRs, only heads whose `checksState` reads `pending`; within a PR,
- * jobs only for runs already concluded. Cadence, not volume, is what bites, so this adds no loop and
- * no wait of its own (docs/forensics/open-prs-rest.md).
+ * Workflow run observations (W1-T2340) — the producer for `OpenPrView.workflowRuns`. `stalledRunReason`
+ * (lib/sweep.ts) joins a run's own conclusion against its jobs' statuses: a job left non-terminal inside an
+ * already-concluded run will never move, because a terminal run schedules nothing further. The rollup cannot
+ * answer that — it is check-runs, and such a run contributes entries that merely look pending. A
+ * `KNOWN_UNWIRED` entry was refused because `stalledRunReason(undefined)` returns `undefined`, so it would ship
+ * a detector that never fires. The cost bound is read off the predicate, never picked: across PRs, only heads
+ * whose `checksState` reads `pending`; within a PR, jobs only for runs already concluded. Cadence, not volume,
+ * is what bites, so this adds no loop and no wait of its own (docs/forensics/open-prs-rest.md). GitHub's jobs
+ * listing can trail its runs listing, so a running job is a stall only when a LATER read of that attempt still
+ * shows it: #9482 and #11239 each escalated a head whose every job read `completed` minutes later.
  * ──────────────────────────────────────────────────────────────────────────────────────────── */
 
 /** Hard ceiling on the PRs this hydrates in one sweep pass. Above it the rest keep
@@ -1215,18 +1215,47 @@ export function jobsForRunRestArgs(owner: string, repo: string, runId: number): 
   return ["api", `repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`];
 }
 
-/** True when a run's conclusion is populated — GitHub sets it only once the run itself concluded.
- *  The SAME first clause {@link "./sweep.js".stalledRunReason} tests, kept here so the fetch scope
- *  and the predicate cannot drift apart. */
+/** True when a run's conclusion is populated — GitHub sets it only once the run itself concluded. The SAME first
+ *  clause {@link "./sweep.js".stalledRunReason} tests, kept here so the fetch scope and the predicate cannot drift apart. */
 function runHasConcluded(conclusion: unknown): boolean {
   return typeof conclusion === "string" && conclusion.trim() !== "";
 }
 
-export const CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES = 2_048; // BACKSTOP: a concluded attempt's jobs are immutable
+export const CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES = 2_048; // BACKSTOP: a concluded attempt's settled jobs are immutable
 
 export type ConcludedRunJobsCache = Map<string, ReadonlyArray<{ status?: string }>>;
 
 const concludedRunJobs: ConcludedRunJobsCache = new Map();
+
+export type StuckRunSuspects = Set<string>;
+
+const stuckRunSuspects: StuckRunSuspects = new Set();
+
+function jobSettled(job: { status?: string }): boolean {
+  return (job.status ?? "").toLowerCase() === "completed";
+}
+
+/** One fresh jobs read of a concluded attempt: all settled is cached; a running job is reported only on a re-read. */
+function concludedRunJobsAsRead(
+  jobs: ReadonlyArray<{ status?: string }>,
+  runKey: string,
+  cacheKey: string | undefined,
+  jobsCache: ConcludedRunJobsCache,
+  suspects: StuckRunSuspects,
+): ReadonlyArray<{ status?: string }> | undefined {
+  if (jobs.every(jobSettled)) {
+    suspects.delete(runKey);
+    if (cacheKey !== undefined) {
+      jobsCache.set(cacheKey, jobs);
+      if (jobsCache.size > CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES) jobsCache.delete(jobsCache.keys().next().value as string);
+    }
+    return jobs;
+  }
+  if (suspects.has(runKey)) return jobs;
+  suspects.add(runKey);
+  if (suspects.size > CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES) suspects.delete(suspects.values().next().value as string);
+  return undefined;
+}
 
 /** Observations for one head: every workflow run on it, with jobs attached to the runs that have
  *  already concluded. A run still in progress is reported without jobs, since the predicate cannot
@@ -1238,8 +1267,9 @@ export function fetchWorkflowRunObservations(
   headSha: string,
   fetch: GhApiFetcher,
   jobsCache: ConcludedRunJobsCache = concludedRunJobs,
+  suspects: StuckRunSuspects = stuckRunSuspects,
 ): WorkflowRunObservation[] {
-  return runGhReadSteps(workflowRunObservationSteps(owner, repo, headSha, fetch, jobsCache));
+  return runGhReadSteps(workflowRunObservationSteps(owner, repo, headSha, fetch, jobsCache, suspects));
 }
 
 function* workflowRunObservationSteps(
@@ -1248,6 +1278,7 @@ function* workflowRunObservationSteps(
   headSha: string,
   fetch: GhApiFetcher,
   jobsCache: ConcludedRunJobsCache,
+  suspects: StuckRunSuspects,
 ): GhReadSteps<WorkflowRunObservation[]> {
   const listing = (yield* ghRead(fetch, runsForHeadRestArgs(owner, repo, headSha))) as {
     workflow_runs?: ReadonlyArray<{ id?: number; run_attempt?: number; conclusion?: string | null }>;
@@ -1270,11 +1301,8 @@ function* workflowRunObservationSteps(
       const j = (yield* ghRead(fetch, jobsForRunRestArgs(owner, repo, run.id))) as {
         jobs?: ReadonlyArray<{ status?: string | null }>;
       };
-      jobs = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
-      if (key !== undefined) {
-        jobsCache.set(key, jobs);
-        if (jobsCache.size > CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES) jobsCache.delete(jobsCache.keys().next().value as string);
-      }
+      const read = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
+      jobs = concludedRunJobsAsRead(read, key ?? `${owner}/${repo}#${run.id}`, key, jobsCache, suspects);
     } catch {
       /* leave `jobs` undefined: "could not check", never "nothing was scheduled" */
     }
@@ -1306,7 +1334,7 @@ export function* hydrateWorkflowRunsSteps(
   const out = new Map<number, readonly WorkflowRunObservation[]>();
   for (const p of pendingPrs.slice(0, cap)) {
     try {
-      out.set(p.number, yield* workflowRunObservationSteps(owner, repo, p.headRefOid, fetch, concludedRunJobs));
+      out.set(p.number, yield* workflowRunObservationSteps(owner, repo, p.headRefOid, fetch, concludedRunJobs, stuckRunSuspects));
     } catch {
       /* best-effort: this PR keeps the pre-existing undefined workflowRuns, the pass continues */
     }
