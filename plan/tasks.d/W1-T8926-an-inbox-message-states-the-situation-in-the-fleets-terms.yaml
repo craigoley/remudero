@@ -1,0 +1,78 @@
+- id: W1-T8926
+  title: "AN INBOX MESSAGE STATES THE SITUATION IN THE FLEET'S TERMS — the writer sees only the raw summary and generic style rules, and the checker checks only shape and code-like tokens, so fleet CI minutes become \"developers lost 12 working hours\", a merge-arm blocker becomes a \"Deployment Policy Change\", headlines tell the operator which option to pick, and four operator kinds have no template"
+  repo: remudero
+  depends_on: [W1-T8829]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # changes the inbox writer's context, its checker and its templates, and re-writes every stored message (Rule 19)
+  band_meaning: span
+  origin: "operator session 2026-10-12/13: console inbox review (\"we were supposed to have an interpreter making this more understandable\"); interpreter-quality audit of the live plain store"
+  plan_refs: [W1-T4087, W1-T8829, W1-T8826, W1-T2498]
+  files: [src/lib/inbox-plain.ts, test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts, test/every-inbox-message-is-plain-language.test.ts, test/inbox-plain-source.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host's state/inbox-plain.json (345 stored messages: 195 verify-human, 106 board-review,
+    39 machine-judge, 3 standing-debt, 1 guard-retirement, 1 ruling; 339 model-written):
+    - fleet time as people's time: machine-judge:W1-T5984 "It has cost developers over 12 working hours of lost
+      productivity." The source measures 12.19 PR-hours of fleet CI time; there are no developers.
+    - framing the item is not about: machine-judge:W1-T6021 "Deployment Policy Change — Awaiting Approval" (an
+      awaiting-arm blocker), verify-human:W2-T2 "Human review required before production changes".
+    - headlines that pre-judge the decision (12): machine-judge:W1-T7698 "A plan-only change is stuck; approve it to release
+      it.", verify-human:W1-T1015 "Approve clear credit for updates the sweep itself made", verify-human:W1-T4350
+      "Approve the change to stop approval stamps from colliding".
+    - harness terms in the headline or what happened (19): "lane", "gate", "sweep", "shard", "rung", "ratchet" — e.g.
+      verify-human:W1-T3588 "Decide how the lane should meet the gate".
+    - placeholder headlines (7, plus template fallbacks): machine-judge:W1-T6170 and W1-T6175 "Review the original record"
+      with "A record is available, but this summary does not verify its current facts or requested action.";
+      board-review:escalation:#7244 "The fleet has an item for you to look at"; verify-human:W1-T3187 "The item still
+      needs your review".
+    (The "if nothing happens" non-answer — 288 of 345 — is W1-T8829's; option-to-action mapping is W1-T8826's.)
+    ROOT CAUSE on origin/main, src/lib/inbox-plain.ts: `writerContext` gives the model only the raw summary plus generic
+    style rules ("Write for a busy person who does not read code ..."), never who the reader is or what the item's costs
+    measure; `checkPlainMessage` checks only the decision-card shape and `machineTokens` (code spans, paths, ids,
+    commands, identifiers), so plain-English misstatements and harness words pass; `TEMPLATES` (written for the kinds live
+    on 2026-09-22) has no machine-judge, board-review, guard-retirement or standing-debt template, so a writer failure on
+    those falls to `UNKNOWN_TEMPLATE`'s "Review the original record" — and the standing-debt kind resolves to
+    "craigoley/remudero/standing-debt", never matching a template key.
+  design: |
+    1. Templates for every operator-owned kind seen live — machine-judge (who filed it and why the risk judge parked it),
+       board-review, guard-retirement, standing-debt (keyed by the kind's last path segment, so
+       "craigoley/remudero/standing-debt" resolves) — each stating a real situation from the summary, never a placeholder.
+    2. The writer's context names the reader (the operator of an autonomous software fleet) and the units: PR-minutes,
+       rounds and hours in an item are the fleet's machine and CI time, never people's time; a merge, arm, review or
+       workflow change is not a deployment unless the item says so; the headline states the situation and never which
+       option to choose; and it carries a short glossary turning harness words into plain ones (task record, review
+       step, cost check, ...).
+    3. `checkPlainMessage` refuses, and the existing one-retry path re-asks with the problem named: (a) people-time
+       wording ("developers", "engineers", "working hours", "productivity", ...) when the source summary names no people;
+       (b) deployment or production framing when the source does not mention deployment or production; (c) a headline that
+       opens with one of the message's own option labels or a verdict verb (approve, reject, release, decline, keep,
+       "do not"); (d) harness glossary terms in the headline or what-happened; (e) a placeholder headline for a kind that
+       has a template.
+    4. Backfill: bump the plain contract version W1-T8829 introduces, so every stored message is written again once by the
+       existing backfill.
+  acceptance:
+    - claim: "every operator-owned kind seen live, standing-debt included, has its own template and none is a placeholder"
+      proof: 'grep: test("W1-T8926: every operator kind seen live has its own template" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "fleet CI time described as people's working hours is refused and re-asked"
+      proof: 'grep: test("W1-T8926: fleet time described as working hours is refused" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "deployment framing for an item that is not about deployment is refused"
+      proof: 'grep: test("W1-T8926: deployment framing the source never mentions is refused" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "a headline that tells the operator which option to pick is refused"
+      proof: 'grep: test("W1-T8926: a headline that picks an option is refused" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "harness terms in the headline or what-happened are refused"
+      proof: 'grep: test("W1-T8926: harness terms in the headline are refused" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "the writer is told who reads the message and what the item's costs measure"
+      proof: 'grep: test("W1-T8926: the writer is told who reads it and what the costs measure" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+    - claim: "stored messages from the previous contract are written again"
+      proof: 'grep: test("W1-T8926: a message stored under the previous contract is written again" in test/an-inbox-message-states-the-situation-in-the-fleets-terms.test.ts'
+  falsifier: |
+    Check the live machine-judge:W1-T5984 message (whatHappened "It has cost developers over 12 working hours of lost
+    productivity.") against a source summary that speaks only of PR-minutes: at origin/main `checkPlainMessage` passes it;
+    with the change it is refused. The same for W1-T7698's headline "A plan-only change is stuck; approve it to release
+    it." and W1-T3588's "Decide how the lane should meet the gate", and `plainTemplate` for machine-judge:W1-T6170 no
+    longer reads "Review the original record".
