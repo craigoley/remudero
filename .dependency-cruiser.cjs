@@ -27,6 +27,18 @@ module.exports = {
       to: { path: "^src/(spike|run-task)\\.ts$|^src/cli/" },
     },
     {
+      name: "cli-no-run-task",
+      severity: "error",
+      comment:
+        "src/cli/ must never import the CLI entrypoint (src/run-task.ts). A verb module " +
+        "receives what it needs from run-task.ts through a host parameter that the HANDLERS " +
+        "entry supplies, never through an import, because that import is a cycle with " +
+        "HANDLERS (which imports the module back) and a top-level const in the cycle reads " +
+        "as a TDZ error at load. W1-T9331.",
+      from: { path: "^src/cli/" },
+      to: { path: "^src/run-task\\.ts$" },
+    },
+    {
       name: "drafter-never-sees-held-out-set",
       severity: "error",
       comment:
