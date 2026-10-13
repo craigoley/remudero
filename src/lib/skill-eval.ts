@@ -289,8 +289,10 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
   catch (error) {
     const reason = failureReason("cleanup-failed", error);
     reasons.push(reason);
+    control?.cancel(`eval-cleanup-unverified: ${reason}`);
   }
-  return { taskId: item.taskId, ...slot, verdict, costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,
+  return { taskId: item.taskId, ...slot, verdict: control?.checkpoint() === false ? "unmeasurable" : verdict,
+    costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,
     breach, headSha: attempt?.headSha ?? null, reasons };
 }
 

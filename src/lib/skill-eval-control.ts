@@ -10,6 +10,7 @@ export interface SkillEvalControlInput {
 export interface SkillEvalControl {
   readonly signal: AbortSignal;
   checkpoint(): boolean;
+  cancel(reason: string): void;
   dispose(): void;
 }
 /** BACKSTOP: cooperative polling of a fixed deadline, not proof of descendant termination. */
@@ -40,5 +41,6 @@ export function createSkillEvalControl(input?: SkillEvalControlInput): SkillEval
   checkpoint();
   const timer = setInterval(checkpoint, SKILL_EVAL_CONTROL_POLL_MS);
   timer.unref();
-  return { signal: controller.signal, checkpoint, dispose: () => { clearInterval(timer);signal?.removeEventListener("abort", cancel); } };
+  return { signal: controller.signal, checkpoint, cancel: reason => controller.abort(reason),
+    dispose: () => { clearInterval(timer);signal?.removeEventListener("abort", cancel); } };
 }

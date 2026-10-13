@@ -108,13 +108,13 @@ test("an expired skill eval control refuses new attempts while preserving the qu
     grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 100 } };
   assert.equal((await runSkillEval(input)).state, "cancelled");assert.equal(fleet.built.length, 0);
   assert.equal((await runSkillEval({ ...input, argv: [] })).state, "refused");
-  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "up", quiet: false }, headroom: HEADROOM } })).state, "refused");
+  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "up" }, headroom: HEADROOM } })).state, "refused");
 });
 
 test("skill eval cancellation during grading or failed cleanup is never an evaluated success", async () => {
   const { runSkillEval } = await skillEval(), selection = await selected();
   for (const phase of ["grading", "cleanup"] as const) {
-    const source = new AbortController(), fleet = fakeFleet(LIFTS, () => phase === "cleanup" ? { cleanup: () => { source.abort();throw new Error("cleanup EIO"); } } : {});
+    const source = new AbortController(), fleet = fakeFleet(LIFTS, () => phase === "cleanup" ? { cleanup: () => { throw new Error("cleanup EIO"); } } : {});
     const grade = (req: Parameters<typeof fleet.grade>[0]) => { if (phase === "grading") source.abort();return fleet.grade(req); };
     const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
       grade, argv: CONFIRM, idle: IDLE, log: fleet.log,
