@@ -30,7 +30,7 @@
     pass could land. Bounded edits per pass keep a wholesale rewrite from collapsing the context workers are given
     (ACE, ICLR 2026; Microsoft SkillOpt). The operator ruled 3 on 2026-10-13. The operator approved replacing that
     fixed number with an adaptive bound on 2026-10-13, under the standing rule against hard fixed thresholds. The
-    bound below reproduces 3 exactly on a fresh record, so it changes nothing until evidence moves it.
+    bound below gives exactly 3 on a fresh record. Today's retire record earns 5 (see below).
     THE EVIDENCE THE GARDENER ALREADY KEEPS. Each class has a Beta record (`GardenState.classes`, src/lib/gardener.ts).
     It starts at Beta(3, 1) (`initialGardenState`). It gains alpha or beta when the class's PR is closed (a debit),
     when its metric moves beyond one standard error after a merge (`judgeGardenPending`), and when the gardener
