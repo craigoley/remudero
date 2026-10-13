@@ -1,0 +1,101 @@
+- id: W1-T9323
+  title: "DISPATCH ORDERS BY A COST-OF-DELAY SCORE THAT AGES, AND PRIORITY IS ONE INPUT TO IT — `compareDispatch` sorts on `priority` before the stride, so on 2026-10-13 about 20 dependency-met auto tasks sat at priority <= 1 and 28 more at <= 1.5, and filers minted 0.9-0.93 (#11483, #11485) to get ahead: an arms race the order cannot end"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the comparator's primary key becomes the cost-of-delay stride, and priority becomes a bounded input to the score; the fallback order is unchanged
+  band_meaning: span
+  origin: "operator approval 2026-10-13: the dispatch diagnosis's priority-inflation finding; W1-T8514's rationale named the tier-crossing change as a separate operator decision, and this is that decision"
+  plan_refs: [W1-T4064, W1-T3412, W1-T7534, W1-T3075, W1-T8514, W1-T8502, W1-T8771, W1-T422]
+  files: [src/lib/drain.ts, src/lib/dispatch-value.ts, test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on origin/main bbab8894f, 2026-10-13 ~22:40Z. Open means no `Remudero-Task:` trailer on main and a
+    shard status that is not merged, retired, done or blocked. Of 329 such tasks, the dependency-met `verify: auto` ones
+    split 20 at priority <= 1, 28 in (1, 1.5] and 203 above or absent. Six carry values below 1: W1-T9030 0.9,
+    W1-T9252 0.9, W1-T8776 0.91, W1-T9062 0.915, W1-T8950 0.92 and W1-T8831 0.93. Every one was minted to get ahead
+    of the tasks at 1.
+    THE PATH, read on origin/main bbab8894f (symbols, not lines):
+      - `compareDispatch` (src/lib/drain.ts) returns `pa - pb` on any priority difference before it reads
+        `stridePassByTaskId`. W1-T4064's cost-of-delay stride, built in `costOfDelayContext`
+        (src/lib/dispatch-value.ts), therefore orders tasks only inside one priority tier, and never across one.
+      - So any value below the head wins outright, however long the rest of the queue has waited. The only way
+        for a filer to move a task forward is a smaller number, and the next filer does the same. Nothing in the
+        order ages a waiting task past a fresher one with a smaller number.
+      - `costOfDelayContext` scores a task as validity-at-age x (1 + open dependents) x class value x merge
+        probability, then sets `pass = (1 + starts) / score`. Filing age enters only through the validity share,
+        which falls with age, so a task does not gain from waiting.
+      - An open task the filing scan cannot date is left out of `stridePassByTaskId` (W1-T7534) and sorts after
+        the scored tier. The core ledger's `dispatch.cost_of_delay.ready` rows at 20:12Z, 21:27Z and 22:21Z on
+        2026-10-13 each list `unscored: [NEW-1A, NEW-1B, NEW-1a, NEW-1b]`: ids the scan's `-T<n>` pattern cannot
+        read. A task missing from a filing snapshot that is one selection behind the plan is unscored the same way.
+    WHY NOT A FLOOR OR A CAP on priority values: the operator's rule is no hard thresholds. The weight below is
+    bounded by the queue's own shape: the share of the open queue a task outranks, and a measured median wait.
+    No number is fixed.
+    HOW THIS DIVIDES WITH THE NEIGHBOURS. W1-T8514 (PR #11492, open) reserves a skipped task's files against
+    strictly lower-priority candidates inside the pack. It reads `priority`, not order, so it is unaffected. Its
+    rationale's "stride aging never crosses a tier" premise is what this task changes, on the operator's 2026-10-13
+    approval. W1-T8771 names the tasks a pack passes over. The sibling task W1-T9325 writes the row that explains each
+    pick. W1-T9328 is the lint half of the same finding. This task changes only the order.
+  design: |
+    1. Priority as a bounded input (src/lib/dispatch-value.ts). Add optional `priority?: number` to
+       `DispatchValueTask`. In `costOfDelayContext`, compute for each open task its `priorityHeadStart`: the share of
+       the OTHER open tasks whose priority is strictly lower-ranked. An absent priority counts as lowest, as in
+       `compareDispatch`. The share lies in [0, 1), so a task at the head with nobody else there reads nearly 1, and
+       a task in the bottom tier reads 0. Minting a value below the head moves this share only by the tasks it newly
+       outranks.
+    2. Aging (same function). Measure `medianWaitMs` from the evidence the function already reads: the median, over
+       runs in the window, of first `run.start` minus the task's filing time. Use the same `starts` map and
+       `snapshot.filedAtByTaskId`, and keep only runs with a known filing time no later than the start. The task's
+       urgency is `1 + age / medianWaitMs + priorityHeadStart`, which multiplies the existing score.
+       `pass = (1 + starts) / score` is unchanged. A task's pass therefore falls as it waits, and priority is worth
+       at most one median wait of head start. With no wait sample at all, the context is refused with reason
+       `no-wait-evidence`, which takes today's fallback path.
+    3. Every open task scored. An open task the filing history cannot date, because its id is unreadable or it is
+       absent from a snapshot one selection behind, is scored at age 0 rather than left out. List these in a new
+       `costOfDelayImputed` field. `costOfDelayReadyRow` names them as `imputed` in the ready row, deduped per plan
+       tree exactly as `unscored` is now. When the context is ready, `costOfDelayUnscored` is always empty.
+    4. Order (src/lib/drain.ts). In `compareDispatch`, when `context.stridePassByTaskId` is present and the context
+       is not `costOfDelayFallback`, compare the stride passes FIRST, and use priority only as the first tiebreak
+       after them. The rest of the chain (undeclared scope, value, fanout, id) is unchanged. When there is no
+       context, or it is a fallback, the comparator is byte-identical to today's, so the order stays priority first.
+    5. Unchanged: eligibility, the pack and `packDisjointFirst`, overlap admission, W1-T8514's reservation, the
+       validity share, the Thompson draw, the fanout term and every ledger row except the ready row's `imputed` field.
+    Existing tests that assert priority-first order WITH a complete cost-of-delay context are updated to the new
+    rule, and the PR body names each one. Tests with no context, or a fallback context, must pass untouched.
+    New tests go in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts, with `test(`
+    titles exactly as in the proofs below. Build injected plans and evidence rows with fixed timestamps. No live
+    ledger, no git and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts"
+    - claim: "a lower-priority task that has waited longer than the measured median wait outranks a fresh higher-priority task"
+      proof: 'grep: test("W1-T9323: a lower-priority task that has waited past the median wait outranks a fresh higher-priority task" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "between two tasks of equal age, the higher-priority one still dispatches first"
+      proof: 'grep: test("W1-T9323: between equally old tasks the higher priority dispatches first" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "a priority value below the queue head buys only the share of the queue it newly outranks"
+      proof: 'grep: test("W1-T9323: a priority below the queue head buys only the share it newly outranks" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "an open task the filing history cannot date is scored at age zero and named as imputed, never left unscored"
+      proof: 'grep: test("W1-T9323: an undatable open task is scored at age zero and named as imputed" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "without a ready cost-of-delay context the order is priority first, exactly as before"
+      proof: 'grep: test("W1-T9323: without a ready cost-of-delay context the order stays priority first" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "the score carries the priority head start"
+      proof: 'grep: priorityHeadStart in src/lib/dispatch-value.ts'
+  falsifier: |
+    Evidence: a median wait of 2 h. Queue: P2 X filed 5 h ago and P1 Y filed now, both unstarted, same class, no
+    dependents. Today Y dispatches first because its priority is lower. With the fix, X's urgency is 1 + 2.5 + 0 =
+    3.5 against Y's 1 + 0 + ~1, so X dispatches first. Put priority back as the comparator's first key and the first
+    test reads Y. Drop the head start and the second test (X and Y both filed now) ties on age and is decided by id.
+    Weight raw priority values instead of the outranked share, and the third test sees 0.5 beat 0.9 by more than
+    one rank. Leave an undated task out of the stride, and the fourth test finds it sorted last.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: for each `run.start`, compare
+    the started task's filing age and priority with the runnable frontier's. Healthy shape: no task waits more than a
+    couple of median waits behind fresher work, and new filings stop minting values below 1. Read W1-T9328's lint warnings
+    for the second. Rows to watch: `dispatch.cost_of_delay.ready` (`imputed` should list only genuinely new ids) and
+    `dispatch.cost_of_delay.fallback` with reason `no-wait-evidence`.
