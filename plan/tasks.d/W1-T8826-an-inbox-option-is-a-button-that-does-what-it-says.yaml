@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-12: console inbox review; mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
   plan_refs: [W1-T4087, W1-T2604, W1-T3407]
-  files: [src/lib/inbox-plain.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts]
+  files: [src/lib/inbox-plain.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts, "openapi/daemon.yaml", "packages/api-client/src/schema.d.ts"]
   status: queued
   priority: 1
   attempts: 0

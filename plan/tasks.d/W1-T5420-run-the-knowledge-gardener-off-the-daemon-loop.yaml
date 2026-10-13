@@ -12,7 +12,7 @@
   origin: "2026-10-03 approved follow-up; read-only core startup investigation"
   plan_refs: [W1-T5114, W1-T5361, W1-T5285]
   files: [src/lib/garden-registry.ts, src/run-task.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts, test/knowledge-garden-off-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at dde31b951bbb682c42a28dd3bb5652142ac98cf2, rechecked at filing

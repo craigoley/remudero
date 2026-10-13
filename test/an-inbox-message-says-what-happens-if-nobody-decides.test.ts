@@ -33,8 +33,8 @@ const card = (extra: Record<string, unknown> = {}) => ({
   what_happened: "A fix for a slow build is parked and waiting for a ruling.",
   decision: "Decide whether the fix should go ahead.",
   options: [
-    { label: "Let it go ahead", consequence: "The fix is built and merged." },
-    { label: "Drop it", consequence: "The fix is closed." },
+    { label: "Let it go ahead", consequence: "The fix is built and merged.", intent: "approve" as const },
+    { label: "Drop it", consequence: "The fix is closed.", intent: "decline" as const },
   ],
   ...extra,
 });

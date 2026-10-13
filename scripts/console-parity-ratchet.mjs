@@ -116,6 +116,8 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // Explicit host-local state inspection; never a remote console mutation surface.
+      "inspect",
       // Phase 1 P1-04: rebuilds and swaps a host-local SQLite file and writes the kill-switch file on
       // the daemon host; the console reads the views it feeds, never the store itself.
       "read-model",
@@ -132,6 +134,9 @@ export const CLI_ONLY = {
       "host-alert",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
+      // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
+      // a spend the operator confirms per invocation, not a console action.
+      "skill-eval",
       "benchmark-aa",
       "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —

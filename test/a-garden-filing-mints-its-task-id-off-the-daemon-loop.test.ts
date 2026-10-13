@@ -107,7 +107,7 @@ test("W1-T7742: every minting gardener files with the async-minted id while the 
   const search = { filesContaining: () => [{ file: "src/lib/owner.ts", hits: 1 }], fileExists: () => true };
   const ci = ciFrictionGardenSpec(f.deps, {
     ledgerRecords: () => [], planState: () => ({ tasks: [] }), ownerSearch: search, mintTaskId: mint,
-    gateFireRates: () => ({ status: "measured", prsScanned: 19, gates: [{ gate: "reviewer-unmet", prs: 19, runs: 26, redRuns: 26, refusals: 26, repaired: 26, overridden: 0, minutes: 465 }], neverFired: [], alwaysFired: [] }),
+    gateFireRates: () => ({ status: "measured", prsScanned: 19, gates: [{ gate: "reviewer-unmet", prs: 19, runs: 26, redRuns: 26, refusals: 26, repaired: 26, overridden: 0, minutes: 465, redMinutes: 465, redPrs: 19 }], neverFired: [], alwaysFired: [] }),
   });
   const ciActions = ci.candidates(ci.inventory(), () => 0);
   assert.equal(ciActions.length, 1);

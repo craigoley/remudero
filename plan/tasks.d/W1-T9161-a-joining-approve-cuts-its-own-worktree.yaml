@@ -1,0 +1,97 @@
+- id: W1-T9161
+  title: "A JOINING APPROVE CUTS ITS OWN WORKTREE AND BRANCH — joinRatificationBranch and completeRatificationBranch run `git worktree add -b <the open plan PR's branch>` at that branch's shared path, so any second approve while the first still holds it fails 'a branch named ... already exists': 4 of the 17 fleet approves started from 14:10Z to 14:29:30Z on 2026-10-13, and a retry hits it again"
+  repo: remudero
+  depends_on: [W1-T9153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the join path gives each approve run its own tree and branch; it spans the approve gateway (run-task.ts), the run-branch push (git-push.ts) and the join-candidate read (inbox.ts)
+  band_meaning: span
+  origin: "found 2026-10-13 diagnosing approve failures after W1-T9065 (#11332) went live at the 13:06Z daemon boot; operator standing direction: fix at root, automated flow"
+  plan_refs: [W1-T4437, W1-T903, W1-T9065, W1-T5356, W1-T1129, W1-T4706, W1-T9153]
+  files:
+    - src/run-task.ts
+    - src/lib/git-push.ts
+    - src/lib/inbox.ts
+    - test/a-joining-approve-cuts-its-own-worktree.test.ts
+  status: queued
+  priority: 1  # the join is the path every fleet approve takes while a ratify PR is open, which is most of the time once approves run
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced: the core ledger's live file (rotated 13:58Z; positive
+    control: 3,943 rows stamped 14:xx) and state/logs/approve-*.log.
+      - 17 fleet approves started from 14:10Z to 14:29:30Z (`ratify.cli_started`). 14 took the W1-T4437 join path
+        into one of two open ratify PRs:
+        #11361, on run-APPROVE-proof-debt-W1-T6372-1791900424090-5b011df233d1, and later the PR on
+        run-APPROVE-followup-DAEMON-1789492764199-...-4b13226dc725.
+      - 4 died at the add itself, at 14:10:55, 14:12:33, 14:14:29 and 14:23:23Z. Each died with "fatal: a branch named
+        'run-APPROVE-...' already exists" from `git -C /home/node/Remudero/repos/remudero worktree add -b
+        run-APPROVE-<X> --no-track /home/node/Remudero/worktrees/run-APPROVE-<X> origin/run-APPROVE-<X>`.
+      - In each of those runs, its own `worktree.prune` row lists worktrees/run-APPROVE-<X> under `skipped`. A live
+        run held it: the PR's original approve (pid 739090, in ci.polling from 14:10:05Z to 14:17:13Z) or another
+        joiner. A branch checked out in a live worktree cannot be created again, so `-b` fails.
+      - When no live run holds it, `pruneStaleRuns` deletes the leftover local branch first (14:11:56Z, 14:16:26Z,
+        14:21:06Z and later rows list it under `branches`), and the add succeeds. So the failure depends on timing,
+        and a retry fails again for as long as any approve holds the path.
+      - The JOIN-VS-MERGE race: pid 776761 joined #11361 at 14:16:28Z. At 14:17:13Z the PR's original approve wrote
+        "automerge.clean_status_direct_merge (already green — merged now)". 776761 then died of the shared-path
+        teardown (W1-T9153) before pushing. Had it pushed, its shard would have landed on a branch that was already merged.
+    WHY, READ on origin/main c226da0bb (symbols, not lines):
+      - `joinRatificationBranch` and `completeRatificationBranch` (the RatifyGateway in `approveCommand`,
+        src/run-task.ts) set `worktreePath = join(worktreesDir(config), branch)`, with `branch` being the open PR's
+        branch. They call `addLockedRunWorktree(dir, worktreePath, branch, origin/<branch>, ...)`. `worktreeAdd`
+        (src/lib/worker.ts) always runs `worktree add -b <branch>`. So every approve that joins one PR claims the
+        same path and the same local branch name: the one the PR's creating run also used.
+      - `findJoinablePr` takes the newest `ratify.approved` row (`mostRecentApprovePr`, src/lib/inbox.ts), confirms
+        the PR is open, and skips it only when `priorArmOnHead` finds an arm row for its head. A PR whose own
+        approve is still in its CI wait, and about to direct-merge, reads as joinable.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 383 origin heads (fetched 14:31Z) for
+    joinRatificationBranch, findJoinablePr, approveRunBranch and addLockedRunWorktree. No head reads more than main.
+    Main's one joinRatificationBranch hit is W1-T4706, which is merged and is about the joined PR's body. The control
+    term W1-T9124 was read on all 383 heads. W1-T9153 (filed in the same PR) stops a failed add from destroying another
+    run's tree. It does not make this add succeed.
+  design: |
+    No new bound and no retry count. The outcome is decided by git's own fast-forward rule and by a process's
+    liveness, never by a timeout.
+    1. EACH JOIN AND RESUME CUTS ITS OWN TREE. `joinRatificationBranch` and `completeRatificationBranch` add their
+       worktree at this run's own path and local branch, `approveRunBranch(runId)`, cut from `origin/<PR branch>`
+       through the unchanged `addLockedRunWorktree`. They never use `-b <PR branch>` or `worktrees/<PR branch>`. A
+       leftover local branch named for the PR, from its creating run or from a crashed join, can no longer collide,
+       and two joiners never share a path.
+    2. THE PUSH NAMES ITS DESTINATION. `gitPushRunBranch` (src/lib/git-push.ts) gains an optional `destination`. The
+       join pushes HEAD to `refs/heads/<PR branch>` as a plain fast-forward: no force, no lease override, and the
+       existing guards apply to the destination. Every other caller passes none and pushes exactly as today.
+    3. A LOST RACE OPENS ITS OWN PR. If that push is rejected as a non-fast-forward, another approve moved the tip
+       first. The run releases the ids it reserved (`idBlock.releaseAll()`) and files through
+       `createRatificationBranch`'s path instead: a fresh origin/main tree and its own PR, which is the pre-W1-T4437
+       shape. It never retries the join, so no attempt count is needed.
+    4. NO JOIN INTO A PR WHOSE OWN APPROVE IS STILL DECIDING. `mostRecentApprovePr` also returns the
+       `ratify.approved` row's `actor_pid` and `host`. `findJoinablePr` skips a candidate whose approving process is
+       alive on this host (`defaultIsPidAlive`), because that run may still merge the PR or arm it. A dead or
+       foreign-host pid keeps today's behaviour.
+    Tests go in a new file, test/a-joining-approve-cuts-its-own-worktree.test.ts, with `test(` titles verbatim as in
+    the proofs. Use a real temporary origin and clone (`gitRepo()` with a fixture identity) so `worktree add` and the
+    push are git's own. Drive the gateway methods through `approveCommand`'s `deps` seams.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-joining-approve-cuts-its-own-worktree.test.ts"
+    - claim: "a retried approve with a leftover local branch named for the open PR joins it and pushes"
+      proof: 'grep: test("W1-T9161: a retried approve with a leftover run-APPROVE branch succeeds" in test/a-joining-approve-cuts-its-own-worktree.test.ts'
+    - claim: "a join while another live run holds the PR branch's worktree succeeds in its own worktree"
+      proof: 'grep: test("W1-T9161: a join while another run holds the PR branch succeeds" in test/a-joining-approve-cuts-its-own-worktree.test.ts'
+    - claim: "two concurrent joins of one PR both file: one joins and the loser opens its own PR"
+      proof: 'grep: test("W1-T9161: the join that loses the push opens its own PR" in test/a-joining-approve-cuts-its-own-worktree.test.ts'
+    - claim: "a PR whose approving process is still alive is not joined"
+      proof: 'grep: test("W1-T9161: a PR whose approve is still running is not joinable" in test/a-joining-approve-cuts-its-own-worktree.test.ts'
+  falsifier: |
+    Keep `addLockedRunWorktree(dir, join(worktreesDir, branch), branch, origin/<branch>)` in the join, and the
+    second and third tests fail with git's own "a branch named ... already exists", as at 14:12:33Z. Retry the join
+    after a non-fast-forward instead of opening a PR, and the fourth test's loser's shard never reaches any PR within
+    the test, or reaches it only by a forced push the test refuses. Drop the actor_pid check, and the fifth test
+    joins a PR whose approve fixture is a live child process.
+  note: |
+    EFFECT, measured from the core ledger after the merge sha deploys, with no numeric pass mark. Count approve.error
+    rows naming "a branch named 'run-APPROVE-" and "already exists". Healthy shape: none. Count `approve.joined`
+    rows. Healthy shape: present whenever two or more approves run inside one open ratify PR's life. None were
+    written from 14:10Z to 14:29Z on 2026-10-13.

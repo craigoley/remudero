@@ -1636,7 +1636,7 @@ function verifyHumanAgeBand(ageDays: number): number | undefined {
 }
 
 export function verifyHumanAgeBandKey(shard: ShardUnderJudgement): string | undefined {
-  const band = verifyHumanAgeBand(shard.ageDays);
+  const band = shard.ageDays === null ? undefined : verifyHumanAgeBand(shard.ageDays);
   return band === undefined ? undefined : `${observedStateKey(shard)}:age_band=${band}`;
 }
 

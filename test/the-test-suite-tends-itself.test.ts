@@ -166,12 +166,12 @@ test("W1-T4112: a repeat flaker is retiered to the slow tier, judged by retry co
   const root = seededSuite();
   off(root, "adopt-durations", "shrink-baseline");
   const ledgerPath = join(root, "state", "ledger.ndjson");
-  const row = (test: string) => JSON.stringify({ ts: "2026-09-24T00:00:00.000Z", step: "test.flake_retry", file: "test/c.test.ts", test, headline: "first attempt failed" });
-  writeFileSync(ledgerPath, [row("one"), row("two"), row("three")].join("\n") + "\n");
+  const row = (ci_run_id: number) => JSON.stringify({ ts: new Date().toISOString(), step: "test.flake_retry", file: "test/c.test.ts", ci_run_id, retry_outcome: "recovered" });
+  writeFileSync(ledgerPath, [row(1), row(2), row(3)].join("\n") + "\n");
   const inv = testGardenInventory(root, join(root, "state"), probe);
   assert.deepEqual(inv.candidates.map((a) => a.target), ["scripts/test-tier-manifest.json#test/c.test.ts"]);
   assert.equal(inv.candidates[0]!.edit.to, 5000, "retiered to the manifest's own slow threshold");
-  assert.match(inv.candidates[0]!.reason, /Retried 3 time\(s\) so far/);
+  assert.match(inv.candidates[0]!.reason, /Recovered on 3 distinct CI run\(s\) in the flake window/);
   const landed: Landed[] = [];
   runGarden(testGardenSpec(deps(root, landed), probe), deps(root, landed));
   assert.equal(JSON.parse(readFileSync(join(root, "scripts/test-tier-manifest.json"), "utf8")).files["test/c.test.ts"], 5000);
@@ -181,16 +181,16 @@ test("W1-T4112: fewer than the retry threshold, or already slow, retiers nothing
   const probe = await probesPromise;
   const root = seededSuite();
   const stateDir = join(root, "state");
-  const row = (file: string, test: string) => JSON.stringify({ step: "test.flake_retry", file, test });
+  const row = (file: string, ci_run_id: number) => JSON.stringify({ ts: new Date().toISOString(), step: "test.flake_retry", file, ci_run_id, retry_outcome: "recovered" });
   // Below RETIER_THRESHOLD.
-  writeFileSync(join(stateDir, "ledger.ndjson"), Array.from({ length: RETIER_THRESHOLD - 1 }, (_, i) => row("test/c.test.ts", `t${i}`)).join("\n") + "\n");
+  writeFileSync(join(stateDir, "ledger.ndjson"), Array.from({ length: RETIER_THRESHOLD - 1 }, (_, i) => row("test/c.test.ts", i)).join("\n") + "\n");
   assert.deepEqual(testGardenInventory(root, stateDir, probe).candidates, []);
   // At the threshold, but the file is already committed at/above the slow threshold.
   writeFileSync(
     join(root, "scripts/test-tier-manifest.json"),
     JSON.stringify({ thresholdMs: 5000, files: { "test/a.test.ts": 100, "test/b.test.ts": 0, "test/c.test.ts": 9000, "test/d.test.ts": 50 } }, null, 2) + "\n",
   );
-  writeFileSync(join(stateDir, "ledger.ndjson"), Array.from({ length: RETIER_THRESHOLD + 2 }, (_, i) => row("test/c.test.ts", `t${i}`)).join("\n") + "\n");
+  writeFileSync(join(stateDir, "ledger.ndjson"), Array.from({ length: RETIER_THRESHOLD + 2 }, (_, i) => row("test/c.test.ts", i)).join("\n") + "\n");
   assert.deepEqual(testGardenInventory(root, stateDir, probe).candidates, []);
 });
 

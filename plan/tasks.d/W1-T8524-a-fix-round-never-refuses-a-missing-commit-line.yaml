@@ -8,7 +8,7 @@
   budget_usd: 8.00
   risk: high # changes a pinned fix-lane contract (a missing line no longer refuses) across run-task.ts and its existing suite
   band_meaning: span
-  origin: "operator session 2026-10-12: escalation #10031 triage"
+  origin: "ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report#r3"  # #10031 design-remedy: was "operator session 2026-10-12: escalation #10031 triage"; re-keyed so the ci-friction gardener measures it as rung 3
   plan_refs: [W1-T5565, W1-T5325, W1-T4467, W1-T4052]
   files: [src/run-task.ts, test/fix-refusal-no-anchored-commit-message-line-in-the-report.test.ts, test/a-fix-round-never-refuses-a-missing-commit-line.test.ts]
   status: queued

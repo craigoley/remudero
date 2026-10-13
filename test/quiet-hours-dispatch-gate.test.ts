@@ -103,8 +103,14 @@ test("W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that
   assert.deepEqual(clear.dispatched, absent.dispatched);
   assert.deepEqual(clear.summary, absent.summary);
   // W1-T4998: `daemon.tick_phases` carries real elapsed milliseconds, which differ run to run.
+  // W1-T8235: `lane.idle_changed` stamps `at_ms` from the same wall clock.
+  // W1-T9072: so does `daemon.boot_first_dispatch`, from boot to its first selection and lane start.
   const untimed = (lines: typeof clear.lines) =>
-    lines.map((l) => (l.step === "daemon.tick_phases" ? { ...l, extra: { ...l.extra, ms_to_admission: 0, ms_in_cadences: 0 } } : l));
+    lines.map((l) =>
+      l.step === "daemon.tick_phases" ? { ...l, extra: { ...l.extra, ms_to_admission: 0, ms_in_cadences: 0 } }
+        : l.step === "lane.idle_changed" ? { ...l, extra: { ...l.extra, at_ms: 0 } }
+          : l.step === "daemon.boot_first_dispatch" ? { ...l, extra: { ...l.extra, boot_at: 0, first_selection_ms: 0, first_run_start_ms: 0 } }
+            : l);
   assert.deepEqual(untimed(clear.lines), untimed(absent.lines));
   assert.equal(clear.lines.some((l) => l.step === "daemon.quiet_hours"), false);
 });

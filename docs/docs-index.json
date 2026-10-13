@@ -56,6 +56,12 @@
       "grepHint": "0006. Run daemon children from a precompiled, source-keyed bundle, not tsx"
     },
     {
+      "path": "docs/adr/0007-build-runs-outlive-the-daemon.md",
+      "title": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code",
+      "summary": "Status: Proposed",
+      "grepHint": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
@@ -768,6 +774,12 @@
       "title": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05",
       "summary": "Written at origin/main `88b6eb78efd6731b3ad1c0b49d739a3addc2f56f` (toplevel /home/user/remudero, branch",
       "grepHint": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05"
+    },
+    {
+      "path": "docs/reservation-backed-skill-eval.md",
+      "title": "Reservation-backed skill eval qualification",
+      "summary": "The operator selected this policy on 2026-10-13: a separately approved, bounded",
+      "grepHint": "Reservation-backed skill eval qualification"
     },
     {
       "path": "docs/review-gate.md",

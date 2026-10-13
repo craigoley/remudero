@@ -7,12 +7,14 @@
  * is noisy but never turns this test into the unbounded local gate it guards.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { boundedSuiteLeaf, runBoundedSuite } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
+import { defaultProbe } from "../src/lib/host-memory-ledger.js";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
@@ -64,15 +66,14 @@ function writeWedgedSuiteFixture(): { dir: string; parentPidPath: string; grandc
   return { dir, parentPidPath, grandchildPidPath, parentScript };
 }
 
+/** #7398: `kill(pid, 0)` succeeds on a ZOMBIE. A killed grandchild is reparented, and stays a zombie until
+ *  whatever reaps orphans gets to it; under a load above 20, or in a container whose PID 1 reaps nothing, that
+ *  outlasted this wait and read as a grandchild that "survived" the teardown. A zombie has terminated, so the
+ *  probe the memory ledger already trusts (/proc state first, then ESRCH) is the one asked here. */
 async function waitUntilDead(pid: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-      throw error;
-    }
+    if (defaultProbe(pid).state === "gone") return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.fail(`pid ${pid} survived the timeout's group teardown`);
@@ -113,6 +114,24 @@ test("W1-T3303: a SIGTERM-ignoring suite and its grandchild die at the hard wall
     await waitUntilDead(grandchildPid);
   } finally {
     if (parentPid) killProcessGroup(parentPid);
+  }
+});
+
+test("a terminated grandchild left a zombie reads as dead to the teardown check (#7398)", { skip: process.platform !== "linux" }, async () => {
+  // `sleep 0` exits at once, and the shell `exec`s into a `sleep` that never reaps it: a real zombie for 5 s.
+  const holder = spawn("sh", ["-c", "sleep 0 & echo $!; exec sleep 5"], { stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    const pid = Number(await new Promise<string>((resolve) => holder.stdout.once("data", (d) => resolve(String(d).trim()))));
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    const deadline = Date.now() + 3_000;
+    while (!/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8")) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(readFileSync(`/proc/${pid}/stat`, "utf8"), /\) Z /, "the fixture holds a real zombie");
+    assert.doesNotThrow(() => process.kill(pid, 0), "kill(pid, 0) alone reads the zombie as alive");
+    await waitUntilDead(pid);
+  } finally {
+    holder.kill("SIGKILL");
   }
 });
 

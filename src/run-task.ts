@@ -1,3 +1,13 @@
+import {
+  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
+  releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
+} from "./lib/check-proof.js";
+export {
+  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
+  releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
+} from "./lib/check-proof.js";
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -45,7 +55,7 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -64,7 +74,6 @@ import {
   notifyRecipient,
   providerRoutingOwnsHeadroom,
   resolveHeadroomEnabled,
-  resolveHeavyReadyDirectory,
   softBudgetThreshold,
   synthesisEffort,
   synthesisModel,
@@ -101,6 +110,7 @@ import {
   escalateLifetimeCapExceeded,
   escalatePostReviewStall,
   escalateQuotaExhaustion,
+  escalateReplayStranded,
   escalateStarvation,
   escalateStarvationCleared,
 } from "./lib/escalation-catalogue.js";
@@ -188,14 +198,15 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
-import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
-import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
@@ -219,12 +230,12 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
+import { inboxThreadStorePath, ratifyCliGateway, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointCommitSubject, checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -379,6 +390,7 @@ import {
   runRelintLoop,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
+import { censusRunDirs } from "./lib/run-child-contract.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -448,10 +460,13 @@ import {
   daemonExitCodeForSummary,
   resolveFleetControlHold,
   runDaemon,
+  RESTART_HISTORY_WINDOW_MS,
   type CrashLoopVerdict,
   type DaemonFreshness,
   type DaemonOpts,
   type DaemonSummary,
+  type RestartBoundary,
+  type RestartBoundaryContext,
   type HeadroomPolicy,
   type IntakeRungDecision,
   type IntakeRungRunResult,
@@ -1123,6 +1138,8 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -1391,7 +1408,9 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   renderSkillsPart,
+  SKILL_FIX_TASK_TYPE,
   skillsInjectedEvent,
+  skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
   workerAllowlistFromSettings,
@@ -1499,6 +1518,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   bodyReviewContractDigest,
   reviewContractDigest,
@@ -1624,6 +1644,7 @@ import {
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
+  independentBlockReleasesFrom,
   readLedgerLines,
   type DeriveDeps,
   type GitHub,
@@ -1993,28 +2014,17 @@ export function buildFreshTreeReviewRunner(
     try {
       let worktree = prepared.get(sha);
       if (worktree === undefined) {
-        worktree = `${deps.worktreeRoot}/reviewer-${sha.slice(0, 12)}`;
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
-          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, worktree, sha);
-        if (existing === "unsafe") {
-          throw new Error(`reviewer worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
-        }
-        if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-        if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
-          throw new Error(`reviewer worktree at ${worktree} has no runnable canonical node_modules link`);
-        }
+        worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
       const reviewerTree = worktree;
       const run = async () => {
-        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
-          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, reviewerTree, sha);
-        if (existing !== "reusable") {
+        if (freshTreeInspector(deps)(repoDir, reviewerTree, sha) !== "reusable") {
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
@@ -2031,6 +2041,75 @@ export function buildFreshTreeReviewRunner(
       return undefined;
     }
   };
+}
+
+/** The seams a fresh origin/main tree needs, the reviewer's less its spawn (W1-T9065 shares them). */
+export type FreshTreeTools = Omit<FreshTreeReviewSeams, "spawnReview">;
+
+function freshTreeInspector(deps: FreshTreeTools): NonNullable<FreshTreeTools["inspectExistingWorktree"]> {
+  return deps.inspectExistingWorktree ?? ((dir, path, revision) => inspectFreshReviewerWorktree(dir, path, revision, deps.git));
+}
+
+/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable. */
+function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string): string {
+  const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
+  const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
+  if (existing === "unsafe") {
+    throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
+  }
+  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
+  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
+    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  }
+  return worktree;
+}
+
+/**
+ * W1-T9065 — THE FLEET'S `rmd approve`/`rmd reframe` RUN FROM A TREE AT origin/main, as the reviewer does.
+ * The daemon's checkout is detached and behind, where the CLI's self-sync guard refused every lane
+ * approve before the verb ran, and setting the guard there would classify against a stale plan. Here
+ * the child's repoRoot IS origin/main, so its plan, policy and grep reads are fresh by construction.
+ * The tree is leased until `action` settles; every failure is rethrown with credentials scrubbed.
+ */
+export function freshOriginMainTreeRunner(
+  repoDir: string,
+  deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
+): RatifyCliTree["freshTree"] {
+  return async (action) => {
+    try {
+      const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
+      const path = prepareFreshOriginMainTree(repoDir, deps, "approve", sha);
+      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
+        if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
+          throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
+        }
+        return action({ path, sha });
+      });
+    } catch (err) {
+      throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
+    }
+  };
+}
+
+/** W1-T9065 — the daemon's ratify gateway: the reviewer's tree helpers, git through the hardened leaf. */
+export function fleetRatifyGateway(
+  repoDir: string,
+  logDir: string,
+  ledgerPath: string,
+  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string> } = {},
+): RatifyCliHandle {
+  const { spawn: spawnChild, ...tree } = overrides;
+  return ratifyCliGateway(repoDir, logDir, {
+    ledgerPath,
+    freshTree: freshOriginMainTreeRunner(repoDir, {
+      // inspectFreshReviewerWorktree passes `-C <dir>` first; the leaf takes the dir apart.
+      git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
+      addWorktree: (dir, path, revision) => realDeps().reviewWorktree.addWorktree(dir, path, revision),
+      worktreeRoot: join(repoDir, "..", "worktrees"),
+      ...tree,
+    }),
+    ...(spawnChild ? { spawn: spawnChild } : {}),
+  });
 }
 
 /** W1-T4055 — PRIMARY CONTROL on how much of one fresh-tree failure a ledger row carries. The child's
@@ -2957,7 +3036,7 @@ import {
   REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
-  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock,
+  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath,
   workerLedgerFields,
   workerTranscript,
   withAssignmentTrailer, resolveCommitAssignment,
@@ -2996,6 +3075,7 @@ import {
 } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
+import { toolStepSignature } from "./lib/tool-step-signature.js";
 
 /** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
  * The catch arm must publish the values captured by the worker, rather than re-reading policy
@@ -3028,7 +3108,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
-import { heavyNewBuildGate } from "./lib/heavy-build-reservation.js";
+import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -3046,6 +3126,7 @@ import {
   gitPushRunBranch,
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
+  isNonFastForwardRejection,
   LanePushForeignHeadError,
   runStepsAsync,
   runStepsSync,
@@ -3345,8 +3426,11 @@ export const WORKER_STATE_LEDGER_STEP = "worker.state";
 /** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
  *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
  *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
- *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
- *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
+ *  timing/outcome, and heartbeat cadence. A tool-executing row adds `tool_call_index` (from 0, per
+ *  run) and `tool_signature`, the {@link toolStepSignature} of at most 120 characters: a Bash
+ *  program and subcommand, or a file tool and its repo-relative path. A row never carries a prompt,
+ *  a raw tool argument, a flag value, or tool output. It is diagnostic telemetry only and must
+ *  never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -3465,12 +3549,13 @@ export function attributeWorkerStreamEvent(
 /** The stream observer one dispatch spawn hands its worker: enrich, attribute to the spawn's assignment, then forward. */
 export function dispatchStreamObserver(
   base: WorkerStreamObserver,
-  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider">,
+  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider"> & { cwd?: string },
   assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
 ): WorkerStreamObserver {
   return (event) => {
     const current = assignment();
-    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(event, spawn, current), current));
+    const located = spawn.cwd && !event.cwd ? { ...event, cwd: spawn.cwd } : event;
+    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(located, spawn, current), current));
   };
 }
 
@@ -3610,11 +3695,12 @@ export function freshnessYieldRows(a: {
 /** W1-T8139: the daemon's restart latch as the watchdog's pending-yield read: the in-process `restartAtWorkerBoundary`
  * only (never the fetching `externalWaitFreshness`), named by the sha pair it waits on. Undefined without a daemon. */
 export function restartLatchDetail(
-  latch: (() => Extract<DaemonFreshness, { stale: true }> | undefined) | undefined,
+  latch: RestartBoundary | undefined,
+  context?: () => RestartBoundaryContext,
 ): (() => string | undefined) | undefined {
   if (!latch) return undefined;
   return () => {
-    const freshness = latch();
+    const freshness = latch(context?.());
     return freshness ? `daemon restart latched: ${freshness.oldSha.slice(0, 9)}..${freshness.newSha.slice(0, 9)}` : undefined;
   };
 }
@@ -3679,6 +3765,7 @@ export function buildWorkerStateSensor(args: {
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
   let lastActivityKey: string | undefined;
+  let nextToolCallIndex = 0;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -3728,7 +3815,9 @@ export function buildWorkerStateSensor(args: {
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
     const eventAt = new Date(event.tsMs).toISOString();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
+    const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
+      const toolSignature = event.toolName ? toolStepSignature(event.toolName, event.toolInput, event.cwd ?? "") : undefined;
       const activityRow = {
         run_id: args.runId,
         task_id: args.taskId,
@@ -3749,6 +3838,8 @@ export function buildWorkerStateSensor(args: {
         ...(event.kind === "tool-executing"
           ? {
               tool_name: toolName ?? "unknown",
+              tool_call_index: toolCallIndex,
+              ...(toolSignature ? { tool_signature: toolSignature } : {}),
               ...(lastWorkerText ? { tool_reason: boundedWorkerTelemetryText(lastWorkerText) } : {}),
               tool_started_at: eventAt,
             }
@@ -5196,6 +5287,30 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
     // Corrupt marker JSON fails open to a new retained-history window; cadence parsing is separate.
     void e;
     return undefined;
+  }
+}
+
+/** The worktree's HEAD sha, or undefined when git cannot say (W1-T9030: a round that cannot show its head is read as moved). */
+export function worktreeHeadOrUndefined(worktreePath: string): string | undefined {
+  try {
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim() || undefined;
+  } catch (e) {
+    void e; // an unreadable head only costs the harness-tip shortcut; the subject rule still applies
+    return undefined;
+  }
+}
+
+/** The round's uncommitted work as the progress judge reads it (W1-T9030): tracked diff stat plus untracked paths,
+ *  bounded. Empty when there is none or git cannot say — the judge then simply sees no working-tree line. */
+export function worktreeDiffStat(worktreePath: string): string {
+  try {
+    const stat = hostWorktreeGit(worktreePath, ["diff", "--stat", "HEAD"]).trim().split("\n").filter(Boolean).slice(-12).join("; ");
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard"]).trim().split("\n").filter(Boolean);
+    const text = [stat, untracked.length ? `untracked: ${untracked.slice(0, 12).join(", ")}` : ""].filter(Boolean).join("; ");
+    return text.length > 800 ? `${text.slice(0, 800)}...` : text;
+  } catch (e) {
+    void e; // the stat is evidence for the judge, not a gate
+    return "";
   }
 }
 
@@ -8269,7 +8384,7 @@ async function runReview(args: {
   prUrl: string;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -8482,9 +8597,11 @@ async function runReview(args: {
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
-  const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
+  const preparedDecision = await preparePromisedReviewDecision({
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
+  const decisionDigest = preparedDecision.decisionDigest;
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8625,7 +8742,7 @@ async function runReview(args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
@@ -8742,7 +8859,7 @@ async function runReview(args: {
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
-  const computed = await judgeReviewAsync(criteria, {
+  const computed = await preparedDecision.judge({
     diff,
     report,
     planLint,
@@ -11840,6 +11957,8 @@ export async function runFixRung(opts: {
     packageScripts?: Readonly<Record<string, string>>;
     /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
     branchClaim?: FixRoundBranchClaim;
+    /** The approved skill tree the fix lane selects from; production reads the implement lane's. */
+    approvedSkillsDir?: string;
   };
 }): Promise<FixRungOutcome> {
   const roundRows: Record<string, unknown>[] = [];
@@ -12075,6 +12194,16 @@ export async function runFixRung(opts: {
       standInEscalates = false;
     }
   };
+  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
+  // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  const fixSkillSelection = observeSkillSelection(
+    loadInjectableSkills(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills")),
+    SKILL_FIX_TASK_TYPE,
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    opts.task.files,
+    (skillName) => skillWithheldForRun(opts.runId, skillName),
+  );
+  let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
@@ -13315,6 +13444,9 @@ export async function runFixRung(opts: {
       deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
+    // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
+    if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
+    fixSkillSelectionLogged = true;
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -13323,6 +13455,7 @@ export async function runFixRung(opts: {
         round: attempt,
         branch: opts.branch,
         evidence,
+        skillsPart: renderSkillsPart(fixSkillSelection.selected),
         // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
         // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
         // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
@@ -14330,6 +14463,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: reviewTask,
       report: reviewReport,
+      implementationReport: workerTranscript(fixResult),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       reviewInputBody,
@@ -14872,6 +15006,8 @@ export function proofRepairRoundRefusalInWorktree(input: {
   roundStartSha: string | undefined;
   stageable: readonly string[];
   proofs: readonly string[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
     hostWorktreeGit(input.worktreePath, args).trim();
@@ -14889,7 +15025,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase], {
+      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -16431,8 +16567,12 @@ export function buildRuleHeadlinesPart(
   enabled: boolean,
   sourcePath: string,
   readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+  displayPath: string = sourcePath,
 ): string {
   if (!enabled) return "";
+  // `sourcePath` is where the file is READ from (an absolute worktree path at the real call site);
+  // `displayPath` is what the WORKER is told. The worker's cwd is its own worktree, so the
+  // repo-relative name is the one that resolves for it, and no prompt line names a foreign tree.
   const introLine =
     `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
     `bodies, so you know what exists without paying for what you don't need yet. ` +
@@ -16441,9 +16581,11 @@ export function buildRuleHeadlinesPart(
   if (raw === undefined) {
     const unreadable: RuleHeadline = {
       headline: "CLAUDE.md rule index",
-      body: ` (unavailable — could not read rule source ${sourcePath})`,
+      body: ` (unavailable — could not read rule source ${displayPath})`,
     };
-    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined)}`].join("\n");
+    // Indented without its own bullet, like the index lines below: it continues the cited intro claim. As a
+    // bullet it was an uncited claim, and the provenance gate refused every dispatch to a tree with no CLAUDE.md.
+    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined).replace(/^- /, "")}`].join("\n");
   }
   const rules = parseRuleHeadlines(raw);
   const indexLines = renderHeadlineOnlyIndex(rules)
@@ -16459,9 +16601,9 @@ export function buildRuleHeadlinesPart(
   const migrated = rules.some((r) => parseRuleBodyPointer(r.body) !== undefined);
   const pointer = migrated
     ? `    Each headline's full body — the measurement that earned it — is a file under ` +
-      `doctrine/ in your own worktree, and ${sourcePath} names the exact path beside every ` +
+      `doctrine/ in your own worktree, and ${displayPath} names the exact path beside every ` +
       `headline. Read one when you are about to apply that rule precisely, or you doubt it.`
-    : `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+    : `    Read a headline's full body from ${displayPath} in your own worktree when you need it — ` +
       "this index carries headlines only.";
   return [introLine, ...indexLines, pointer].join("\n");
 }
@@ -16712,7 +16854,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   claimReserver?: DispatchClaimReserverAsync;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: ExternalWaitFreshness;
-  restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  restartAtWorkerBoundary?: RestartBoundary;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -16736,6 +16878,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
 }
 
 export interface RunTaskContext {
+  restartPhase?: { current: string };
   /** W1-T7096: a caller-supplied worker spawn (a test seam); a run on the real spawn asks the LLM judge. */
   spawnInjected?: boolean;
   /**
@@ -17616,9 +17759,8 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: ExternalWaitFreshness;
-    /** W1-T7806: the daemon's latched restart, read at each worker boundary; reading it releases this lane's hold
-     *  on refill. A set latch yields the run even when its own `externalWaitFreshness` read would not. Daemon only. */
-    restartAtWorkerBoundary?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    /** The daemon asks this run to yield or grants it a measured, bounded holdout at its current phase. */
+    restartAtWorkerBoundary?: RestartBoundary;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -17772,6 +17914,11 @@ async function runTask(
   // DECISION_REQUEST resume below all share it (see `buildWorkerStateSensor`'s own doc for why
   // a fresh tracker per spawn would misreport a restart the operator never actually saw).
   const workerStateSensor = buildWorkerStateSensor({ ledgerPath, runId, taskId, root: config.root });
+  const restartPhase = { current: "recon" };
+  const noteRestartPhase = (phase: string): void => {
+    restartPhase.current = phase;
+    log("run.phase", { waiting_on: phase });
+  };
 
   /**
    * W1-T442: THE DESTINATION for a spawn's asynchronous 'error' event. Wrapping
@@ -17797,6 +17944,7 @@ async function runTask(
   const cashContainmentState = { contained: false };
   const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
+    noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
     const spawnArgs = opts.gitCredentialSocketPath
       ? withGitCredentialSocket(requestedSpawnArgs, opts.gitCredentialSocketPath)
@@ -17810,7 +17958,7 @@ async function runTask(
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
       provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
-      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary),
+      restartPending: restartLatchDetail(opts.restartAtWorkerBoundary, () => ({ waitingOn: restartPhase.current, runId })),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
       ...effectiveSpawnArgs,
@@ -18114,6 +18262,7 @@ async function runTask(
     harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
   return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
+      restartPhase,
       spawnInjected: opts.spawn !== undefined,
       cashContainmentBoundary,
       cashContainmentState,
@@ -18931,6 +19080,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (step === "verdict") verdictWritten = true;
     ctxLog(step, extra);
   };
+  const restartPhase = ctx.restartPhase ?? { current: "recon" };
+  const noteRestartPhase = (phase: string): void => {
+    restartPhase.current = phase;
+    log("run.phase", { waiting_on: phase });
+  };
   // Direct callers of the exported body retain ordinary routing.  Production runTask always
   // supplies the shared object so the preflight and its spawn wrapper observe the same decision.
   const cashContainmentState = ctx.cashContainmentState ?? { contained: false };
@@ -19103,6 +19257,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     return r;
   };
 
+  // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
+  let restoredCheckpoint: { branch: string; headSha: string } | undefined;
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
    * error). Turn it into a terminal verdict: clean the worktree so no debris
@@ -19114,6 +19270,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
+    // W1-T8676: a worker error is not the checkpoint's fault. Unless this run pushed its own branch (the newer
+    // checkpoint, W1-T7837) — read while the worktree stands; only a proven absence (exit 1) keeps it.
+    const keptCheckpoint = v.verdict === "failed" && restoredCheckpoint !== undefined &&
+      hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
+      ? restoredCheckpoint : undefined;
     try {
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", { on: `${stage}.error` });
@@ -19121,6 +19282,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
     log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
+    if (keptCheckpoint) {
+      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
+        failed_stage: stage, failed_subtype: r.subtype });
+    }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -19613,10 +19778,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (checkpoint) {
       try {
         const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args), log);
-        if (!(restored.base === "main" && restored.dropped)) log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
-          base: restored.base, restored_head_sha: restored.headSha,
-          ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
-          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        if (!(restored.base === "main" && restored.dropped)) {
+          restoredCheckpoint = checkpoint;
+          log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+            base: restored.base, restored_head_sha: restored.headSha,
+            ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
+            ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        }
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19957,15 +20125,21 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleHeadlinesEnabled = opts.maskRules
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
-    const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
+    const ruleHeadlinesPart = buildRuleHeadlinesPart(
+      ruleHeadlinesEnabled,
+      join(worktreePath, "CLAUDE.md"),
+      undefined,
+      "CLAUDE.md",
+    );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
-    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
+    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
     const skillSelection = observeSkillSelection(
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
       task.files,
+      (skillName) => skillWithheldForRun(runId, skillName),
     );
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
@@ -20032,12 +20206,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // FIRST one: it accumulates, and at DIAGNOSE_AT_STRIKES (two) an evidence-only DIAGNOSE
     // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
     // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
+    noteRestartPhase("implementing");
     say("implement worker");
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
+    // W1-T9030: the head every round starts from — after a checkpoint restore it is the harness's own merge commit.
+    let roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
-    const yieldAtWorkerBoundary = async (waitingOn: string): Promise<RunResult | undefined> => {
-      const freshness = await (opts.restartAtWorkerBoundary ?? opts.externalWaitFreshness)?.();
+    const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
+      noteRestartPhase(phase === "checkpoint" ? "checkpointed" : phase === "decision" ? "implementing" : phase);
+      const freshness = opts.restartAtWorkerBoundary
+        ? opts.restartAtWorkerBoundary({ waitingOn: restartPhase.current, runId })
+        : await opts.externalWaitFreshness?.();
       const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
@@ -20358,7 +20538,19 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let checkpointJudge: FixProgressJudge | undefined;
     for (;;) {
       const tipSubject = lastCommitSubject(worktreePath);
-      if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
+      const roundReport = parseReport(fullText(impl));
+      const roundTip = classifyRoundTip({
+        tipSubject, headBefore: roundHeadBefore, headNow: worktreeHeadOrUndefined(worktreePath),
+        finishedByReport: roundReport?.prUrl !== undefined || (harnessOwnsGit && roundReport?.commitMessage !== undefined),
+        reportOpenedPr: roundReport?.prUrl !== undefined,
+      });
+      if (tipSubject === undefined || !roundTip.unfinished) {
+        // A wip-shaped tip the harness wrote, left unmoved by a round that reported its completion line: finished.
+        if (tipSubject !== undefined && isWipSubject(tipSubject) && !roundTip.headMoved && roundReport?.prUrl === undefined) {
+          log("implement.finished_on_harness_tip", { subject: tipSubject, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
+        }
+        break;
+      }
       const checkpointYield = await yieldAtWorkerBoundary("checkpoint");
       if (checkpointYield) return checkpointYield;
       let tipBody = "";
@@ -20369,8 +20561,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         void e;
       }
       const remaining = checkpointRemaining(tipBody);
-      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
-      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining });
+      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
+      const workingTree = worktreeDiffStat(worktreePath);
+      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining, ...(workingTree ? { workingTree } : {}) });
       const decision = await judgeCheckpointStop(checkpointStops, {
         readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
         makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
@@ -20380,6 +20573,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (!decision.resume) break;
       const judgedYield = await yieldAtWorkerBoundary("checkpoint");
       if (judgedYield) return judgedYield;
+      noteRestartPhase("implementing");
+      roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
       impl = account(
         await spawn({
           cwd: worktreePath,
@@ -20407,14 +20602,15 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
     const preopenGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
     if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
-      const workerYield = await yieldAtWorkerBoundary("worker");
+      const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
       if (workerYield) return workerYield;
       const gate = await preopenGate(worktreePath);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
         ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
       if (gate.kind === "fail") {
-        const preopenYield = await yieldAtWorkerBoundary("preopen_gate");
+        const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
         if (preopenYield) return preopenYield;
+        noteRestartPhase("implementing");
         impl = account(
           await spawn({
             cwd: worktreePath,
@@ -20441,7 +20637,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
 
     if (!parseReport(fullText(impl))?.prUrl) {
-      const workerYield = await yieldAtWorkerBoundary("worker");
+      const workerYield = await yieldAtWorkerBoundary("worker", "pushing");
       if (workerYield) return workerYield;
     }
 
@@ -20945,7 +21141,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : undefined;
     if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
-      externalWaitFreshness: opts.restartAtWorkerBoundary ?? opts.externalWaitFreshness,
+      externalWaitFreshness: opts.restartAtWorkerBoundary
+        ? () => opts.restartAtWorkerBoundary!({ waitingOn: "ci", runId }) : opts.externalWaitFreshness,
       externalWaitRecycle: opts.externalWaitRecycle,
       handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
     });
@@ -21032,9 +21229,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       prUrl,
       task,
       report: reviewReport,
-      implementationReport: fullText(impl),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
+      implementationReport: fullText(impl),
       settingsFile,
       config,
       budgetUsd,
@@ -21800,247 +21997,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
  */
 // resolveReviewTarget moved to src/lib/report-commands.ts (W1-T2888) — imported/re-exported
 // below.
-
-/**
- * (R-11) What {@link buildBaseProofDir} hands back — the evidence fields it becomes, plus the one
- * fact the caller needs for teardown. `baseCheckoutDir` is a REAL CHECKOUT (a detached worktree at
- * the merge-base) exactly when `baseIsCheckout` is true; otherwise it is the blob-only fallback
- * (or absent), and `baseWorktreeFailure` names why the worktree could not be created.
- */
-export interface BaseProofDir {
-  baseCheckoutDir: string | undefined;
-  baseUnreadablePaths: ReadonlySet<string>;
-  baseIsCheckout: boolean;
-  /** (W1-T5528) Set only on the `detachedAsync` path: the base probe's checkout still in flight. */
-  pendingCheckout?: Promise<void>;
-  /** True when every proof was a house-dialect `grep:` and `baseCheckoutDir` holds exactly the merge-base
-   *  bytes at each target and nothing else ({@link materialiseBaseGrepTree}), never a checkout. A complete
-   *  base for THOSE proofs; teardown is a plain delete ({@link releaseBaseProofDir}). */
-  baseIsGrepTree?: boolean;
-  baseWorktreeFailure?: string;
-  /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
-   *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
-   *  non-discriminating about a file the merge-base never had. Empty when no copy happened. */
-  addedTestFiles: ReadonlySet<string>;
-}
-
-/**
- * Build the BASE-revision tree {@link preexistingProofHits} needs. Returns `baseCheckoutDir:
- * undefined` when there is nothing to compare (no dialect proof at all, or no resolvable
- * merge-base) — in which case the staleness check stays inert exactly as it was.
- *
- * (R-11) A REAL CHECKOUT, NOT A BLOB DIRECTORY. This used to materialise only the blobs `grep:`
- * proofs name (via {@link materialiseBaseProofBlobs}) and returned a dir only when one was
- * written. W1-T362 had already extended the staleness check to `unit test:` proofs, so every one
- * of those was re-run in a directory holding no `package.json` and no `test/` — or in NO base at
- * all, when the review carried no grep proof. `node --test` there exits 1 with empty stdout, the
- * executor reports "fail", and `classifyBaseProofOutcome` (review.ts) graded that "discriminates":
- * a test passing identically at both commits was certified `executed_pass` with a reason asserting
- * it told done from not-done. Every W1-T362 test injected a fake executor, so the shape was never
- * exercised. The base is now `git worktree add --detach <dir> <merge-base>`, run from the head
- * checkout through the same injectable seam the head materialisation uses, so a `unit test:` proof
- * re-runs in the tree it was written for; its `node_modules` is primed by the executor's existing
- * `ensureDeps` (review.ts) only when a `unit test:` proof actually runs there — a `grep:`-only
- * review pays for the checkout and never for an install. Teardown is the CALLER's (the same
- * `withMaterializedWorktree` that removes the head; `rmd check-proof` removes its own).
- *
- * A `grep:`-ONLY REVIEW CHECKS NOTHING OUT. Every proof a house-dialect grep ⇒ the base is a GREP TREE
- * ({@link materialiseBaseGrepTree}): exactly the merge-base bytes at each target, read through the leaf,
- * and nothing else, so the same `grep -arn` sees the same input. `baseIsGrepTree` marks it; a target a
- * plain-file tree cannot reproduce (a symlink or submodule on its path) falls through to the worktree.
- *
- * THE BLOB PATH IS THE FALLBACK, ONLY when the worktree cannot be created (a checkout that is not a
- * git repo, a base object the repo does not hold, disk): `grep:` proofs are still checked against
- * their blobs exactly as before, and `baseIsCheckout: false` tells the classifier that a
- * `unit test:` proof is `base_unknown` there — never "discriminates". `git show <rev>:<dir>` for a
- * DIRECTORY target (R-12) can no longer reach this path either: `parseDialectGrep` refuses the
- * directory shape, so no such proof compiles to a blob to materialise.
- *
- * THE MERGE-BASE, not `origin/main`: "already matched before this work existed" is a question about
- * the commit the branch forked from, and a proof legitimately added by a PR merged in between must
- * not count against this one.
- *
- * (W1-T460) `baseUnreadablePaths` names the paths whose base blob GENUINELY failed to read on the
- * fallback path (never the ordinary absent-at-base forward reference, which stays carved out). It
- * is a PER-PROOF fact and cannot be folded into `baseCheckoutDir === undefined`, the GLOBAL "no
- * base at all" fact: a mixed review where one blob reads and another fails still produces a
- * perfectly good dir, and collapsing the two would either exempt every proof in the review or
- * silently credit the one that was never checked. On the worktree path it is always empty — a
- * checkout has no per-blob read step.
- */
-export function buildBaseProofDir(
-  criteria: ReadonlyArray<{ proof?: string }>,
-  headCheckoutDir: string,
-  deps: {
-    detachedAsync?: { path: string; revision: string; run: (args: string[]) => Promise<void> };
-    mergeBase?: (cwd: string) => string;
-    showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
-    makeDir?: () => string;
-    /** (R-11) `git worktree add --detach <worktreePath> <revision>` run from `repoDir` — the same
-     *  shape {@link ReviewWorktreeDeps.addWorktree} has for the head. Injected by tests to force the
-     *  fallback (throw) or to observe the call; real callers omit it. */
-    addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
-    /** (W1-T3098) The diff's ADDED `test/**` paths between `base` and the head checkout's
-     *  `HEAD` — what {@link buildBaseProofDir} copies into the base worktree so a `unit test:` proof
-     *  for a PR-added test can be RE-RUN there instead of failing on a file the merge-base checkout
-     *  never had. Injected by tests against a real temp repo; real callers omit it. */
-    changedTestFiles?: (headDir: string, base: string) => string[];
-    /** (W1-T3098) Copies one file from the head checkout into the base worktree, creating parent
-     *  directories as needed. Injected by tests to observe/force failure; real callers omit it. */
-    copyFile?: (src: string, dest: string) => void;
-    /** The grep tree's own git readers ({@link materialiseBaseGrepTree}); injected by tests only. */
-    grepTree?: Omit<BaseGrepTreeReaders, "showBlob">;
-  } = {},
-): BaseProofDir {
-  const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
-  if (deps.detachedAsync) {
-    const { path, revision, run } = deps.detachedAsync;
-    return {
-      baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
-      pendingCheckout: run(detachedArgs(path, revision)),
-    };
-  }
-  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"]).trim());
-  const showBlob =
-    deps.showBlob ??
-    ((cwd: string, rev: string, rel: string) =>
-      // W1-T460: `stdio` PIPES git's stderr instead of letting it inherit the reviewer's. Without
-      // it, the routine absent-at-base read (every filing PR has one) printed `fatal: path … does
-      // not exist in …` straight through a PASSING review — it surfaced on #1732/#1734/#1735/#1736
-      // and reads as breakage. Piping does not change what the caller can tell apart: the
-      // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
-      // Node `code`) was MEASURED with stderr already piped, and is locked by
-      // test/base-blob-read-failure.test.ts Group 0.
-      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26 }));
-  const addWorktree =
-    deps.addWorktree ??
-    ((repoDir: string, worktreePath: string, revision: string) =>
-      // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
-      // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
-      // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      hostWorktreeGit(repoDir, detachedArgs(worktreePath, revision)));
-  const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
-  // (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
-  // seam's correctness, and the two halves are asymmetric:
-  //
-  // ADDED IS THE POINT. A file the base never had makes `node --test` fail on a MISSING FILE there,
-  // and "absent" is not "fails" — that result says nothing about the code. Copying it in makes the
-  // base run the SAME test, which is what separates a new test passing at base anyway (proves
-  // nothing, graded `executed_stale`) from one that needs this PR's own source change (real
-  // discrimination, because its import or assertion is what is missing at base).
-  //
-  // MODIFIED MUST NOT BE COPIED. A modified file EXISTS at base and its own version already runs
-  // there — that run IS the evidence. Overwriting it with the head version manufactures a pass: a
-  // test legitimately FAILING at base passes instead, and the single strongest discrimination
-  // signal (a task REPAIRING a failing test, the case CLAUDE.md names) silently grades stale.
-  // MEASURED on this branch 2026-09-08, running
-  // test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts under each filter: with `AM`
-  // exactly one case reddens — "a unit-test proof that passes at head and fails at base reports
-  // discrimination, verdict unchanged" — and with `A` the file is 8/8. That case is this rule's
-  // falsifier; restore the `M` and it fails again.
-  //
-  // The pathspec restricts the walk to `test/` itself, matching design (iv): only files a
-  // `unit test:` proof could ever name are ever copied.
-  const changedTestFiles =
-    deps.changedTestFiles ??
-    ((headDir: string, base: string) =>
-      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"])
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean));
-  const copyFile =
-    deps.copyFile ??
-    ((src: string, dest: string) => {
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, readFileSync(src));
-    });
-
-  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false, addedTestFiles: new Set<string>() };
-  // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
-  // base, so no checkout is paid for. A single `grep:` OR `unit test:` proof is enough to want one.
-  if (!criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null)) return noBase;
-  let base: string;
-  try {
-    base = mergeBase(headCheckoutDir);
-  } catch {
-    return noBase; // unresolvable base ⇒ no staleness signal, never a false positive
-  }
-  if (!base) return noBase;
-
-  const dir = makeDir();
-  // A review whose every proof is a `grep:` reads the base blobs it names and checks nothing out: the
-  // grep reads one path, and a checkout of the whole tree for it was observed taking 66 minutes on a loaded host.
-  const grepTargets = grepOnlyBaseTargets(criteria);
-  if (grepTargets !== undefined) {
-    const tree = materialiseBaseGrepTree(headCheckoutDir, base, grepTargets, dir, { ...deps.grepTree, showBlob: deps.showBlob });
-    if (tree.needsCheckout.length === 0) {
-      // (W1-T3190) The same ADDED set the worktree path copies, so a grep naming a test file this diff adds
-      // still classifies `discriminates`; nothing is copied, since no test re-runs in a grep tree.
-      let added: string[] = [];
-      try {
-        if (grepTargets.some((t) => t.startsWith("test/"))) added = changedTestFiles(headCheckoutDir, base);
-      } catch {
-        // `git diff` broke: no added file is known, which is the pre-W1-T3098 reading and never a false stale.
-      }
-      return { baseCheckoutDir: dir, baseUnreadablePaths: new Set(tree.unreadable), baseIsCheckout: false, baseIsGrepTree: true, addedTestFiles: new Set(added) };
-    }
-    // A symlink or submodule on the way to a target: only a real checkout resolves it, into an empty dir.
-    rmSync(dir, { recursive: true, force: true });
-    mkdirSync(dir, { recursive: true });
-  }
-  let worktreeFailure: string;
-  try {
-    addWorktree(headCheckoutDir, dir, base);
-    registerReviewerCheckout(dir);
-    // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
-    // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
-    // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
-    // Copy the diff's ADDED `test/**` files in at the same repo-relative paths so the SAME
-    // proof that just passed on the head can actually be re-run here. Best-effort and isolated in
-    // its own try: a copy failure (or a `git diff` that itself throws) narrows what gets re-run —
-    // that one file's proof falls back to whatever it graded before this change — it must never
-    // downgrade `baseIsCheckout`, which is a fact about the WORKTREE, already true by this point,
-    // not about any one file inside it.
-    const copiedTestFiles = new Set<string>();
-    try {
-      for (const rel of changedTestFiles(headCheckoutDir, base)) {
-        try {
-          copyFile(join(headCheckoutDir, rel), join(dir, rel));
-          copiedTestFiles.add(rel); // W1-T3190: only on SUCCESS, so set and tree agree
-        } catch {
-          // per-file: leave this one path absent from the base tree, exactly as before this change
-        }
-      }
-    } catch {
-      // `changedTestFiles` itself failed to run (e.g. `git diff` broke) — no files copied, no worse
-      // than the pre-W1-T3098 checkout.
-    }
-    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: copiedTestFiles };
-  } catch (e) {
-    // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
-    // prints it and the classifier reads the fallback's `baseIsCheckout: false` (R-11).
-    worktreeFailure = String((e as Error)?.message ?? e);
-  }
-  // FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir.
-  const { written, unreadable } = materialiseBaseProofBlobs(
-    criteria,
-    base,
-    (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
-    (rel: string, contents: string) => {
-      const dest = join(dir, rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, contents);
-    },
-  );
-  return {
-    baseCheckoutDir: written > 0 ? dir : undefined,
-    baseUnreadablePaths: new Set(unreadable),
-    baseIsCheckout: false,
-    addedTestFiles: new Set<string>(), // the blob fallback copies nothing in; absent means absent
-
-    baseWorktreeFailure: worktreeFailure,
-  };
-}
 
 // ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
 //
@@ -24368,141 +24324,6 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * the open-PR read deliberately — that is a stated scope reduction, still reported, still
  * exit 0 (the history scan still runs offline — it is a local git read, not a network one).
  */
-/**
- * `rmd check-proof <proof>` — run ONE acceptance proof through the REVIEWER'S OWN parser AND
- * executor and print what it did, so an author never has to hand-roll a verification that
- * differs from the thing that actually runs.
- *
- * WHY THIS EXISTS. The recurring cost is not that authors are careless — it is that local
- * verification and remote execution are two different programs. PR #1071's author checked a
- * `grep:` proof with `grep -F`, a FIXED-STRING matcher; the executor runs `grep -arn --`, a REGEX.
- * The `[call-site]` in the pattern was a character class to one and a literal to the other, so the
- * local check said green and the review said fail. Measured across the unioned ledger, 1,952
- * verdicts carry a failed grep proof. This verb removes the gap BY CONSTRUCTION rather than by
- * asking people to remember a rule nothing states: it calls `parseWhitelistedProof`, prints the
- * exact argv, and — W1-T387 — judges the run through {@link "./lib/review.js".execWhitelistedProof}
- * itself, the SAME function `judgeCriterion` calls at review time, rather than a second hand-rolled
- * exit-code check of its own.
- *
- * W1-T387 (THE PARSER/EXECUTOR SPLIT THIS CLOSES). Before this, `checkProofCommand` shared only
- * `parseWhitelistedProof` with the reviewer; past that it ran its OWN raw `spawnSync` and judged
- * PASS/FAIL purely by `status === 0`. For a name-filtered `unit test:` proof that is unsound:
- * `node --test --test-name-pattern` exits 0 and emits its file's own trivial TAP wrapper line even
- * when ZERO named tests matched — MEASURED live, `unit test: fixHeadAcceptable` (resolves to
- * `test/fix-rung-no-task.test.ts`) reads `exit: 0, hits: 17` here while
- * {@link "./lib/review.js".execWhitelistedProof}, which reads the TAP stream instead of the exit
- * code, reports `no-match`. An author trusted "the reviewer's own executor" and shipped a proof the
- * reviewer would cap. Calling the real executor removes that gap the same way it removed the
- * grep-matcher gap: BY CONSTRUCTION, not by a second implementation kept in sync by hand.
- *
- * DIAGNOSTICS SURVIVE THE COLLAPSE. `execWhitelistedProof` returns only a three-value verdict
- * (`"pass" | "fail" | "no-match"`, or throws) — no stdout, no exit code, no signal. This verb still
- * prints all three, by handing `execWhitelistedProof` a {@link "./lib/review.js".ProofSpawner} that
- * wraps the real one and records what it observed on the side; the VERDICT is still decided
- * entirely inside `execWhitelistedProof`, this file never re-derives it from the exit code.
- *
- * EXIT CODE IS THE VERDICT, MAPPED — see {@link CHECK_PROOF_EXIT}. `no-match` and `fail` used to
- * share exit 1; they no longer do, because they mean different things to the reviewer (`no-match`
- * degrades to the keyword floor, `fail` overrides it to UNMET) and a local check that conflated
- * them could not tell an author which one to expect.
- *
- * STRICTLY READ-ONLY. It writes no cache, no ledger line, and no state file — deliberately unlike
- * `rmd next-task-id`, which looks like a reader and writes a history cache into the SHARED git
- * common dir that every worktree and the live daemon use. Nothing here touches `config.root`,
- * `state/`, or `.git`; the only side effect is one `grep`/`node --test` child process and stdout.
- *
- * "ONE child process" WAS DOING A LOT OF WORK IN THAT SENTENCE, and the `unresolvable` branch below
- * is why it now says less. A `unit test:` proof naming a TITLE compiles to a `--test-name-pattern`
- * run over TEST_GLOB; when the title resolves to no file, that glob survived into the spawn, so the
- * "one child process" was `node --test` over the ENTIRE SUITE, with no timeout. Writing nothing is
- * not the same as doing nothing. The branch below refuses that run by default.
- *
- * W1-T912, OPTIONAL `--base <ref>`: THIS VERB ANSWERED A DIFFERENT QUESTION THAN THE REVIEWER ASKS.
- * Without `--base`, everything above still describes the whole verb — one tree, one verdict. The
- * reviewer applies a SECOND test this CLI never performed: a proof that matches BOTH the PR head and
- * its merge-base discriminates nothing and is downgraded to `executed_stale` (W1-T273 for `grep:`,
- * extended to `unit test:` by W1-T362) — so a proof could read `verdict: pass` here and count for
- * nothing in review, with nothing local ever having asked the second question. `--base <ref>` asks
- * it: it runs the SAME proof again against `<ref>` (via {@link buildBaseProofDir}, the exact builder
- * `rmd review`'s own wiring uses, injected with `<ref>` in place of the real merge-base) and prints a
- * `base:` line alongside the existing `verdict:` line, plus a `discrimination:` line naming the
- * reviewer's own `executed_stale` when both trees agree. Absent `--base`, none of this runs — every
- * line above and the function's return value are byte-identical to before this task, so no existing
- * caller shifts. It REPORTS, it does not RE-RANK: no change to the reviewer, to `executed_stale`
- * itself, or to any exit code other than the new stale case (see {@link CHECK_PROOF_EXIT}). (R-11)
- * The base is a real detached worktree at `<ref>` — the same builder the reviewer uses — so a
- * `unit test:` proof is compared too; when that worktree cannot be created, a `grep:` proof falls
- * back to its materialized base blob and a `unit test:` proof reports `UNKNOWN` (the reviewer's own
- * `base_unknown`) rather than silently skipping the check. The worktree is removed before returning.
- */
-/** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
- *  `unresolvable` branch in {@link checkProofCommand}. */
-export const CHECK_PROOF_FULL_SUITE_FLAG = "--allow-full-suite";
-
-/**
- * `rmd check-proof`'s verdict/refusal → exit-code contract (W1-T387 design (v)). A VERDICT and a
- * REFUSAL are different claims and must never share a code:
- *   - `pass`      (0) — executed, and {@link "./lib/review.js".execWhitelistedProof} says the
- *                       named check holds. Same code as before.
- *   - `fail`      (1) — executed, and it does not hold — a genuine failing test or grep miss.
- *                       Same code as before.
- *   - `refused`   (2) — NOTHING executed: bad usage, an unparseable proof, or a name-filtered
- *                       proof whose candidate resolution was `unresolvable` and
- *                       `--allow-full-suite` was not given. Unchanged from before.
- *   - `noMatch`   (3) — NEW. Executed (or fast-failed on positive evidence of absence) and ZERO
- *                       named tests matched — review.ts DEGRADES this to the keyword floor, never
- *                       a failure, so it must never read the same as `fail`. Before W1-T387 this
- *                       shared exit 1 with `fail`, which is the exact gap this task closes: a
- *                       proof that reads GREEN locally (`exit 0`) could be `no-match` at review,
- *                       and a local check that then reported the SAME code as `fail` would not
- *                       even let an author tell the two verdicts apart once they knew to look.
- *   - `execError` (4) — NEW. The run did not reach a clean pass/fail/no-match verdict at all: a
- *                       timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
- *                       distinct from exit 1's "looked, found nothing" (W1-T219). Inconclusive,
- *                       not evidence either way — review.ts also degrades this to the keyword
- *                       floor, so it must not read as `fail` either.
- *   - `executedStale` (5) — NEW (W1-T912). ONLY reachable with `--base <ref>`: the proof passed on
- *                       BOTH the working tree and `<ref>`, so it discriminates nothing — the exact
- *                       shape review.ts's own `executed_stale` (W1-T273/W1-T362) downgrades. Absent
- *                       `--base` this code is never returned, so every existing caller is unaffected.
- */
-export const CHECK_PROOF_EXIT = {
-  pass: 0,
-  fail: 1,
-  refused: 2,
-  noMatch: 3,
-  execError: 4,
-  executedStale: 5,
-} as const;
-
-/** Fallback when plan/policy.yaml cannot be read: that file's own documented floor for
- *  `proofTimeoutMs`, so this verb is never less bounded than the reviewer. */
-const CHECK_PROOF_TIMEOUT_FLOOR_MS = 60_000;
-
-/**
- * How long `check-proof` lets a proof run. Time-boxed for the SAME reason the reviewer time-boxes,
- * reading the SAME policy field (`proofTimeoutMs`) so the two cannot drift: a proof that hangs must
- * fail rather than wedge the operator's terminal — this verb had no timeout at all, which is half of
- * what made the whole-suite fallback below so expensive.
- *
- * Best-effort by design: an unreadable policy must not turn a diagnostic verb into a crash, so it
- * degrades to that field's own documented floor. `readPolicy` is injected LAST and defaulted, so no
- * caller shifts — and so the catch arm is reachable from a test rather than being dead code that
- * only fires on a broken checkout.
- */
-export function checkProofTimeoutMs(readPolicy?: () => number): number {
-  try {
-    // THE SEAM IS THE `??` FORM DELIBERATELY. test/config-reader-seams.test.ts detects an
-    // injectable policy read by the literal `?? loadDefaultPolicy(` shape; a defaulted PARAMETER
-    // is just as injectable but reads to that detector as unseamed, and allowlisting it would
-    // trip its own stale-entry lock (an allowlisted reader that HAS a seam is a failure). Writing
-    // the seam in the house form is cheaper than teaching the detector a second shape.
-    return readPolicy?.() ?? loadDefaultPolicy().values.proofTimeoutMs;
-  } catch {
-    return CHECK_PROOF_TIMEOUT_FLOOR_MS;
-  }
-}
-
 /** Default window for `rmd emissions`. 30 days covers this host's entire rotation history, so
  *  "zero in the window" is a claim about the corpus rather than about retention. */
 const EMISSIONS_DEFAULT_DAYS = 30;
@@ -27208,458 +27029,6 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
   return 0;
 }
 
-export function checkProofCommand(
-  rest: string[],
-  deps: {
-    pathStatus?: (cwd: string, path: string) => string;
-    /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
-     *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
-     *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
-     *  from two literal fixture trees with NO spawn beyond the executor this verb already
-     *  drives (execWhitelistedProof's own grep/`node --test`) — the "base" tree never needs a
-     *  real git rev to exist for a test. */
-    baseBlobDeps?: {
-      showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
-      makeDir?: () => string;
-      /** (R-11) the merge-base worktree seam — thrown from, in a test, to reach the blob fallback. */
-      addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
-      /** (R-11) teardown of that worktree — thrown from, in a test, to prove a failed teardown never
-       *  masks the verdict already computed. */
-      removeWorktree?: (repoDir: string, worktreePath: string) => void;
-    };
-  } = {},
-): number {
-  // Matched as STANDALONE tokens, never a substring: a proof body is free text that could
-  // legitimately quote either flag's name.
-  const allowFullSuite = rest.includes(CHECK_PROOF_FULL_SUITE_FLAG);
-  const baseFlagIdx = rest.indexOf("--base");
-  const baseRef = baseFlagIdx >= 0 ? rest[baseFlagIdx + 1] : undefined;
-  if (baseFlagIdx >= 0 && baseRef === undefined) {
-    console.error("rmd check-proof: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  // W1-T4590: `--repo <owner/name>` resolves the proof against THAT repository's registered suite
-  // roots, as the reviewer does (W1-T3525). Omitted, the default target is unchanged.
-  const repoFlagIdx = rest.indexOf("--repo");
-  const repoSlug = repoFlagIdx >= 0 ? rest[repoFlagIdx + 1] : undefined;
-  const [repoOwner, repoName] = repoSlug?.split("/") ?? [];
-  if (repoFlagIdx >= 0 && (!repoOwner || !repoName)) {
-    console.error("rmd check-proof: --repo needs <owner/name>, e.g. `--repo craigoley/remudero-console`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  const target = repoOwner && repoName ? { owner: repoOwner, repo: repoName } : undefined;
-  const flagTokens = new Set<number>();
-  for (const idx of [baseFlagIdx, repoFlagIdx]) if (idx >= 0) flagTokens.add(idx).add(idx + 1);
-  const proof = rest
-    .filter((t, i) => {
-      if (t === CHECK_PROOF_FULL_SUITE_FLAG) return false;
-      // Only ever excludes a PRESENT flag's own token and its value token, so a caller who omits
-      // both --base and --repo keeps a byte-identical proof string.
-      return !flagTokens.has(i);
-    })
-    .join(" ")
-    .trim();
-  if (!proof) {
-    console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  const w = parseWhitelistedProof(proof, target);
-  if (!w) {
-    console.log(`proof:      ${proof}`);
-    console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
-    // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
-    // clause, a traversal — instead of only the generic hint below.
-    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof, target);
-    if (why !== undefined) console.log(`            reason: ${why}`);
-    console.log(
-      "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
-        "            test path or title. A proof wrapped in markdown backticks parses since #1063, but a\n" +
-        "            proof with no dialect prefix at all is prose and never executes.",
-    );
-    return CHECK_PROOF_EXIT.refused;
-  }
-  console.log(`proof:      ${proof}`);
-  console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
-
-  let args = w.args as readonly string[];
-  if (w.nameFiltered && w.runner === "vitest") {
-    // The registered Vitest target already scopes the run to its own tests/ root. The
-    // Node-only grep resolver searches this repo's test/ root and would refuse a valid
-    // site/console proof before the shared reviewer executor could run it.
-    console.log("candidates: delegated to the registered Vitest suite root");
-  } else if (w.nameFiltered) {
-    const r = resolveNameFilteredCandidates(process.cwd(), w.label);
-    if (r.status === "resolved") {
-      console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
-      args = narrowNameFilteredArgs(w.args, r.files);
-    } else {
-      console.log(`candidates: ${r.status}${"reason" in r ? ` — ${r.reason}` : ""}`);
-      if (r.status === "absent") {
-        console.log("verdict:    no-match — the executor fast-fails here and never spawns node.");
-        return CHECK_PROOF_EXIT.noMatch;
-      }
-      // UNRESOLVABLE ⇒ `narrowNameFilteredArgs` returns the args UNCHANGED, still carrying
-      // TEST_GLOB — so executing here runs the ENTIRE SUITE. That fallback is defensible inside
-      // the reviewer, whose own comment argues it: with no evidence either way, the wide run is
-      // the honest attempt. It was NOT defensible here, because this verb called `spawnSync` with
-      // no `timeout` — so an operator asking a one-line question about one proof got an UNBOUNDED
-      // full-suite run. review.ts's comment names what that costs: "the full glob loads every file
-      // including several that drive a real headless browser and hang when the name filter matches
-      // none of their tests".
-      //
-      // The trigger is not exotic. `resolveNameFilteredCandidates` answers `unresolvable` whenever
-      // `couldBeInterpolatedTitle` is true — i.e. whenever the proof's title merely SHARES A
-      // STATIC CHUNK with any template-literal title in the corpus — which happens in a perfectly
-      // ordinary checkout, and is indistinguishable to the author from a title that simply typo'd.
-      //
-      // So: report, and decline to be the thing that runs the suite. Everything an author came for
-      // (parse kind, the resolution and its reason, the exact argv) is printed either way; only
-      // the spawn is withheld.
-      if (!allowFullSuite) {
-        console.log(`argv:       ${w.command} ${args.join(" ")}`);
-        console.log(
-          "verdict:    NOT EXECUTED — this proof resolved to no file, so running it would run the\n" +
-            "            WHOLE test suite (note the trailing glob in the argv above), unbounded.\n" +
-            `            Re-run with ${CHECK_PROOF_FULL_SUITE_FLAG} to do it anyway (time-boxed to the\n` +
-            "            same proofTimeoutMs the reviewer uses), or name a test/<file>.test.ts path —\n" +
-            "            the path form runs exactly one file.",
-        );
-        return CHECK_PROOF_EXIT.refused;
-      }
-    }
-  }
-  console.log(`argv:       ${w.command} ${args.join(" ")}`);
-
-  // W1-T1224: resolve the grep TARGET PATH and PATTERN once, up front — {@link grepZeroHitCauseLine}
-  // below and the exec_error branch's path-absent check both need them, and the --base block
-  // further down already relied on this same "argv's last element is the path" assumption (see its
-  // own comment, unchanged) before this task; pattern is the element right before it, matching how
-  // parseDialectGrep (review.ts) always compiles a `grep:` proof's args as `[..flags, "--", pattern,
-  // path]`.
-  const grepTargetPath = w.kind === "grep" && w.args.length >= 1 ? w.args[w.args.length - 1] : undefined;
-  const grepPattern = w.kind === "grep" && w.args.length >= 2 ? w.args[w.args.length - 2] : undefined;
-
-  // W1-T1224: the static BRE-metacharacter note used to print unconditionally on every non-pass
-  // grep verdict, whether or not the pattern actually carried one — now gated (below) behind
-  // breMetacharsIn actually finding one of `[ * ^ $` in the pattern, the SAME check
-  // proofGrepSafetyViolations (task-linter.ts) already uses to decide whether a pattern is
-  // BLOCKING-unsafe.
-  const GREP_METACHAR_NOTE =
-    "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
-    "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.";
-  const grepPatternHasBlockingMetachar = grepPattern !== undefined && breMetacharsIn(grepPattern).blocking.length > 0;
-
-  /**
-   * W1-T1224 — WHY a zero-hit `grep:` proof read zero, as a `cause:` line alongside the unchanged
-   * `verdict:`/exit code (design (iii): report, do not re-rank). Calls {@link classifyGrepZeroHit}
-   * (src/lib/grep-zero-cause.ts) — this file derives NO cause of its own, only reads the file and
-   * formats what the classifier returns. `undefined` when there is nothing to say: a non-grep
-   * proof, or a target path/pattern argv could not resolve.
-   */
-  function grepZeroHitCauseLine(): string | undefined {
-    // grepTargetPath/grepPattern are only ever set (above) when w.kind === "grep" — reading them
-    // rather than w.kind again keeps this closure from needing TS to re-narrow `w` (a `const` from
-    // an outer scope; type guards on it do not apply inside a nested function declaration).
-    if (grepTargetPath === undefined || grepPattern === undefined) return undefined;
-    let fileText: string;
-    try {
-      fileText = readFileSync(join(process.cwd(), grepTargetPath), "utf8");
-    } catch {
-      return undefined; // the file the executor just read a moment ago is now unreadable — say nothing rather than guess
-    }
-    switch (classifyGrepZeroHit(grepPattern, fileText)) {
-      case "line-seam":
-        return (
-          "cause:      line-seam — the pattern's text IS in the file, but a line break falls inside\n" +
-          "            it (a YAML fold or a wrapped paragraph). grep is line-based and this can NEVER\n" +
-          "            match as written — rejoin the phrase onto one physical line, or rewrite the\n" +
-          "            pattern to match text that already lives on one line."
-        );
-      case "case-only":
-        return (
-          "cause:      case-only — the pattern's text IS in the file with different capitalisation.\n" +
-          "            grep here is case-sensitive and this can NEVER match as written — match the\n" +
-          "            file's actual case, or write a separate case-insensitive proof if that is truly\n" +
-          "            the intent."
-        );
-      case "absent":
-        return (
-          "cause:      absent — the pattern's text is not in the file in any form (line-wrap and case\n" +
-          "            both probed). This reads as a legitimate FORWARD REFERENCE to work not yet\n" +
-          "            written, not as a broken proof."
-        );
-      case "matched":
-        return (
-          "cause:      matched — this classifier's own probe found a line match despite the real grep\n" +
-          "            reading zero hits; that is a matcher disagreement, not a fact about the file —\n" +
-          "            treat it as a bug report against the classifier, never as evidence either way."
-        );
-    }
-  }
-
-  // W1-T387: THE COLLAPSE. Everything above this line is UNCHANGED diagnostics (parse kind,
-  // candidate resolution, the exact argv) — the whole point is that they survive. From here down,
-  // the VERDICT is decided by execWhitelistedProof itself, the SAME function judgeCriterion calls
-  // at review time, never by this file re-deriving pass/fail from a raw exit code again.
-  //
-  // execWhitelistedProof returns only "pass" | "fail" | "no-match" (or throws) — no stdout, no
-  // exit code, no signal. `capturingSpawn` wraps the REAL spawner (review.ts's own
-  // `defaultProofSpawner`, the identical primitive execWhitelistedProof would use by default) and
-  // records what it observed on the side, purely so the diagnostics below (`exit:`, `hits:`) can
-  // still be printed — this file never reads `diag` to decide the verdict.
-  let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
-  const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
-    const proofPaths = grepTargetPath === undefined
-      ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
-        .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
-      : [grepTargetPath];
-    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => hostWorktreeGitAtTopLevel(
-      cwd, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", resolve(cwd, path)],
-      { log: () => {} },
-    ));
-    for (const path of new Set(proofPaths)) {
-      let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
-      try {
-        status = { kind: "read", text: pathStatus(spawnCwd, path) };
-      } catch (error) {
-        status = { kind: "unreadable", error };
-      }
-      if (status.kind === "read" && status.text.trim() !== "") {
-        console.error(`warning:    ${path} differs from HEAD; the pushed head may answer differently.`);
-      }
-    }
-    try {
-      const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-      diag = { stdout: out, status: 0, signal: null };
-      return out;
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException & {
-        status?: number | null;
-        signal?: NodeJS.Signals | null;
-        stdout?: string | Buffer | null;
-      };
-      diag = {
-        stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
-        status: typeof err.status === "number" ? err.status : null,
-        signal: err.signal ?? null,
-      };
-      throw e;
-    }
-  };
-
-  let outcome: "pass" | "fail" | "no-match";
-  try {
-    outcome = execWhitelistedProof(w, process.cwd(), checkProofTimeoutMs(), capturingSpawn);
-  } catch (e) {
-    // exec_error: a timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
-    // never treated as evidence of a failing proof (W1-T219). Same class of run the reviewer
-    // degrades to the keyword floor rather than an executed_fail.
-    if (diag) {
-      console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
-      const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-      console.log(`hits:       ${hits}`);
-      if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
-    }
-    console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
-    // W1-T1224 (design (iv)): an ABSENT path is the one exec_error cause this task names — it
-    // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
-    // this line. Checked with existsSync rather than the classifier: there is no file text to
-    // read at all, so classifyGrepZeroHit has nothing to classify.
-    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath)))
-      console.log(
-        `cause:      path-absent — ${grepTargetPath} does not exist; grep could not even look (a\n` +
-          "            renamed/missing target, or a permission error).",
-      );
-    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
-    return CHECK_PROOF_EXIT.execError;
-  }
-
-  if (diag) {
-    console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
-    const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-    console.log(`hits:       ${hits}`);
-    if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
-  }
-  console.log(`verdict:    ${outcome}`);
-  if (w.kind === "grep" && outcome !== "pass") {
-    // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
-    // classifyGrepZeroHit( in src/run-task.ts, above, is the wiring this line exercises.
-    const causeLine = grepZeroHitCauseLine();
-    if (causeLine) console.log(causeLine);
-    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
-  }
-  const headExit =
-    outcome === "pass" ? CHECK_PROOF_EXIT.pass : outcome === "fail" ? CHECK_PROOF_EXIT.fail : CHECK_PROOF_EXIT.noMatch;
-
-  // W1-T912: --base ABSENT ⇒ nothing below this line ever runs, and every line printed above (and
-  // `headExit`, this function's return value with no --base) is byte-identical to before this task —
-  // no existing caller shifts. See this function's own doc comment for the full design.
-  if (baseRef === undefined) return headExit;
-
-  console.log(`base ref:   ${baseRef}`);
-  // Reuses the SAME builder `rmd review` wires (buildBaseProofDir: a detached worktree at <ref>,
-  // falling back to materialiseBaseProofBlobs), injected with `<ref>` in place of the real
-  // `git merge-base origin/main HEAD` — everything downstream (the worktree, the blob fallback, the
-  // absent/unreadable distinction) is the reviewer's own mechanism, not a second implementation
-  // kept in sync by hand.
-  const { removeWorktree, ...builderDeps } = deps.baseBlobDeps ?? {};
-  const built = buildBaseProofDir([{ proof }], process.cwd(), {
-    mergeBase: () => baseRef,
-    ...builderDeps,
-  });
-  try {
-    return compareAgainstBase(built);
-  } finally {
-    // (R-11) A worktree or grep tree this verb built is this verb's to remove — the reviewer's
-    // `withMaterializedWorktree` does the same for its own. A blob-fallback dir is left to the boot sweep.
-    releaseBaseProofDir(process.cwd(), built, removeWorktree);
-  }
-
-  function compareAgainstBase(base: BaseProofDir): number {
-    const { baseCheckoutDir, baseUnreadablePaths } = base;
-    // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
-    // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
-    // A grep tree holds a target only when the base had it and the read succeeded, so a missing one
-    // reads exactly as the blob path's absent or unreadable blob does.
-    const grepTreeLacksTarget =
-      base.baseIsGrepTree === true &&
-      grepTargetPath !== undefined &&
-      !base.addedTestFiles.has(grepTargetPath) &&
-      !existsSync(join(baseCheckoutDir!, grepTargetPath));
-
-    if (baseCheckoutDir === undefined || grepTreeLacksTarget) {
-      if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
-        console.log(
-          `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
-            "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
-            "            base_unreadable degrade the reviewer itself uses (W1-T460).",
-        );
-      } else if (grepTargetPath !== undefined) {
-        console.log(
-          `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
-            "            have matched before the work existed (a forward reference) — the strongest possible\n" +
-            "            form of discriminating.",
-        );
-      } else {
-        // (R-11) A `unit test:` proof with no checkout to run in. The worktree is the only base a
-        // test can be re-run against; without one the reviewer grades base_unknown, and so does this.
-        console.log(
-          `base:       UNKNOWN — a merge-base worktree at ${baseRef} could not be created` +
-            (base.baseWorktreeFailure ? ` (${base.baseWorktreeFailure.split("\n")[0]})` : "") +
-            `, and a \`unit test:\` proof (kind=${w!.kind}) cannot be re-run against materialised\n` +
-            "            blobs — the reviewer grades exactly this base_unknown (R-11): no downgrade, and NO\n" +
-            "            claim that the proof discriminates; the verdict above stands unchanged.",
-        );
-      }
-      console.log("discrimination: unknown — reported verdict above stands unchanged");
-      return headExit;
-    }
-
-    // `buildBaseProofDir` copies ADDED test files into its base checkout only so a `unit test:`
-    // proof can exercise the same test against base source. A `grep:` proof targeting that copied
-    // file still names a path absent at the merge base, so it discriminates by construction. The
-    // reviewer owns this distinction in `classifyBaseProofOutcome`; without this matching arm the
-    // public diagnostic executes grep against the copied head file and falsely reports stale.
-    if (w!.kind === "grep" && grepTargetPath !== undefined && base.addedTestFiles.has(grepTargetPath)) {
-      console.log(
-        `base:       ABSENT at ${baseRef} — ${grepTargetPath} was copied only to re-run added unit tests; ` +
-          "a grep proof still names a path the merge base did not contain.",
-      );
-      console.log("discrimination: discriminates — this proof's target did not exist at the merge base.");
-      return headExit;
-    }
-
-    let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
-    const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
-      try {
-        const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-        baseDiag = { stdout: out, status: 0, signal: null };
-        return out;
-      } catch (e) {
-        const err = e as NodeJS.ErrnoException & {
-          status?: number | null;
-          signal?: NodeJS.Signals | null;
-          stdout?: string | Buffer | null;
-        };
-        baseDiag = {
-          stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
-          status: typeof err.status === "number" ? err.status : null,
-          signal: err.signal ?? null,
-        };
-        throw e;
-      }
-    };
-    let baseOutcome: "pass" | "fail" | "no-match";
-    try {
-      baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
-    } catch (e) {
-      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
-      const missingExport =
-        w!.kind === "test" && typeof loadOutput === "string"
-          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
-          : undefined;
-      if (missingExport !== undefined) {
-        console.log(`base:       COULD NOT LINK — ${missingExport}`);
-        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
-        return headExit;
-      }
-      console.log(
-        `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
-          "            evidence either way, same as the reviewer's own base_unknown degrade.",
-      );
-      console.log("discrimination: unknown — reported verdict above stands unchanged");
-      return headExit;
-    }
-    if (baseDiag && w!.kind === "grep") {
-      const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-      console.log(`base hits:  ${baseHits}`);
-    }
-    console.log(`base:       ${baseOutcome}`);
-
-    if (outcome === "pass" && baseOutcome === "pass") {
-      console.log(
-        "discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates NOTHING;\n" +
-          "                the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would\n" +
-          "                count for nothing in review despite reading pass above.",
-      );
-      return CHECK_PROOF_EXIT.executedStale;
-    }
-    console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
-    return headExit;
-  }
-}
-
-/** Release what {@link buildBaseProofDir} built: a worktree is deregistered, a grep tree deleted, both through
- *  {@link removeBaseProofWorktree}'s best-effort teardown. A blob-fallback dir is left to the boot sweep, as before. */
-function releaseBaseProofDir(
-  repoDir: string,
-  base: BaseProofDir | undefined,
-  removeWorktree?: (repoDir: string, worktreePath: string) => void,
-): void {
-  if (base?.baseCheckoutDir === undefined) return;
-  if (base.baseIsCheckout) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, removeWorktree);
-  else if (base.baseIsGrepTree === true) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, (_repo, tree) => rmSync(tree, { recursive: true, force: true }));
-}
-
-/**
- * (R-11) `rmd check-proof --base`'s own teardown of the merge-base worktree {@link buildBaseProofDir}
- * added for it — best-effort, never masking the verdict already computed, mirroring
- * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree. The default
- * removes it through {@link hostWorktreeGit}, the hardened leaf the build added it through, so the
- * caller's checkout (a PR head, for a proof amendment) is pinned and inherited git variables are dropped.
- */
-function removeBaseProofWorktree(
-  repoDir: string,
-  worktreePath: string,
-  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) => void hostWorktreeGit(dir, ["worktree", "remove", "--force", wt]),
-): void {
-  try {
-    remove(repoDir, worktreePath);
-  } catch (e) {
-    console.error(`(base worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
-  }
-}
-
 /**
  * W1-T917 — read each OPEN pull request's ACTUAL CHANGED FILES over REST, as
  * {@link OpenPrFileScope} rows for {@link rareOverlapWarnings}.
@@ -28014,19 +27383,6 @@ export function gitRunAdapter(
     const r = run(args);
     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
-}
-
-export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
-  const log = opts.log ?? ((step: string, extra: Record<string, unknown>) => {
-    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
-  });
-  for (let at = resolve(dir); ; at = dirname(at)) {
-    try {
-      return hostWorktreeGit(at, args, { ...opts, log });
-    } catch (error) {
-      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
-    }
-  }
 }
 
 /** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
@@ -30509,7 +29865,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
+      checkProofChildArgv(proof, mergeBase),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
@@ -33704,15 +33060,68 @@ export async function addLaneWorktree(
   return { branch, worktreePath };
 }
 
+/** W1-T9153: an add refused because another LIVE run's lock is at the path. Nothing was written: the holder's lock,
+ *  worktree and branch are exactly as they were, and the message names the path, the holder's pid and its run_id. */
+export class RunWorktreeHeldError extends RmdError {
+  constructor(readonly worktreePath: string, readonly holder: RunLockInfo) {
+    super("git", GENERIC_EXIT_CODE,
+      `refusing to add ${worktreePath}: its run lock is held by live pid ${holder.pid} (run_id ${holder.run_id}) (W1-T9153)`,
+      { worktreePath, holder_pid: holder.pid, holder_run_id: holder.run_id });
+    this.name = "RunWorktreeHeldError";
+  }
+}
+
+function parseRunLockHolder(raw: string): RunLockInfo | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<RunLockInfo> | null;
+    return typeof parsed?.pid === "number" ? (parsed as RunLockInfo) : null;
+  } catch {
+    return null; // garbled bytes name no holder, so reclaimStaleLock judges them stale, as it does a dead pid
+  }
+}
+
+/** W1-T9153: CLAIM a path's run lock, never overwrite it. The overwrite let a second approve replace a live holder's lock,
+ *  fail its add, and then delete the lock the holder depended on. `link(2)` is the exclusive create: it fails EEXIST
+ *  over any lock, so of two runs that both found none exactly one wins, and the link publishes complete bytes, so no
+ *  reader sees a half-written lock. A lock already there is judged by {@link worktreeLockIsPidAlive}, the reaper's own
+ *  predicate: another live run's refuses the add; a dead or unparseable holder's (or this process's own, as the
+ *  overwrite allowed) is reclaimed through {@link reclaimStaleLock}, whose identity check keeps two reclaimers of one
+ *  dead lock from both winning. */
+function claimRunLock(worktreePath: string, runId: string): void {
+  const target = runLockPath(worktreePath);
+  const staged = `${target}.claim-${process.pid}`; // one claim per process at a time: this function never yields
+  writeFileSync(staged, JSON.stringify({ pid: process.pid, run_id: runId, startedAt: systemClock.iso() }, null, 2));
+  try {
+    for (;;) {
+      try {
+        linkSync(staged, target);
+        return;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      const held = reclaimStaleLock(target, {
+        parseHolder: parseRunLockHolder,
+        isStale: (holder) => holder.pid === process.pid || !worktreeLockIsPidAlive(holder.pid, holder),
+      });
+      if (held.outcome === "live") throw new RunWorktreeHeldError(worktreePath, held.holder);
+      // "reclaimed" | "missing" | "lost": the path changed under this look, so claim again from the top.
+    }
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
 /** W1-T5356: a `run-*` lane's sync add, LOCK FIRST — runTaskBody's W1-T5280 order for every other lane. A sync add blocks
  *  only its own event loop; a prune in ANOTHER process (an approve pid, a hand-run `rmd`) still reaches a lockless path
- *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on. */
+ *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on.
+ *  W1-T9153: the lock is CLAIMED ({@link claimRunLock}), so a path another live run holds is refused before anything is
+ *  written, and the lock a failed add drops is always this run's own. */
 export function addLockedRunWorktree(
   repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   mkdirSync(worktreePath, { recursive: true }); // reapStaleWorktrees deletes a `.lock` whose directory is absent
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  claimRunLock(worktreePath, runId);
   try {
     worktreeAdd(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
@@ -33728,7 +33137,7 @@ export async function addLockedRunWorktreeAsync(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<void> {
   mkdirSync(worktreePath, { recursive: true });
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  claimRunLock(worktreePath, runId); // W1-T9153: the same claim as the sync add
   try {
     await worktreeAddAsync(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
@@ -36841,7 +36250,7 @@ async function drainCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
@@ -38498,6 +37907,49 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
+/** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
+ *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
+ *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
+ *  judge's spawn in tests. */
+export function issueRevalidationRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: {
+    loadPlan?: () => Plan;
+    reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
+    spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
+  } = {},
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+  const { owner, repo, repoRoot, stateDir, log } = ctx;
+  let plan: Plan | undefined;
+  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
+  return {
+    hasReferent: (issue) => {
+      const taskId = issueTaskId(issue) ?? "";
+      return /^PR-\d+$/.test(taskId) || planNow().byId.has(taskId) ||
+        prReferentFromIssueText(issue.body) !== undefined || prReferentFromIssueText(issue.title) !== undefined;
+    },
+    referentVerdicts: async (issues) => {
+      const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
+        ...seams.reconcile,
+        issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
+      });
+      return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
+        const pr = c.derived.prNumber !== undefined ? `PR #${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
+        if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
+        if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
+        if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+      }));
+    },
+    judgeText: (prompt, issueNumber) => {
+      const mounts = loadMounts(mountsPath(repoRoot));
+      return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
@@ -38528,6 +37980,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "knowledge": {
+      // Preserve knowledge's open-PR reuse, review and assertion-refresh ports in the child,
+      // rather than reducing it to the generic garden workspace and losing those semantics.
+      const d: GardenerDeps<GardenWorkspace> = {
+        ...deps("knowledge"),
+        openWorkspace: () => knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+      };
+      return withDue(async () => {
+        try {
+          await runKnowledgeGardenPass(d);
+        } catch (e) {
+          log("knowledge.gardener_failed", { error: String((e as Error)?.message ?? e) });
+        }
+      }, () => gardenPassDue(knowledgeGardenSpec(d), d));
+    }
     case "plan": {
       const d = deps("plan");
       const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
@@ -38667,6 +38134,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow":
       return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         { admission: { owner, repo, settings: config.contributorAdmission } });
+    // W1-T8864: every open issue re-checked against current evidence. Shadow until the operator flips
+    // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
+    case "issue-revalidation":
+      return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
+        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
+      }));
     case "evidence-coverage":
       return withDue(() => {
         try {
@@ -39308,6 +38782,8 @@ export async function daemonCommand(
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
+  // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
+  const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath);
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
@@ -39703,6 +39179,13 @@ export async function daemonCommand(
     // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
     headroom_enabled: opts.headroomEnabled,
   });
+  // W1-T9070: the positive control for ADR 0007's run children. No spawn site writes a run directory yet, so this
+  // reads all zeros; the adoption task builds on it. A failed read is ledgered, never read as zeros.
+  try {
+    log("run_child.boot_census", { ...censusRunDirs(join(config.root, "state")) });
+  } catch (censusError) {
+    log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
+  }
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
@@ -40033,6 +39516,9 @@ export async function daemonCommand(
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
         // W1-T534/W1-T916 hit two lines below, and the one #4715 shipped for this very feature.
         readLedgerLines: () => readLedgerRawLines(ledgerPathFor(config)),
+        readRestartHistory: () => {
+          return readRestartHistoryLines(dirname(ledgerPathFor(config)));
+        },
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
@@ -40066,6 +39552,7 @@ export async function daemonCommand(
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
         isIndependentFailureBlocked,
+        independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
         // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through
@@ -40118,7 +39605,7 @@ export async function daemonCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
@@ -40281,14 +39768,6 @@ export async function daemonCommand(
         livenessPulse: true,
         ...(target.isSelf
           ? {
-              knowledgeGardener: {
-                stateDir: join(config.root, "state"),
-                repoRoot,
-                openWorkspace: () =>
-                  knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJsonAsync),
-                log,
-              },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
                 // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
@@ -40350,13 +39829,16 @@ export async function daemonCommand(
           stateDir: join(config.root, "state"),
           ledgerPath,
           mergedLastDay: () => mergedInLastDayAsync(repoRoot),
-          approve: (proposalId) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).approve(proposalId),
+          approve: (proposalId) => void fleetRatify.approve(proposalId),
+          escalateReplayStranded: (stranded) => escalateReplayStranded(stranded, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+          handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
+          originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
         },
         inboxResponder: {
           threadStorePath: inboxThreadStorePath(config.root),
           ledgerPath,
           readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
-          reframe: (proposalId, feedback) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).reframe(proposalId, feedback),
+          reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
           decide: inboxThreadDecider(config, log),
         },
         runPrAction: async (request) => {
@@ -42010,7 +41492,7 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
-    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection?.isReady ?? boardGate.isReady)], tokens.read);
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
     if (boardProjection) boardProjection.start();
@@ -42633,8 +42115,12 @@ function stepErrorContext(lines: readonly string[]): number[] {
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const pool = poolVerdictRetention();
-  for (const line of log.split("\n")) pool.push(line);
-  return pool.wrap(extractCiFailureRegionBase(log, tailLines));
+  const rule = ruleSuitesRetention();
+  for (const line of log.split("\n")) {
+    pool.push(line);
+    rule.push(line);
+  }
+  return rule.wrap(pool.wrap(extractCiFailureRegionBase(log, tailLines)));
 }
 
 function extractCiFailureRegionBase(log: string, tailLines: number): string {
@@ -42759,6 +42245,25 @@ export function poolVerdictRetention(): { push(line: string): void; wrap(region:
   };
 }
 
+/** W1-T7848: the rule-checks runner's closing line naming every suite it failed. Under node 24's spec reporter
+ *  the region is the first `failing tests:` block, far above it, so it rides along like the pool's verdicts. */
+const CI_RULE_SUITES_FAILED_LINE = /^rule-checks: failed suites: \S/;
+export const RETAINED_RULE_SUITES_HEADER = "--- rule-checks failed-suites line retained from this job ---";
+
+export function ruleSuitesRetention(): { push(line: string): void; wrap(region: string): string } {
+  let kept: string | undefined;
+  return {
+    push(line) {
+      const trimmed = line.replace(ACTIONS_LOG_TIMESTAMP, "").trim();
+      if (CI_RULE_SUITES_FAILED_LINE.test(trimmed)) kept = trimmed;
+    },
+    wrap(region) {
+      return kept === undefined || region.split("\n").some((l) => l.trim() === kept) ? region
+        : [RETAINED_RULE_SUITES_HEADER, kept, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -42775,6 +42280,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
   const verdict = gateVerdictRetention();
   const pool = poolVerdictRetention();
+  const rule = ruleSuitesRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -42790,6 +42296,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
       verdict.push(line);
       pool.push(line);
+      rule.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -42825,7 +42332,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return verdict.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n")));
+      return verdict.wrap(rule.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"))));
     },
   };
 }
@@ -52353,7 +51860,7 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ageDays: shardAgeDays(task.id, root, nowMs),
+      ...shardAgeDays(task.id, root, nowMs),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
@@ -52398,16 +51905,19 @@ export function shardEvidence(task: Task): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-/** Days since the shard's file first appeared in git history; 0 when unreadable. Age is
- *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
-function shardAgeDays(taskId: string, root: string, nowMs: number): number {
+/** Days since the shard's file first appeared in git history, or `null` with the reason it could
+ *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
+ *  never a threshold — nothing here decides anything from it. */
+function shardAgeDays(taskId: string, root: string, nowMs: number): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const shardFile = `plan/tasks.d/${taskId}-*.yaml`;
+  let out: string;
   try {
-    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
-    if (!out) return 0;
-    return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
+    out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)${shardFile}`], { encoding: "utf8" }).trim();
   } catch {
-    return 0; // no git, or no such file — age is context, and an unknown age is reported as 0
+    return { ageDays: null, ageUnknownReason: "git log failed: no git, or the root is not a repository" };
   }
+  if (!out) return { ageDays: null, ageUnknownReason: `no commit adds ${shardFile}; the record may be embedded in plan/tasks.yaml` };
+  return { ageDays: Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000)) };
 }
 
 /** Whether anything under src/ cites this id — evidence the work may already have landed under
@@ -52732,6 +52242,17 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
+/** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail. */
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
+    rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
+    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause"],
+  });
+  if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
+  return read.rows.map((row) => JSON.stringify(row));
+}
+
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
@@ -52796,9 +52317,12 @@ export async function approveCommand(
     root?: string;
     clock?: Clock;
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** The plan both branches read: the checkout's own, never `config.root` (a state root holds no plan). */
+    planPath?: string;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
+  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
   // well-formed task id is refused as a task rather than as a missing proposal.
@@ -52808,7 +52332,7 @@ export async function approveCommand(
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
     const outcome = approveParkedTask(proposalId, {
-      plan: loadPlan(join(config.root, "plan", "tasks.yaml")),
+      plan: loadPlan(planPath),
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -52845,7 +52369,7 @@ export async function approveCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const plan = loadPlan(planPath);
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
@@ -52861,6 +52385,10 @@ export async function approveCommand(
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
+  // W1-T9153: the worktree this run may tear down, recorded only once ITS add returned. Both are set by
+  // `addApproveWorktree` below and never before the add: a run whose add threw or was refused never owned what lives at
+  // that path, which may be another live approve's tree, so its teardown removes nothing.
+  let addedWorktreePath: string | undefined;
   // The shard path(s) this ratification wrote, captured beside `filedTaskIds` and for the same
   // reason: `openPlanPr` runs after the branch call and must name what was ACTUALLY written rather
   // than a path it assumes. Empty on the adopt/resume paths, which write nothing.
@@ -52888,6 +52416,23 @@ export async function approveCommand(
     }
     return repoDir;
   };
+  const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
+    addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
+    return (addedWorktreePath = path);
+  };
+  // W1-T9161: a join or a resume cuts THIS run's own tree on this run's own branch from `base`, so no two approves
+  // ever claim one path or create one local branch.
+  const addOwnTreeAt = (dir: string, base: string): string => {
+    const own = approveRunBranch(runId);
+    return addApproveWorktree(dir, join(worktreesDir(config), own), own, base);
+  };
+  // W1-T9161: the tree a lost join added, with its never-pushed local branch, so the fallback can cut the same name.
+  const dropOwnTree = (dir: string, path: string): void => {
+    worktreeRemove(dir, path);
+    removeRunLock(path);
+    hostWorktreeGit(dir, ["branch", "-D", approveRunBranch(runId)]);
+    addedWorktreePath = worktreePath = undefined;
+  };
   // A fresh, locked worktree on this run's branch at origin/main — shared by the two skill paths (W1-T4338's write,
   // the lifecycle retirement), which write under .claude/skills/ rather than filing plan shards.
   const freshSkillApproveWorktree = (): { branch: string; path: string } => {
@@ -52895,9 +52440,7 @@ export async function approveCommand(
     const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
     if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
     const branch = approveRunBranch(runId);
-    // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
-    const path = (worktreePath = join(worktreesDir(config), branch));
-    addLockedRunWorktree(dir, path, branch, "origin/main", runId, log); // W1-T5356: lock before add
+    const path = (worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main"));
     return { branch, path };
   };
   // W1-T4437: the mint/write/commit steps `createRatificationBranch` and `joinRatificationBranch`
@@ -52905,7 +52448,11 @@ export async function approveCommand(
   // which ref that worktree was checked out AT (a fresh `origin/main` vs. an already-open PR's own
   // tip) and whether the result is pushed as a NEW branch or a new commit on an existing one.
   // Shared here so the mint/shard/stamp/advisory sequence can never drift between the two.
-  const materializeAndCommitApproveFragment = (worktreePath: string, payload: RatificationPayload, purposeLabel: string): void => {
+  // W1-T9161: `filingBranch` is the branch the shards land on, which a join's own local branch is not: the remote
+  // reservation names it, so the reserved ids match the PR that files them.
+  const materializeAndCommitApproveFragment = (
+    worktreePath: string, payload: RatificationPayload, purposeLabel: string, filingBranch: string,
+  ): void => {
     const subjectId = deriveTaskReferent(payload.proposalId);
     const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
     if (subject?.status === "blocked" && subject.retirement) {
@@ -52948,7 +52495,7 @@ export async function approveCommand(
                 approveReserveFrom,
                 count,
                 gatedRemoteRefReserver({
-                  lane: "approve", log,
+                  lane: "approve", log, filingBranch,
                   run: (args) => {
                     const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -53032,6 +52579,12 @@ export async function approveCommand(
     findJoinablePr() {
       const candidate = mostRecentApprovePr(readLedgerLines(ledgerPath));
       if (!candidate) return undefined;
+      // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
+      // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
+      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+        log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
+        return undefined;
+      }
       const open = probeExistingPlanPr(ghJson, owner, repo, candidate.branch);
       if (!open) return undefined;
       let headSha: string | undefined;
@@ -53050,10 +52603,10 @@ export async function approveCommand(
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
       // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
-      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
+      // W1-T9161: this run's OWN tree and local branch, cut from the resumed branch's remote tip. Nothing is pushed.
+      worktreePath = addOwnTreeAt(dir, `origin/${branch}`);
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
@@ -53077,10 +52630,9 @@ export async function approveCommand(
       // never the id itself (a registry key and a ledger value), and the SAME call fixes the
       // WORKTREE DIRECTORY on the next line, which is derived from this string.
       const branch = approveRunBranch(runId);
-      worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see completeRatificationBranch's identical note, above.
-      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
-      materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
+      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main");
+      materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`, branch);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       return branch;
@@ -53094,11 +52646,23 @@ export async function approveCommand(
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      worktreePath = join(worktreesDir(config), branch);
-      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
-      materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
-      preflightApprovePush(worktreePath, branch, payload.proposalId);
-      gitPushRunBranch(worktreePath);
+      // W1-T9161: this run's OWN tree and local branch, cut from the PR's remote tip, never `-b <the PR's branch>` at
+      // `worktrees/<the PR's branch>`: that path and branch belong to whichever run created or last held them.
+      const ownTree = (worktreePath = addOwnTreeAt(dir, `origin/${branch}`));
+      materializeAndCommitApproveFragment(ownTree, payload, `joined ${branch}`, branch);
+      preflightApprovePush(ownTree, branch, payload.proposalId);
+      try {
+        gitPushRunBranch(ownTree, { destination: branch });
+      } catch (e) {
+        if (!isNonFastForwardRejection(e)) throw e;
+        // Another approve moved the PR's tip first. Release the ids, drop this tree and its unpushed branch, and let
+        // approveProposal file through createRatificationBranch: a fresh origin/main tree and its own PR.
+        log("approve.join_lost", { proposal_id: payload.proposalId, branch, released_ids: idBlock?.ids ?? [] });
+        idBlock?.releaseAll();
+        idBlock = undefined;
+        dropOwnTree(dir, ownTree);
+        return undefined;
+      }
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
       try {
@@ -53224,14 +52788,15 @@ export async function approveCommand(
     // (if any) comes back rather than punching a phantom-id hole.
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlock?.releaseAll();
-    if (repoDir && worktreePath) {
+    // W1-T9153: only a worktree this run's add returned. A refused or failed add left nothing of its own here.
+    if (repoDir && addedWorktreePath) {
       try {
-        worktreeRemove(repoDir, worktreePath);
+        worktreeRemove(repoDir, addedWorktreePath);
       } catch {
         /* best-effort */
       }
       try {
-        removeRunLock(worktreePath);
+        removeRunLock(addedWorktreePath);
       } catch {
         /* best-effort */
       }
@@ -53275,7 +52840,7 @@ export async function approveCommand(
     throw new Error("rmd approve: gateway reported success but never created a ratification branch");
   }
   const ownedRepoDir = repoDir;
-  const ownedWorktreePath = worktreePath;
+  const ownedWorktreePath = addedWorktreePath; // W1-T9153: the one this run's add returned
   const removeApproveWorktree = () => {
     if (ownedRepoDir && ownedWorktreePath) worktreeRemove(ownedRepoDir, ownedWorktreePath);
   };
@@ -56326,6 +55891,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "inspect",
+    syntax: "rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>",
+    summary: "Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.",
+    detail: "Explicit read-only entry point for ledger-grep and skill effectiveness only. Requires an existing absolute --state-dir; never provisions HOME config or state. Runs before CLI invocation logging, temp cleanup, credential refresh and source freshness. Unknown verbs, lifecycle writes and unsupported flags are refused before dispatch. Reads the complete archive-plus-live union and refuses incomplete history. Ordinary command behavior is unchanged.",
+  },
+  {
     name: "progress-watchdog",
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
@@ -56468,6 +56039,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N]",
     summary: "Replay the seeded goldens and record what the retro's Self-Harness leg reads.",
     detail: "W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.",
+  },
+  {
+    name: "skill-eval",
+    syntax: "rmd skill-eval <proposal-id> --confirm-spend",
+    summary: "Attempt a staged skill draft with and without it on held-out tasks; record the verdict.",
+    detail: "Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.",
   },
   {
     name: "check-acceptance",
@@ -57111,6 +56688,47 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   }
 }
 
+/** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
+ *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
+function cliLedgerPathWithoutConfig(): string {
+  let root = join(homedir(), "Remudero");
+  try {
+    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
+    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
+  } catch {
+    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+  }
+  return join(root, "state", LEDGER_FILENAME);
+}
+
+/**
+ * W1-T9065 — A REFUSED SELF-SYNC IS A LEDGER ROW. `checkCliFreshness`'s W1-T486 `log` was never wired, so
+ * 1,171 lane approves died with the refusal in their log file alone. The row carries `verb`, the sink's
+ * `reason`/shas and, off main, `detached`; never a path. Its `task_id` is the proposal an approve or reframe
+ * names, so the fleet lane finds it. A ledger that cannot be written gets the row as one stderr line.
+ */
+export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], ledgerPath: () => string = cliLedgerPathWithoutConfig): SelfSyncDeps {
+  let warned = "";
+  return {
+    warn: (msg) => {
+      warned = msg;
+      console.error(msg);
+    },
+    log: (step, extra = {}) => {
+      const subject = (cmd === "approve" || cmd === "reframe") && rest[0] !== undefined ? rest[0] : "CLI";
+      const row = {
+        run_id: `CLI-${systemClock.now()}`, task_id: subject, step, verb: cmd ?? "(none)", ...extra,
+        ...(extra.reason === "off-main" ? { detached: warned.includes("DETACHED HEAD") } : {}),
+      };
+      try {
+        appendLedger(ledgerPath(), row);
+      } catch (err) {
+        process.stderr.write(`${JSON.stringify({ ...row, ledger_error: String(err) })}\n`);
+      }
+    },
+  };
+}
+
 /**
  * W1-T1134: verbs exempt from `main()`'s CLI freshness gate because they only READ the
  * ledger/state/plan and print — they never decide-then-act on a stale plan, which is the
@@ -57381,9 +56999,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["preflight", async (rest) => await preflightCommand(rest)],
   ["emissions", (rest) => emissionsCommand(rest)],
   // A daemon-owned check-proof reserves host memory for itself while it runs (250-290 MB measured 2026-10-10).
-  ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest), { bindSelf: true })],
+  ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
@@ -57420,6 +57039,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
   ["autonomy-rate", (rest) => autonomyRateCommand(rest)],
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
+  ["skill-eval", async (rest) => await skillEvalCommand(rest,
+    skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
@@ -57583,6 +57204,13 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect") {
+    if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
+      console.log(commandHelp(commandSpec("inspect")));
+      return await flushThenExit(0);
+    }
+    return await flushThenExit(readOnlyInspectionCommand(inspectionArgv.slice(1)));
+  }
   // Local inspection bypasses invocation logging, housekeeping, credentials and self-sync.
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
@@ -57737,7 +57365,7 @@ export async function main(
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
   } else {
-    const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
+    const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
       console.error(freshness.message);
       process.exit(1);

@@ -22,7 +22,7 @@ function fixture(withSetup: boolean) {
   for (const [path, name] of [
     ["scripts/lint-plan-precheck.mjs", "lint-plan"],
     ["scripts/task-id-existence-check.mjs", "task-id"],
-    ["src/run-task.ts", "check-proof"],
+    ["src/check-proof-main.ts", "check-proof"],
   ]) {
     writeFileSync(join(repo.dir, path!), `
       import { writeFileSync } from "node:fs";

@@ -29,6 +29,7 @@ for (const [form, rationale] of [
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     fs.writeFileSync(join(root, "MASTER-PLAN.md"), "# Master plan\n");
     fs.mkdirSync(join(root, "src", "lib"), { recursive: true });
+    fs.writeFileSync(join(root, "src", "lib", "plan.ts"), ""); // W1-T9039: the module the draft edits exists
     const paths = fileRatificationDraft(root, {
       proposalId: proposal.id,
       fragmentYaml: `${fragment}\n${rationale}${following}`,

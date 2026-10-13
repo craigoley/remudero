@@ -259,8 +259,20 @@ function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSum
   return "in_progress";
 }
 
-/** Every operator item's thread, waiting-on-you first, then most recent activity. A declined item
- *  is listed only once someone has written on its thread. */
+/** The list order by attention (#7708). `waitingOn` only says who wrote last, so ordering by it
+ *  listed a fleet thread the daemon last wrote on beside, and often above, a real decision. Same
+ *  ranks as the console's `sortInboxThreads`, so every reader of the API sees the order the phone
+ *  shows: what needs the operator first, an answer already owed by the daemon last. */
+const ATTENTION_RANK: Record<ThreadSummaryView["attention"], number> = {
+  decision: 0,
+  reply: 1,
+  in_progress: 2,
+  history: 3,
+  awaiting_daemon: 4,
+};
+
+/** Every operator item's thread, in {@link ATTENTION_RANK} order, then most recent activity. A
+ *  declined item is listed only once someone has written on its thread. */
 export function listThreadViews(
   items: InboxThreadItem[],
   threads: Map<string, ThreadMessage[]>,
@@ -273,7 +285,7 @@ export function listThreadViews(
       return summary;
     });
   return views.sort((a, b) => {
-    if (a.waitingOn !== b.waitingOn) return a.waitingOn === "operator" ? -1 : 1;
+    if (a.attention !== b.attention) return ATTENTION_RANK[a.attention] - ATTENTION_RANK[b.attention];
     return (b.lastActivity ?? 0) - (a.lastActivity ?? 0);
   });
 }

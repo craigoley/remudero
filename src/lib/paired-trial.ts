@@ -452,6 +452,9 @@ export interface SealedPairedAttemptOptions {
   installDependencies?: typeof execFileSync;
   probeIsolation?: (input: SealedProbeInput) => SealedIsolationReading;
   removeTree?: (repoDir: string, dir: string) => void;
+  /** The `skills` prompt part for one attempt, so a held-out skill eval can give one arm a draft
+   *  skill the other lacks. Absent (every caller today), the prompt is byte-identical. */
+  skillsPartFor?: (request: PairedAttemptRequest<string>) => string;
 }
 
 /**
@@ -482,7 +485,7 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
       validateWorkerSettingsFile(settingsFile);
       const result = await (options.spawn ?? benchmarkNonDispatchSpawn("paired-trial", spawnWorker))({
         cwd: dir, permissionMode: "bypassPermissions", settingsFile, config: options.config,
-        prompt: `${renderImplementPrompt(options.task, "", attemptId)}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
+        prompt: `${renderImplementPrompt(options.task, "", attemptId, "", "", "", options.skillsPartFor?.(request) ?? "")}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
         model: request.pin.model, effort: request.pin.effort, mountProvider: request.pin.provider as WorkerProviderId,
         maxBudgetUsd: Math.min(options.maxBudgetUsd ?? PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_ATTEMPT_MAX_BUDGET_USD),
         runId: `paired-${attemptId}`, taskId: `${request.pairId}:${request.arm}`,

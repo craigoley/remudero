@@ -53,8 +53,8 @@ const MALFORMED = malformed("W1-T4695", "Instantiate ratification skeleton for M
 const wellFormed = (id: string, n: number): string =>
   inboxDraftExampleFragmentYaml()
     .replace("- id: NEW-1", `- id: ${id}`)
-    .replace("Tighten the empty-input guard in parseWidget", `Tighten guard number ${n} in parseWidget`)
-    .replaceAll("parseWidget rejects an empty input", `parseWidget rejects empty input ${n}`);
+    .replace("Tighten the empty-input guard in parseTasksFromYaml", `Tighten guard number ${n} in parseTasksFromYaml`)
+    .replaceAll("parseTasksFromYaml rejects an empty input", `parseTasksFromYaml rejects empty input ${n}`);
 
 const FIVE_IDS = ["W1-T4695", "W1-T4696", "W1-T4697", "W1-T4698", "W1-T4699"];
 const TWO_ID_STAMP = `- ${PROPOSAL} (Ratification skeleton for MASTER-PLAN §7/P25 open plan) — RATIFIED 2026-09-28 -> W1-T4695/W1-T4696`;
@@ -168,6 +168,7 @@ test("the ratify PR body lists exactly the files the approve path wrote — MAST
       writeFileSync(join(wt, "MASTER-PLAN.md"), before, "utf8");
       // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
       mkdirSync(join(wt, "src", "lib"), { recursive: true });
+      writeFileSync(join(wt, "src", "lib", "plan.ts"), ""); // W1-T9039: the module the drafts edit exists
       const written = fileRatificationDraft(wt, { fragmentYaml: fragment, proposalId: PROPOSAL, stampLine: stamp }, deps, join, KNOWN);
       assert.equal(written.filter((p) => p.startsWith("plan/tasks.d/")).length, 2);
       assert.equal(written.includes("MASTER-PLAN.md"), withBullet);

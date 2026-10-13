@@ -1,0 +1,52 @@
+- id: W1-T9097
+  title: "THE BUILD LANE COUNT FOLLOWS THE MEMORY GOVERNOR, NOT A FIXED NUMBER — sweep.dispatchLanes is a fixed 3 (max 4) that only a plan PR and a restart can change, while ADR 0007 makes each lane cost a whole Node process more"
+  repo: remudero
+  depends_on: [W1-T9080, W1-T8472]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — the build lane count as the memory governor's output, shadow then enforce
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T5347, W1-T7093, W1-T7094, W1-T7243, W1-T8472, W1-T9080]
+  files: [src/lib/lane-governor.ts, src/lib/daemon.ts, src/lib/policy.ts, plan/policy.yaml, test/the-build-lane-count-follows-the-memory-governor.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision C ("Parallelism adapts"). Operator 2026-10-13: "Reduce parallelism if we need to"; standing rule:
+    no hard fixed thresholds.
+    READ on origin/main 5f8d3f178: build lanes are `sweep.dispatchLanes` (plan/policy.yaml, value 3, max 4), read at
+    boot into `DaemonOpts.laneCount`. The adaptive parts are the WIP bound (`checkQueueGovernor`,
+    src/lib/adaptive-wip.ts), the memory floor gate (`memoryGovernorGateFor`, a fixed `memoryFloorMib` 3072) and the
+    review width (`selectRuntimeReviewWidth`).
+    MEASURED (core daemon.alive, 2026-10-11 22:56Z to 10-13 11:45Z, 1,955 rows): container memory.current p50 5,155 MiB,
+    p90 6,569, max 8,379 against memory.high 8,379; the shadow budget (memory_budget.shadow, core, 10-13) would have
+    deferred 963 of 1,874 starts, so its container arm must be lift-gated (W1-T8472) before anything enforces on it.
+  design: |
+    1. New src/lib/lane-governor.ts, `laneTarget(inputs)`: the largest n >= 1 whose projection stays under the onset
+       the shadow budget uses (memory.high, through W1-T8472's lift-gated container basis) and the host arm likewise.
+       The projection adds the daemon's measured growth tail, the learned tails of every in-flight tree (reviews,
+       gardens, adopted run children) and n run trees at the learned class tail of the next build (each tree is a run
+       child plus its worker plus its tests, per the reservation task).
+       - Shrink at once while the container is pressed (containerPressed, or memory.high events rising since the last
+         tick).
+       - Grow by at most one lane per settled tick with no pressure flag since the previous one.
+       - Upper bound: the adaptive WIP bound and the CPU-derived count. No fixed lane number.
+    2. `sweep.laneGovernor.mode` shadow | enforce in plan/policy.yaml (shadow). Shadow ledgers `dispatch.lane_target`
+       {target, fixed: dispatchLanes, binding, projection_mib, onset_mib} once per tick and changes nothing. Enforce
+       uses the target for refill admission.
+    3. A running lane is never stopped by a lower target; only refill obeys it.
+    4. Once enforce has run, `sweep.dispatchLanes` is retired in the same PR that sets enforce (a later plan change).
+  acceptance:
+    - claim: "the target shrinks at once under container pressure and grows back by at most one lane per quiet tick"
+      proof: 'grep: test("W1-T9097: the lane target shrinks at once and grows one lane per quiet tick" in test/the-build-lane-count-follows-the-memory-governor.test.ts'
+    - claim: "in shadow the target is ledgered and dispatch is unchanged"
+      proof: 'grep: test("W1-T9097: shadow ledgers the target and changes nothing" in test/the-build-lane-count-follows-the-memory-governor.test.ts'
+    - claim: "in enforce refill obeys the target and a running lane is never stopped"
+      proof: 'grep: test("W1-T9097: enforce caps refill and never stops a running lane" in test/the-build-lane-count-follows-the-memory-governor.test.ts'
+    - claim: "the dispatch phase reads the lane target"
+      proof: 'grep: laneTarget( in src/lib/daemon.ts'
+  falsifier: |
+    Keep the fixed dispatchLanes: the first test still admits 3 lanes under a pressed container.

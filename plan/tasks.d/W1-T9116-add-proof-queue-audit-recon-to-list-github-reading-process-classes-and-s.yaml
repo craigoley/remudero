@@ -1,0 +1,26 @@
+- id: W1-T9116
+  title: Add proof‑queue‑audit recon to list GitHub‑reading process classes and stamp paths
+  repo: remudero
+  depends_on:
+    - W1-T246
+    - W1-T128
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=8b35b02e47800670
+  attempts: 0
+  files:
+    - src/lib/proof-queue-audit.ts
+  acceptance:
+    - claim: proof‑queue‑audit lists every GitHub‑reading process class with its resolved stamp path and host‑window sharing
+      proof: "grep: proof‑queue‑audit implementation in src/lib/proof-queue-audit.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-10-13 proposal on proof-debt:W1-T6372, ratified via rmd approve:
+  
+    proof-debt: W1-T6372 has 1 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "the recon lists every GitHub-reading
+    process class with the stamp path it resolves and whether it shares the host window, and
+    recommends without changing enforcement".

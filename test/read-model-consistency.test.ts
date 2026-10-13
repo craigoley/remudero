@@ -25,6 +25,8 @@ import {
   runConsistencyCheck,
   settledIngestMark,
   ORACLE_INGEST_SETTLE_MS,
+  ORACLE_RECURRENCE_MS,
+  healRecurs,
   type ConsistencyCheckOptions,
   type OracleWindow,
 } from "../src/lib/read-model-consistency.js";
@@ -157,6 +159,33 @@ test("a drift that recurs within a day of a self-heal escalates", (t) => {
   assert.match(again.escalationReasons.join(), /within 24 h of an earlier self-heal/);
   assert.equal(again.issueUrl, "https://github.com/craigoley/remudero/issues/9001");
   assert.equal(issues.titles.length, 1);
+});
+
+test("a rolling slice that heals an older gap is not a recurrence, but the same window drifting again is", (t) => {
+  const f = projected(t);
+  const issues = fakeIssues();
+  const escalation = { issues, ledgerPath: f.metricPath, runId: "oracle" };
+  const newer: OracleWindow = { t0: T0 + 6_000, t1: T0 + 11_999 };
+  const older: OracleWindow = { t0: T0, t1: T0 + 5_999 };
+  f.db.exec("UPDATE fact SET body = body || ' ' WHERE ts_ms = (SELECT max(ts_ms) FROM fact)");
+  assert.equal(check(f, { escalation, window: newer }).outcome, "healed");
+  f.db.exec("UPDATE fact SET body = body || ' ' WHERE ts_ms = (SELECT min(ts_ms) FROM fact)");
+  assert.equal(check(f, { escalation, window: older }, fixedClock(CHECK_AT + 600_000)).outcome, "healed",
+    "the next slice back reaching its own part of an old gap heals without asking anyone (#10884's 33 false recurrences)");
+  assert.equal(issues.titles.length, 0);
+  f.db.exec("UPDATE fact SET body = body || ' ' WHERE ts_ms = (SELECT max(ts_ms) FROM fact)");
+  const again = check(f, { escalation, window: newer }, fixedClock(CHECK_AT + 1_200_000));
+  assert.equal(again.outcome, "escalated", "the healed window drifting again is a real recurrence");
+  assert.match(again.escalationReasons.join(), /within 24 h of an earlier self-heal/);
+});
+
+test("a heal recurs on an overlapping window or on rows written after it, within the recurrence bound", () => {
+  const heal = { atMs: 1_000_000, t0: 100, t1: 200, healed: 3 };
+  assert.equal(healRecurs([heal], { t0: 0, t1: 99 }, 1_100_000), false, "an older, disjoint slice is a first discovery");
+  assert.equal(healRecurs([heal], { t0: 150, t1: 300 }, 1_100_000), true, "an overlapping window drifted again");
+  assert.equal(healRecurs([heal], { t0: 500, t1: 1_050_000 }, 1_100_000), true, "rows written after the heal drifted");
+  assert.equal(healRecurs([{ ...heal, healed: 0 }], { t0: 150, t1: 300 }, 1_100_000), false, "a run that healed nothing");
+  assert.equal(healRecurs([heal], { t0: 150, t1: 300 }, heal.atMs + ORACLE_RECURRENCE_MS + 1), false, "a day later starts over");
 });
 
 test("a drift that survives a rebuild of its window opens one needs-human issue", (t) => {

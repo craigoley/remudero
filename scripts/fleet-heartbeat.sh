@@ -62,8 +62,8 @@
 # ── EXIT CODES ────────────────────────────────────────────────────────────────────────────────
 # 0 = the beat was published (whatever it SAID about the fleet's health — a beat reporting a dead
 #     daemon is a SUCCESSFUL beat; the verdict travels in the payload, not the exit code).
-# 1 = the beat could not be published. Nothing off-machine changed, and the watcher will
-#     eventually see the silence. This is the only failure mode this script has.
+# 1 = liveness could not be published; the watcher will eventually see the silence.
+# A failed consumer supplement leaves the confirmed liveness beat on the remote and exits 0.
 #
 # ── INSTALLING IT ON THE MINI ─────────────────────────────────────────────────────────────────
 # Every five minutes, from the operator checkout, e.g. a launchd agent with
@@ -607,11 +607,14 @@ if [ -n "$_janitor_files" ]; then
   fi
 fi
 
-# Sizes (`du -sk`) of the known consumers, every Nth beat only (RMD_CONSUMER_EVERY, default 6) —
-# `du` over a worktrees root is not free. Failed scheduled reads publish unknown, never 0.
-# The gardener attributes a falling disk to whichever of these grows fastest.
+# Consumer walks run every RMD_CONSUMER_EVERY beats (default 6), after liveness is published.
+# RMD_CONSUMER_WALK_BUDGET_S (default 120 s) bounds walks; failed or cut reads publish unknown, never 0.
+# `du -sk /mnt/rmd` once held liveness for 11-16 min in disk-wait (2026-10-06, #9643).
 CONSUMER_EVERY="${RMD_CONSUMER_EVERY:-6}"
 case "$CONSUMER_EVERY" in ''|*[!0-9]*|0) CONSUMER_EVERY=6 ;; esac
+CONSUMER_WALK_BUDGET_S="${RMD_CONSUMER_WALK_BUDGET_S:-120}"
+case "$CONSUMER_WALK_BUDGET_S" in ''|*[!0-9]*|0) CONSUMER_WALK_BUDGET_S=120 ;; esac
+CONSUMER_WALK_CUT=""
 BEAT_N_FILE="${RMD_ROOT}/state/heartbeat-count.txt"
 BEAT_N=0
 if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)"; fi
@@ -623,14 +626,18 @@ mount_root_used_kb() {
   [ "$(findmnt -n -o FSROOT -M "$1" 2>/dev/null)" = "/" ] || return 1
   df_field "$1" 3
 }
-# ionice -c3 is kept for hosts whose block scheduler is BFQ. It is a NO-OP under `none` and
-# `mq-deadline` (the Azure host's nvme0n1 reads `[none] mq-deadline`), so it never protects that disk:
-# the adaptive schedule below is what keeps the walk off a busy data disk.
+# ionice -c3 is kept for hosts whose block scheduler is BFQ; it is a NO-OP under `none` and `mq-deadline` (the
+# Azure host's nvme0n1), so the adaptive schedule is what keeps the walk off a busy data disk. Each du runs under
+# `timeout` for what is left of the budget, none starts once it is spent (both 124); without `timeout`, between walks.
 du_idle() {
-  if command -v ionice >/dev/null 2>&1; then ionice -c3 -t nice -n 19 du -sk "$1"; else nice -n 19 du -sk "$1"; fi
+  local left
+  left=$((CONSUMER_WALK_DEADLINE - $(date +%s)))
+  [ "$left" -gt 0 ] || return 124
+  command -v timeout >/dev/null 2>&1 || left=""
+  if command -v ionice >/dev/null 2>&1; then ${left:+timeout "$left"} ionice -c3 -t nice -n 19 du -sk "$1"; else ${left:+timeout "$left"} nice -n 19 du -sk "$1"; fi
 }
 consumer_kb() {
-  local name="$1" total=0 seen=0 failed=0 p kb device devices="" paths=""
+  local name="$1" total=0 seen=0 failed=0 cut=0 p kb device devices="" paths=""
   shift
   for p in "$@"; do
     case "$p" in *'*'*) continue ;; esac
@@ -647,6 +654,7 @@ ${p}"
     elif kb="$(du_idle "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
       case "$kb" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + kb)) ;; esac
     else
+      [ "$?" = 124 ] && cut=1
       failed=1
     fi
     device="$(df_field "$p" 1)"; [ -n "$device" ] || device="unknown"
@@ -654,6 +662,7 @@ ${p}"
 ${device}"
   done
   if [ "$seen" = 0 ] || [ "$failed" = 1 ]; then total="unknown"; fi
+  if [ "$cut" = 1 ]; then CONSUMER_WALK_CUT="${CONSUMER_WALK_CUT:+${CONSUMER_WALK_CUT},}${name}"; fi
   if [ -z "$devices" ] || [[ "$devices" = *unknown* ]]; then
     devices="unknown"
   else
@@ -670,12 +679,11 @@ live_consumer_path() {
   source="$(printf '%s\n' "$CONSUMER_MOUNTS" | awk -F '\t' -v p="$path" -v d="$destination" '$2==p || $2==d {print $1; exit}')"
   case "$source" in /*) printf '%s' "$source" ;; *) printf '%s' "$path" ;; esac
 }
-# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct
-# filesystems (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat
-# noise, which decays by a quarter each scheduled beat so a one-off swing does not suppress walks for
-# long. A falling disk drifts every beat and keeps walking; a quiet one stops paying a multi-minute
-# metadata walk at the data disk's IOPS cap (2026-10-09: 94% util ~470 r/s for ~1 min per walk).
-# No state, an unreadable signature or a walk older than the backstop always walks.
+# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct filesystems
+# (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat noise, which decays by
+# a quarter each scheduled beat so a one-off swing does not suppress walks for long. A falling disk drifts every
+# beat and keeps walking; a quiet one stops paying a multi-minute metadata walk at the data disk's IOPS cap
+# (2026-10-09: 94% util ~470 r/s for ~1 min per walk). No state, an unreadable signature or a stale walk walks.
 CONSUMER_STATE_FILE="${RMD_ROOT}/state/consumer-probe.state"
 CONSUMER_BACKSTOP_S="${RMD_CONSUMER_BACKSTOP_S:-21600}"
 case "$CONSUMER_BACKSTOP_S" in ''|*[!0-9]*) CONSUMER_BACKSTOP_S=21600 ;; esac
@@ -708,44 +716,6 @@ if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
     fi
   else
     NOISE_KB=0
-  fi
-fi
-if [ "$CONSUMER_PROBE" = "walked" ]; then
-  CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
-  CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
-    --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
-  LIVE_TMP="$(live_consumer_path "${RMD_ROOT}/tmp" /home/node/Remudero/tmp)"
-  consumer_kb worktrees "$(live_consumer_path "${RMD_ROOT}/worktrees" /home/node/Remudero/worktrees)"
-  consumer_kb state "${RMD_ROOT}/state"
-  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
-    DOCKER_ROOT="$("$CONSUMER_RUNTIME" info --format '{{.DockerRootDir}}' 2>/dev/null)" || DOCKER_ROOT=""
-    case "$DOCKER_ROOT" in /*) : ;; *)
-      DOCKER_ROOT="$(grep -o '"data-root"[[:space:]]*:[[:space:]]*"[^"]*"' \
-        "${RMD_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}" 2>/dev/null | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')" ;;
-    esac
-    case "$DOCKER_ROOT" in /*) : ;; *) DOCKER_ROOT=/var/lib/docker ;; esac
-    consumer_kb docker "$DOCKER_ROOT"
-    consumer_kb containerd /var/lib/containerd
-    consumer_kb rmd_tmp /mnt/rmd/tmp
-    consumer_kb rmd /mnt/rmd
-  fi
-  CONSUMER_TMP="${TMPDIR:-/tmp}"
-  LIVE_SYSTEM_TMP="$(live_consumer_path "$CONSUMER_TMP" /tmp)"
-  consumer_kb scratch "$CONSUMER_TMP"/claude* "$LIVE_SYSTEM_TMP"/claude* "$LIVE_TMP"
-  consumer_kb coverage "$CONSUMER_TMP"/rmd-c-* "$LIVE_SYSTEM_TMP"/rmd-c-* /mnt/rmd/tmp/rmd-c-* "$LIVE_TMP"/rmd-c-* \
-    "$(live_consumer_path "${RMD_ROOT}/.remudero-coverage" /home/node/Remudero/.remudero-coverage)" \
-    "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
-  consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
-  consumer_kb npm_cache "${HOME}/.npm"
-  WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
-fi
-if [ -n "$CONSUMER_PROBE" ]; then
-  CONSUMER_LINES="${CONSUMER_LINES}
-consumer_walk_state=${CONSUMER_PROBE}
-consumer_walk_signature=${CONSUMER_USED_KB:-unknown}"
-  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_CONSUMER_STATE_WRITE:-}" = "1" ]; then
-    mkdir -p "$(dirname "$CONSUMER_STATE_FILE")" 2>/dev/null && printf 'walk_used_kb=%s\nwalk_epoch=%s\nprev_used_kb=%s\nnoise_kb=%s\n' \
-      "${WALK_USED_KB:-}" "${WALK_EPOCH:-}" "${CONSUMER_USED_KB:-}" "${NOISE_KB:-0}" > "$CONSUMER_STATE_FILE" 2>/dev/null
   fi
 fi
 # The pacing counter advances on every real beat, published or not: advanced only after a confirmed
@@ -1427,12 +1397,6 @@ if [ -n "$IMAGE_BUILD_SHA" ]; then
 image_build_sha=${IMAGE_BUILD_SHA}"
 fi
 
-# Consumer sizes are APPENDED, only when scheduled (every Nth beat): an absent `consumer_*_kb` means
-# "not measured this beat", which a reader must never coerce to 0.
-if [ -n "$CONSUMER_LINES" ]; then
-  PAYLOAD="${PAYLOAD}${CONSUMER_LINES}"
-fi
-
 # Device pressure is APPENDED: absent device keys mean nothing was measured, never an idle disk.
 PAYLOAD="${PAYLOAD}
 ${IO_LINES}"
@@ -1446,43 +1410,100 @@ ${MEM_LINES}"
 # daemon on a healthy host, a broken install on a healthy host) call for different responses.
 SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | build ${DISPATCH_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"
 
-if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "1" ]; then
-  printf '%s\n' "$SUBJECT"
-  printf '%s\n' "$PAYLOAD"
-  exit 0
-fi
-
 # ── publish ───────────────────────────────────────────────────────────────────────────────────
 # An explicit identity so an unattended run never dies on an unset user.name/user.email; these are
 # process-scoped exports and change nothing in any config file.
-export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-remudero-heartbeat}"
-export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-heartbeat@remudero.invalid}"
-export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
-export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+publish_beat() (
+  PAYLOAD="$1"
+  export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-remudero-heartbeat}"
+  export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-heartbeat@remudero.invalid}"
+  export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+  export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
-fail() {
-  printf 'fleet-heartbeat: BEAT NOT PUBLISHED — %s\n' "$1" >&2
-  exit 1
-}
+  fail() {
+    printf 'fleet-heartbeat: BEAT NOT PUBLISHED — %s\n' "$1" >&2
+    exit 1
+  }
 
-blob="$(printf '%s\n' "$PAYLOAD" | git -C "$INSTALL_DIR" hash-object -w --stdin 2>/dev/null)" \
-  || fail "could not write the payload blob"
-[ -n "$blob" ] || fail "hash-object produced no object id"
+  blob="$(printf '%s\n' "$PAYLOAD" | git -C "$INSTALL_DIR" hash-object -w --stdin 2>/dev/null)" \
+    || fail "could not write the payload blob"
+  [ -n "$blob" ] || fail "hash-object produced no object id"
 
-tree="$(printf '100644 blob %s\t%s\n' "$blob" "$PAYLOAD_FILE" | git -C "$INSTALL_DIR" mktree 2>/dev/null)" \
-  || fail "could not build the payload tree"
-[ -n "$tree" ] || fail "mktree produced no tree id"
+  tree="$(printf '100644 blob %s\t%s\n' "$blob" "$PAYLOAD_FILE" | git -C "$INSTALL_DIR" mktree 2>/dev/null)" \
+    || fail "could not build the payload tree"
+  [ -n "$tree" ] || fail "mktree produced no tree id"
 
-# No `-p`: a parentless root commit, so the force-push below replaces rather than extends.
-commit="$(git -C "$INSTALL_DIR" commit-tree "$tree" -m "$SUBJECT" 2>/dev/null)" \
-  || fail "could not build the beat commit"
-[ -n "$commit" ] || fail "commit-tree produced no commit id"
+  # No `-p`: a parentless root commit, so the force-push below replaces rather than extends.
+  commit="$(git -C "$INSTALL_DIR" commit-tree "$tree" -m "$SUBJECT" 2>/dev/null)" \
+    || fail "could not build the beat commit"
+  [ -n "$commit" ] || fail "commit-tree produced no commit id"
 
-git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
-  || fail "push to ${REMOTE}/${BRANCH} failed"
+  git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
+    || fail "push to ${REMOTE}/${BRANCH} failed"
 
-# Only after a CONFIRMED push, so `since_prev_beat_s` measures published beats rather than
-# attempts. Best-effort: a state file that cannot be written must not fail a beat that landed.
-mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null && printf '%s\n' "$NOW_ISO" > "$STATE_FILE" 2>/dev/null
+  printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
+)
 
-printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
+# Liveness reaches the remote before any consumer walk; dry runs still print one complete payload.
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ]; then
+  EARLY_PAYLOAD="$PAYLOAD"
+  [ "$CONSUMER_PROBE" != walked ] || EARLY_PAYLOAD="${EARLY_PAYLOAD}
+consumer_walk_state=pending"
+  publish_beat "$EARLY_PAYLOAD" || exit 1
+  # Only after a CONFIRMED push, so `since_prev_beat_s` measures published beats rather than
+  # attempts. Best-effort: a state file that cannot be written must not fail a beat that landed.
+  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null && printf '%s\n' "$NOW_ISO" > "$STATE_FILE" 2>/dev/null
+fi
+
+if [ "$CONSUMER_PROBE" = "walked" ]; then
+  CONSUMER_NOW_S="$(date +%s)"
+  CONSUMER_WALK_DEADLINE=$((CONSUMER_NOW_S + CONSUMER_WALK_BUDGET_S))
+  CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+  CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
+    --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
+  LIVE_TMP="$(live_consumer_path "${RMD_ROOT}/tmp" /home/node/Remudero/tmp)"
+  consumer_kb worktrees "$(live_consumer_path "${RMD_ROOT}/worktrees" /home/node/Remudero/worktrees)"
+  consumer_kb state "${RMD_ROOT}/state"
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    DOCKER_ROOT="$("$CONSUMER_RUNTIME" info --format '{{.DockerRootDir}}' 2>/dev/null)" || DOCKER_ROOT=""
+    case "$DOCKER_ROOT" in /*) : ;; *)
+      DOCKER_ROOT="$(grep -o '"data-root"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        "${RMD_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}" 2>/dev/null | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')" ;;
+    esac
+    case "$DOCKER_ROOT" in /*) : ;; *) DOCKER_ROOT=/var/lib/docker ;; esac
+    consumer_kb docker "$DOCKER_ROOT"
+    consumer_kb containerd /var/lib/containerd
+    consumer_kb rmd_tmp /mnt/rmd/tmp
+    consumer_kb rmd /mnt/rmd
+  fi
+  CONSUMER_TMP="${TMPDIR:-/tmp}"
+  LIVE_SYSTEM_TMP="$(live_consumer_path "$CONSUMER_TMP" /tmp)"
+  consumer_kb scratch "$CONSUMER_TMP"/claude* "$LIVE_SYSTEM_TMP"/claude* "$LIVE_TMP"
+  consumer_kb coverage "$CONSUMER_TMP"/rmd-c-* "$LIVE_SYSTEM_TMP"/rmd-c-* /mnt/rmd/tmp/rmd-c-* "$LIVE_TMP"/rmd-c-* \
+    "$(live_consumer_path "${RMD_ROOT}/.remudero-coverage" /home/node/Remudero/.remudero-coverage)" \
+    "$(live_consumer_path "${RMD_ROOT}/repos/.remudero-coverage" /home/node/Remudero/repos/.remudero-coverage)"
+  consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
+  consumer_kb npm_cache "${HOME}/.npm"
+  WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
+  [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_PROBE="budget_exhausted"
+fi
+if [ -n "$CONSUMER_PROBE" ]; then
+  CONSUMER_LINES="${CONSUMER_LINES}
+consumer_walk_state=${CONSUMER_PROBE}
+consumer_walk_signature=${CONSUMER_USED_KB:-unknown}"
+  [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_LINES="${CONSUMER_LINES}
+consumer_walk_budget_exhausted=${CONSUMER_WALK_CUT}"
+  if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_CONSUMER_STATE_WRITE:-}" = "1" ]; then
+    mkdir -p "$(dirname "$CONSUMER_STATE_FILE")" 2>/dev/null && printf 'walk_used_kb=%s\nwalk_epoch=%s\nprev_used_kb=%s\nnoise_kb=%s\n' \
+      "${WALK_USED_KB:-}" "${WALK_EPOCH:-}" "${CONSUMER_USED_KB:-}" "${NOISE_KB:-0}" > "$CONSUMER_STATE_FILE" 2>/dev/null
+  fi
+fi
+if [ -n "$CONSUMER_LINES" ]; then
+  PAYLOAD="${PAYLOAD}${CONSUMER_LINES}"
+fi
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "1" ]; then
+  printf '%s\n' "$SUBJECT" "$PAYLOAD"
+elif [ -n "$CONSUMER_LINES" ]; then
+  publish_beat "$PAYLOAD" || printf 'fleet-heartbeat: consumer supplement failed; liveness was published.\n' >&2
+fi
+exit 0

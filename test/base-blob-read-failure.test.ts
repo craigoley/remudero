@@ -34,7 +34,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
-import { buildBaseProofDir, materializeReviewWorktree, reviewCommand, runReview } from "../src/run-task.js";
+import { materializeReviewWorktree, reviewCommand, runReview } from "../src/run-task.js";
+import { buildBaseProofDir } from "../src/lib/check-proof.js";
 import {
   baseBlobErrorIsAbsence,
   judgeCriterion,
@@ -419,7 +420,7 @@ test("W1-T460 (5): the production showBlob pipes git's stderr — a review over 
   try {
     writeFileSync(
       script,
-      `import { buildBaseProofDir } from ${JSON.stringify(join(REPO_ROOT, "src", "run-task.ts"))};\n` +
+      `import { buildBaseProofDir } from ${JSON.stringify(join(REPO_ROOT, "src", "lib", "check-proof.ts"))};\n` +
         `import { execFileSync } from "node:child_process";\n` +
         // A grep-only review's real default path is the grep tree, whose `ls-tree` reads pipe too; the
         // blob fallback — forced by a `unit test:` sibling and a throwing `addWorktree` — is where the
@@ -460,7 +461,8 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   // repo-wide, while both files changed here scored BETTER). The executing test below still drives
   // the call site — this pin adds the half execution cannot distinguish: that BOTH facts are
   // forwarded, not just the dir impl-GE already wired.
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const sources = ["run-task.ts", "lib/check-proof.ts"].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
+  const src = sources[0]!;
   assert.match(
     src,
     /buildBaseProof:\s*buildBaseProofDir/,
@@ -477,7 +479,8 @@ test("W1-T460 (5): the call site spreads BOTH of buildBaseProofDir's facts onto 
   assert.match(src, /baseCheckoutDir:\s*baseProof\?\.baseCheckoutDir/, "the dir reaches runReview");
   assert.match(src, /baseUnreadablePaths:\s*baseProof\?\.baseUnreadablePaths/, "…and W1-T460's per-proof fact beside it");
   assert.match(src, /baseIsCheckout:\s*baseProof\?\.baseIsCheckout/, "…and whether the dir is a checkout at all");
-  assert.match(src, /export interface BaseProofDir \{\n  baseCheckoutDir: string \| undefined;\n  baseUnreadablePaths: ReadonlySet<string>;\n  baseIsCheckout: boolean;/, "the builder returns exactly those keys, by name");
+  const builder = sources[1]!;
+  assert.match(builder, /export interface BaseProofDir \{\n  baseCheckoutDir: string \| undefined;\n  baseUnreadablePaths: ReadonlySet<string>;\n  baseIsCheckout: boolean;/, "the builder returns exactly those keys, by name");
 });
 
 test("W1-T460 (5): when the worktree could not be materialised, the base facts are still well-formed", async () => {

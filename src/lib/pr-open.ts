@@ -1,6 +1,6 @@
+import { checkProofChildArgv } from "./check-proof.js";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
@@ -33,12 +33,8 @@ export type OpenPullRequestProofRunner = (
   target?: SuiteRegistryTarget,
 ) => OpenPullRequestProofResult;
 
-/** W1-T4590: rmd's OWN launcher, resolved from this module rather than from the tree being
- *  published — a consumer repository carries neither tsx nor src/run-task.ts, which failed every
- *  console and site PR open (19 builds, 2026-09-25..26) with "Cannot find package 'tsx'". bin/rmd
- *  runs its own node_modules/.bin/tsx on its own src/run-task.ts. (`import.meta.resolve` is not
- *  available when tsx loads this module through its CommonJS path, so it is not used here.) */
-const RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+/** Use the harness runtime and entry even in consumer repositories without tsx or rmd. */
+const PROOF_NODE = process.execPath;
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
@@ -49,9 +45,11 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 }
 
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
-function proofArgs(proof: string, mergeBase: string, target?: SuiteRegistryTarget): string[] {
+function proofArgs(proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
-  return ["check-proof", proof, "--base", mergeBase, ...repo];
+  // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
+  if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
+  return [...checkProofChildArgv(proof, mergeBase), ...repo];
 }
 
 // A PR proof runs on the branch being published. The child already receives its exact base
@@ -64,9 +62,9 @@ export function defaultProofRunner(
   mergeBase: string,
   repoRoot: string,
   target?: SuiteRegistryTarget,
-  bin: string = RMD_BIN,
+  bin: string = PROOF_NODE,
 ): OpenPullRequestProofResult {
-  const result = spawnSync(bin, proofArgs(proof, mergeBase, target), {
+  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin), {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: PROOF_MAX_BUFFER,
@@ -117,8 +115,8 @@ export function defaultProofRunnerAsync(
   return new Promise((resolve) => {
     let timedOut = false;
     const child = execFile(
-      opts.bin ?? RMD_BIN,
-      proofArgs(proof, mergeBase, target),
+      opts.bin ?? PROOF_NODE,
+      proofArgs(proof, mergeBase, target, opts.bin),
       { cwd: repoRoot, encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER, env: proofEnv() },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
         clearTimeout(timer);

@@ -1,0 +1,48 @@
+- id: W1-T9091
+  title: "THE DAEMON STARTS FROM A NARROW ENTRY THAT NEVER LOADS src/run-task.ts — bin/rmd daemon execs tsx src/run-task.ts, whose esbuild metafile is 512 modules, so every source change is a change to the daemon and the daemon loads all the run code it no longer executes"
+  repo: remudero
+  depends_on: [W1-T9089]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — moving daemonCommand out of run-task.ts behind its own entry
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7728, W1-T8778, W1-T9092, W1-T9089]
+  files: [src/daemon-main.ts, src/run-task.ts, bin/rmd, src/lib/garden-registry.ts, src/lib/measurement-cadence.ts, test/the-daemon-starts-from-a-narrow-entry.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    ADR 0007 decision B.3 and offset 5 of decision C.
+    MEASURED 2026-10-13 on origin/main 0384f1a08 (esbuild metafile, packages external): src/run-task.ts bundles 512
+    source modules, src/lib/daemon.ts 244. Over 2026-10-06..13, 444 of 1,377 first-parent commits touched daemon.ts's
+    closure, the install inputs or the launcher, against the 639 that MATERIAL_ADVANCE_PATHS calls material today; 76
+    touched src/run-task.ts and nothing in daemon.ts's closure.
+    READ: bin/rmd's last line execs tsx on `$DIR/src/run-task.ts` with every argument; `daemonCommand` lives in
+    src/run-task.ts; `childGardenPassSpawn` (src/lib/garden-registry.ts) and `childMeasurementCadenceSpawn`
+    (src/lib/measurement-cadence.ts) start their children from `process.argv[1]` / `process.execArgv`, so with a narrow
+    daemon entry they would start the wrong entry.
+    The in-process run path must be gone first (the retirement task), or the narrow entry would still import runTask.
+  design: |
+    1. Move `daemonCommand` and the helpers only it uses into src/daemon-main.ts (and src/lib modules where shared).
+       src/daemon-main.ts's static import graph (buildAffectedSuitesGraph's directImports) never reaches
+       src/run-task.ts. It exports `daemonMain(argv)`; run-task.ts's `daemon` command-table row delegates to it, so
+       `rmd daemon` is unchanged for callers.
+    2. bin/rmd routes the `daemon` verb to src/daemon-main.ts.
+    3. Garden and measurement-cadence children start their entries through `childEntryArgv` on the newest engine,
+       never `process.argv[1]` or the daemon's execArgv.
+    4. Constraints: the comment-load ratchet refuses an added comment block over 25 lines, and a moved one counts as
+       added; split or compress. Tests coupled to daemonCommand's location are repointed, never deleted.
+    5. Report in the PR the new entry's metafile module count; after merge an operator session reads the daemon's RSS
+       and boot time on the host.
+  acceptance:
+    - claim: "the daemon entry's static import graph never reaches src/run-task.ts"
+      proof: 'grep: test("W1-T9091: the daemon entry never imports the run-task module" in test/the-daemon-starts-from-a-narrow-entry.test.ts'
+    - claim: "garden and cadence children start their own entries, not the daemon's argv"
+      proof: 'grep: test("W1-T9091: garden and cadence children start their own entries" in test/the-daemon-starts-from-a-narrow-entry.test.ts'
+    - claim: "run-task's daemon verb delegates to the narrow entry's daemonMain"
+      proof: "grep: daemonMain( in src/run-task.ts"
+  falsifier: |
+    Leave any import from src/daemon-main.ts that reaches src/run-task.ts: the graph walk in the first test finds it.

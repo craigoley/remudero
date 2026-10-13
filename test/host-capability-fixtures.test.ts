@@ -136,6 +136,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "heavy-ready-startup.test.ts", key: "0o644", count: 1,
+    reason: "The startup reader rejects group/world-readable file stat modes before parsing, independent of OS read privileges. This fixture asserts the explicit privacy policy, not EACCES, so uid 0 cannot turn it into a readable-success case.",
+  },
+  {
+    kind: "chmod", file: "heavy-ready-startup.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same private startup file after the mode-policy refusal. The subsequent fixtures positively exercise private-parent, symlink, hardlink and bounded regular-file policies; this is not an OS permission-denial assertion.",
+  },
+  {
     kind: "chmod", file: "heavy-build-reservation.test.ts", key: "0o644", count: 1,
     reason: "The READY reader refuses group/world-readable record modes by descriptor stat before parsing. This explicit policy is independent of uid, not an EACCES assertion.",
   },

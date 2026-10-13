@@ -27,6 +27,16 @@ module.exports = {
       to: { path: "^src/(spike|run-task)\\.ts$|^src/cli/" },
     },
     {
+      name: "drafter-never-sees-held-out-set",
+      severity: "error",
+      comment:
+        "A skill draft is judged on held-out merged tasks (src/lib/skill-eval.ts, drawn from " +
+        "src/lib/golden-corpus.ts). The drafter must never be able to read that set, or it can " +
+        "tune the draft to it. Falsifier: test/a-skill-draft-is-judged-on-tasks-it-never-saw.test.ts.",
+      from: { path: "^src/lib/(skill-workshop|workflow-mining)\\.ts$" },
+      to: { path: "^src/lib/(skill-eval|golden-corpus)\\.ts$" },
+    },
+    {
       // WHY `error` NOW, 2026-09-08 (W1-T2895). This rule ran as `warn` from its introduction
       // (thirteen tolerated cycles, `scripts/cycle-baseline.json`'s prior `maxCycles: 13`) until
       // this task cut every one of them: six single-symbol edges each moved to a leaf module

@@ -1,0 +1,93 @@
+- id: W1-T9062
+  title: "A RATIFICATION DRAFT NAMES ONLY PATHS THE TREE HOLDS — the inbox drafter invents `files:` paths and readiness never checks them, so 9 of 10 redrafts that reached READY on 2026-10-13 named files that do not exist, a proposal about an existing parked shard is redrafted as new invented tasks instead of releasing that shard, and the one release path (`rmd approve <taskId>`) crashes in the core container"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the inbox draft floor and readiness (inbox.ts), the shared path-existence predicate (plan.ts) and the approve release branch (run-task.ts)
+  band_meaning: span
+  origin: "operator session 2026-10-13 (clear the inbox; lean into automation): inbox redraft review, ~/Remudero-notes/inbox-brief-2026-10-13/redrafts/"
+  plan_refs: [W1-T8828, W1-T8926, W1-T8950, W1-T8714, W1-T3216, W1-T5660, W1-T512]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/plan.ts
+    - src/run-task.ts
+    - test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts
+    - test/a-ratification-draft-is-refused-before-it-reaches-ci.test.ts
+    - test/drafting-prompts-require-scope.test.ts
+    - test/an-operator-verdict-releases-a-parked-task.test.ts
+    - test/inbox.test.ts
+  status: queued
+  priority: 1 # operator-2026-10-13: every reframed proposal came back READY with invented paths, so no operator approval of a redraft is usable
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 (operator-delegated inbox clear). The operator's 11 reframes (`rmd reframe`, direction text
+    from ~/Remudero-notes/inbox-brief-2026-10-13/brief.json) produced 10 redrafts that classified READY by 11:15Z:
+    standing-debt:4, standing-debt:5, machine-judge W1-T5309 / W1-T6107 / W1-T6372 / W1-T7271 / W1-T7739 and
+    verify-human W1-T204 / W1-T216 / W1-T5717. Read one by one against origin/main (notes per draft in
+    ~/Remudero-notes/inbox-brief-2026-10-13/redrafts/*.txt):
+      - 9 of 10 name `files:` paths that exist neither in the checkout nor on main: src/lib/fixWorker.ts,
+        src/lib/coverage.ts, src/lib/fix-rung.ts, plan/gate.yaml, src/ciEnforcer.ts, forge-attack.yml,
+        scripts/forge-attack-test.sh, src/ownership.ts, state/retro.log, src/lib/handler.ts, docs/MASTER-PLAN.md,
+        src/console-freshness.ts, src/serve.ts, docs/github-read-window-divergence.md, test/fast-gate-real-spawn.test.ts.
+      - The 10th (verify-human:W1-T5717) greps `#8650` / `#8671`, which already match on main, so it proves nothing.
+      - 4 of the 10 are about a parked shard that is already sound and matches the operator's direction (W1-T6107,
+        W1-T5717, W1-T6372, W1-T7271). The faithful action is to release that shard; the drafter invented new tasks.
+      - That release, `rmd approve <taskId>`, crashes in the core container: `PlanError: ENOENT
+        /home/node/Remudero/plan/tasks.yaml`.
+    WHY, READ on origin/main 9ee45e15f (symbols, not lines):
+      - `blockingLintMessages` (src/lib/inbox.ts) lints the merged fragment with `lintPlan(merged, () => ({}), ids)`:
+        no `moduleExists`, no `pathExistsAtBase`, no existence fact of any kind. Nothing at the draft floor or at
+        readiness (`classifyProposal`) refuses a `files:` path the tree does not hold.
+      - The only check that does, "declares file path(s) that exist in neither the checkout nor the base tree"
+        (`machineFilingAdmissionViolations`, src/lib/plan.ts), applies only to machine filings, never to an inbox draft.
+      - `inboxDraftPrompt` shows the drafter a plan INDEX (id/title/status/type/depends_on) but never the `files:` of
+        the parked task a `machine-judge:` / `verify-human:` proposal names, and never asks it to confirm a path exists.
+        It has Read/Grep/Glob and still guessed.
+      - `approveCommand`'s task-id branch (W1-T3216, `approveParkedTask`) loads `join(config.root, "plan", "tasks.yaml")`.
+        In the core container `config.root` is /home/node/Remudero, not the checkout, so the branch cannot run there.
+        The proposal branch of the same command reads `repoRoot` and works.
+    RELATED, NOT DUPLICATED: W1-T9039 (open plan PR #11312 at filing, not yet on main) gives the draft and approve
+    floors `lint-plan --base`'s facts, so call-site, blocked-task-disposition and proof-grep-already-true fire before
+    READY. It does not refuse a nonexistent declared path, ground the prompt in the parked shard, add the release
+    candidate, or fix the release crash. Both edit src/lib/inbox.ts; whichever merges second rebases. W1-T8828 (stamp),
+    W1-T8926 (message quality) and W1-T8950 (recommendations) are different concerns.
+  design: |
+    No new bound.
+    1. ONE PATH-EXISTENCE PREDICATE. Extract the existence check from `machineFilingAdmissionViolations` into an
+       exported helper in src/lib/plan.ts (declared paths that exist neither in the checkout nor at the base tree,
+       minus allowed new paths). Machine-filing admission keeps its exact behaviour through the helper.
+    2. THE DRAFT FLOOR AND READINESS REFUSE A MISSING PATH. `blockingLintMessages` (draft self-lint and
+       `classifyProposal`) adds a `[draft-path-missing]` blocking message for every drafted task path the helper
+       reports, resolved against the same checkout the draft is linted in and origin/main. Allowed new paths: a test
+       file under test/ named after the drafted task's slug, and a path the task's `design:` declares on a line
+       `CREATES: <path>`. A dirty draft goes back through the existing bounded redraft with the message in hand; a draft
+       still dirty after the bound is cached NOT-READY with the message, never surfaced as READY.
+    3. THE DRAFTER IS GROUNDED IN THE PARKED SHARD. For a proposal whose id names a parked task (`machine-judge:<id>`,
+       `verify-human:<id>`, `verify-human-automate:<id>`), `inboxDraftPrompt` pastes that task's title, `files:` and
+       acceptance, and says: every `files:` path must exist (confirm with Glob before listing it), a new file is either
+       a slug-named test or declared on a `CREATES:` line, and a proof must fail on main.
+    4. RELEASE FIRST. For those proposals the prompt asks first whether releasing the parked shard as it stands
+       satisfies the proposal and every reframe round. If it does, the drafter emits the existing structured lifecycle
+       action for a release (the READY item's lifecycle-action form) naming the task id, not new tasks. Approve of
+       that item releases the shard through `approveParkedTask`.
+    5. THE RELEASE PATH RUNS IN THE CONTAINER. `approveCommand`'s task-id branch loads the plan from `repoRoot`, like
+       its proposal branch, so `rmd approve <taskId>` works wherever `rmd approve <proposalId>` does.
+    Tests go in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts with the titles below verbatim.
+  acceptance:
+    - claim: "a drafted task declaring a src path the tree does not hold is refused at the draft floor and is not READY"
+      proof: 'grep: test("W1-T9062: a draft naming a src file the tree does not hold is not READY" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
+    - claim: "a new slug-named test file and a CREATES-declared path stay allowed"
+      proof: 'grep: test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
+    - claim: "a parked-task proposal's draft prompt carries that shard's files and offers releasing it"
+      proof: 'grep: test("W1-T9062: a parked-task proposal prompt shows the shard files and offers the release" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
+    - claim: "rmd approve of a parked task id loads the plan from the repo, not the config root"
+      proof: 'grep: test("W1-T9062: approve of a parked task id reads the plan from the repo root" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
+  falsifier: |
+    Keep `blockingLintMessages` without an existence fact and the first test fails: a fragment declaring
+    src/lib/fixWorker.ts in a fixture tree without it classifies READY. Allow every missing path and the first test
+    still passes only by accident of the fixture, so the second test pins the allowed shapes both ways. Drop the parked
+    shard from the prompt and the third fails on its expected `files:` line. Keep `config.root` in the release branch
+    and the fourth fails with ENOENT on a fixture whose config root holds no plan/.

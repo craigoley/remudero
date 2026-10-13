@@ -1,0 +1,78 @@
+- id: W1-T8950
+  title: "AN INBOX ITEM CARRIES A RECOMMENDED DECISION — the operator decided 47 items from a recommendations page built outside the console; the console inbox should say what to do, why, and whether the item is already obsolete, on the item itself"
+  repo: remudero
+  depends_on: [W1-T8826, W1-T8825]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high # a new model-written store served on the operator's decision surface, with routes attached (Rule 19)
+  band_meaning: span
+  origin: "operator session 2026-10-13: recommendations belong in the console inbox, not a claude.ai page (operator: \"Yes\")"
+  plan_refs: [W1-T4087, W1-T8825, W1-T8826, W1-T8829, W1-T8926, W1-T2604]
+  files: [src/lib/inbox-recommendation.ts, src/lib/panel-graph.ts, src/lib/daemon.ts, src/run-task.ts, test/an-inbox-item-carries-a-recommended-decision.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13: to clear the console inbox (8 ready, 36 not ready, 3 declined) an operator session wrote one
+    recommendation per item by hand: what to choose, the exact reframe text, why, and the evidence (PR, sha, task id).
+    Three items were OBSOLETE (their subject already fixed on main), nine were one root cause filed once per shard. None
+    of that lives in the console: the operator had to read a separate page and then act in the inbox. The interpreter
+    (W1-T4087, src/lib/inbox-plain.ts) explains each item; nothing recommends a decision or checks whether main already
+    resolved it. W1-T8825 (merged cfac56bdd) gives every item a sender and a time, and W1-T8826 maps each plain option to
+    its route; this task adds the recommended choice on top of both.
+  design: |
+    PINNED CONTRACT (the console files against exactly these names, after this merges):
+      every operator-owned item in `GET /v1/views/inbox?section=<needsYou|ready|drafting|notReady|declined>` `data.items[]`
+      and in `GET /v1/inbox` `needsYou.{ready,drafting,notReady,declined}[]` gains an optional
+        recommendation?: {
+          action:      "approve" | "decline" | "reframe" | "reply" | "keep",
+          text?:       string,     // the exact reason / feedback / reply text the action posts as its input
+          why:         string,     // one plain sentence
+          evidence:    string[],   // "#11199", "1bbec7c94", "W1-T8918", "src/lib/inbox.ts:1655"
+          obsolete:    boolean,    // true only with evidence of a merged change on main that resolves the subject
+          group?:      string,     // shared root cause, when several items are one cause
+          generatedAt: string,     // ISO instant
+          source:      "writer" | "operator-session-seed",
+          route?:      { method: "POST", path: string, fields: object, input?: "reason" | "feedback" | "text" }
+        }
+      `route` is attached at serve time from action + lane + proposalId with W1-T8826's mapping (approve only on a ready
+      item; keep carries none). An item with no current recommendation omits the field. Fleet-owned items never carry it.
+    1. STORE: state/inbox-recommendations.json keyed by proposalId, each entry the recommendation plus
+       `sourceFingerprint` = sha256 of ["inbox-recommendation-v1", proposalId, summary, lane, the task shard's blob sha on
+       main when the id names a task (machine-judge:<id>, verify-human:<id>)]. A stale fingerprint reads as no
+       recommendation, exactly like inbox-plain.ts's currentStoredMessage.
+    2. WRITER: src/lib/inbox-recommendation.ts, a backfill on its own timer beside startPlainBackfill (one item per tick,
+       never two at once), using the same summarize lane as the plain writer. Its context: the item's plain message, its
+       summary and lane, the task shard text when the id names a task, and main's evidence for that task (merged PRs whose
+       body carries `Remudero-Task: <id>` or that name it, from `git log origin/main`). It asks for one recommendation.
+    3. CHECKER (writer output only): action in the enum and routable for the item's lane; `text` present when the action
+       takes an input; `why` passes checkOperatorMessage; every evidence entry resolves (a PR number merged on main, a sha
+       reachable from origin/main, a task id in the plan, or a file path that exists); `obsolete: true` requires at least one
+       merged-PR or sha evidence entry. A failing answer is retried once with the problems, then no recommendation is stored.
+    4. SEED: plan/seeds/inbox-recommendations-2026-10-13.json (committed with this filing) holds 47 operator-session
+       recommendations in this contract's shape. On first run the writer imports each entry whose proposalId is still a
+       current operator item and has no stored recommendation, with source "operator-session-seed" and the item's current
+       fingerprint; the checker is not applied to seeded entries. Seeded entries are re-written by the writer once the
+       item's fingerprint changes, like any other.
+    5. SYMBOLS (call sites are proofs): src/lib/inbox-recommendation.ts exports `startRecommendationBackfill(deps, intervalMs, log)`
+       (started in src/lib/daemon.ts beside startPlainBackfill, wired from src/run-task.ts like `plainBackfill`) and
+       `recommendationFor(proposal, lane, store)` (called in src/lib/panel-graph.ts inboxLanes for operator items).
+    6. Nothing new is writable: every route is an existing inbox route with its existing tier and auth.
+  acceptance:
+    - claim: "a ready item's served recommendation carries its route and a stale one is omitted"
+      proof: 'grep: test("W1-T8950: a ready item serves its recommendation with its route" in test/an-inbox-item-carries-a-recommended-decision.test.ts'
+    - claim: "the checker refuses an obsolete claim without merged evidence and an action the lane cannot route"
+      proof: 'grep: test("W1-T8950: the checker refuses unproven obsolete claims and unroutable actions" in test/an-inbox-item-carries-a-recommended-decision.test.ts'
+    - claim: "the operator-session seed is imported once for items still present"
+      proof: 'grep: test("W1-T8950: the seed is imported once for items still in the inbox" in test/an-inbox-item-carries-a-recommended-decision.test.ts'
+    - claim: "the daemon starts the recommendation backfill"
+      proof: 'grep: startRecommendationBackfill( in src/lib/daemon.ts'
+    - claim: "the served inbox lanes attach each item's recommendation"
+      proof: 'grep: recommendationFor( in src/lib/panel-graph.ts'
+  falsifier: |
+    Serve the inbox lanes for `machine-judge:W1-T6088` (not ready) with the seed loaded. At origin/main no item carries a
+    `recommendation`; with the change the item serves {action: "decline", obsolete: true, source: "operator-session-seed",
+    route: POST /v1/inbox/decline input "reason"}. Change the item's summary and the recommendation is no longer served.
+    A writer answer claiming obsolete with only a task-id evidence entry is refused.

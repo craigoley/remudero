@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-10: core memory follow-up to the machine-judge re-landing loop (#10678)"
   files: [src/lib/check-proof.ts, src/check-proof-main.ts, src/run-task.ts, src/lib/plan-pr-emitter.ts, src/lib/pr-open.ts, src/lib/worktree-sites.ts, scripts/proof-discrimination-gate.mjs, test/a-check-proof-child-loads-a-narrow-entry.test.ts, test/base-blob-read-failure.test.ts, test/base-proof-dir-is-a-checkout.test.ts, test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts, test/check-proof-executor-parity.test.ts, test/check-proof-grep-cause.test.ts, test/grep-zero-cause.test.ts, test/preexisting-proof-hits-wiring.test.ts, test/worktree-creation-census.test.ts, test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts, test/the-base-proof-worktree-is-removed-through-the-hardened-git-leaf.test.ts, test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts, test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts]
-  status: queued
+  status: merged
   priority: 0.95 # operator-2026-10-12: core is the container that keeps hitting memory.high; no memory is saved until these two land; W1-T7729's bundle is baked but unused
   attempts: 0
   note: "Sequenced after #10677 (fix(base-proof), merged 2026-10-10 at f36a6af18), which edits removeBaseProofWorktree and the git-site census tables this task moves. #10677 was built on a run-unfiled branch and has no task id, so depends_on cannot name it; build on an origin/main that contains f36a6af18."

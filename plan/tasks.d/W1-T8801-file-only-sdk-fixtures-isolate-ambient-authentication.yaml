@@ -56,5 +56,5 @@
     - claim: The real subscription fixtures establish a scoped file-only authentication precondition
       proof: 'grep: function fileOnlyUsageAuthentication in test/headroom-sdk-source.test.ts'
   files: [test/headroom-sdk-source.test.ts, test/headroom-sdk-fixture-environment.test.ts]
-  status: queued
+  status: merged
   attempts: 0

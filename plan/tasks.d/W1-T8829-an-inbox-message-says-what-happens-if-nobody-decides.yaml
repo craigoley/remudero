@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: console inbox review (\"we were supposed to have an interpreter making this more understandable\")"
   plan_refs: [W1-T4087, W1-T2498, W1-T313]
   files: [src/lib/inbox-plain.ts, src/lib/feedback.ts, test/an-inbox-message-says-what-happens-if-nobody-decides.test.ts, test/every-inbox-message-is-plain-language.test.ts, test/inbox-plain-source.test.ts, test/decision-summary.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

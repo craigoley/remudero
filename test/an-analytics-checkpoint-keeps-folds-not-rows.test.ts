@@ -148,7 +148,9 @@ async function fold(rows: readonly Row[], split?: number): Promise<{ scratch: st
   }
 }
 
-const GOLDEN = "e89b83ee40b47592cf027eb6bcb7e9ae5311fac8816e2196e975890ae3ff8439";
+// Re-pinned when judge calibration gained humanRates and method.rates: with those two fields
+// stripped, this corpus still digests to the prior golden e89b83ee…3ff8439, so nothing else moved.
+const GOLDEN = "ba139e8af0083474a68b047c609e518caaf92d2edf049464712b3b1c56ecc282";
 
 test("unit test: work integrity, judge calibration and the operator-agent signals read byte-identically from the checkpoint's folds", async () => {
   const rows = corpus(600);

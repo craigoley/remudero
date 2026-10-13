@@ -25,13 +25,11 @@ import type { ProofDiscriminationEvidence } from "../src/lib/sweep.js";
 import type { WhitelistedProof } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config-schema.js";
 import {
-  CHECK_PROOF_EXIT,
-  buildBaseProofDir,
   buildProofAmendmentGitOps,
   buildProofAmendmentWritePorts,
-  checkProofCommand,
   dispatchProofAmendmentWrite,
 } from "./helpers/run-task-test.js";
+import { CHECK_PROOF_EXIT, buildBaseProofDir, checkProofCommand } from "../src/lib/check-proof.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 // W1-T3434 — #5154 was CAPPED because its `unit test:` proofs passed at both the implementation

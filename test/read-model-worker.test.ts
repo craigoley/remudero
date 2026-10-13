@@ -870,7 +870,7 @@ test("a rebuild that fences the worker during its check makes it reopen the file
   assert.equal(lastState(f.c.messages).instances[0]?.lease, "none");
 });
 
-test("a drift the worker's windowed check detects is healed and a recurrence escalates through the issue path", (t) => {
+test("a drift the worker's windowed check detects is healed, and the next older slice heals its own gap without escalating", (t) => {
   const titles: string[] = [];
   const issues: IssueGateway = { create: (title) => (titles.push(title), `https://github.com/craigoley/remudero/issues/${9000 + titles.length}`) };
   const f = checkFixture(t, { escalation: { issues, ledgerPath: join(scratch(t, "rmw-check-esc"), LIVE), runId: "read-model" } });
@@ -884,12 +884,14 @@ test("a drift the worker's windowed check detects is healed and a recurrence esc
   assert.deepEqual(oracleRows(f.stateDir).map((r) => r.outcome ?? r.step), ["healed", READ_MODEL_SELF_HEALED_STEP], "the newest slice found the drift and healed it");
   assert.equal(tamper.prepare("SELECT count(*) AS n FROM fact WHERE body LIKE '% '").get()?.n, 0, "the corrupted fact was rebuilt from the ledger");
   assert.equal(titles.length, 0, "a first drift heals without asking anyone");
-  // Just below the newest slice checked so far: inside the next one.
+  // Just below the newest slice checked so far: inside the next one. A rolling slice reaching an OLDER part of history is
+  // a first discovery, not a recurrence: escalating it filed #10884's 33 comments for one historical gap walked backward.
+  // A re-drift of a healed window, or of rows written after the heal, still escalates (read-model-consistency.test.ts).
   corruptBefore(checkWindows(f.stateDir).at(-1)![0]);
   tickUntilChecks(f, 1);
   const checks = oracleRows(f.stateDir).filter((r) => r.step === READ_MODEL_CONSISTENCY_STEP);
-  assert.equal(checks.at(-1)?.outcome, "escalated", "a drift in the next slice within a day of the heal escalates");
-  assert.equal(titles.length, 1, "through the one escalation path");
+  assert.equal(checks.at(-1)?.outcome, "healed", "the next older slice heals its own gap");
+  assert.equal(titles.length, 0, "and asks no one");
 });
 
 test("a blind slice is logged and waits out its back-off without failing the projector", (t) => {

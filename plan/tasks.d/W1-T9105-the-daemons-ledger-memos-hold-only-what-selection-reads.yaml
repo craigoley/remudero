@@ -1,0 +1,47 @@
+- id: W1-T9105
+  title: "THE DAEMON'S LEDGER MEMOS REPORT THEIR SIZE AND HOLD ONLY WHAT THEIR READERS USE — dispatchSelectionLedgerUnion keeps parsed rotation rows for the life of the process and terminalUnionScans keeps every PR key of every archive, inside a daemon heap of 910 MiB p50 that nothing attributes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the size of the daemon's ledger memos
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7092, W1-T100]
+  files: [src/lib/ledger-union.ts, src/lib/sweep.ts, src/run-task.ts, src/lib/daemon-memory-telemetry.ts, test/the-daemons-ledger-memos-hold-only-what-their-readers-use.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision C, offset 3 (lever B follow-on; #10688 made dispatch read only what changed).
+    MEASURED (core daemon.alive, 2026-10-11 22:56Z to 10-13 11:45Z, 1,955 rows): heap used p50 910 MiB, p90 about
+    1.19 GiB, with no attribution; RSS p50 1,933 MiB.
+    READ on origin/main 5f8d3f178:
+    - `createIncrementalLedgerUnion` (src/lib/ledger-union.ts) parses each rotation once and keeps it in memory with a
+      durable digest; its single instance `dispatchSelectionLedgerUnion` (src/run-task.ts) lives for the process.
+    - `terminalUnionScans` (src/lib/sweep.ts) keeps every PR key seen in every archive for the process lifetime.
+    - `mergeLogEvidenceByRoot` and `dispatchFilingCache` (src/run-task.ts) grow with history.
+    NOTE: src/lib/ledger-union.ts is in BAKED_RUNTIME_SOURCE_PATHS, so this PR rebuilds the image once.
+    OVERLAP: lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) as sharing src/lib/sweep.ts and
+    src/run-task.ts. That is the whole-file surface only; this task touches the ledger memos, not CI routing.
+  design: |
+    1. Each named memo exposes `size()`: entries and an approximate retained byte count accumulated at insert.
+       daemon.alive gains `memo_sizes` {name: {entries, approx_bytes}} for dispatchSelectionLedgerUnion,
+       terminalUnionScans, mergeLogEvidenceByRoot, dispatchFilingCache and baseReproductionHostCache.
+    2. `createIncrementalLedgerUnion` takes a projection its consumer declares and retains only those fields per row,
+       never whole rows; dispatch selection's answer is unchanged.
+    3. `terminalUnionScans` keeps keys only for PRs the sweep can still act on, and evicts a closed PR's keys once its
+       terminal row has been consumed. An evicted key re-read from the archive digest is a cache miss, never a
+       different answer.
+    4. After merge an operator session reads memo_sizes and heap used on the host and quotes them on the PR.
+  acceptance:
+    - claim: "daemon.alive reports each named memo's entries and approximate bytes"
+      proof: 'grep: test("W1-T9105: the alive row reports each memo size" in test/the-daemons-ledger-memos-hold-only-what-their-readers-use.test.ts'
+    - claim: "the incremental union retains only its consumer's projection and selection's answer is unchanged"
+      proof: 'grep: test("W1-T9105: the union keeps only the declared projection with the same answer" in test/the-daemons-ledger-memos-hold-only-what-their-readers-use.test.ts'
+    - claim: "an evicted terminal key gives the same answer when read again"
+      proof: 'grep: test("W1-T9105: an evicted terminal key gives the same answer" in test/the-daemons-ledger-memos-hold-only-what-their-readers-use.test.ts'
+  falsifier: |
+    Retain whole rows: the second test's approximate bytes equal the whole-row size of the fixture.

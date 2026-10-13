@@ -23,6 +23,7 @@ import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
 import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
+import { ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_MIN_INTERVAL_MS, runIssueRevalidationGarden, type IssueRevalidationPorts } from "./issue-revalidation-garden.js";
 import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
 import {
   readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
@@ -60,6 +61,10 @@ export const REGISTERED_GARDEN_NAMES = [
   "flow-remedy",
   // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
   "fix-lane",
+  // W1-T5420: append the formerly separate knowledge starter; existing registered slots stay unchanged.
+  "knowledge",
+  // W1-T8864: every open issue re-checked against current evidence, shadow-first.
+  "issue-revalidation",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
@@ -143,6 +148,9 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow" || name === "fix-lane") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "issue-revalidation") {
+    return { intervalFor: (i) => Math.max(i, ISSUE_REVALIDATION_MIN_INTERVAL_MS), minIntervalMs: ISSUE_REVALIDATION_MIN_INTERVAL_MS, hourly: false };
+  }
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }
 
@@ -544,4 +552,26 @@ export function flowGardenPass(
     }
   };
   return Object.assign(pass, { due: () => flowPassDue(d.stateDir, d.clock) });
+}
+
+/** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match
+ *  the previous ones widens the wait (never under the garden's hourly floor), and a changed verdict snaps
+ *  it back. A pass never throws: a failure is ledgered as `issue_revalidation.failed`. */
+export function issueRevalidationGardenPass(
+  stateDir: string, ports: IssueRevalidationPorts, clock?: Clock,
+): (() => Promise<void>) & { due: () => boolean } {
+  const pass = async (): Promise<void> => {
+    let found = false;
+    try {
+      found = (await runIssueRevalidationGarden(ports)).found;
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pass", error: String((e as Error)?.message ?? e) });
+    }
+    try {
+      recordGardenPacing(stateDir, "issue-revalidation", found, { clock });
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pacing", error: String((e as Error)?.message ?? e) });
+    }
+  };
+  return Object.assign(pass, { due: () => gardenPacingDue(stateDir, "issue-revalidation", { clock }) });
 }

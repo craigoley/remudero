@@ -108,7 +108,7 @@ test("plan status history searches only merged friction shards without trailer c
       return `- id: ${id}\n  title: "remedy"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: ${status}\n  attempts: 0\n  origin: "ci-friction:check:ci-log"\n  files: [src/lib/ci-friction-gardener.ts]\n  acceptance: [{claim: "c", proof: "unit test: p"}]\n`;
     }
     assert.equal(args[0], "log");
-    if (!args.includes("-S")) return "2026-09-20T12:00:00Z\tW1-T1\n";
+    if (!args.includes("-S")) return "\x1e2026-09-20T12:00:00Z\x1ffix: remedy (#1)\n\nRemudero-Task: W1-T1\n\n## Notes\n";
     walks++;
     assert.deepEqual(args.slice(args.indexOf("--") + 1), [paths[1]], "trailer-credited and queued shards never need a status history walk");
     return `\x012026-09-21T12:00:00Z\n${paths[1]}\n`;

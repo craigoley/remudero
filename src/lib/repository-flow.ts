@@ -7,6 +7,7 @@ import { buildBatchedGithub, taskIdFromRunBranch } from "./status.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS } from "./analytics-route.js";
+import { projectRepairCostContext } from "./repair-cost-evidence.js";
 
 export const REPOSITORY_FLOW_VERSION = "repository-flow-v1";
 /** BACKSTOP: optional graph evidence leaves room for existing Analytics in the same response. */
@@ -177,20 +178,32 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       if (fingerprints.has(fingerprint)) return;
       if (fingerprints.size >= MAX_REPAIR_IDENTITIES) { overflow = true; return; }
       fingerprints.add(fingerprint);
-      const n = row.pr_number;
+      // The real fix caller emits repair_pr_url/repair_round_id (fixWorkerReceipt),
+      // not the generic aliases older collectors and fixtures used. Decode its
+      // caller-owned context with the same projector as private repair accounting.
+      const canonical = projectRepairCostContext(row);
+      const hasCanonical = row.repair_pr_url !== undefined || row.repair_round_id !== undefined;
+      const n = hasCanonical ? canonical.number : row.pr_number;
+      const round = hasCanonical ? canonical.roundId : row.round_id;
+      const scopeMatches = hasCanonical
+        ? canonical.repo === repository &&
+          (row.pr_number === undefined || row.pr_number === n) &&
+          (row.pr_url === undefined || row.pr_url === row.repair_pr_url) &&
+          (row.round_id === undefined || row.round_id === round)
+        : row.pr_url === `https://github.com/${repository}/pull/${n}` ||
+          row.pr_url === undefined && (row.repository === repository || row.repo === repository);
       if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0 || typeof row.head_sha !== "string" ||
-        !/^[a-f0-9]{40,64}$/.test(row.head_sha) || typeof row.round_id !== "string" || !row.round_id.length ||
-        row.round_id.length > 160 || !(row.pr_url === `https://github.com/${repository}/pull/${n}` ||
-          row.pr_url === undefined && (row.repository === repository || row.repo === repository)) ||
+        !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.head_sha) || typeof round !== "string" || !round.length ||
+        round.length > 160 || !scopeMatches ||
         row.repository !== undefined && row.repository !== repository ||
         typeof row.repo === "string" && row.repo.includes("/") && row.repo !== repository) {
         gaps.add("repair rows without exact repository PR head and round were excluded"); return;
       }
       const reason = reasonNames.includes(row.reason_class as typeof reasonNames[number])
         ? row.reason_class as typeof reasonNames[number] : "unknown";
-      const key = JSON.stringify([n, row.head_sha, row.round_id]);
+      const key = JSON.stringify([n, row.head_sha, round]);
       const previous = repairs.get(key);
-      if (!previous) repairs.set(key, { pr: n, head: row.head_sha, round: row.round_id, at, reason });
+      if (!previous) repairs.set(key, { pr: n, head: row.head_sha, round, at, reason });
       else if (previous.at !== at || previous.reason !== reason) {
         previous.at = Math.min(previous.at, at); previous.reason = "unknown";
         gaps.add("conflicting repair identity observations retain unknown classification");

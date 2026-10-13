@@ -11,6 +11,7 @@ import { createService } from "../src/lib/service.js";
 import { buildReadModelViewRoutes } from "../src/lib/views.js";
 import type { AnalyticsViewData } from "../src/lib/analytics-view.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
+import { repairReceiptFields } from "../src/lib/repair-cost-evidence.js";
 
 test("W1-T8684: default sources reach cached repository flow without request-time scans", async t => {
   const root = makeTempDir("repository-flow-worker");
@@ -26,8 +27,12 @@ test("W1-T8684: default sources reach cached repository flow without request-tim
     createdAt, mergedAt, updatedAt: mergedAt, headRefName: "run-W1-T12-123", headRefOid: "a".repeat(40),
     body: "Remudero-Task: W1-T12", autoMergeRequest: null, title: "fixture" }]), true);
   assert.equal(cache.commitOpen!([], now), true);
+  // Exercise the fields owned by the real fix lane, not invented collector-specific aliases.
+  const repairFields = repairReceiptFields({ prUrl: `https://github.com/${repository}/pull/3`, roundId: "one" });
+  assert.equal("pr_url" in repairFields, false);
+  assert.equal("round_id" in repairFields, false);
   writeFileSync(join(stateDir, "ledger.ndjson"), JSON.stringify({ ts: mergedAt, step: "fix.dispatch",
-    pr_number: 3, pr_url: `https://github.com/${repository}/pull/3`, head_sha: "b".repeat(40), round_id: "one" }) + "\n");
+    ...repairFields, head_sha: "b".repeat(40) }) + "\n");
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "serve" } }));
   const posted: ReadModelWorkerMessage[] = [];
   let onMessage: ((m: { type?: string }) => void) | undefined;

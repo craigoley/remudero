@@ -1,0 +1,55 @@
+- id: W1-T9082
+  title: "RUN-CHILD SHADOW: A PROBE CHILD LOADS WHAT A RUN CHILD WOULD AND RECORDS ITS COST, WHILE THE RUN STAYS IN-PROCESS — nothing measures a run child on the host (the bundle alone peaks 166-182 MiB at --help, the run's working set is unknown), and the contract and engine tree need a production round-trip before any run depends on them"
+  repo: remudero
+  depends_on: [W1-T9077, W1-T9080, W1-T8777]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — the shadow probe and the mode switch that gates every later step
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7729, W1-T8777, W1-T8778, W1-T9070, W1-T9077, W1-T9080]
+  files: [scripts/build-child-entries.mjs, src/run-child-main.ts, src/lib/run-child.ts, src/lib/policy.ts, src/lib/host-memory-ledger.ts, plan/policy.yaml, src/run-task.ts, test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision A.9 (migration) and decision C (sizing). Shadow first, as the operator's rollout rule asks.
+    The memory sizing in the ADR is an estimate: 220-330 MiB per child on the bundle, against 519-547 MiB cold tsx
+    (ADR 0006; W1-T8775). The container's p90 memory.current is 6,569 MiB against memory.high 8,379 (core daemon.alive,
+    2026-10-11/13), so the real figure decides how far lanes must adapt (the lane-governor task) before children go on.
+    ADR 0006 decision 4: a bundled process cannot start a worker thread from its own .ts URL; W1-T8777 makes the
+    worker entries bundled, and this task proves the run-child verb starts none it cannot resolve.
+  design: |
+    1. `CHILD_ENTRIES` (scripts/build-child-entries.mjs) gains `{ name: "run-child", source: "src/run-child-main.ts" }`.
+       New src/run-child-main.ts reads `--run-dir`, validates the spec through the contract, and in `--probe` mode loads
+       the modules a run loads (the run path's static graph), reads the plan snapshot file, writes status
+       starting -> done with `probe: true` and the load time, and exits. It never touches the task.
+    2. `sweep.runChild.mode` in plan/policy.yaml: `{ value: "shadow", origin: "proposal" }`, allowed off | shadow | on |
+       auto, read optionally by src/lib/policy.ts like `hostMemoryBudget` (absent means off). `on` and `auto` are
+       accepted by the parser but implemented by later tasks; until then they behave as shadow and say so.
+    3. src/lib/run-child.ts `startRunChildProbe(...)`: under shadow, the daemon's runOne wiring (src/run-task.ts) starts
+       one probe per dispatched run beside the in-process run, on `newestCurrentEngine`, under a reservation of a new class `run-child-probe`
+       (src/lib/host-memory-ledger.ts `WorkerClass`), learned like the others.
+    4. The daemon writes the plan snapshot it admitted the task against to `<state>/plan-snapshots/<planSha>.json` once
+       per plan sha and reuses it; a snapshot no non-terminal run directory names, and not the newest, is removed.
+    5. Ledger `run_child.shadow` {run_id, task_id, engine_sha, entry_kind, entry_reason, load_ms, tree_peak_bytes from the
+       reservation release, contract: ok | <failure class>}. A probe that fails ledgers why and never touches the run.
+    6. Prove the verb starts no self-URL worker: drive `run-child --probe` with worker_threads' Worker made to throw.
+  acceptance:
+    - claim: "under shadow a dispatched run also starts one probe child that writes its status and a run_child.shadow row with entry kind and tree peak"
+      proof: 'grep: test("W1-T9082: a shadow probe writes its status and its shadow row" in test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts'
+    - claim: "a failing probe ledgers its failure and leaves the in-process run untouched"
+      proof: 'grep: test("W1-T9082: a failing probe never touches the in-process run" in test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts'
+    - claim: "the run-child verb starts no self-URL worker thread"
+      proof: 'grep: test("W1-T9082: the run-child verb starts no self-URL worker" in test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts'
+    - claim: "the mode parses off, shadow, on and auto, and an absent block reads as off"
+      proof: 'grep: test("W1-T9082: the run-child mode parses and an absent block is off" in test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts'
+    - claim: "the child-entry build declares the run-child entry"
+      proof: 'grep: name: "run-child" in scripts/build-child-entries.mjs'
+    - claim: "the daemon's runOne wiring starts the shadow probe"
+      proof: 'grep: startRunChildProbe( in src/run-task.ts'
+  falsifier: |
+    Run the probe from the daemon's checkout under tsx: the first test's entry_kind reads tsx with a current bundle in
+    the engine tree. Let a probe error propagate: the second test's in-process run sees it.

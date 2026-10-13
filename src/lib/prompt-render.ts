@@ -16,7 +16,7 @@ import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
 import { citation } from "./provenance.js";
-import type { CriterionVerdict } from "./review.js";
+import { workerProofTitles, type CriterionVerdict } from "./review.js";
 import {
   describeCiLogUnavailable,
   ADDITIVE_REGISTRATION_SURFACES,
@@ -483,6 +483,8 @@ export function renderFixPrompt(opts: {
   // enforcement can never name a different set. Omitted (or empty) renders no GATE REMEDY line —
   // never a guessed remedy.
   reachableRemedyFiles?: readonly RemedyFileForGate[];
+  /** `renderSkillsPart` of the fix lane's selected skills; "", omitted, or a plan-gate round renders nothing. */
+  skillsPart?: string;
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const censusSnapshotEnv = opts.censusSnapshotPath === undefined ? undefined :
@@ -614,6 +616,8 @@ export function renderFixPrompt(opts: {
             : []),
         ]
       : [];
+  // Approved procedures for fix rounds, after the scope they work within and before the evidence.
+  const skillsBlock = opts.skillsPart ? ["", opts.skillsPart, ""] : [];
   const footer = [
     "",
     "Report exactly one anchored `FIX_OUTCOME:` line before COMMIT_MESSAGE/PR_URL, choosing one outcome:",
@@ -711,6 +715,7 @@ export function renderFixPrompt(opts: {
       header,
       ...constraintBlock,
       ...scopeBlock,
+      ...skillsBlock,
       `This PR's merge state is DIRTY — GitHub cannot compute a clean merge ref, so NO check even`,
       `runs until the conflict is resolved; there is no review to react to either.`,
       // W1-T4458: a shell-less round is told a few lines below (the harnessCommits footer) that
@@ -818,6 +823,7 @@ export function renderFixPrompt(opts: {
       header,
       ...constraintBlock,
       ...scopeBlock,
+      ...skillsBlock,
       `Required CI check(s) are FAILING — the failing signal here IS the CI log, not a reviewer`,
       `verdict. GitHub will not merge past a red required check no matter what any review verdict`,
       `says, and a review verdict sitting beside this one (if any exists at all — most often none`,
@@ -848,6 +854,7 @@ export function renderFixPrompt(opts: {
       header,
       ...constraintBlock,
       ...scopeBlock,
+      ...skillsBlock,
       `The review gate is FAILING on ${n} actionable gate failure${n === 1 ? "" : "s"} the reviewer named a`,
       `SINGLE, unambiguous remedy for — every named acceptance criterion may already read MET; this is NOT`,
       `an unmet-criterion gap. Resolve EACH remedy below exactly as named — the review floor has already`,
@@ -867,6 +874,7 @@ export function renderFixPrompt(opts: {
       header,
       ...constraintBlock,
       ...scopeBlock,
+      ...skillsBlock,
       `The review was CAPPED: every named criterion read MET, but the proof(s) below did not discriminate this`,
       `branch from its merge base. THE PLAN, NOT THIS PR'S BODY, IS WHAT A TRAILERED PR IS JUDGED AGAINST —`,
       `editing the PR body cannot change this verdict, and you have no authority to edit the plan or this`,
@@ -912,6 +920,7 @@ export function renderFixPrompt(opts: {
       header,
       ...constraintBlock,
       ...scopeBlock,
+      ...skillsBlock,
       `The review gate is FAILING on ${n} unmet acceptance criteri${n === 1 ? "on" : "a"} whose reviewer`,
       `reason is a PROOF-KEYWORD COVERAGE gap — the report text never mentions the proof, this is`,
       `NOT an executed failure. The likely fix is the PR BODY's Acceptance block: add the`,
@@ -929,6 +938,7 @@ export function renderFixPrompt(opts: {
     header,
     ...constraintBlock,
     ...scopeBlock,
+    ...skillsBlock,
     `The review gate is FAILING (${n} UNMET acceptance criterion${n === 1 ? "" : "a"}). Resolve ALL`,
     `of them together in this ONE pass — never fix one and leave another; patching one criterion`,
     `at a time is exactly what causes an infinite ping-pong across review rounds. Review summary:`,
@@ -1157,6 +1167,18 @@ export function implementPromptParts(
   const body = (task.prompt ?? task.title)
     .split("${RUN_ID}").join(runId)
     .split("${TASK_ID}").join(task.id);
+  const titles = workerProofTitles(task.acceptance ?? []);
+  const admittedOutsideFiles = [
+    "This list names only what commitWorkerEdits already admits outside the task's files: scope.",
+    ...(titles.length > 0 ? [
+      "A NEW test/ file declaring one of these proof titles will be committed even when not in files: for this task; " +
+        "existing test files and unrelated new tests are not admitted by this exception.",
+      ...titles.map((title) => `- ${title}`),
+    ] : []),
+    "For each registered artifact below, the harness keeps a regenerated copy even when absent from files:.",
+    ...Object.entries(REGENERABLE_ARTIFACT_GENERATORS).map(([path, generator]) =>
+      `- ${path}: npm run --silent ${generator}`),
+  ].map((line) => `${line} ${citation(`plan#${task.id}`)}`).join("\n");
   return [
     { name: "doctrine", value: renderDoctrinePreamble() },
     // W1-T2761, design (ii): directly after doctrine — the other STABLE half of the CONTEXT
@@ -1173,6 +1195,7 @@ export function implementPromptParts(
     // W1-T3880: a RECORD of what already happened (capability grants used/refused earlier this
     // run), not injected knowledge — placed just before the task body, after every KNOWLEDGE part.
     { name: "capability_context", value: capabilityContextPart },
+    { name: "admitted_outside_files", value: admittedOutsideFiles },
     { name: "task_body", value: body },
   ];
 }
@@ -1235,6 +1258,7 @@ export function renderImplementPromptWithParts(
     // has none, so the prompt is byte-identical to today's — exactly the `skills`/`rule_headlines`
     // convention above.
     ...(partValue("capability_context") ? [partValue("capability_context")] : []),
+    ...(partValue("admitted_outside_files") ? [partValue("admitted_outside_files")] : []),
     "",
     "# TASK",
     partValue("task_body"),

@@ -1,0 +1,58 @@
+id: fb-1791856366583-e5a5e9
+ts: 2026-10-13T01:52:46.586Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - Each injected skill has its own hand-written test:
+  test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts and
+  test/a-ci-state-forensics-skill-is-selectable-and-bounded.test.ts.
+
+  - A third applies-to skill, or a consumer repo's skill once per-repo layering
+  lands (submission key nanoclaw-2026-10-13/per-repo-skills), gets no test
+  unless its author writes one.
+
+
+  WHAT NANOCLAW DOES (OBSERVED): scripts/skill-conformance.test.ts discovers
+  every skill with an nc: fence and enforces, with no per-skill test file: lint
+  clean, fixtures present, every guard branch exercised, and ordering invariants
+  (lines 53-56, 245-339).
+
+
+  ASK: one discovery test over every .claude/skills/*/SKILL.md that carries
+  applies-to:. Per skill it proves:
+
+  - the applies-to value is a TASK_TYPES member (src/lib/plan.ts:105);
+
+  - every when-paths glob matches at least one tracked file;
+
+  - the skill alone fits DEFAULT_KNOWLEDGE_BUDGET_CHARS
+  (src/lib/learnings.ts:49), so it can never be silently dropped whole;
+
+  - observeSkillSelection selects it for a matching task and excludes it for
+  every other task type;
+
+  - it passes scanSkillDraft's allowlist (src/lib/skill-workshop.ts:307).
+
+  Keep or fold the two hand-written tests.
+
+
+  FALSIFIER: add a fixture skill with applies-to: implemnt (a typo), or with a
+  when-paths glob that matches nothing. The discovery test fails and names it.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/skill-conformance-discovery
+thread_id: null

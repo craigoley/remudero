@@ -279,13 +279,26 @@ export function priceCiFrictionCauses(
     rows.set(key, row);
   }
   if (gateFireRates?.status === "measured") {
+    // A gate costs friction only when it fires: a green shard run is the price of running CI, and pricing EVERY run made
+    // the eight coverage-shard legs the eight costliest "causes" (W1-T7358 & co., 2,200–3,900 min each) with no round
+    // behind any of them. Matrix legs of one check are one cause (ciCheckFamily), as on the ci-log path. A report written
+    // before `redMinutes` existed prices nothing rather than mistaking total runtime for friction.
+    const families = new Map<string, { minutes: number; redRuns: number; redPrs: number }>();
     for (const g of gateFireRates.gates) {
-      if (g.minutes <= 0) continue;
-      const cause: CiFrictionCause = { kind: "check", name: g.gate };
+      if (!(g.redMinutes !== undefined && g.redMinutes > 0)) continue;
+      const family = families.get(ciCheckFamily(g.gate)) ?? { minutes: 0, redRuns: 0, redPrs: 0 };
+      family.minutes += g.redMinutes;
+      family.redRuns += g.redRuns;
+      // Summed over legs, so a PR red on two legs counts twice: context only, never the ranking.
+      family.redPrs += g.redPrs ?? 0;
+      families.set(ciCheckFamily(g.gate), family);
+    }
+    for (const [name, family] of families) {
+      const cause: CiFrictionCause = { kind: "check", name };
       const hand = ledgerRounds.filter((r) => r.pricing === "median-proxy" && ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(cause));
       const proxyMinutes = hand.reduce((sum, r) => sum + r.minutes * (nowMs === undefined ? 1 : ciFrictionRecencyWeight(r.at, nowMs)), 0);
-      rows.set(ciFrictionCauseKey(cause), { cause, minutes: g.minutes + proxyMinutes, rounds: g.redRuns + hand.length,
-        prSet: new Set(), prs: g.prs + new Set(hand.map((r) => r.pr)).size });
+      rows.set(ciFrictionCauseKey(cause), { cause, minutes: family.minutes + proxyMinutes, rounds: family.redRuns + hand.length,
+        prSet: new Set(), prs: family.redPrs + new Set(hand.map((r) => r.pr)).size });
     }
   }
   return [...rows.values()]
@@ -458,11 +471,25 @@ function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, 
     ? own.map((f) => ({ check: f.check as string, signature: typeof f.signature === "string" ? f.signature : undefined }))
     : (typeof r.head_sha === "string" ? redByHead.get(r.head_sha) ?? [] : []).map((check) => ({ check, signature: undefined as string | undefined }));
   if (failures.length === 0) return [{ kind: "check", name: "ci-log" }];
-  return failures.map(({ check, signature }) => ({
-    kind: "check",
-    name: `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
-  }));
+  // W1-T9056: an aggregator is red only because a producer was, so once a producer names its failure the
+  // aggregator is dropped from the round's split rather than taking a share of it.
+  const producerNamed = failures.some((f) => f.signature && !CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(f.check)));
+  const names = new Set<string>();
+  for (const { check, signature } of failures) {
+    if (producerNamed && CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(check))) continue;
+    const flakySuffix = signature && flaky.has(signature) ? ":flaky" : "";
+    // A failing test file is one cause whichever check it ran in; any other signature stays per-check.
+    names.add(signature && CI_TEST_FILE_SIGNATURE.test(signature)
+      ? `test:${signature}${flakySuffix}`
+      : `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${flakySuffix}`);
+  }
+  return [...names].map((name) => ({ kind: "check" as const, name }));
 }
+
+/** W1-T9056: checks red only because a producer check was — never a cause of their own when one names it. */
+const CI_AGGREGATOR_FAMILIES: ReadonlySet<string> = new Set(["coverage-ratchet", "ci-required", "ci-gate"]);
+/** A signature that is exactly a failing test file's path (what {@link testRunnerFailureSignature} returns for one). */
+const CI_TEST_FILE_SIGNATURE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
 /** `head_sha -> the red checks the sweep saw on it`, from `sweep.disposed` (its `red_checks`, or
  *  the check its reason names, "<check> failed on <sha>"). */
@@ -616,6 +643,26 @@ export type CiFrictionGit = (args: string[]) => string;
  *  a full-history walk per shard took about a minute each on this repo (measured 2026-10-02). */
 export const CI_FRICTION_HISTORY_SINCE = "--since=60.days";
 
+/**
+ * When each of `ids` merged on `refName`: the OLDEST commit whose body carries an anchored `Remudero-Task: <id>` line
+ * (`trailerTaskIds`). A GitHub squash body puts that line mid-body, where git's `%(trailers)` never looks — read that
+ * way, main credited 38 ids against 1,541 body lines from 2026-09-25 to 2026-10-13, so a merged remedy stayed
+ * unmerged and its effect was never measured. ONE `git log`, bounded by an id-scoped `--grep`, not by age: a remedy's
+ * credit must not expire while its cause is still priced.
+ */
+export function bodyCreditedMergeTimes(git: CiFrictionGit, refName: string, ids: readonly string[]): Map<string, string> {
+  const wanted = new Set(ids.filter(id => /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(id)));
+  const merges = new Map<string, string>();
+  if (wanted.size === 0) return merges;
+  const grep = `--grep=^Remudero-Task:[[:space:]]*(${[...wanted].join("|")})[[:space:]]*$`;
+  for (const record of git(["log", refName, "-E", grep, "--format=%x1e%cI%x1f%B"]).split("\x1e")) {
+    const [at, body] = record.split("\x1f");
+    // `git log` lists newest first, so overwriting keeps the oldest crediting commit.
+    if (at?.trim() && body !== undefined) for (const id of trailerTaskIds(body)) if (wanted.has(id)) merges.set(id, at.trim());
+  }
+  return merges;
+}
+
 /** `path -> commit time` from one `git log --name-only` walk; `pick` keeps the oldest or newest. */
 export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<string, string> {
   const out = new Map<string, string>();
@@ -634,7 +681,7 @@ export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<s
 }
 
 /** Read every task whose `origin:` names a ci-friction cause from `refName`, and when each one's build
- *  merged: the commit carrying its `Remudero-Task:` trailer, else the commit that set it `merged`. */
+ *  merged: the commit whose body carries its `Remudero-Task:` line, else the commit that set it `merged`. */
 export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, refName = "origin/main", onUnreadable: (path: string, reason: string) => void = () => {}): CiFrictionRemedyTask[] {
   let listed = "";
   try {
@@ -644,11 +691,6 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     if ((e as { status?: number }).status !== 1) throw e;
   }
   const paths = listed.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => l.replace(`${refName}:`, ""));
-  const merges = new Map<string, string>();
-  for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE, "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
-    const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map((value) => value.trim()).filter(Boolean)) if (at) merges.set(id, at);
-  }
   // Source registration needs a delivery on main's first-parent history. A feature commit's
   // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
   const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
@@ -678,9 +720,13 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      const mergedAt = merges.get(task.id);
-      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(mergedAt ? { mergedAt } : {}) });
+      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path });
     }
+  }
+  const merges = bodyCreditedMergeTimes(git, refName, tasks.map(task => task.id));
+  for (const task of tasks) {
+    const mergedAt = merges.get(task.id);
+    if (mergedAt) task.mergedAt = mergedAt;
   }
   const fallbackPaths = [...new Set(tasks.filter(task => task.status === "merged" && !task.mergedAt && task.path).map(task => task.path!))];
   if (fallbackPaths.length > 0) {
@@ -1138,10 +1184,13 @@ export function ciFrictionLadder(input: {
   const remedyRounds = remedyRoundsOf(input.rounds);
   const ladder: CiFrictionCauseLine[] = [];
   let next: CiFrictionInventory["next"];
-  for (const price of input.priced.slice(0, LADDER_DEPTH)) {
+  for (const [rank, price] of input.priced.entries()) {
+    // The scorecard reports the top LADDER_DEPTH causes, but a settled cause there (retired, open, measuring, escalated)
+    // never hides a draftable one below it: eight such causes used to leave `next` undefined and the gardener silent.
+    if (rank >= LADDER_DEPTH && next) break;
     const key = ciFrictionCauseKey(price.cause);
     const line: CiFrictionCauseLine = { cause: key, minutes: price.minutes, state: "draft" };
-    ladder.push(line);
+    if (rank < LADDER_DEPTH) ladder.push(line);
     if (price.cause.kind === "conflict") {
       line.state = "delegated";
       continue;
