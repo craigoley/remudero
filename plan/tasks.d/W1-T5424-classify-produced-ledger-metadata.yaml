@@ -12,7 +12,7 @@
   origin: "2026-10-03 approved telemetry and Inbox follow-ups; measured ledger corpus"
   plan_refs: [W1-T1286, W1-T5041, W1-T5341]
   files: [src/lib/ledger-union.ts, src/lib/ledger.ts, test/ledger-grep-unclassified.test.ts, test/cash-trial.test.ts, test/triage-lane-outcomes.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 5017ff2f95b0321163f6c4c21256a0f6eb69844b: listedLedgerFiles names every
