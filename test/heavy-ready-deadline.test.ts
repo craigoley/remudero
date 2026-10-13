@@ -56,7 +56,7 @@ test("heavy READY durable sink refuses unbound events and validates an immutable
 
 test("heavy READY independent service is default off before reading any directory", async () => {
   const api = await load();
-  assert.equal(api.startHeavyReadyDeadlineService({ get dir() { assert.fail("OFF must not inspect directory"); } }), undefined);
+  assert.equal(api.startHeavyReadyDeadlineService({ get dir(): string { throw new Error("OFF must not inspect directory"); } }), undefined);
   assert.throws(() => api.startHeavyReadyDeadlineService({ enabled: true }), /explicit directory/);
 });
 
