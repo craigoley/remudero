@@ -48,7 +48,7 @@ export function normalizeSubjectCase(subject: string): string {
   return trimmed.charAt(0).toLowerCase() + trimmed.slice(1);
 }
 
-/** Wrap `text` so no line exceeds `max` chars, breaking on whitespace only. */
+/** Wrap `text` so no line exceeds `max` chars: at whitespace, and a longer word after its last `:`, `-` or `/` (#10269). */
 export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bodyMaxLineLength): string[] {
   const out: string[] = [];
   for (const paragraph of text.split("\n")) {
@@ -57,7 +57,7 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
       continue;
     }
     let line = "";
-    for (const word of paragraph.split(/\s+/)) {
+    for (const word of paragraph.split(/\s+/).flatMap((w) => splitLongWord(w, max))) {
       if (line === "") {
         line = word;
       } else if (line.length + 1 + word.length <= max) {
@@ -70,6 +70,24 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
     if (line !== "") out.push(line);
   }
   return out;
+}
+
+function splitLongWord(word: string, max: number): string[] {
+  const pieces: string[] = [];
+  let rest = word;
+  while (rest.length > max) {
+    let cut = max;
+    for (let i = max; i > 0; i--) {
+      if (":-/".includes(rest[i - 1]!)) {
+        cut = i;
+        break;
+      }
+    }
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  pieces.push(rest);
+  return pieces;
 }
 
 export function fitConventionalTitle(

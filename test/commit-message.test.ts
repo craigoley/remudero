@@ -10,6 +10,7 @@ import {
   CONVENTIONAL_LIMITS,
   CONVENTIONAL_RULE_COVERAGE,
   emitterChecksStep,
+  fitConventionalTitle,
   normalizeSubjectCase,
   shapeCommitMessage,
   spawnFailureDetail,
@@ -134,6 +135,24 @@ test("wrapBodyLines: breaks on whitespace only and never emits an over-long line
   const lines = wrapBodyLines("alpha beta gamma delta epsilon zeta eta theta", 12);
   for (const l of lines) assert.ok(l.length <= 12, `over-long: ${JSON.stringify(l)}`);
   assert.equal(lines.join(" "), "alpha beta gamma delta epsilon zeta eta theta", "no word may be lost or split");
+});
+
+test("#10269: a word longer than the body limit is cut after its last separator, so the ci-friction filing commits", () => {
+  // The gardener's commit failed commitlint on every retry from 2026-10-09: its body carried a 102-char cause key,
+  // one token whitespace wrapping could never fit, so nothing it drafted for that class ever landed.
+  const key = "ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero";
+  const title = `chore(plan): the ci-friction gardener drafts a fix for ${key}`;
+  const fitted = fitConventionalTitle(title);
+  assert.equal(fitted.trimmed, true);
+  const lines = wrapBodyLines(`Full title: ${title}\n\nTended by the ci-friction gardener.`);
+  for (const l of lines) assert.ok(l.length <= CONVENTIONAL_LIMITS.bodyMaxLineLength, `over-long: ${JSON.stringify(l)}`);
+  const cut = lines.findIndex((l) => l.startsWith("ci-friction:"));
+  assert.equal(lines[cut], "ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-");
+  assert.equal(lines[cut]! + lines[cut + 1], key, "the cut loses no character of the key");
+  const result = lint(`${fitted.header}\n\n${lines.join("\n")}\n`);
+  assert.equal(result.status, 0, `commitlint must pass the gardener's message: ${result.stdout}${result.stderr}`);
+  const bare = "x".repeat(25);
+  assert.deepEqual(wrapBodyLines(bare, 10), ["x".repeat(10), "x".repeat(10), "x".repeat(5)], "a word with no separator is cut at the limit");
 });
 
 test("the worker OUTPUT CONTRACT states the Conventional Commits rule — a worker is TOLD, not left to guess", () => {
