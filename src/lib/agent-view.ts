@@ -73,7 +73,7 @@ export interface AgentViewData {
 
 /** The `proposals` part: the visible proposals, or why none can be generated. */
 export interface AgentProposalsBody {
-  proposals?: Candidate[];
+  proposals?: Array<Omit<Candidate, "detail">>;
   recordVersion?: "operator-agent-records-v1";
   records?: Array<{ proposalId: string; detail: ProposalDetail; durable: { state: "unregistered" } | { state: "registered"; source: "ledger"; createdAt: string; status: string } }>;
   coverage?: { ranked: number; published: number; complete: number; unavailable: number; capped: number };

@@ -31,6 +31,7 @@ import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from
 import { makeTempDir } from "../src/lib/tmp.js";
 import { renderView } from "../src/lib/views.js";
 import { corpus, get, listen, NOW } from "./helpers/operator-agent-corpus.js";
+import { SPEC, violations } from "./helpers/openapi-strict.js";
 
 const REPO = "owner/repo";
 const ANALYTICS_AS_OF = new Date(NOW - 60_000).toISOString();
@@ -66,6 +67,7 @@ test("W1-T9244: new ranked proposals carry complete evidenced records from the s
   assert.deepEqual(recommendationBody(busySnapshot(), [], NOW + 1000), body, "request time is not evidence time");
   const all = supportedSignalsSnapshot();
   const complete = recommendationBody(all);
+  assert.deepEqual(violations(complete, SPEC.components.schemas.AgentProposals!), [], "reported records match the actual strict OpenAPI contract");
   assert.deepEqual(complete.proposals.map((p: any) => p.signal).sort(), ["token-burn", "queue-pressure", "worker-failure-rate-implement-sonnet", "proof-failure-rate", "revert-rate-full-pass", "approval-pattern-docs", "capacity-scale-up-owner-repo"].sort());
   assert.equal(complete.coverage.complete, 7);
   assert.match(complete.records.find((r: any) => r.proposalId.includes("proof-failure")).detail.reasoning, /Keep proof validation/);
@@ -76,6 +78,7 @@ test("W1-T9244: new ranked proposals carry complete evidenced records from the s
   all.consoleV1.metrics.find((m) => m.key === "queue.pending")!.value = 0;
   all.consoleV1.operatorAgent.capacity.measurements[0] = { ...all.consoleV1.operatorAgent.capacity.measurements[0]!, recommendation: "underutilized", activeWorkers: 0, admittedLanes: 0, queuedWork: 0, utilizationRatio: 0 };
   const alternatives = recommendationBody(all);
+  assert.deepEqual(violations(alternatives, SPEC.components.schemas.AgentProposals!), []);
   assert.equal(alternatives.coverage.complete, 7);
   assert.ok(alternatives.proposals.some((p: any) => p.signal === "slow-runs"));
   assert.ok(alternatives.proposals.some((p: any) => p.signal === "proof-pass-rate"));
