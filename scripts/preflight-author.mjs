@@ -14,6 +14,8 @@ import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
+import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -228,6 +230,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
     }
     receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
+      durationMs: result.durationMs ?? null, startedAt: result.startedAt ?? null, finishedAt: result.finishedAt ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name.startsWith('affected-tests') ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
@@ -317,6 +320,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (receipt.suites.length === 0 && receipt.selection !== 'plan-only') throw new Error('no verified test files in the checkout');
     console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
+      const dependencyBefore=authorDependencyProvenance(root);
+      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusOk = census.status === 0 && !census.signal && !census.error;
       report('census-precheck', census, censusOk);
@@ -361,6 +367,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             report('lint-plan-fast', lint, lintOk);
           }
           if (staticOk && lintOk) {
+            const dependencyAfterStatic=authorDependencyProvenance(root);
+            receipt.dependencyProvenance.afterStatic=dependencyAfterStatic;
+            if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfterStatic))throw new Error('installed dependency donor changed during static validation; tests not started');
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
@@ -441,6 +450,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
         throw new Error('the author tree changed during verification; receipt refused');
       }
+      const dependencyAfter=authorDependencyProvenance(root);
+      receipt.dependencyProvenance.after=dependencyAfter;
+      if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfter))throw new Error('installed dependency donor changed during author validation; receipt refused');
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
@@ -451,6 +463,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     console.error(`author preflight REFUSED: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
+  receipt.phaseAccounting = accountAuthorPhases(receipt);
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
     if (diagnosticsRoot) {

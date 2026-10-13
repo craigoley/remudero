@@ -46,6 +46,7 @@ function fixture(baseline: Record<string, string> = {}) {
   writeFileSync(join(root, '.nvmrc'), process.versions.node + '\n');
   writeFileSync(join(root, '.gitignore'), 'node_modules\ncoverage\n');
   symlinkSync(join(ROOT, 'node_modules'), join(root, 'node_modules'));
+  writeFileSync(join(root, 'package-lock.json'), readFileSync(join(ROOT, 'package-lock.json')));
   writeFileSync(join(root, 'scripts/diff-class.mjs'), '// This fixture has no census path readers.\n');
   writeFileSync(join(root, 'scripts/census-precheck.mjs'), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, 'test/setup/tmp-hygiene.ts'), 'export {};\n');
@@ -391,7 +392,7 @@ test('author preflight clears foreign Git scope without hiding a dirty intended 
 
 test('author preflight full fallback includes unrelated tests for unmodelled configuration', () => {
   const f = fixture();
-  writeFileSync(join(f.root, 'package-lock.json'), '{}\n');
+  writeFileSync(join(f.root, 'package-lock.json'), JSON.stringify(JSON.parse(readFileSync(join(ROOT, 'package-lock.json'),'utf8')),null,1)+'\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: change dependency inputs');
   assert.equal(mod.main([], { root: f.root }), 0);
   assert.equal(f.receipt().selection, 'full-fallback');
