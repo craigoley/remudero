@@ -183,6 +183,9 @@ test("an unreadable harvest is UNKNOWN, while a no-promise or already-reported r
   const empty = observation([]); assert.equal(await recoverPromisedFollowUpReports(empty, args), empty);
   const reported = "## Follow-ups\ntask: source-keyed child bundle store with atomic publication;\naction: bounded heavy READY escalation\n";
   const current = observation(); assert.equal(await recoverPromisedFollowUpReports(current, { ...args, implementationReport: reported }), current);
+  const authoredMissing = await recoverPromisedFollowUpReports(current, { ...args, implementationReport: "current implementation report with no declarations" });
+  assert.equal(authoredMissing, current, "an available current report must not turn a known missing promise into an archive-scan UNKNOWN");
+  assert.equal(review("current implementation report with no declarations", authoredMissing).state, "failure");
   const repo = gitRepo(); t.after(() => repo.cleanup()); const state = join(repo.dir, "state"); mkdirSync(state);
   const local = { ...args, ledgerPath: join(state, "ledger.ndjson") };
   assert.equal((await recoverPromisedFollowUpReports(observation(), local)).state, "unknown", "a missing live ledger is not a measured empty harvest");

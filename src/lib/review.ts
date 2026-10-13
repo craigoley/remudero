@@ -4831,11 +4831,11 @@ export async function observePromisedFollowUps(args: {
 const followUpReport = (entries: readonly HarvestableFollowUp[]): string =>
   `## Follow-ups\n${entries.map(entry => `${entry.type}: ${entry.text}`).join("\n")}\n`;
 
-/** Recover an already-harvested declaration for this exact task/PR, including rotated history. No write or model. */
+/** Recover a cold review's missing transcript from exact task/PR history. An available current report is authoritative. */
 export async function recoverPromisedFollowUpReports(observation: PromisedFollowUpObservation, args: {
   ledgerPath: string; taskId: string; prUrl: string; implementationReport?: string;
 }): Promise<PromisedFollowUpObservation> {
-  if (observation.state === "unknown" || observation.promised.length === 0 ||
+  if (observation.state === "unknown" || args.implementationReport !== undefined || observation.promised.length === 0 ||
       unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
   let incomplete = false;
