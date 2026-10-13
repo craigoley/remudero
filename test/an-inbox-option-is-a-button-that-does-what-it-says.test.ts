@@ -72,30 +72,40 @@ test("W1-T8826: a decline, reframe or reply option names its route and its input
     { label: "Ask for changes", consequence: "The author is asked to rework it.", intent: "reframe" },
     { label: "Ask a question", consequence: "Your question is added to the thread.", intent: "reply" },
   ];
-  const { byLabel } = served(t, "ready", all);
-  assert.deepEqual(byLabel("Close it").action, { method: "POST", path: "/v1/inbox/decline", fields: { proposalId: ID }, input: "reason" });
-  assert.deepEqual(byLabel("Ask for changes").action, { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback" });
-  assert.deepEqual(byLabel("Ask a question").action, {
-    method: "POST", path: "/v1/inbox/thread/reply", fields: { threadId: inboxThreadId(ID) }, input: "text",
-  });
+  for (const state of ["ready", "drafting", "not_ready", "deferred_with_trigger", "declined"] as const) {
+    const { byLabel } = served(t, state, all);
+    const close = byLabel("Close it");
+    assert.equal(close.intent, "decline");
+    if (state === "declined") {
+      assert.equal(Object.hasOwn(close, "action"), false, "an already declined item has no decline route");
+    } else {
+      assert.deepEqual(close.action, { method: "POST", path: "/v1/inbox/decline", fields: { proposalId: ID }, input: "reason" }, state);
+    }
+    assert.equal(byLabel("Ask for changes").intent, "reframe");
+    assert.deepEqual(byLabel("Ask for changes").action, { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback" }, state);
+    assert.equal(byLabel("Ask a question").intent, "reply");
+    assert.deepEqual(byLabel("Ask a question").action, {
+      method: "POST", path: "/v1/inbox/thread/reply", fields: { threadId: inboxThreadId(ID) }, input: "text",
+    }, state);
+  }
   assert.equal(inboxThreadId(ID), `thread:${ID}::inbox::-::-`);
-
-  const declined = served(t, "declined", all);
-  assert.equal(declined.byLabel("Close it").action, undefined, "an already declined item has no decline route");
-  assert.ok(declined.byLabel("Ask for changes").action, "control: reframe is valid in every lane");
 });
 
 test("W1-T8826: keep and untagged options carry no action", (t) => {
-  const { byLabel } = served(t, "ready", [
-    TAGGED[0]!,
-    { label: "Ask the author", consequence: "The author is asked what they meant." },
-    TAGGED[2]!,
-  ]);
-  assert.equal(byLabel("Keep parked").intent, "keep");
-  assert.equal(byLabel("Keep parked").action, undefined);
-  assert.equal(byLabel("Ask the author").intent, "reply", "an untagged stored option is served as a reply");
-  assert.equal(byLabel("Ask the author").action, undefined);
-  assert.ok(byLabel("Approve now").action, "control: a tagged sibling in the same message is actionable");
+  for (const state of ["ready", "drafting", "not_ready", "deferred_with_trigger", "declined"] as const) {
+    const { byLabel } = served(t, state, [
+      TAGGED[0]!,
+      { label: "Ask the author", consequence: "The author is asked what they meant." },
+      TAGGED[1]!,
+    ]);
+    assert.equal(byLabel("Keep parked").intent, "keep");
+    assert.equal(Object.hasOwn(byLabel("Keep parked"), "action"), false, state);
+    assert.equal(byLabel("Ask the author").intent, "reply", "an untagged stored option is served as a reply");
+    assert.equal(Object.hasOwn(byLabel("Ask the author"), "action"), false, state);
+    assert.deepEqual(byLabel("Request clearer proof").action, {
+      method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback",
+    }, "control: a tagged sibling in the same message is actionable in every lane");
+  }
 });
 
 test("W1-T8826: the decision card validates an option intent and rejects an unknown one", () => {
@@ -231,6 +241,7 @@ test("W1-T8826: the writer schema permits intents and retries an untagged answer
   const message = stored(TAGGED);
   const prompt = buildDecisionSummaryPrompt({ context: SUMMARY });
   assert.match(prompt, /"intent"/);
+  assert.match(prompt, /"options": \[\{[^\n]*"intent"/, "the exact option shape includes the optional intent field");
   assert.match(prompt, /optional.*intent/i, "the shared schema allows inbox intents without requiring them on escalation cards");
   let calls = 0;
   const result = await writePlainMessage({ id: ID, summary: SUMMARY }, {
