@@ -242,6 +242,10 @@ export type SkillEvalRun =
   | { state: "refused"; reason: SkillEvalRunRefusal; detail: string; dispatched: 0 }
   | { state: "evaluated"; verdict: SkillEvalVerdict; attempts: SkillEvalAttempt[] };
 
+/** A failure's label with its own message, bounded, so a paid attempt that died says why in its ledger row. */
+const failureReason = (label: string, error: unknown): string =>
+  `${label}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`;
+
 async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusItem, slot: SkillEvalSlot,
   dispatch: PairedAttemptDispatch<SkillEvalArm>): Promise<SkillEvalAttempt> {
   const draftSha256 = input.selection.draftSha256;
@@ -251,8 +255,8 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
     attempt = await dispatch({ pilotId: `skill-eval-${draftSha256.slice(0, 16)}`, taskId: item.taskId, arm: slot.arm,
       pairId: `skill-eval-${sha256(`${draftSha256}\0${item.taskId}\0${slot.trial}`).slice(0, 16)}`, position: slot.position,
       ...input.stack, isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false } });
-  } catch {
-    const reason = "attempt-failed";
+  } catch (error) {
+    const reason = failureReason("attempt-failed", error);
     reasons.push(reason);
   }
   const breach = attempt?.pushedRef || attempt?.prUrl || attempt?.breach || null;
@@ -264,16 +268,16 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
     try {
       grade = await (input.grade ?? ((req) => gradeHeadWithReviewerExecutor(req.criteria, req.headDir)))({ taskId: item.taskId,
         headDir, criteria: item.proofs });
-    } catch {
-      const reason = "grading-failed";
+    } catch (error) {
+      const reason = failureReason("grading-failed", error);
       reasons.push(reason);
     }
   }
   if (grade?.verdict === "unmeasurable") reasons.push(`ungradeable:${grade.reasons.join("+")}`);
   const verdict: CorpusProofOutcome = grade !== null && reasons.length === 0 ? grade.verdict : "unmeasurable";
   try { attempt?.cleanup?.(); }
-  catch {
-    const reason = "cleanup-failed";
+  catch (error) {
+    const reason = failureReason("cleanup-failed", error);
     reasons.push(reason);
   }
   return { taskId: item.taskId, ...slot, verdict, costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,

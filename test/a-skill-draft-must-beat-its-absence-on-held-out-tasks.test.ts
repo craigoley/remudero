@@ -318,15 +318,15 @@ test("a skill eval names each failed attempt reason and keeps a graded verdict w
   const run = evaluated(await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
     grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log }));
   assert.deepEqual(run.attempts.slice(0, 4).map((a) => [a.verdict, a.reasons]), [
-    ["unmeasurable", ["attempt-failed"]],
+    ["unmeasurable", ["attempt-failed: the worker spawn died"]],
     ["unmeasurable", ["no-head"]],
-    ["unmeasurable", ["grading-failed"]],
+    ["unmeasurable", ["grading-failed: the grader died"]],
     ["unmeasurable", ["ungradeable:named-test-not-found"]],
-  ]);
+  ], "each failure keeps its own message, so a paid attempt that died says why");
   assert.equal(run.attempts[0]!.costUsd, null, "a dispatch that died reports no cost");
   const cleanupFailed = run.attempts[4]!;
   assert.notEqual(cleanupFailed.verdict, "unmeasurable", "a head graded before its cleanup failed keeps its grade");
-  assert.deepEqual(cleanupFailed.reasons, ["cleanup-failed"]);
+  assert.deepEqual(cleanupFailed.reasons, ["cleanup-failed: worktree remove failed"]);
   assert.equal(run.verdict.reason, "too-few-measurable-tasks");
 });
 
