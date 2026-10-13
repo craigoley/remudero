@@ -22,7 +22,7 @@ import { DELEGATION_PROFILE_VERSION, projectDelegationProfile } from "./delegati
 import { followUpHistoryFromRows } from "./follow-up-policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, type LedgerRotationMemo } from "./ledger-union.js";
-import { operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeAnalytics } from "./nav-badge-view.js";
+import { AGENT_RECORD_LIMITS, operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeAnalytics, type ProposalDetail } from "./nav-badge-view.js";
 import type { NowInstance } from "./now-view.js";
 import {
   readDelegationProfiles,
@@ -74,11 +74,23 @@ export interface AgentViewData {
 /** The `proposals` part: the visible proposals, or why none can be generated. */
 export interface AgentProposalsBody {
   proposals?: Candidate[];
+  recordVersion?: "operator-agent-records-v1";
+  records?: Array<{ proposalId: string; detail: ProposalDetail; durable: { state: "unregistered" } | { state: "registered"; source: "ledger"; createdAt: string; status: string } }>;
+  coverage?: { ranked: number; published: number; complete: number; unavailable: number; capped: number };
   reason?: string;
 }
 
 /** One instance's committed analytics, as the proposal engine reads it; undefined before a first refresh. */
-type AgentAnalytics = { asOf: string; analytics: NavBadgeAnalytics; console: AnalyticsConsoleSource };
+type AgentAnalytics = { asOf: string; analytics?: NavBadgeAnalytics; console: AnalyticsConsoleSource; signalsAsOf?: string | null; reason?: string; sourceState?: ViewSource["state"]; sourceInstance?: string };
+
+function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string | undefined {
+  const agent = snapshot?.consoleV1?.operatorAgent;
+  const lists = [snapshot?.consoleV1?.metrics, snapshot?.routingTelemetry?.buckets, agent?.outcomes?.classes, agent?.decisions?.classes, agent?.capacity?.measurements];
+  if (!agent?.proof || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
+  if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
+  if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object"))) return "malformed committed proposal analytics";
+  return undefined;
+}
 
 /** Every part's body for one instance over `rows`, computed by the readers its route calls. */
 export function agentPartBodies(input: { ledgerDir: string; instance: string; repository?: string; now: number; rows: readonly Row[]; analytics?: AgentAnalytics }): Record<AgentViewPart, Omit<AgentViewData, "instance" | "part">> {
@@ -104,12 +116,40 @@ export function agentPartBodies(input: { ledgerDir: string; instance: string; re
   });
 }
 
-function proposalsBody(input: { instance: string; repository?: string; analytics?: AgentAnalytics }, history: ReturnType<typeof readOperatorAgentHistory>, settings: ReturnType<typeof readOperatorAgentSettings>["settings"] | undefined): AgentProposalsBody {
+function proposalsBody(input: { instance: string; repository?: string; now: number; analytics?: AgentAnalytics }, history: ReturnType<typeof readOperatorAgentHistory>, settings: ReturnType<typeof readOperatorAgentSettings>["settings"] | undefined): AgentProposalsBody {
   if (input.repository === undefined || settings === undefined) return { reason: "serve names no repository for this instance" };
   if (input.analytics === undefined) return { reason: "no analytics refresh has completed yet, so no proposal is generated" };
-  const candidates = operatorAgentCandidates(input.analytics.analytics, { repository: input.repository, instanceId: input.instance }, history);
+  const reason = input.analytics.reason ?? proposalSnapshotReason(input.analytics.analytics);
+  if (reason) return { reason };
+  const sourceState = input.analytics.sourceState ?? analyticsSource({ instanceId: input.instance, snapshot: { asOf: input.analytics.asOf, console: input.analytics.console } }, input.now).state;
+  const candidates = operatorAgentCandidates(input.analytics.analytics!, { repository: input.repository, instanceId: input.instance }, history, {
+    now: input.now, sourceRepository: input.analytics.console?.repository, sourceInstance: input.analytics.sourceInstance ?? input.instance, sourceState,
+  });
   const byId = new Map(candidates.map((candidate) => [candidate.proposalId, candidate]));
-  return { proposals: visibleOperatorAgentProposals(candidates, history, settings).map((id) => byId.get(id)!) };
+  const ranked = visibleOperatorAgentProposals(candidates, history, settings).map((id) => byId.get(id)!);
+  const refused = (reason: string): AgentProposalsBody => ({ reason, recordVersion: "operator-agent-records-v1", coverage: { ranked: ranked.length, published: 0, complete: 0, unavailable: ranked.length, capped: ranked.length } });
+  if (ranked.length > AGENT_RECORD_LIMITS.rows || ranked.some((rank) => rank.proposalId.length > AGENT_RECORD_LIMITS.id || rank.signal.length > AGENT_RECORD_LIMITS.label || !Number.isFinite(rank.confidence))) return refused("proposal ranks exceed the publication budget");
+  const proposals = ranked.map(({ proposalId, category, signal, confidence }) => ({ proposalId, category, signal, confidence }));
+  const records: NonNullable<AgentProposalsBody["records"]> = ranked.map((rank) => {
+    const durable = history.find((row) => row.repo === input.repository && row.proposalId === rank.proposalId);
+    return { proposalId: rank.proposalId, detail: { state: "unavailable", reason: "complete detail exceeds the publication budget" }, durable: durable
+      ? { state: "registered", source: "ledger", createdAt: durable.createdAt, status: durable.status } : { state: "unregistered" } };
+  });
+  const coverage = { ranked: ranked.length, published: records.length, complete: 0, unavailable: records.length, capped: 0 };
+  const body: AgentProposalsBody = { proposals, recordVersion: "operator-agent-records-v1", records, coverage };
+  const bodyBudget = AGENT_RECORD_LIMITS.bytes - 512; // reserve envelope identity and coverage counts
+  if (Buffer.byteLength(JSON.stringify(body)) > bodyBudget) return refused("proposal records exceed the total publication budget");
+  for (const [i, rank] of ranked.entries()) {
+    const record = records[i]!;
+    record.detail = rank.detail ?? { state: "unavailable", reason: "native signal has no complete detail mapping" };
+    if (Buffer.byteLength(JSON.stringify(body)) > bodyBudget) {
+      record.detail = { state: "unavailable", reason: "complete detail exceeds the publication budget" };
+      coverage.capped++;
+    }
+  }
+  coverage.complete = records.filter((record) => record.detail.state === "reported").length;
+  coverage.unavailable = records.length - coverage.complete;
+  return body;
 }
 
 /**
@@ -118,18 +158,24 @@ function proposalsBody(input: { instance: string; repository?: string; analytics
  */
 function committedAnalytics(home: ReadModelDb, instance: string, held: Map<string, AgentAnalytics>, now: number): { analytics?: AgentAnalytics; source: ViewSource } {
   const row = sourceSnapshotStates(home, ANALYTICS_SOURCE_CONSOLE_V1).find((state) => state.instance === instance);
-  if (row?.asOf && held.get(instance)?.asOf !== row.asOf) {
+  const signalsRow = sourceSnapshotStates(home, ANALYTICS_SOURCE_SIGNALS).find((state) => state.instance === instance);
+  if (row?.asOf && (held.get(instance)?.asOf !== row.asOf || held.get(instance)?.signalsAsOf !== signalsRow?.asOf)) {
     const consoleV1 = readSourceSnapshotBody(home, instance, ANALYTICS_SOURCE_CONSOLE_V1) as AnalyticsConsoleSource;
     const signals = readSourceSnapshotBody(home, instance, ANALYTICS_SOURCE_SIGNALS) as { routingTelemetry: AnalyticsSnapshot["routingTelemetry"] };
-    held.set(instance, { asOf: row.asOf, console: consoleV1, analytics: { asOf: row.asOf, consoleV1: consoleV1.projection, routingTelemetry: signals.routingTelemetry } });
+    const analytics = { asOf: row.asOf, consoleV1: consoleV1?.projection, routingTelemetry: signals?.routingTelemetry };
+    const reason = signalsRow?.asOf !== row.asOf ? "proposal source snapshots have different observation clocks" : proposalSnapshotReason(analytics);
+    held.set(instance, { asOf: row.asOf, console: consoleV1, signalsAsOf: signalsRow?.asOf, sourceInstance: row.instance, ...(reason ? { reason } : { analytics }) });
   }
-  const analytics = row?.asOf ? held.get(instance) : undefined;
+  const cached = row?.asOf ? held.get(instance) : undefined;
+  const analytics = cached && signalsRow?.asOf !== row?.asOf ? { ...cached, reason: "proposal source snapshots have different observation clocks" } : cached;
+  const failed = [row, signalsRow].filter((state) => state?.error).sort((a, b) => Number(b!.errorMs) - Number(a!.errorMs))[0];
   const input: AnalyticsInstanceInput = {
     instanceId: instance,
     ...(analytics ? { snapshot: { asOf: analytics.asOf, console: analytics.console } } : {}),
-    ...(row?.error ? { failure: { error: row.error, atMs: Number(row.errorMs) } } : {}),
+    ...(failed?.error ? { failure: { error: failed.error, atMs: Number(failed.errorMs) } } : {}),
   };
-  return { ...(analytics ? { analytics } : {}), source: analyticsSource(input, now) };
+  const source = analyticsSource(input, now);
+  return { ...(analytics ? { analytics: { ...analytics, sourceState: source.state } } : {}), source };
 }
 
 export function agentViewKey(instance: string, part: AgentViewPart): string {
@@ -189,7 +235,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
         const { instance } = slot;
         const fold = folds.current(foldSlot(slot));
         const committed = committedAnalytics(home, instance.name, parsed, now);
-        const memo = `${fold.seq}|${committed.analytics?.asOf ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
+        const memo = `${fold.seq}|${committed.analytics?.asOf ?? "-"}|${committed.analytics?.reason ?? "-"}|${committed.source.state}|${committed.source.phase ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
         let entry = built.get(instance.name);
         if (entry?.memo !== memo) {
           const input = { ledgerDir: instance.ledgerDir, instance: instance.name, ...(instance.repo ? { repository: instance.repo } : {}), now, rows: fold.rows, ...(committed.analytics ? { analytics: committed.analytics } : {}) };

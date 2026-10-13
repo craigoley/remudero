@@ -408,6 +408,41 @@ a first analytics refresh or for an instance with no repository, never an empty 
 - Shadow side: the routes' computation over the ledger union read the routes' way, up to the fold's newest row.
 - Not yet a part: `capabilities` (core serves no such route). `/context` stays a direct keyed GET.
 
+W1-T9244 adds `recordVersion: "operator-agent-records-v1"`, `records` and `coverage` to the proposals body;
+the view version remains 1. The existing `{ proposalId, category, signal, confidence }` ranks keep their native
+IDs, ordering, thresholds, preference adjustment and terminal exclusion. Each `records` entry names its
+rank's `proposalId` and carries `detail` plus a separate `durable` reference.
+
+Reported `detail` has `state: "reported"`, `kind: "generated-recommendation"`, a deterministic SHA-256
+`observationId`, exact `repository` and `instanceId`, `proposalText`, `reasoning`, source `observedAt`,
+`scoreKind: "native-heuristic"`, measured `evidence` and named `unavailable` facts. Evidence carries numeric
+value, unit, source, observation time, freshness and a measured window or explicit null. Native heuristic
+confidence is not a probability. Proof-pass history cannot waive validation; approval patterns grant no
+auto-merge policy. No savings, cost, causal claim, independent sample size or human consent is invented.
+Capacity counts describe their recorded window rather than current workers.
+
+An unregistered rank's `durable` is `{ state: "unregistered" }`. A registered rank instead names
+`{ state: "registered", source: "ledger", createdAt, status }`; read its immutable payload from the separate
+history part. Generation never appends registration, decisions, outcomes or preferences, and never rewrites
+the history payload or its original creation time to attach today's rank score.
+
+Foreign or missing source repository/instance identity, unknown/future/stale clocks and invalid evidence
+produce `{ state: "unavailable", reason }` details beside the existing ranks. Committed console/signals clocks
+must agree. Missing or malformed source structure refuses generation explicitly. Each source list and the
+published rank set are bounded to 100 rows; labels are bounded to 160 characters, rank IDs to 512, proposal
+text to 600 and reasoning to 1400. The proposals response reserves envelope space within 64 KiB. Over-budget
+details remain unavailable; an over-budget rank set returns a refusal rather than a partial or certified empty
+engine. `coverage` names `ranked`, `published`, `complete`, `unavailable` and `capped` counts.
+
+Unchanged source observations retain content identity across refresh and restart; request time never becomes
+evidence time. GET reads the committed body and its source envelope. Consumers must honor the envelope's
+staleness even when a restored detail describes an observation that was fresh when generated.
+
+The additive body needs its own native qualification before runtime adoption. Historical parity counters for
+the old rank-only body are not a qualification receipt for these records. Preserve the existing shadow pairing,
+fast comparator ownership, floors, 24-hour horizon and traffic multiplier. This source change authorizes no
+switch promotion, serve restart or console adoption; each requires its separate current-generation receipt.
+
 ## `incidents` (version 1)
 
 `GET /v1/views/incidents`: the /incidents page, one body across instances (arch Phase 4 §1.1, P4-T15, W1-T5054,

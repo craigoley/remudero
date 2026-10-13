@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import type { Clock } from "../src/lib/clock.js";
@@ -19,7 +19,12 @@ import {
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
 } from "../src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease } from "../src/lib/read-model-db.js";
+import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "../src/lib/read-model-db.js";
+import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
+import { agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
+import { buildReadModelViewRoutes, type ViewBody } from "../src/lib/views.js";
+import { createService } from "../src/lib/service.js";
 import {
   READ_MODEL_CHECK_SHARE,
   READ_MODEL_LEASE_RENEW_MS,
@@ -41,6 +46,70 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
+
+test("W1-T9244: default worker and HTTP serve complete cached proposals without side effects", async (t) => {
+  const stateDir = scratch(t, "agent-record-worker");
+  const now = Date.now(), asOf = new Date(now - 60_000).toISOString(), repository = "owner/repo";
+  writeFileSync(join(stateDir, LIVE), "");
+  const db = openProjectorReadModel(stateDir, "core");
+  db.exec(SOURCE_SNAPSHOT_DDL);
+  const lease = acquireLease(db, { holder: "proposal-source-fixture" });
+  assert.ok(lease.ok);
+  const cold = coldAnalyticsSnapshot();
+  const snapshot = { ...cold, asOf, consoleV1: { ...cold.consoleV1, metrics: [{ key: "runs.completed" as const, class: "observed" as const, value: 10 }, { key: "tokens.total" as const, class: "provider_reported" as const, value: 1_000_000 }] } };
+  writeSourceSnapshot(db, lease.lease, { instance: "core", ok: true, asOf, bodies: analyticsSourceBodies(snapshot, repository) });
+  releaseLease(db, lease.lease);
+  db.close();
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { agent: "serve" } }));
+  const messages: ReadModelWorkerMessage[] = [];
+  const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], tickMs: 20, observe: (msg) => void messages.push(msg) });
+  t.after(() => worker.stop());
+  worker.start();
+  const key = agentViewKey("core", "proposals"), deadline = Date.now() + 30_000;
+  while (!worker.body("agent", key) && Date.now() < deadline) await sleep(20);
+  const entry = worker.body("agent", key)!;
+  assert.ok(entry, "actual default worker commits the proposals part");
+  const body = (entry.body.data as AgentViewData).body as AgentProposalsBody;
+  assert.equal(body.proposals?.length, 1, "positive new candidate with empty durable history");
+  assert.equal(body.records?.[0]?.detail.state, "reported");
+  assert.equal(body.coverage?.complete, 1);
+  assert.deepEqual(body.records?.[0]?.durable, { state: "unregistered" });
+  assert.equal(worker.stop(), true);
+  const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }] });
+  assert.deepEqual(restarted.body("agent", key)?.body.data, entry.body.data, "restart restores the exact generated observation");
+  const source = { body: (view: string, key?: string) => restarted.body(view, key), judge: restarted.judge, switches: restarted.switches };
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["agent"], requiredParams: { agent: ["instance", "part"] }, readModel: source }) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const before = readFileSync(join(stateDir, LIVE), "utf8"), store = openProjectorReadModel(stateDir, "core");
+  const digest = readModelDigest(store);
+  const originalRead = fs.readFileSync;
+  const reads = mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    assert.ok(!String(args[0]).startsWith(stateDir), "HTTP reads no source file or ledger");
+    return originalRead.apply(fs, args as never);
+  });
+  const writes = mock.method(fs, "writeFileSync", () => assert.fail("HTTP writes no file"));
+  const appends = mock.method(fs, "appendFileSync", () => assert.fail("HTTP appends no ledger decision"));
+  syncBuiltinESMExports();
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/agent?instance=core&part=proposals`;
+    const response = await fetch(url, { headers: { authorization: "Bearer r" } });
+    assert.equal(response.status, 200);
+    const served = await response.json() as ViewBody<AgentViewData>;
+    assert.deepEqual(served.data.body, body);
+    assert.equal(served.data.repository, repository);
+    const same = await fetch(url, { headers: { authorization: "Bearer r", "if-none-match": response.headers.get("etag")! } });
+    assert.equal(same.status, 304);
+    assert.equal((await fetch(url)).status, 401, "cached records do not bypass authentication");
+  } finally {
+    reads.mock.restore(); writes.mock.restore(); appends.mock.restore(); syncBuiltinESMExports();
+  }
+  assert.equal(readFileSync(join(stateDir, LIVE), "utf8"), before);
+  assert.deepEqual(readModelDigest(store), digest, "GET preserves persisted facts and fold state");
+  assert.equal(Number(store.prepare("SELECT count(*) AS n FROM fact WHERE step LIKE 'panel.%'").get()?.n), 0);
+  store.close();
+  assert.ok(!messages.some((msg) => msg.type === "log" && /provider|proposal_registered|proposal_decision/.test(msg.step)));
+});
 
 type TestCtx = { after: (fn: () => void) => void };
 

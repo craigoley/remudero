@@ -61,6 +61,21 @@ test("the agent badge counts the proposals the console engine would show", () =>
   assert.deepEqual(visible.length, 2);
 });
 
+test("complete detail generation keeps the badge's exact native IDs scores ordering and preferences", () => {
+  const snapshot = busySnapshot();
+  const scope = { repository: REPO, instanceId: "core" };
+  const rows = [history("operator-agent:other:x:optimize:token-burn", { decisionHistory: [{ decision: "rejected", at: "2026-09-29T01:00:00.000Z" }] })];
+  const before = operatorAgentCandidates(snapshot, scope, rows);
+  const withDetails = operatorAgentCandidates(snapshot, scope, rows, { now: NOW, sourceRepository: REPO, sourceInstance: "core", sourceState: "fresh" });
+  assert.deepEqual(withDetails.map(({ detail: _detail, ...rank }) => rank), before);
+  const settings = { enabled: true, confidenceThreshold: 0.9 };
+  assert.deepEqual(visibleOperatorAgentProposals(withDetails, rows, settings), visibleOperatorAgentProposals(before, rows, settings));
+  assert.equal(withDetails.find((c) => c.signal === "token-burn")!.confidence, 0.875);
+  const foreign = operatorAgentCandidates(snapshot, scope, [], { now: NOW, sourceRepository: REPO, sourceInstance: "other-instance", sourceState: "fresh" });
+  assert.ok(foreign.every((c) => c.detail?.state === "unavailable"), "same repository is not same source instance");
+  assert.notEqual(operatorAgentCandidates(snapshot, { ...scope, instanceId: "other-instance" }, [])[0]!.proposalId, before[0]!.proposalId);
+});
+
 test("a decided or rejected proposal leaves the agent badge", () => {
   const candidates = operatorAgentCandidates(busySnapshot(), { repository: REPO, instanceId: "core" }, []);
   const tokenBurn = candidates.find((c) => c.signal === "token-burn")!;
