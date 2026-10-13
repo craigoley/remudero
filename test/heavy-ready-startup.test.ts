@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import fs, { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { captureHeavyNewBuildStartupGate, HEAVY_READY_STARTUP_FILENAME, readHeavyReadyStartupFile } from "../src/lib/heavy-ready-startup.js";
 import { reserveHeavyNewBuilds, releaseHeavyNewBuilds } from "../src/lib/heavy-build-reservation.js";
 
-function fixture(t: Parameters<Parameters<typeof test>[1]>[0]) {
+function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-ready-startup-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, HEAVY_READY_STARTUP_FILENAME), ready = join(dir, "ready");
@@ -54,7 +54,7 @@ test("startup sidecar absence disables, but malformed or unreadable evidence ref
   }
   writeFileSync(f.path, "{", { mode: 0o600 }); assert.equal(readHeavyReadyStartupFile(f.path).state, "unavailable");
   assert.equal(readHeavyReadyStartupFile("relative.json").state, "unavailable");
-  assert.equal(readHeavyReadyStartupFile(join(f.dir, "missing", "..", "missing.json")).state, "unavailable");
+  assert.equal(readHeavyReadyStartupFile(f.dir + "/missing/../missing.json").state, "unavailable");
   f.publish(); const open = t.mock.method(fs, "openSync", () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); }); syncBuiltinESMExports();
   try { assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "unavailable", reason: "permission denied" }); assert.equal(open.mock.callCount(), 1); }
   finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
@@ -75,17 +75,27 @@ test("startup sidecar detects descriptor read failure, in-place changes and atom
   const realRead = fs.readSync;
   for (const mode of ["error", "grow", "replace"] as const) {
     f.publish(); let first = true;
-    t.mock.method(fs, "readSync", (...args: Parameters<typeof fs.readSync>) => {
+    t.mock.method(fs, "readSync", (fd: number, buffer: Uint8Array, offset: number, length: number, position: number) => {
       if (first) { first = false;
         if (mode === "error") throw new Error("descriptor failure");
         if (mode === "grow") writeFileSync(f.path, " ".repeat(4097));
         if (mode === "replace") { const staged = f.path + ".stage"; writeFileSync(staged, '{"version":1}', { mode: 0o600 }); renameSync(staged, f.path); }
       }
-      return realRead(...args);
+      return realRead(fd, buffer, offset, length, position);
     }); syncBuiltinESMExports();
     try { assert.equal(readHeavyReadyStartupFile(f.path).state, "unavailable"); }
     finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
   }
+});
+
+test("startup sidecar descriptor-close errors are UNKNOWN, not fatal startup or successful absence", t => {
+  const f = fixture(t); f.publish(); const close = fs.closeSync;
+  t.mock.method(fs, "closeSync", (fd: number) => { close(fd); throw new Error("close receipt failed"); }); syncBuiltinESMExports();
+  try {
+    assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "unavailable", reason: "startup descriptor closure unavailable: close receipt failed" });
+    const gate = captureHeavyNewBuildStartupGate(() => {}, {}, { env: {}, startupFile: f.path });
+    assert.throws(gate, /startup observation unavailable/);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
 test("startup sidecar default location is captured once and absence writes no files", t => {

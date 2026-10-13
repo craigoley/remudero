@@ -31,7 +31,8 @@ export function readHeavyReadyStartupFile(path: string): StartupReading {
     }
     const after = fstatSync(fd), published = lstatSync(path), parentAfter = lstatSync(parent);
     if (used > MAX_STARTUP_BYTES || used !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
-        published.dev !== before.dev || published.ino !== before.ino || parentAfter.dev !== directory.dev || parentAfter.ino !== directory.ino) throw new Error("startup identity or content changed during read");
+        published.dev !== before.dev || published.ino !== before.ino || parentAfter.dev !== directory.dev || parentAfter.ino !== directory.ino ||
+        parentAfter.mode !== directory.mode || parentAfter.uid !== directory.uid || realpathSync(parent) !== parent) throw new Error("startup identity or content changed during read");
     const value = JSON.parse(buffer.subarray(0, used).toString("utf8")) as unknown;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("startup record must be an object");
     const record = value as Record<string, unknown>;
@@ -39,7 +40,12 @@ export function readHeavyReadyStartupFile(path: string): StartupReading {
         !record.readyDirectory || record.readyDirectory.length > 2048 || !isAbsolute(record.readyDirectory) || resolve(record.readyDirectory) !== record.readyDirectory) throw new Error("unsupported or malformed startup record");
     return { state: "configured", dir: record.readyDirectory };
   } catch (error) { return { state: "unavailable", reason: detail(error) }; }
-  finally { if (fd !== undefined) closeSync(fd); }
+  finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); }
+      catch (error) { return { state: "unavailable", reason: `startup descriptor closure unavailable: ${detail(error)}` }; }
+    }
+  }
 }
 
 /** Captures startup input; neither later file edits nor config/env mutation can hot-reload the gate.
