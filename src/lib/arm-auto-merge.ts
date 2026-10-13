@@ -424,13 +424,14 @@ export function mergeDirectViaRest(
   prUrl: string,
   exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
   securityRead?: (path: string) => unknown,
+  expectedHead?: string,
 ): void {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  const head = securityMergeHead(prUrl, securityRead);
-  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head), { encoding: "utf8", stdio: "pipe" });
+  const head = securityMergeHead(prUrl, securityRead, expectedHead);
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
 }
 
 const execFilePromise = promisify(execFile);
@@ -440,13 +441,14 @@ export async function mergeDirectViaRestAsync(
   prUrl: string,
   exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = execFilePromise,
   securityRead?: (path: string) => Promise<unknown>,
+  expectedHead?: string,
 ): Promise<void> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  const head = await securityMergeHeadAsync(prUrl, securityRead);
-  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head), { encoding: "utf8" });
+  const head = await securityMergeHeadAsync(prUrl, securityRead, expectedHead);
+  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" });
 }
 
 /**

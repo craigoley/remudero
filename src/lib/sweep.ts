@@ -2571,7 +2571,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec(args, opts), undefined, pr.headSha);
         },
       } : undefined;
       let attemptError: string | undefined;

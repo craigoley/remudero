@@ -26,3 +26,10 @@ test('core security admission blocks high alerts and preserves unavailable as UN
   (e:unknown)=>e instanceof SecurityMergeRefused&&e.state==='unknown');
  assert.throws(()=>securityMergeHead(url,reader({...clean,status:'in_progress'})),SecurityMergeRefused);
 });
+test('core security admission rejects a changed expected head and carries the observed head into its refusal',async()=>{
+ const oldHead='c'.repeat(40);
+ const refused=(e:unknown)=>e instanceof SecurityMergeRefused&&e.state==='unknown'&&e.headSha===head&&e.details?.headSha===head;
+ assert.throws(()=>securityMergeHead(url,reader(),oldHead),refused);
+ await assert.rejects(()=>securityMergeHeadAsync(url,async p=>reader()(p),oldHead),refused);
+ assert.equal(securityMergeHead(url,reader(),head),head);
+});
