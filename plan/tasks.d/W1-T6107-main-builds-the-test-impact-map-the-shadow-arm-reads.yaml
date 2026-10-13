@@ -4,7 +4,7 @@
   depends_on: [W1-T6083]
   type: implement
   # a .github/workflows path: an operator build, as W1-T6088 and W1-T5940 park theirs
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: one concern — the impact map is produced on main and handed to the shadow selector
@@ -76,10 +76,10 @@
     AMENDED 2026-10-13 at the operator's request after a build-time recon: producer moved from ci.yml's
     push/merge_group lanes to coverage-nightly (see the rationale's AMENDED section for both controls).
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-10T22:08:30.203Z"
-    pin: "98f8e91bfc907dd14b9503272064cef28d31988f40eaf2bca661167402eaca4e"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-13T12:02:59.272Z"
+    pin: "68caca1a9bb926ebd2ebc14c8f37fbae3d6ab28f6f45f1442f31e8baa095cde7"

@@ -258,12 +258,16 @@ function walked(beatOverrides: Record<string, string>, state?: string): { beat: 
   return { beat, walks };
 }
 
+// The beat ages `walk_epoch` against its own `CONSUMER_NOW_S="$(date +%s)"`, a child's real clock
+// scripts/clock-shift.mjs cannot move, so the fixture epoch is read from that same `date`.
+const beatNowS = (): number => Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim());
+
 test("a measuring beat skips the du walk while the consumers' disks have not moved since the last walk", () => {
   const first = walked({});
   assert.equal(first.beat.consumer_walk_state, "walked", "no prior state always walks");
   const used = Number(first.beat.consumer_walk_signature);
   assert.ok(used > 0, "the signature is a statfs sum, read without a walk");
-  const now = Math.floor(Date.now() / 1000);
+  const now = beatNowS();
   const quiet = walked({}, `walk_used_kb=${used}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=0\n`);
   assert.equal(quiet.beat.consumer_walk_state, "unchanged");
   assert.equal(quiet.walks, 0, "an unmoved disk must not be walked");
@@ -273,7 +277,7 @@ test("a measuring beat skips the du walk while the consumers' disks have not mov
 
 test("a measuring beat walks when the consumers' disks moved by more than their noise, or the backstop expired", () => {
   const used = Number(walked({}).beat.consumer_walk_signature);
-  const now = Math.floor(Date.now() / 1000);
+  const now = beatNowS();
   const moved = walked({}, `walk_used_kb=${used - 500000}\nwalk_epoch=${now}\nprev_used_kb=${used}\nnoise_kb=1000\n`);
   assert.equal(moved.beat.consumer_walk_state, "walked");
   assert.ok(moved.walks > 0);

@@ -2954,29 +2954,86 @@ export function fleetLaneStoreForDisplay(stateDir: string): ReturnType<typeof re
   }
 }
 
-/** Real {@link RatifyCliGateway}: shells out to the repo's own `bin/rmd`, matching a terminal
- *  invocation exactly. stdout/stderr are appended to a per-call log under `<logDir>`, since no
- *  operator terminal is watching this run — a failing spawn still leaves a trace. */
-export function ratifyCliGateway(repoRoot: string, logDir: string): RatifyCliGateway {
+export type RatifyCliTree = {
+  ledgerPath: string;
+  freshTree: <T>(action: (tree: { path: string; sha: string }) => Promise<T>) => Promise<T>;
+  spawn?: typeof spawn;
+};
+
+export interface RatifyCliHandle extends RatifyCliGateway {
+  approve(proposalId: string): Promise<void> | undefined;
+  reframe(proposalId: string, feedback: string): Promise<void> | undefined;
+  inFlight(proposalId: string): boolean;
+}
+
+/** Real {@link RatifyCliGateway}: spawns `bin/rmd`, output appended to a per-call log under `<logDir>`. W1-T9065: with
+ *  `seams` it spawns from a clean tree at the fetched origin/main (run-task.ts's freshOriginMainTreeRunner) with
+ *  `RMD_SELF_SYNC_DONE=1`, true there and not a bypass; each hand-off's fate is a ledger row and its promise never rejects. */
+export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: RatifyCliTree): RatifyCliHandle {
   const rmdBin = join(repoRoot, "bin", "rmd");
-  const spawnDetached = (args: string[], label: string) => {
+  const openLog = (label: string) => {
     mkdirSync(logDir, { recursive: true });
     // A proposal id can hold a path (`symbol-no-caller:src/lib/retro.ts:x`); the log name must stay one file.
-    const logFd = openSync(join(logDir, `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`), "a");
+    const name = `${label.replace(/[^\w.-]+/g, "_")}-${Date.now()}.log`;
+    return { name, fd: openSync(join(logDir, name), "a") };
+  };
+  const spawnDetached = (args: string[], label: string) => {
+    const log = openLog(label);
     try {
-      const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", logFd, logFd] });
+      const child = spawn(rmdBin, args, { cwd: repoRoot, detached: true, stdio: ["ignore", log.fd, log.fd] });
       child.unref();
     } finally {
-      closeSync(logFd);
+      closeSync(log.fd);
     }
+  };
+  const running = new Map<string, number>();
+  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string): Promise<void> => {
+    running.set(proposalId, (running.get(proposalId) ?? 0) + 1);
+    const record = (step: string, extra: Record<string, unknown>) => {
+      try {
+        appendPanelLedger(s.ledgerPath, step, proposalId, "ratify-gateway", { verb: args[0], ...extra });
+      } catch (err) {
+        process.stderr.write(`${JSON.stringify({ step, task_id: proposalId, verb: args[0], ...extra, ledger_error: String(err) })}\n`);
+      }
+    };
+    const runChild = (tree: { path: string; sha: string }) => new Promise<void>((resolve, reject) => {
+      const log = openLog(label);
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = (s.spawn ?? spawn)(join(tree.path, "bin", "rmd"), args, {
+          cwd: tree.path, detached: true, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+        });
+      } finally {
+        closeSync(log.fd);
+      }
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        record("ratify.cli_exited", { code, signal, log: log.name, sha: tree.sha });
+        resolve();
+      });
+      if (child.pid !== undefined) record("ratify.cli_started", { pid: child.pid, log: log.name, sha: tree.sha });
+      child.unref();
+    });
+    return s.freshTree(runChild)
+      .catch((err: unknown) => record("ratify.handoff_failed", { reason: String((err as Error)?.message ?? err) }))
+      .finally(() => {
+        const left = (running.get(proposalId) ?? 1) - 1;
+        if (left > 0) running.set(proposalId, left);
+        else running.delete(proposalId);
+      });
   };
   return {
     approve(proposalId) {
+      if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
+      return undefined;
     },
     reframe(proposalId, feedback) {
+      if (seams) return handOff(seams, proposalId, ["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
       spawnDetached(["reframe", proposalId, "--feedback", feedback], `reframe-${proposalId}`);
+      return undefined;
     },
+    inFlight: (proposalId) => running.has(proposalId),
   };
 }
 

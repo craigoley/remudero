@@ -236,7 +236,8 @@ test("W1-T3921: a failed verdict remains due for the next bounded retry", async 
 });
 
 test("W1-T3188: the observed-state key excludes AGE, which would re-ask everything daily", () => {
-  assert.equal(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, ageDays: NEEDS.ageDays + 30 }));
+  assert.equal(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, ageDays: 79 }));
+  assert.equal(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, ageDays: null }), "nor whether the age was readable");
   assert.notEqual(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, depsAllMerged: true }));
   assert.notEqual(observedStateKey(NEEDS), observedStateKey({ ...NEEDS, citedInSrc: true }));
 });
@@ -683,16 +684,16 @@ test("W1-T3188: a real (non-dry-run) pass routes through the injected router, st
   );
 });
 
-test("W1-T3188: a shard whose age cannot be read is reported as age 0 rather than throwing", () => {
+test("W1-T3188: a shard whose age cannot be read is reported as an unknown age rather than throwing", () => {
   // `shardAgeDays` shells git for the shard file's add-date. The fixture root is not a git repo at
-  // all, which is the same shape as a shard with no file: age is CONTEXT, so an unknown one is
-  // reported as 0 and the shard still gets judged, rather than the whole sweep dying on it.
+  // all: age is CONTEXT, so the shard still gets judged rather than the whole sweep dying on it —
+  // and (#7911) its age is `null`, never a 0 that tells the operator it was filed today.
   const root = sweepRoot(PARKED_PLAN);
   const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
     now: () => 0,
     iso: () => "1970-01-01T00:00:00.000Z",
   } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
-  assert.equal(shards[0].ageDays, 0, "an unreadable age must not throw, and must not invent a number");
+  assert.equal(shards[0].ageDays, null, "an unreadable age must not throw, and must not invent a number");
 });
 
 test("W1-T3188: a shard whose file IS in git reports a real age in days, not the unknown-age zero", () => {
