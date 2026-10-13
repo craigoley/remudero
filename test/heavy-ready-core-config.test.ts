@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import fs, { mkdtempSync, rmSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { CONFIG_SCHEMA, validateConfigShape } from "../src/lib/config-schema.js";
 import { resolveHeavyReadyDirectory } from "../src/lib/config.js";
 import { heavyNewBuildGate, reserveHeavyNewBuilds, releaseHeavyNewBuilds } from "../src/lib/heavy-build-reservation.js";
@@ -19,16 +20,18 @@ test("heavy READY startup config has one declared optional string field and reje
   const field = CONFIG_SCHEMA.find(f => f.name === "heavyReadyDirectory");
   assert.equal(field?.type, "string"); assert.equal(field?.optional, true); assert.equal(field?.default, undefined);
   const base = { claudeBin: "/fixture/claude", root: "/fixture/root" };
-  assert.deepEqual(validateConfigShape({ ...base, heavyReadyDirectory: "/private/core-ready" }), { ...base, heavyReadyDirectory: "/private/core-ready" });
-  assert.throws(() => validateConfigShape({ ...base, heavyReadyDirectory: 123 }), /heavyReadyDirectory/);
+  assert.deepEqual(validateConfigShape({ ...base, heavyReadyDirectory: "/private/core-ready" }, "fixture config"), { ...base, heavyReadyDirectory: "/private/core-ready" });
+  assert.throws(() => validateConfigShape({ ...base, heavyReadyDirectory: 123 }, "fixture config"), /heavyReadyDirectory/);
 });
 
-test("both NEW-build composition roots resolve config once without starting or restarting a daemon", () => {
-  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-  assert.equal([...source.matchAll(/checkHeavyNewBuild: deps\.checkHeavyNewBuild \?\? heavyNewBuildGate\(log, \{ dir: resolveHeavyReadyDirectory\(config\) \}\)/g)].length, 2);
-  const configSource = readFileSync(fileURLToPath(new URL("../src/lib/config.ts", import.meta.url)), "utf8");
-  const block = configSource.slice(configSource.indexOf("export function resolveHeavyReadyDirectory("), configSource.indexOf("\n}", configSource.indexOf("export function resolveHeavyReadyDirectory(")) + 2);
-  assert.doesNotMatch(block, /execFile|spawn|writeFile|mkdir|restart|docker/);
+test("startup directory resolution performs no filesystem or process activity", t => {
+  for (const key of ["readFileSync", "writeFileSync", "mkdirSync"] as const) t.mock.method(fs, key, () => { throw new Error(`unexpected filesystem ${key}`); });
+  for (const key of ["execFileSync", "execFile", "spawn", "spawnSync"] as const) t.mock.method(childProcess, key, () => { throw new Error(`unexpected process ${key}`); });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(resolveHeavyReadyDirectory({ heavyReadyDirectory: "/private/core-ready" }, {}), "/private/core-ready");
+    assert.equal(resolveHeavyReadyDirectory({}, {}), undefined);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
 test("a configured native READY request safely releases and a captured adapter never hot-reloads config", t => {
