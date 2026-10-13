@@ -16443,7 +16443,9 @@ export function buildRuleHeadlinesPart(
       headline: "CLAUDE.md rule index",
       body: ` (unavailable — could not read rule source ${sourcePath})`,
     };
-    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined)}`].join("\n");
+    // Indented without its own bullet, like the index lines below: it continues the cited intro claim. As a
+    // bullet it was an uncited claim, and the provenance gate refused every dispatch to a tree with no CLAUDE.md.
+    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined).replace(/^- /, "")}`].join("\n");
   }
   const rules = parseRuleHeadlines(raw);
   const indexLines = renderHeadlineOnlyIndex(rules)
