@@ -164,10 +164,18 @@ test("a later review recovers actual harvested entries across gzip, plain and li
   assert.notEqual(reviewDecisionDigest({ ...material, promisedFollowUpObservation: first }), reviewDecisionDigest({ ...material, promisedFollowUpObservation: second }));
 });
 
-test("an unreadable harvest is UNKNOWN, while a no-promise or already-reported review performs no ledger read", async () => {
+test("an unreadable harvest is UNKNOWN, while a no-promise or already-reported review performs no ledger read", async t => {
   const args = { ledgerPath: "/absent/promise-fixture/state/ledger.ndjson", taskId: "W1-T7729", prUrl: "https://github.com/o/r/pull/7" };
   assert.equal((await recoverPromisedFollowUpReports(observation(), args)).state, "unknown");
   const empty = observation([]); assert.equal(await recoverPromisedFollowUpReports(empty, args), empty);
   const reported = "## Follow-ups\ntask: source-keyed child bundle store with atomic publication;\naction: bounded heavy READY escalation\n";
   const current = observation(); assert.equal(await recoverPromisedFollowUpReports(current, { ...args, implementationReport: reported }), current);
+  const repo = gitRepo(); t.after(() => repo.cleanup()); const state = join(repo.dir, "state"); mkdirSync(state);
+  const local = { ...args, ledgerPath: join(state, "ledger.ndjson") };
+  assert.equal((await recoverPromisedFollowUpReports(observation(), local)).state, "unknown", "a missing live ledger is not a measured empty harvest");
+  writeFileSync(local.ledgerPath, "");
+  const measured = await recoverPromisedFollowUpReports(observation(), local);
+  assert.equal(measured.state, "complete"); if (measured.state !== "complete") return;
+  assert.equal(measured.harvestCorpusComplete, true); assert.deepEqual(measured.harvested, []);
+  assert.equal((await recoverPromisedFollowUpReports(observation(), { ...local, ledgerPath: join(state, "other.ndjson") })).state, "unknown", "do not silently query a different ledger basename");
 });

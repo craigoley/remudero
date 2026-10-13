@@ -20,7 +20,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync, openLedgerUnion } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath } from "./ledger-union.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -4839,8 +4839,15 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
   let incomplete = false;
   try {
+    const stateDir = dirname(args.ledgerPath);
+    if (resolve(args.ledgerPath) !== resolve(ledgerLivePath(stateDir))) throw new Error("promise harvest path is not the union's live ledger");
+    // The shared union deliberately tolerates absent state/live files. That is not
+    // evidence of an empty harvest; prove the directory exists before inferring absence.
+    const names = readdirSync(stateDir);
+    if (!names.includes("ledger.ndjson")) incomplete = true;
+    else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
-    for await (const row of openLedgerUnion(dirname(args.ledgerPath), {
+    for await (const row of openLedgerUnion(stateDir, {
       step: "report.followups", dedupe: false, signal: controller.signal,
       ...(liveOnly ? { throughRotation: "" } : {}),
       onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
