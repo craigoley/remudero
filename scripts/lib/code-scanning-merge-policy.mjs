@@ -1,0 +1,44 @@
+/** Exact-head metadata policy. No API writes, dispatch, source execution or notification.
+ * UNKNOWN is never a reusable merge permission. Production adapter must re-read HEAD
+ * immediately before its write and attest complete file/check pagination from trusted APIs. */
+export const CODE_SCANNING_MERGE_POLICY = 'exact-head-new-high-critical-v1';
+export const CODE_SCANNING_MAX_CHANGED_FILES = 3000; // BACKSTOP: larger diffs need explicit complete evidence, not a truncated green.
+const sha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+const path = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 &&
+  !value.startsWith('/') && !/[\x00-\x1f\x7f]/.test(value) && !value.split('/').some(part => part === '' || part === '.' || part === '..');
+// Matches the existing CodeQL workflow's ignored surface; rename predecessors are checked too.
+const ignored = value => value.endsWith('.md') || ['plan/', 'docs/', 'learnings/'].some(prefix => value.startsWith(prefix));
+const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
+
+export function classifyCodeScanningMergePolicy(input) {
+  if (!input || !sha(input.headSha) || input.observedHeadSha !== input.headSha) return unknown('head-unavailable-or-changed');
+  if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) return unknown('pr-identity-unavailable');
+  if (input.filesComplete !== true || input.filesHeadSha !== input.headSha || !Number.isSafeInteger(input.changedFileCount) ||
+      !Array.isArray(input.files) || input.files.length !== input.changedFileCount || input.files.length > CODE_SCANNING_MAX_CHANGED_FILES) {
+    return unknown('changed-file-corpus-incomplete');
+  }
+  if (input.files.some(file => !file || !path(file.filename) ||
+      (file.previous_filename !== undefined && !path(file.previous_filename)))) return unknown('changed-file-path-ambiguous');
+  const relevant = input.files.some(file => !ignored(file.filename) ||
+    (file.previous_filename !== undefined && !ignored(file.previous_filename)));
+  if (!relevant) return {state:'not-applicable',mergeAllowed:true,reason:'complete-verified-out-of-codeql-scope'};
+  if (input.checksComplete !== true || input.checksHeadSha !== input.headSha || !Array.isArray(input.checks)) return unknown('check-corpus-incomplete');
+  const checks = input.checks.filter(check => check?.name === 'CodeQL' && check.head_sha === input.headSha &&
+    check.app?.slug === 'github-advanced-security' && check.app?.id === 57789 && check.app?.owner?.login === 'github');
+  if (checks.length === 0) return unknown('trusted-exact-head-codeql-result-missing');
+  if (checks.some(check => !Number.isSafeInteger(check.id) || check.id <= 0)) return unknown('check-generation-unavailable');
+  if (new Set(checks.map(check => check.id)).size !== checks.length) return unknown('check-generation-ambiguous');
+  const latest = checks.reduce((a,b) => a.id > b.id ? a : b);
+  if (latest.status !== 'completed') return unknown('security-analysis-pending');
+  const summary = latest.output?.summary;
+  if (typeof summary !== 'string') return unknown('security-result-shape-unavailable');
+  const counts = [...summary.matchAll(/^\s*\* (\d+) (high|critical)\s*$/gm)];
+  if (counts.some(match => Number(match[1]) > 0)) return {state:'blocked',mergeAllowed:false,reason:'new-high-or-critical-security-alert'};
+  // Actual GitHub producer stores the no-new-alert statement in TITLE, not SUMMARY.
+  // The summary must bind that canonical statement to this PR, not another PR at the same SHA.
+  const link = `[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A${input.prNumber}+tool%3ACodeQL+is%3Aopen).`;
+  if (latest.conclusion === 'success' && latest.output.title === 'No new alerts in code changed by this pull request' && summary === link) {
+    return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-no-new-alerts'};
+  }
+  return unknown('security-analysis-failed-or-unrecognized');
+}
