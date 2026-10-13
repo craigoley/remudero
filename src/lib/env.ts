@@ -114,6 +114,13 @@ export function buildWorkerEnv(
     child.DISABLE_AUTOUPDATER = "1";
   }
 
+  // Grants CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 (unless the caller set one via `extra`) — auto memory loads
+  // whatever `settingSources` says and is shared by every worktree of a repo, ungoverned by any budget.
+  // Why: the SDK's own isolation table and the shared grant — docs/forensics/env.md#claude_code_disable_auto_memory.
+  if (!("CLAUDE_CODE_DISABLE_AUTO_MEMORY" in child)) {
+    child.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+  }
+
   // Overflow valve — engaged only when the caller passes `opts.allowApiKey` (the config.overflow
   // conditional-cap guard, §9). Passes the parent's ANTHROPIC_API_KEY through by value; absent the
   // flag or the key, nothing is copied and billing stays subscription.
