@@ -33074,7 +33074,7 @@ function parseRunLockHolder(raw: string): RunLockInfo | null {
     const parsed = JSON.parse(raw) as Partial<RunLockInfo> | null;
     return typeof parsed?.pid === "number" ? (parsed as RunLockInfo) : null;
   } catch {
-    return null;
+    return null; // garbled bytes name no holder, so reclaimStaleLock judges them stale, as it does a dead pid
   }
 }
 
