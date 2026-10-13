@@ -9,7 +9,8 @@
   # refusal-amendment (W1-T7730, run W1-T7730-1791657284295, 2026-10-10T19:56:33.132Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
   #   worker evidence: The `pr-blocker.ts` owner logic is already correct for the wired plan-repair path, so a real fix would need a new repair lane for non-machine-lane or non-fleet plan filings, in `sweep.ts`, which is outside the declared files.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # superseded by W1-T9250 (#11435): the sweep.ts fix this worker refused as outside its files (an operator plan PR red only because main is red waits for main and is refreshed); operator approval 2026-10-13
   attempts: 0
   author_class: machine
   origin: "flow-blocker:plan-proof-unrunnable:plan-only PR is red on ci-shard (<n>/<n>)"
