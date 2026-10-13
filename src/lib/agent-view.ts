@@ -89,6 +89,7 @@ function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string
   if (agent === undefined || agent === null || agent.proof === null || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
   if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
   if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object"))) return "malformed committed proposal analytics";
+  if (snapshot!.consoleV1.metrics.some((metric) => typeof metric.key !== "string" || !["observed", "provider_reported", "modeled"].includes(metric.class) || (metric.value !== null && !Number.isFinite(metric.value)))) return "malformed committed metric provenance or value";
   return undefined;
 }
 

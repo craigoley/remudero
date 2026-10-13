@@ -101,6 +101,12 @@ test("W1-T9244: proposal detail publication preserves bounds identity and honest
   const malformed = structuredClone(busySnapshot());
   (malformed.consoleV1.operatorAgent as any).proof = null;
   assert.match(recommendationBody(malformed).reason, /malformed/);
+  const unknownMetric = busySnapshot();
+  (unknownMetric.consoleV1.metrics[0] as unknown as { class: string }).class = "unknown";
+  assert.match(recommendationBody(unknownMetric).reason, /malformed/);
+  const invalidValue = busySnapshot();
+  invalidValue.consoleV1.metrics[0]!.value = Number.NaN;
+  assert.match(recommendationBody(invalidValue).reason, /malformed/);
   const badCounts = busySnapshot();
   badCounts.routingTelemetry.buckets[0]!.failures = 99;
   assert.equal(recommendationBody(badCounts).records.find((r: any) => r.proposalId.includes("worker-failure")).detail.state, "unavailable");
