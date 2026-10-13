@@ -41,8 +41,8 @@ test('default core merge effectors refuse new high and UNKNOWN evidence before a
   await withLiveWritesAllowed(async()=>{
    assert.throws(()=>sync.armAuto(url),SecurityMergeRefused);assert.throws(()=>sync.enqueue!(url),SecurityMergeRefused);
    assert.throws(()=>sync.mergeDirect(url),SecurityMergeRefused);
-   await assert.rejects(()=>asyncDeps.armAuto(url),SecurityMergeRefused);await assert.rejects(()=>asyncDeps.enqueue!(url),SecurityMergeRefused);
-   await assert.rejects(()=>asyncDeps.mergeDirect(url),SecurityMergeRefused);
+   await assert.rejects(async()=>await asyncDeps.armAuto(url),SecurityMergeRefused);await assert.rejects(async()=>await asyncDeps.enqueue!(url),SecurityMergeRefused);
+   await assert.rejects(async()=>await asyncDeps.mergeDirect(url),SecurityMergeRefused);
    assert.throws(()=>ghPrMergeSquash(url,()=>({state:'clean',defused:[]})),SecurityMergeRefused);
   });
  }

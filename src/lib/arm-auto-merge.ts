@@ -51,7 +51,7 @@ import {
   recordClosingReferenceToLedger,
   type ClosingReferenceGuardResult,
 } from "./closing-reference-guard.js";
-import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghExecFile, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type AdmissionTarget, type AdmissionAction, type AdmissionRecord } from "./contributor-admission.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -422,7 +422,7 @@ export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: stri
  *  shifts, and so the argv and the refusal are unit-testable without a live pull request. */
 export function mergeDirectViaRest(
   prUrl: string,
-  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe"; timeout?: number; maxBuffer?: number; killSignal?: NodeJS.Signals }) => unknown = execFileSync,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe"; timeout?: number; maxBuffer?: number; killSignal?: NodeJS.Signals }) => unknown = ghExecFile,
   securityRead?: (path: string) => unknown,
   expectedHead?: string,
 ): void {
