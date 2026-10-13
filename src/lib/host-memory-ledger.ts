@@ -198,6 +198,28 @@ export interface SweepResult {
 
 const seenDiagnostics = new Set<string>();
 const ownReservations = new Map<string, MemoryReservationEntry>();
+
+/** Read-only binding for a NEW isolated run, never a foreign or already-running lease.
+ * Uses canonical owner copies AND the published record; unknown storage is not fresh capacity. */
+export function ownedMemoryRunBinding(id: string, deps: HostMemoryLedgerOptions = {}):
+  { state: "fresh" } | { state: "bound"; roots: readonly ProcessIdentity[] } | { state: "unavailable"; reason: string } {
+  try {
+    const ctx = contextOf(deps), owned = [...ownReservations].find(([path, entry]) => path.startsWith(`${ctx.dir}/`) && entry.id === id);
+    const observation = observeSentinel(ctx, false);
+    if (observation.state !== "present") throw new Error(`canonical reservation store ${observation.state}`);
+    if (!owned) throw new Error("no original owned reservation");
+    const [path, memory] = owned, disk = JSON.parse(ctx.read(path)) as MemoryReservationEntry;
+    const actual = ctx.probe(process.pid);
+    if (actual.state !== "alive" || memory.owner.pid !== process.pid || memory.owner.start !== actual.start ||
+        disk.id !== id || disk.owner.pid !== memory.owner.pid || disk.owner.start !== memory.owner.start ||
+        JSON.stringify(disk.generation) !== JSON.stringify(memory.generation) || JSON.stringify(ctx.generation) !== JSON.stringify(memory.generation) ||
+        memory.occupancyReleasedAt !== undefined || disk.occupancyReleasedAt !== undefined ||
+        JSON.stringify(disk.roots) !== JSON.stringify(memory.roots) || JSON.stringify(disk.tree) !== JSON.stringify(memory.tree)) {
+      throw new Error("owned reservation identity/publication changed");
+    }
+    return memory.roots.length === 0 && memory.tree.length === 0 ? { state: "fresh" } : { state: "bound", roots: memory.roots.map(root => ({ ...root })) };
+  } catch (error) { return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) }; }
+}
 const sentinelIds = new Map<string, string>();
 const pendingResets = new Map<string, string>();
 const pendingMissing = new Set<string>();
