@@ -10,8 +10,8 @@
   risk: high  # Rule 19: one concern — the impact map is produced on main and handed to the shadow selector
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
-  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940]
-  files: [.github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts]
+  plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940, W1-T5923, W1-T5705]
+  files: [.github/workflows/coverage-nightly.yml, .github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts, test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -26,29 +26,55 @@
     coverage-ratchet-required job already downloads all eight with `pattern: coverage-shard-*`. W1-T6083's
     shard design named a daemon-side fetch; #9760 built neither half of the delivery, so the map has no
     producer and the arm reads its fallback on every run.
+    AMENDED 2026-10-13 (operator-approved redesign; the original reading above stays as written).
+    THE ORIGINAL PRODUCER CANNOT WORK AT HEAD, MEASURED. W1-T5923 (premapping) changed what a ci.yml
+    coverage shard uploads: `Stage this coverage shard` now copies coverage/premapped/coverage-*.json,
+    and writePremappedCoverageDirectories keeps only each report's translated `result` array, dropping
+    the `test`/`root`/`child` identity and the source-map cache that buildImpactMap needs to name a
+    suite. Negative control on origin/main b001fd214: two real suites run under NODE_V8_COVERAGE, then
+    `--premap-output`, then `--impact-map` over the premapped directory exits with "contains no V8
+    coverage files". Positive control on the same raw reports: `--compact-output` (what
+    coverage-nightly's shards upload; compaction keeps `test`, `root` and `child` per report) then
+    `--impact-map` writes an rmd-test-impact-map-v1 map of 2 suites, 523 source files, 0 orphan
+    reports, 1 suite credited with a child's report.
+    THE ORIGINAL TRIGGER RARELY FIRES. Of the 30 newest ci.yml push runs on main (2026-10-13 05:54Z to
+    10:22Z) 16 were cancelled by a newer push, and the 13 that succeeded include non-SOURCE commits whose
+    coverage shards ran no instrumented suite (run 38381017566: every coverage shard 32-43 s).
+    coverage-nightly is a schedule on main that no merge cancels, and its merge job already downloads
+    all eight compact shards. Main merges about 200 commits a day (211 in the 24 h before this
+    amendment), so a nightly map stays inside IMPACT_MAP_STALENESS_BOUND (150 commits) for roughly the
+    first 18 hours after each run; past that the arm falls back and names why, which costs shadow
+    evidence for part of each day and never a verdict.
   design: |
-    THE CHEAP CANDIDATE: a CI step, not a daemon fetch. (1) In coverage-ratchet-required, on a push to
-    main (class `push:SOURCE`) and on merge_group (whose tested commit becomes main's when the queue fast-
-    forwards), run `node --import tsx scripts/coverage-merge-ratchet.mjs --impact-map test-impact-map.json
-    --sha "$GITHUB_SHA"` over the eight downloaded shards' raw/ directories, and upload it as the
-    `test-impact-map` artifact with a retention long enough to cover IMPACT_MAP_STALENESS_BOUND commits
-    (at least 7 days). A builder failure is reported in the step summary and never fails the job: the map
-    is shadow evidence. (2) In the coverage-shard shadow step on pull_request, fetch the newest
-    `test-impact-map` artifact from a successful main ci.yml run (the workflow already holds
-    `actions: read`), and pass `--impact-map <path> --base <the PR base sha>` to select-affected-suites;
-    with no artifact, omit both flags so the selector records no impact arm, and print why. Live selection
-    does not change. THE COSTLY CANDIDATE (a daemon-side fetch keeping maps under state for local
-    selection) waits for the shadow record to show the impact arm is worth using outside CI.
+    PRODUCER: coverage-nightly, not ci.yml. In the `merge` job, after the merged lcov is written, install
+    the lockfile (`npm ci`: the builder is TypeScript and runs under `--import tsx`) and run
+    `node --import tsx scripts/coverage-merge-ratchet.mjs --impact-map test-impact-map.json --sha
+    "$GITHUB_SHA"` over the same eight `coverage-shards/coverage-shard-<n>/raw` compact directories the
+    merge reads. A builder failure is written to the step summary and never fails the job (the map is
+    shadow evidence, and the nightly's floor verdict must not depend on it). Upload the map as the
+    `test-impact-map` artifact with `retention-days: 14` (at least 7), only when the file exists.
+    CONSUMER: ci.yml's coverage shard, in SHADOW. On pull_request, a step before `Test with coverage`
+    fetches the newest `test-impact-map` artifact from a successful coverage-nightly run on main with
+    the same `gh run list` / `gh run download` pattern the narrowed-floor read already uses (the
+    workflow holds `actions: read`), and records the map's path. The shadow selector call then passes
+    `--impact-map <path> --base <the PR base sha>`; with no map it passes neither flag and prints why.
+    Live selection, required checks and every other event's behavior do not change. The shared gh
+    shim (test/helpers/gh-shim.ts) gains a route that writes a file, so the fetch step's real shell body
+    can be exercised with a downloaded map; no hand-rolled gh shim (the fixture-copy census refuses one). THE COSTLY
+    CANDIDATE (also building per-shard maps in ci.yml's shards before premapping and merging them on
+    main pushes) waits until the shadow record shows the arm is worth a fresher map than one a day.
   acceptance:
-    - claim: "ci.yml builds the impact map from the downloaded coverage shards only on a push to main and on merge_group, uploads it as the test-impact-map artifact with a retention of at least 7 days, never fails the job on a builder error, and the coverage-shard shadow step passes --impact-map with --base when a main map was fetched and omits both when none exists"
+    - claim: "coverage-nightly builds the impact map from its eight downloaded compact shards with the run's sha, uploads it as the test-impact-map artifact with a retention of at least 7 days, and never fails the run on a builder error; ci.yml's coverage-shard shadow step on pull_request passes --impact-map with --base when a nightly map was fetched and omits both when none exists, and no other event's selection changes"
       proof: "unit test: test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts"
   falsifier: |
-    Drop the `--impact-map` pass from the shadow step: the workflow fixture's shadow invocation carries no
-    map flag and the shadow-step test fails.
+    Drop the `--impact-map` pass from the shadow step, or build the map from a premapped directory: the
+    workflow fixture's shadow invocation carries no map flag, or the builder control finds no V8
+    coverage, and the test fails. Let a builder error fail the nightly: the never-fails control fails.
   note: |
-    OPERATOR BUILD: a .github/workflows path routes this to operator-build. Depends on W1-T6083 (#9760,
-    open at filing): build after it merges. If W1-T6083 merges WITH a producer after all, retire this as a
-    duplicate. The impact arm stays SHADOW; flipping it live is a separate ruling on the shadow record.
+    OPERATOR BUILD: .github/workflows paths route this to operator-build. Depends on W1-T6083 (merged).
+    The impact arm stays SHADOW; flipping it live is a separate ruling on the shadow record.
+    AMENDED 2026-10-13 at the operator's request after a build-time recon: producer moved from ci.yml's
+    push/merge_group lanes to coverage-nightly (see the rationale's AMENDED section for both controls).
   risk_ruling:
     verdict: "high"
     action: escalate
