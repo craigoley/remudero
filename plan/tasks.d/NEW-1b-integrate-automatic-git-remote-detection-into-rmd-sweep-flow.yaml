@@ -11,7 +11,9 @@
     From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
   
     spans runner and sweep concerns
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=bbda018dc72f52c1
   attempts: 0
   files:
     - src/lib/sweep.ts

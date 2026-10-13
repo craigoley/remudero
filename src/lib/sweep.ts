@@ -91,7 +91,7 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import { createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
@@ -280,6 +280,7 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
+import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -1473,6 +1474,8 @@ export interface BuildSweepEffectsDeps {
   productionProgressJudge?: boolean;
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
+  /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -1835,6 +1838,7 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -1895,6 +1899,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reconcileMainRunGaps",
   "readFleetState",
   "pullMutationVerdicts",
+  "pullFoldDebt",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -2039,6 +2044,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
+  | "pullFoldDebt"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -4496,6 +4502,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return rows;
       } catch (e) {
         log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+    },
+
+    // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
+    pullFoldDebt: async (ingested) => {
+      try {
+        const input = {
+          owner,
+          repo,
+          ingested,
+          settled: settledFoldDebtArtifacts,
+          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          root: repoRoot,
+          log,
+          land: deps.landFeedbackImpl,
+        };
+        return landFoldDebt(pullFoldDebtEntries(input), input);
+      } catch (e) {
+        log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
     },
@@ -12318,6 +12345,8 @@ export interface SweepDeps {
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
+  pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -15256,6 +15285,16 @@ export async function runSweep(
       if (pulled.length > 0) log("sweep.mutation_verdict_pull.ingested", { rows: pulled.length });
     } catch (e) {
       log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+    try {
+      for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
+      }
+    } catch (e) {
+      log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
 
@@ -20550,9 +20589,9 @@ function readPrTerminalLiveCursor(ledgerPath: string): PrTerminalLiveCursor {
   }
 }
 
-/** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
- *  written once, so each is read once per process; only an archive that failed to open is re-read. */
-const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Map<string, ArchivedTerminal> }>();
+/** Only actionable PR keys stay in memory; consumed keys can be read again from rotation digests. */
+export const terminalUnionScans = createSizedMemo<string, ArchivedTerminal & { signature: string }>();
+const terminalMemoKey = (ledgerPath: string, key: string): string => `${dirname(ledgerPath)}\0${key}`;
 
 /** The newest archived terminal row of a PR: its ts and state (a merged fact is final and wins). */
 interface ArchivedTerminal {
@@ -20560,29 +20599,57 @@ interface ArchivedTerminal {
   state: string;
 }
 
-function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
+function terminalArchiveSignature(dir: string): string | undefined {
+  try {
+    const digest = createHash("sha256");
+    for (const entry of ledgerRotationEntries(fs.readdirSync(dir), dir)) {
+      const stat = fs.statSync(entry.path);
+      digest.update(JSON.stringify([entry.path, stat.size, stat.mtimeMs]));
+    }
+    return digest.digest("hex");
+  } catch (error) {
+    // Reason: an unreadable inventory cannot validate a hit; the union read below reports unread archives.
+    return undefined;
+  }
+}
+
+function terminalKeysInArchives(ledgerPath: string, wanted: ReadonlySet<string>): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
   const dir = dirname(ledgerPath);
-  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Map<string, ArchivedTerminal>() };
-  terminalUnionScans.set(dir, memo);
+  const signature = terminalArchiveSignature(dir);
+  const keys = new Map<string, ArchivedTerminal>();
+  const missing = new Set<string>();
+  for (const key of wanted) {
+    const cached = terminalUnionScans.get(terminalMemoKey(ledgerPath, key));
+    if (signature !== undefined && cached?.signature === signature) keys.set(key, cached);
+    else missing.add(key);
+  }
+  if (missing.size === 0) return { keys, unread: 0 };
+  const digests = ledgerRotationDigests(dir, (rows) => rows.filter((row) => row.step === PR_TERMINAL_STEP).map((row) =>
+    ({ step: row.step, pr_url: row.pr_url, ts: row.ts, state: row.state })), { holder: "sweep-pr-terminal", reducerVersion: "1" });
   const read = readLedgerUnionRecordsSync(dir, {
-    pattern: /"step":"pr\.terminal"/,
+    step: PR_TERMINAL_STEP,
     dedupe: false,
     readLiveRecords: () => [],
     rotationRecords: (entry, parse) => {
-      if (memo.scanned.has(entry.path)) return { rows: [], torn: 0, tornLines: [] };
-      const records = parse();
-      memo.scanned.add(entry.path);
-      return records;
+      const read = digests.rotationRecords(entry, parse);
+      return { ...read, rows: read.rows.filter((row) => {
+        const key = prUrlKey(row.pr_url);
+        return key !== undefined && missing.has(key);
+      }) };
     },
     onRecord: (row) => {
       const key = row.step === PR_TERMINAL_STEP ? prUrlKey(row.pr_url) : undefined;
-      if (!key) return;
+      if (!key || !missing.has(key)) return;
       const next = { ts: typeof row.ts === "string" ? row.ts : "", state: String(row.state) };
-      const had = memo.keys.get(key);
-      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) memo.keys.set(key, next);
+      const had = keys.get(key);
+      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) keys.set(key, next);
     },
   });
-  return { keys: memo.keys, unread: read.unread.length };
+  if (read.unread.length === 0 && signature !== undefined) for (const key of missing) {
+    const value = keys.get(key);
+    if (value) terminalUnionScans.set(terminalMemoKey(ledgerPath, key), { ...value, signature });
+  }
+  return { keys, unread: read.unread.length };
 }
 
 /**
@@ -20603,6 +20670,7 @@ export function runPrTerminalReconcile(
     collectPrTerminalKeys(cursor, deps.readLedger(deps.ledgerPath));
   }
   const { named } = cursor;
+  const actionable = new Set<string>();
   const pending: ClosedPrFact[] = [];
   let needsArchives = false;
   for (const [key, prUrl] of named) {
@@ -20610,10 +20678,15 @@ export function runPrTerminalReconcile(
     const fact = covered === true ? undefined : lookup(prUrl);
     if (fact && prUrlKey(fact.prUrl) === key) {
       pending.push(fact);
+      actionable.add(key);
       if (covered === undefined) needsArchives = true;
     }
   }
-  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath) : undefined;
+  const prefix = `${dirname(deps.ledgerPath)}\0`;
+  for (const key of terminalUnionScans.keys()) {
+    if (key.startsWith(prefix) && !actionable.has(key.slice(prefix.length))) terminalUnionScans.delete(key);
+  }
+  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath, actionable) : undefined;
   let appended = 0;
   for (const fact of pending) {
     const key = prUrlKey(fact.prUrl)!;
@@ -20622,7 +20695,10 @@ export function runPrTerminalReconcile(
       // a live closed fact with a named row after it: the PR was reopened and closed again
     } else {
       const archivedFact = archived?.keys.get(key);
-      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) continue;
+      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) {
+        terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
+        continue;
+      }
     }
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
       run_id: deps.runId,
@@ -20637,6 +20713,7 @@ export function runPrTerminalReconcile(
     });
     cursor.terminalSeq.set(key, cursor.seq++);
     cursor.terminalState.set(key, fact.state);
+    terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
     appended++;
   }
   return { named: named.size, appended, unionRead: archived !== undefined };

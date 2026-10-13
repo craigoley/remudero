@@ -128,7 +128,8 @@ function runJob(event: "merge_group" | "pull_request", failOn = "", actionOutcom
     }
     if (step.uses) {
       assert.ok(step.id, "fixture actions must expose their actual workflow step id");
-      assert.match(step.uses, /^actions\/(checkout|setup-node)@/, "unmodeled actions need explicit fixture support");
+      // W1-T7853: the fold-debt upload is continue-on-error and no gate reads its outcome, so it is modeled as a no-op success.
+      assert.match(step.uses, /^actions\/(checkout|setup-node|upload-artifact)@/, "unmodeled actions need explicit fixture support");
       const outcome = Object.hasOwn(actionOutcomes, key) ? actionOutcomes[key] : "success";
       if (outcome !== undefined) {
         result.outcomes.set(key, outcome);
@@ -213,6 +214,7 @@ const PR_ARGV: Record<string, string[]> = {
   "leak-grep": ["leak-grep.sh "],
   "learnings-budget-ratchet": ["npm run --silent learnings-budget-ratchet"],
   "claude-md-budget-ratchet": ["npm run --silent claude-md-budget-ratchet", "env BASE_SHA=HEAD^1"],
+  "collect-fold-debt": ["git ls-files -z --others --exclude-standard -- plan/feedback/fold-debt-*.yaml"], // W1-T7853
   "jscpd-gate": ["npm run --silent jscpd"],
   claims: ["npm run --silent claims"],
   "assertion-discrimination": ["npm run --silent assertion-discrimination"],
