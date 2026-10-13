@@ -4864,6 +4864,27 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
   finally { clearTimeout(timer); }
 }
 
+/** One immutable preparation binds the promise observation to both claiming and judging. */
+export async function preparePromisedReviewDecision(args: {
+  input: ReviewDecisionDigestInput; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string }; ledgerPath: string; prUrl: string;
+}): Promise<{ decisionDigest: string; judge: (evidence: ReviewEvidence) => Promise<ReviewVerdict> }> {
+  const input = structuredClone(args.input);
+  const sources = await observePromisedFollowUps({
+    diff: input.diff, headSha: input.headSha, headCheckoutDir: args.headCheckoutDir, task: { ...args.task },
+  });
+  const observation = await recoverPromisedFollowUpReports(sources, {
+    ledgerPath: args.ledgerPath, taskId: args.task.id, prUrl: args.prUrl, implementationReport: input.implementationReport,
+  });
+  return {
+    decisionDigest: reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation }),
+    judge: evidence => judgeReviewAsync([...input.acceptance], {
+      ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
+      headCheckoutDir: args.headCheckoutDir, promisedFollowUpObservation: observation,
+    }),
+  };
+}
+
 /** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two prefixes is what turns
  *  the raw "touches ANY declared path" false-positive rate — 52%, inflated by plan filings and docs PRs — into the
  *  honest ~11% the advisory-not-refusal call rests on. */

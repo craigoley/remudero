@@ -1498,8 +1498,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
-  observePromisedFollowUps,
-  recoverPromisedFollowUpReports,
+  preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   bodyReviewContractDigest,
   reviewContractDigest,
@@ -8483,15 +8482,11 @@ async function runReview(args: {
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
-  const promiseSources = await observePromisedFollowUps({
-    diff, headSha, headCheckoutDir: args.headCheckoutDir, task,
+  const preparedDecision = await preparePromisedReviewDecision({
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
-  const promisedFollowUpObservation = await recoverPromisedFollowUpReports(promiseSources, {
-    ledgerPath: args.ledgerPath, taskId: task.id, prUrl, implementationReport: args.implementationReport,
-  });
-  const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, promisedFollowUpObservation,
-  });
+  const decisionDigest = preparedDecision.decisionDigest;
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8749,7 +8744,7 @@ async function runReview(args: {
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
-  const computed = await judgeReviewAsync(criteria, {
+  const computed = await preparedDecision.judge({
     diff,
     report,
     planLint,
@@ -8757,7 +8752,6 @@ async function runReview(args: {
     reservationOwnership: ownership,
     baseTaskIdDeclarations: taskIdEvidence.baseDeclarations,
     implementationReport: args.implementationReport,
-    promisedFollowUpObservation,
     target: { owner, repo },
     // W1-T1100: threaded straight from this call's own args — see this arg's own doc.
     reportIsSubstitute: args.reportIsSubstitute,
