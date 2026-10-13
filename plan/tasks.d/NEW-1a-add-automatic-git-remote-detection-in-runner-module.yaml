@@ -12,7 +12,9 @@
     From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
   
     spans runner and sweep concerns
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=5d72887df20c2245
   attempts: 0
   files:
     - src/lib/runner.ts

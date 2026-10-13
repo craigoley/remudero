@@ -351,7 +351,19 @@ test("a skill eval stops dispatching once an overspent attempt leaves less than 
   assert.equal(run.verdict.totalCostUsd, 176);
 });
 
-test("a skill eval names each failed attempt reason and keeps a graded verdict when only its cleanup fails", async () => {
+test("skill eval uncertain cleanup stops the entire default-off run and cannot publish evaluated success", async () => {
+  const { runSkillEval, SKILL_EVAL_STEPS } = await skillEval(), selection = await selected();
+  const fleet = fakeFleet(LIFTS, () => ({ cleanup: () => { throw new Error("cleanup EIO"); } }));
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log });
+  assert.equal(run.state, "cancelled", "default-off is not permission to record uncertain cleanup as success");
+  assert.equal(fleet.requests.length, 1, "no later attempt may launch after unknown cleanup");
+  assert.ok(run.state === "cancelled" && run.capacityReleaseAllowed === false);
+  assert.equal(run.attempts[0]!.verdict, "unmeasurable");
+  assert.equal(fleet.rows.some(row => row.step === SKILL_EVAL_STEPS.result), false);
+});
+
+test("a skill eval names each failed attempt reason and stops on uncertain cleanup without a graded success", async () => {
   const { runSkillEval } = await skillEval();
   const selection = await selected();
   const fleet = fakeFleet((task, arm, _trial, n) => (n === 2 ? "throw" : n === 3 ? "unmeasurable" : WITH_ONLY(task, arm)), (_request, n) => {
@@ -359,8 +371,10 @@ test("a skill eval names each failed attempt reason and keeps a graded verdict w
     if (n === 1) return { headDir: null };
     return n === 4 ? { cleanup: () => { throw new Error("worktree remove failed"); } } : {};
   });
-  const run = evaluated(await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
-    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log }));
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log });
+  assert.equal(run.state, "cancelled");if (run.state !== "cancelled") return;
+  assert.equal(fleet.requests.length, 5);
   assert.deepEqual(run.attempts.slice(0, 4).map((a) => [a.verdict, a.reasons]), [
     ["unmeasurable", ["attempt-failed: the worker spawn died"]],
     ["unmeasurable", ["no-head"]],
@@ -369,9 +383,9 @@ test("a skill eval names each failed attempt reason and keeps a graded verdict w
   ], "each failure keeps its own message, so a paid attempt that died says why");
   assert.equal(run.attempts[0]!.costUsd, null, "a dispatch that died reports no cost");
   const cleanupFailed = run.attempts[4]!;
-  assert.notEqual(cleanupFailed.verdict, "unmeasurable", "a head graded before its cleanup failed keeps its grade");
+  assert.equal(cleanupFailed.verdict, "unmeasurable", "a grade cannot override uncertain cleanup");
   assert.deepEqual(cleanupFailed.reasons, ["cleanup-failed: worktree remove failed"]);
-  assert.equal(run.verdict.reason, "too-few-measurable-tasks");
+  assert.equal(run.capacityReleaseAllowed, false);
 });
 
 test("a skill eval refuses a draft that is not the one its held-out set was drawn for, or a set smaller than K", async () => {

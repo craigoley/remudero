@@ -1,0 +1,26 @@
+- id: W1-T9300
+  title: Capture and store proof execution tail for failed proofs
+  repo: remudero
+  depends_on:
+    - W1-T128
+    - W1-T246
+    - W1-T101
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-13 proposal on proof-debt:W1-T6179, ratified via rmd approve:
+  
+    spans proofExecutor and review subsystems
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/proofExecutor.ts
+    - src/lib/review.ts
+  acceptance:
+    - claim: proof executor records the tail of its own output on a failed criterion
+      proof: "grep: failureTail in src/lib/review.ts"
+    - claim: proof executor's tail recorder is invoked by the review subsystem
+      proof: "grep: recordFailureTail( in src/lib/review.ts"
+  origin: architect
