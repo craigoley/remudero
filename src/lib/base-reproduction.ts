@@ -43,14 +43,30 @@ export function failingTestFilesFromCiFailures(failures: readonly Failure[]): st
   return [...paths];
 }
 
+/** The check `scripts/list-rule-suites.mjs --run` reports as, and the closing line it prints on a failing run. */
+export const RULE_CHECKS_CHECK = "rule-checks";
+const RULE_SUITES_FAILED_LINE = /rule-checks: failed suites: (.+)$/gm;
+
+/** W1-T7848 — the suites a `rule-checks` failure's own closing line names. The light-gates job posts every
+ *  gate from one log, so its other test/ paths (another gate's file, a helper in a stack) are not this red's. */
+export function failingRuleSuitesFromCiFailures(failures: readonly Failure[]): string[] {
+  const suites = failures.filter((failure) => failure.name === RULE_CHECKS_CHECK).flatMap((failure) =>
+    [...failure.logTail.matchAll(RULE_SUITES_FAILED_LINE)].flatMap((match) => match[1]!.trim().split(/\s+/)));
+  return [...new Set(suites.map((suite) => posix.normalize(suite)).filter((suite) => /^test\/.+\.test\.ts$/.test(suite)))];
+}
+
 export function baseReproductionFiles(failures: readonly Failure[]): string[] {
-  const files = failingTestFilesFromCiFailures(failures).flatMap((path) => {
+  const named = failingRuleSuitesFromCiFailures(failures);
+  // A rule-checks red whose log names its failed suites probes only those; one without the line keeps today's read.
+  const read = named.length === 0 ? failures : failures.filter((failure) => failure.name !== RULE_CHECKS_CHECK);
+  const files = failingTestFilesFromCiFailures(read).flatMap((path) => {
     const start = path.search(/(?:^|\/)test\//);
     if (start < 0) return [];
     const file = posix.normalize(path.slice(start).replace(/^\//, ""));
-    return file.startsWith("test/") ? [file] : [];
+    // W1-T7848: the probe runs only `.test.ts` suites, so any other path would grade the whole set unrunnable.
+    return file.startsWith("test/") && file.endsWith(".test.ts") ? [file] : [];
   });
-  return [...new Set(files)];
+  return [...new Set([...named, ...files])];
 }
 
 export function decideBaseReproduction(
