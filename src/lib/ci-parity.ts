@@ -2072,6 +2072,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "a scheduled future-clock drill with issue delivery; its multi-minute simulated-time run is not a pre-push parity leaf",
   },
   {
+    workflow: "clock-sweep.yml",
+    job: "clock-sweep-report",
+    mirrored: false,
+    reason: "W1-T5102: merges the clock-sweep shard jobs' uploaded results and delivers issues; before those hosted shards run it has no input to merge",
+  },
+  {
     workflow: "codeql.yml",
     job: "analyze",
     mirrored: false,
