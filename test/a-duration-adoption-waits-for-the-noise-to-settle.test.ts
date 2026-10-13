@@ -102,10 +102,10 @@ test("an urgent fast-lane move is not held by the daily cadence", async () => {
   const committed = committedSuite();
   const root = suiteWith(committed);
   const heavy = "test/n23.test.ts";
-  // The heaviest fast file really takes 30s on every run: it belongs in the slow tier, and the
+  // The heaviest fast file really takes 120s on every run: it belongs in the slow tier, and the
   // fast lane's slowest shard shrinks by far more than the noise band once it moves.
   writeWindow(root, Array.from({ length: DURATION_WINDOW_RUNS }, (_, run) =>
-    Object.fromEntries(Object.entries(committed).map(([f, ms], i) => [f, f === heavy ? 30_000 + run * 100 : Math.round(ms * jitter(i, run))]))));
+    Object.fromEntries(Object.entries(committed).map(([f, ms], i) => [f, f === heavy ? 120_000 + run * 100 : Math.round(ms * jitter(i, run))]))));
   const inv = testGardenInventory(root, join(root, "state"), probe, { clock: fixedClock(1_000_000 + 60_000), manifestChangedAtMs: () => 1_000_000 });
   assert.deepEqual(inv.candidates.map((a) => a.target), [`${MANIFEST}#${heavy}`]);
   assert.match(inv.candidates[0]!.reason, /\(tier: was 3650ms/);

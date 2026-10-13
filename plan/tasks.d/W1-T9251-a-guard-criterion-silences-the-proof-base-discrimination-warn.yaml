@@ -1,0 +1,56 @@
+- id: W1-T9251
+  title: "LINT-PLAN'S PROOF-BASE-DISCRIMINATION WARN IS SILENT FOR A KIND: GUARD CRITERION — proofBaseDiscriminationViolations warns on a guard naming an existing test file, while proof-discrimination-gate.mjs and proof-base-stale.ts both skip guards"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # one concern: one lint rule skips guards and names the guard remedy; src/lib/task-linter.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: the guard remedy the house rules teach for this warn does not silence it"
+  plan_refs: [W1-T2835, W1-T4419, W1-T4904]
+  files:
+    - src/lib/task-linter.ts
+    - test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts
+  status: queued
+  priority: 2  # a WARN, not a refusal: it costs filers a false alarm on every guard, and teaches them to ignore the row
+  attempts: 0
+  rationale: |
+    READ on origin/main ee05e3863 (symbols, not lines), src/lib/task-linter.ts `proofBaseDiscriminationViolations`:
+    for each acceptance criterion it skips only `c.satisfied_by`, an unparseable proof, a non-test or name-filtered
+    proof, and a forward reference (`!pathExistsAtBase(path)`). It never reads `kind`, so a criterion declaring
+    `kind: guard` on a `unit test: <file that exists at base>` proof still pushes a `proof-base-discrimination` WARN.
+    Its message offers only one remedy, "prove it with a `grep:` on the changed line instead".
+    The gates the warn predicts both skip guards: scripts/proof-discrimination-gate.mjs (`if (criterion.kind ===
+    "guard") { guarded += 1; ... }`, "a regression guard passes at the merge base by design") and
+    src/lib/proof-base-stale.ts (`if (c.satisfied_by || c.kind === "guard" || ...) continue`). task-linter.ts itself
+    reads `(c as { kind?: unknown }).kind === "guard"` in two other checks.
+    REPRODUCED in-process on ee05e3863: `proofBaseDiscriminationViolations({ id, acceptance: [{ claim, proof:
+    "unit test: test/sweep.test.ts", kind: "guard" }] }, { pathExistsAtBase: () => true })` returns one
+    `proof-base-discrimination` warn.
+    The house rule (2026-10-13, W1-T9225) tells a filer to answer this warn by adding `kind: guard`; the warn then
+    stays, so the filer cannot tell an addressed warn from an unaddressed one.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for proof-base-discrimination and proofBaseDiscriminationViolations
+    (W1-T3184, W1-T3282, W1-T3306, W1-T3651, W1-T4904, W1-T5662): W1-T4904 adds a separate grep-proof check that names
+    `kind: guard`; none touches this rule's guard skip. Swept the added lines of all 17 open PR heads: no hit (control:
+    #11411's added lines hit the same sweep's "base red" term twice).
+  design: |
+    1. In `proofBaseDiscriminationViolations`, skip a criterion whose `kind` is `guard`, read the way the rest of the
+       file reads it (`(c as { kind?: unknown }).kind === "guard"`).
+    2. Add `kind: guard` to the warn's remedies: when the criterion protects behaviour the build must not break, declare
+       `kind: guard` (review still executes it at head) and keep a discriminating `grep:` on the new test title beside
+       it; when it proves new behaviour, prove it with the `grep:`.
+    3. Severity, the forward-reference silence and the `pathExistsAtBase` opt stay as they are.
+    Tests go in test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts, calling
+    `proofBaseDiscriminationViolations` directly. test/lint-plan-proof-discrimination.test.ts must stay green.
+  acceptance:
+    - claim: "a kind: guard criterion naming a test file that exists at base draws no proof-base-discrimination warn"
+      proof: 'grep: test("W1-T9251: a guard on an existing test file draws no base-discrimination warn" in test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts'
+    - claim: "the same criterion without kind: guard still warns, and the warn names kind: guard as a remedy"
+      proof: 'grep: test("W1-T9251: an unguarded existing-file proof still warns and names the guard remedy" in test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-guard-criterion-silences-the-proof-base-discrimination-warn.test.ts"
+  falsifier: |
+    Delete the guard skip: the first test sees one warn. Skip every criterion instead: the second test sees none.
+    Drop the remedy sentence: the second test's message match fails.
