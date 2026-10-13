@@ -118,7 +118,7 @@ jobs:
       - name: Admit setup only for a shard with work
         id: admission
         run: |
-          echo "RMD_JOB_STARTED_MS=$(date +%s%3N)" >> "${GITHUB_ENV:-/dev/null}"
+          echo "started_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
           : > admission-files.txt
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF}" ]; then
             if git fetch --no-tags origin "${GITHUB_BASE_REF}" && git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > admission-files.txt; then
@@ -510,6 +510,8 @@ jobs:
             echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
           fi
       - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
+        env:
+          RMD_JOB_STARTED_MS: ${{ steps.admission.outputs.started_ms }}
         run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}

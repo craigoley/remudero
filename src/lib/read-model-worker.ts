@@ -245,6 +245,7 @@ export type ReadModelWorkerMessage =
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
   | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" }
   | ({ type: "view_lane"; view: string } & ReadModelLaneMove)
+  | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer;
 
@@ -676,6 +677,7 @@ export interface ReadModelTicker {
   tick(): void;
   /** Compares one sampled shadow request against the latest body; false when there was nothing to compare. */
   shadow(request: ShadowRequest): boolean;
+  prepareShadow(request: ShadowRequest): ShadowRequest | undefined;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
   /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
@@ -1191,12 +1193,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = viewEtag(name, version, stale, data);
-    if (lastEtag.get(id) === etag) return;
     const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+    latest.set(id, body);
+    if (lastEtag.get(id) === etag) return;
     const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
     if (switches.projector === "on") persist(entry);
     lastEtag.set(id, etag);
-    latest.set(id, body);
     opts.post({ type: "body", entry });
   }
 
@@ -1510,9 +1512,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       postState(now);
     },
     shadow(request: ShadowRequest): boolean {
-      const body = latest.get(`${request.view}\u0000${request.key}`);
+      const body = request.paired?.body ?? latest.get(`${request.view}\u0000${request.key}`);
       try {
-        const legacy = request.legacy
+        const legacy = request.paired?.legacy ?? request.legacy
           ?? (body ? legacyOf(request.view, request.key, clock.now(), body.data) : undefined);
         const shadow = body && legacy ? viewShadow() : undefined;
         if (!body || !legacy || !shadow) return false;
@@ -1521,6 +1523,16 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       } catch (error) {
         log("view.shadow_failed", { view: request.view, key: request.key, error: (error as Error).message });
         return false;
+      }
+    },
+    prepareShadow(request: ShadowRequest): ShadowRequest | undefined {
+      const body = latest.get(`${request.view}\u0000${request.key}`);
+      try {
+        const legacy = body ? legacyOf(request.view, request.key, clock.now(), body.data) : undefined;
+        return body && legacy ? { ...request, paired: { body, legacy } } : undefined;
+      } catch (error) {
+        log("view.shadow_failed", { view: request.view, key: request.key, error: (error as Error).message });
+        return undefined;
       }
     },
     buildNow(view: string): void {
@@ -1634,6 +1646,7 @@ export interface ReadModelViewsData {
 export type ReadModelViewsInput =
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
+  | { type: "shadow-prepare"; request: ShadowRequest }
   | { type: "bodies"; built: SlowLaneBodies }
   | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
@@ -1669,6 +1682,10 @@ export function runReadModelViewWorker(
     if (!ticker) return void early.push(msg);
     if (msg.type === "state") ticker.observe(msg.instances);
     else if (msg.type === "shadow") ticker.shadow(msg.request);
+    else if (msg.type === "shadow-prepare") {
+      const request = ticker.prepareShadow(msg.request);
+      if (request) post({ type: "shadow_prepared", request });
+    }
     else if (msg.type === "want") {
       // A new key is built in a pass of its own, now: main is waiting on it for 300 ms.
       try {
@@ -1786,6 +1803,9 @@ export function threadViews(opts: {
     lane.building = undefined;
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (msg.type === "shadow_prepared") {
+        return fast.worker?.postMessage({ type: "shadow", request: msg.request } satisfies ReadModelViewsInput);
+      }
       if (msg.type === "view_lane") {
         const id = JSON.stringify([msg.view, msg.instance]);
         if (msg.heavy) heavyUnits.add(id);
@@ -1834,7 +1854,13 @@ export function threadViews(opts: {
   spawnLane(fast);
   return {
     state: (instances) => send({ type: "state", instances }),
-    shadow: (request) => send({ type: "shadow", request }, [fast]),
+    shadow: (request) => {
+      const instance = new URLSearchParams(request.key).get("instance") ?? undefined;
+      const owner = heavyUnits.has(JSON.stringify([request.view, undefined]))
+        || heavyUnits.has(JSON.stringify([request.view, instance])) ? heavy : fast;
+      const prepare = owner === heavy && request.legacy === undefined && request.paired === undefined;
+      send({ type: prepare ? "shadow-prepare" : "shadow", request }, [prepare ? heavy : fast]);
+    },
     accept: (built) => send({ type: "bodies", built }, [fast]),
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
