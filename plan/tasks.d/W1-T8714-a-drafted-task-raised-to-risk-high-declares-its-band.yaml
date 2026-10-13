@@ -16,7 +16,7 @@
     - src/lib/inbox-replay.ts
     - src/lib/fleet-lane.ts
     - test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-12 from 2: the split silently lost 40 READY proposals, 18 of them judge remedies (verify-human-automate), and every re-approve repeats the refusal
   attempts: 0
   rationale: |
