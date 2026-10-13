@@ -1421,10 +1421,7 @@ export function compareRestArgs(owner: string, repo: string, base: string, head:
  *  conflict-evidence producer above ignores them. `sha` is the BLOB sha of the file at the head of
  *  the compare, which is what makes the digest a statement about CONTENT rather than about commit
  *  history: a rebase, a force-push of identical bytes, or a merge of the base branch all leave
- *  every blob sha unchanged.
- *
- *  W1-T9047: `patch` is the file's unified diff over the compare. The digest reads the PR's own
- *  hunks from it, and reads `sha` only when GitHub omits the patch (binary, or too large). */
+ *  every blob sha unchanged. W1-T9047: `patch` is read in preference to `sha`. */
 interface RestCompareFile {
   filename?: string;
   deletions?: number;
@@ -2006,11 +2003,8 @@ export interface ReviewReuseFacts {
   mergeBaseSha: string;
 }
 
-/** W1-T9047 — one file's patch with every hunk header reduced to a bare `@@`. A hunk header holds
- *  the line numbers the hunk starts at and, after its closing `@@`, the text of the enclosing
- *  function. Both move when main edits a distant part of the same file. Every body line is kept,
- *  because context, added and removed lines are the PR's own hunks. This is the idea behind
- *  `git patch-id`: ignore line numbers. */
+/** W1-T9047 — a patch with each hunk header cut to `@@`, dropping the line numbers and function
+ *  text that move when main edits elsewhere in the file (the idea behind `git patch-id`). */
 export function hunksWithoutLineNumbers(patch: string): string {
   return patch
     .split("\n")
@@ -2021,8 +2015,7 @@ export function hunksWithoutLineNumbers(patch: string): string {
 /** The own-diff digest, and the paths whose part of it came from a blob sha instead of a patch. */
 export interface OwnDiffDigestDetail {
   digest: string;
-  /** Files GitHub sent no `patch` for (binary, or a diff too large to inline), sorted. For these
-   *  files the digest uses the blob sha at head, which moves when main touches the same file. */
+  /** Files GitHub sent no `patch` for (binary, or too large), sorted; their blob sha is used. */
   blobFallbackPaths: string[];
 }
 
@@ -2035,12 +2028,9 @@ export interface OwnDiffDigestDetail {
  *  the digest survive the pushes that change nothing reviewable: a rebase, a force-push of
  *  identical content, and a merge of the base branch.
  *
- *  W1-T9047 — HUNKS, NOT BLOBS. The digest used to read each file's blob sha at head. A merge of
- *  main that edits a file the PR also edits changes that blob. The digest then read "changed" even
- *  though the PR's own hunks were identical, so every refreshed head sharing a file with main
- *  (sweep.ts, run-task.ts) got a full review. When GitHub omits a patch, that file's blob sha is
- *  used instead, and {@link OwnDiffDigestDetail.blobFallbackPaths} names the file. The two parts
- *  have different prefixes, so a blob sha can never equal a patch.
+ *  W1-T9047 — HUNKS, NOT BLOBS. A blob sha moves when main edits a file the PR shares, so every
+ *  refreshed head touching sweep.ts read "changed". With no patch, the blob sha stands in and
+ *  {@link OwnDiffDigestDetail.blobFallbackPaths} names the file.
  *
  *  SORTED BEFORE HASHING, because the compare endpoint does not promise an order and an unstable
  *  digest would read as "the diff changed" on every second pass — a false negative that costs a
@@ -2178,11 +2168,8 @@ export function tryFetchReviewReuseFacts(
   }
 }
 
-/** W1-T9047 — the default bound on {@link hydrateReviewReuseFacts}: none. The set it walks is
- *  already bounded by the open-PR listing, and only push-orphaned PRs enter it. A PR past a bound
- *  had no reuse facts, so a refreshed head beyond the 25th always got a full LLM review. One
- *  compare costs far less than that review. A caller that still passes a cap gets fleet heads
- *  (`run-*`) first, and every PR past the cap is reported to `onPastCap`. */
+/** W1-T9047 — no default bound: past 25, a refreshed head got a full LLM review for want of one
+ *  compare. The open-PR listing already bounds the orphaned set. */
 export const REVIEW_REUSE_HYDRATION_CAP = Number.POSITIVE_INFINITY;
 
 /** One orphaned PR the reuse hydrator asks about. `headRefName` orders fleet heads first under a cap. */
@@ -2192,8 +2179,7 @@ export interface ReviewReuseHydrationTarget {
   headRefName?: string;
 }
 
-/** Fleet heads (`run-*`) first, otherwise in input order. These are the heads a sweep refresh
- *  re-points at main, so they are the ones a cap must not leave without reuse facts. */
+/** Fleet heads (`run-*`), the ones a refresh re-points at main, first; otherwise input order. */
 export function reviewReuseHydrationOrder<T extends ReviewReuseHydrationTarget>(prs: readonly T[]): T[] {
   const fleet = (pr: T): number => (pr.headRefName?.startsWith("run-") === true ? 0 : 1);
   return prs.map((pr, index) => ({ pr, index }))
