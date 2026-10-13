@@ -122,6 +122,7 @@ test("implementPromptParts: rule_headlines sits DIRECTLY AFTER doctrine — the 
     "matched_learnings",
     "skills",
     "capability_context",
+    "admitted_outside_files",
     "task_body",
   ]);
   assert.equal(names[0], "doctrine");

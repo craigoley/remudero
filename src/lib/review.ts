@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
@@ -4729,6 +4730,13 @@ export const SCOPE_EXEMPT_GENERATED_ARTIFACTS: ReadonlySet<string> = new Set([
   // the remedy for a breach it caused — see the doc above for why deferring this one to a
   // follow-up task is unsafe rather than merely inconvenient.
   "scripts/source-size-baseline.json",
+  // W1-T8834: kept equal to sweep's registry by the build-prompt admission suite, without a cycle to sweep.
+  "scripts/comment-load-baseline.json",
+  "docs/docs-index.json",
+  "learnings/index.json",
+  "docs/cli-reference.md",
+  "MASTER-PLAN.md",
+  "packages/api-client/src/schema.d.ts",
 ]);
 
 /** INVERSE-SCOPE (design (ii)(b), the #839 class): the mirror of {@link "../run-task.js".scopeGuardOutOfScopeFiles},
@@ -4741,15 +4749,79 @@ function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles:
   return declaredFiles.filter((f) => !touched.has(f));
 }
 
-/** SCOPE-VIOLATION (W1-T401): the same diff → declared comparison {@link
- * "../run-task.js".scopeGuardOutOfScopeFiles} makes, run at REVIEW TIME where every PR is seen rather than at the one
- * push site that guard sits behind. ADVISORY, not a refusal. DELIBERATELY DIFFERENT ON ONE POINT: that guard treats an
- * absent declared scope as "everything is out of scope" and this does not. W1-T2650: also subtracts {@link
- * SCOPE_EXEMPT_GENERATED_ARTIFACTS}. */
-function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
+/** W1-T8834: the same name-filtered proof class commitWorkerEdits admits; grep proofs grant no admission. */
+export function workerProofTitles(criteria: readonly AcceptanceCriterion[]): string[] {
+  return criteria.flatMap((criterion) => {
+    const proof = parseWhitelistedProof(criterion.proof);
+    return proof?.kind === "test" && proof.nameFiltered ? [proof.label] : [];
+  });
+}
+
+/** Match commitWorkerEdits's declaration scanner without importing the CLI into src/lib. */
+function declaresAdmittedProofTitle(content: string, titles: readonly string[]): boolean {
+  const scanner = createScanner(true, undefined, content);
+  const braceDepths: number[] = [];
+  let lastEnd = -1;
+  const scanNext = (): SyntaxKind => {
+    let next = scanner.scan();
+    if (next === SyntaxKind.TemplateHead) braceDepths.push(0);
+    else if (next === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
+    else if (next === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        next = scanner.reScanTemplateToken(false);
+        if (next === SyntaxKind.TemplateTail) braceDepths.pop();
+      } else braceDepths[braceDepths.length - 1]--;
+    }
+    return next;
+  };
+  let token = scanNext();
+  while (token !== SyntaxKind.EndOfFile) {
+    const end = scanner.getTokenEnd();
+    if (end <= lastEnd) return false;
+    lastEnd = end;
+    if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
+    if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
+      token = scanNext();
+      while (token === SyntaxKind.DotToken) {
+        scanNext();
+        if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
+        token = scanNext();
+      }
+      if (token === SyntaxKind.OpenParenToken) {
+        token = scanNext();
+        if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
+            !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
+            scanNext() === SyntaxKind.CommaToken) return true;
+      }
+    }
+    token = scanNext();
+  }
+  return false;
+}
+
+function admittedProofTests(diff: string, criteria: readonly AcceptanceCriterion[]): Set<string> {
+  const titles = workerProofTitles(criteria);
+  const admitted = new Set<string>();
+  if (titles.length === 0) return admitted;
+  for (const block of diff.split(/^diff --git /m)) {
+    const path = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    if (!path || !/^--- \/dev\/null$/m.test(block) || !/^test\/.*\.[cm]?[jt]sx?$/.test(path) ||
+        path.split("/").includes("..") || /^new file mode 120000$/m.test(block)) continue;
+    const content = walkDiff(block).filter((line) => line.kind === "add").map((line) => line.text).join("\n");
+    if (declaresAdmittedProofTitle(content, titles)) admitted.add(path);
+  }
+  return admitted;
+}
+
+/** Scope widening is advisory; subtract the harness's registered artifacts and admitted new proof tests. */
+function scopeViolationFiles(
+  diffFiles: readonly string[], declaredFiles: readonly string[] | undefined,
+  admittedTests: ReadonlySet<string> = new Set(),
+): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f) &&
+    !admittedTests.has(f));
 }
 
 export interface ReviewScopeContext {
@@ -4945,6 +5017,7 @@ function unwiredAdvisoriesFor(
   taskDeclaredFiles: string[] | undefined,
   openTaskIds: ReadonlySet<string> | undefined,
   openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
+  criteria: readonly AcceptanceCriterion[],
 ): { advisories: UnwiredAdvisory[]; reachabilityScanned: number | null } {
   const out: UnwiredAdvisory[] = [];
   let reachabilityScanned: number | null = null;
@@ -4979,7 +5052,7 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles);
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, admittedProofTests(diff, criteria));
   if (violating.length > 0) {
     out.push({
       reasonCode: "scope_violation",
@@ -5251,6 +5324,7 @@ export function judgeReview(
     evidence.taskDeclaredFiles,
     evidence.openTaskIds,
     evidence.openTaskDeclaredFiles,
+    criteria,
   );
 
   const unmet = verdicts.filter((v) => !v.met);
