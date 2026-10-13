@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { ghShim } from "./helpers/gh-shim.js";
+import { rotateLedger } from "../src/lib/ledger.js";
 import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewDecisionDigest, type PromisedFollowUpObservation } from "../src/lib/review.js";
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
@@ -24,6 +25,20 @@ function fixture(t: { after: (fn: () => void) => void }) {
   writeFileSync(ledgerPath, line({ step: "dispatch.claim", task_id: taskId, ts: firstRun }));
   return { dir, ledgerPath, taskId, prUrl };
 }
+
+test("rotation retains dispatch claims used to bound a promise harvest", t => {
+  const args = fixture(t);
+  const initial = readFileSync(args.ledgerPath, "utf8") + line({ step: "run.start", task_id: taskId, ts: firstRun });
+  const noise = line({ step: "ci.polling", detail: "x".repeat(Buffer.byteLength(initial) * 4) });
+  writeFileSync(args.ledgerPath, initial + noise);
+  const rotated = rotateLedger(args.ledgerPath, { ceilingBytes: Buffer.byteLength(initial) * 2, smoothingWindowMs: 0 });
+  assert.equal(rotated.rotated, true);
+  const retained = readFileSync(args.ledgerPath, "utf8").trim().split("\n").map(raw => JSON.parse(raw));
+  assert.ok(retained.some(row => row.step === "run.start"), "the existing deciding step survives as a control");
+  assert.ok(retained.some(row => row.step === "dispatch.claim" && row.task_id === taskId && row.ts === firstRun),
+    "rotation must preserve the dispatch timestamp the harvest uses as its lower bound");
+  assert.ok(!retained.some(row => row.step === "ci.polling"), "non-deciding noise is still archived");
+});
 
 test("W1-T9001: a promise harvest reads only the rotations its PR can be in", async t => {
   const args = fixture(t), opened: string[] = [];
@@ -64,6 +79,25 @@ test("the PR creation time bounds a harvest when the live task start is unavaila
   assert.equal(reads, 1);
   assert.equal(result.state, "complete");
   assert.deepEqual(opened, ["ledger.ndjson", fresh]);
+});
+
+test("a harvest keeps a rotation cut exactly at its age bound without an older cursor", async t => {
+  for (const compressed of [false, true]) {
+    const args = fixture(t), opened: string[] = [];
+    writeFileSync(args.ledgerPath, "");
+    const boundary = `ledger.2026-10-12T10-00-00-000Z.ndjson${compressed ? ".gz" : ""}`;
+    writeFileSync(join(args.dir, boundary), compressed ? gzipSync(line(reportRow)) : line(reportRow));
+    const result = await recoverPromisedFollowUpReports(observation, { ...args,
+      prCreatedAt: "2026-10-12T12:00:00.000+02:00",
+      io: { readdirSync, existsSync, createReadStream: (path, options) => {
+        opened.push(basename(path)); return createReadStream(path, options);
+      } },
+    });
+    assert.deepEqual(opened, ["ledger.ndjson", boundary]);
+    assert.equal(result.state, "complete");
+    if (result.state === "complete") assert.deepEqual(result.harvested, reportRow.entries);
+    assert.equal(judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result }).state, "success");
+  }
 });
 
 test("a later live retry cannot hide a report archived after the PR was created", async t => {
@@ -134,6 +168,24 @@ test("an unavailable PR age never falls back to an unbounded harvest or proves a
     assert.equal(verdict.state, "pending", "the unreadable age proves neither satisfaction nor absence");
     assert.equal(verdict.criteria.at(-1)?.loadError, undefined);
   }
+});
+
+test("an aborted PR-age lookup releases the harvest before metadata settles", async t => {
+  const args = fixture(t), controller = new AbortController();
+  let releaseAge!: (timestamp: string) => void, startedAge!: () => void, completed = false;
+  const age = new Promise<string>(resolve => { releaseAge = resolve; });
+  const started = new Promise<void>(resolve => { startedAge = resolve; });
+  const pending = recoverPromisedFollowUpReports(observation, { ...args, signal: controller.signal,
+    fetchPrCreatedAt: () => { controller.abort(new DOMException("cancelled", "AbortError")); startedAge(); return age; },
+  }).then(result => { completed = true; return result; });
+  try {
+    await started;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(completed, true, "an aborted PR-age lookup must release the harvest without waiting for metadata");
+  } finally { releaseAge(firstRun); }
+  const abortedAge = await pending;
+  assert.equal(abortedAge.state, "unknown");
+  if (abortedAge.state === "unknown") assert.equal(abortedAge.cause, "promise-harvest-incomplete");
 });
 
 test("W1-T9001: an unfinished harvest is transient and never asks to repair the toolchain", async t => {

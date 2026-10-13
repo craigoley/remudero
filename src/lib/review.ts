@@ -4927,13 +4927,24 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
       if (!liveOnly) {
-        const prCreatedAt = args.prCreatedAt ?? await (args.fetchPrCreatedAt ?? (async prUrl => {
+        const fetchPrCreatedAt = args.fetchPrCreatedAt ?? (async (prUrl: string) => {
           const target = prLifecycleUrlTarget(prUrl);
           if (!target) throw new Error("promise harvest PR identity is unavailable");
           const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
           if (!row.created_at) throw new Error("promise harvest PR creation time is unavailable");
           return row.created_at;
-        }))(args.prUrl);
+        });
+        let prCreatedAt = args.prCreatedAt;
+        if (prCreatedAt === undefined) {
+          signal.throwIfAborted();
+          let abortLookup!: () => void;
+          const aborted = new Promise<never>((_resolve, reject) => {
+            abortLookup = () => reject(signal.reason);
+            signal.addEventListener("abort", abortLookup, { once: true });
+          });
+          try { prCreatedAt = await Promise.race([fetchPrCreatedAt(args.prUrl), aborted]); }
+          finally { signal.removeEventListener("abort", abortLookup); }
+        }
         // The earliest live start may be a retry whose original start has already rotated away.
         const bound = firstRun !== undefined && Date.parse(firstRun) < Date.parse(prCreatedAt) ? firstRun : prCreatedAt;
         afterRotation = rotationBeforeTime(names, bound);
