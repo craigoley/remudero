@@ -1029,15 +1029,32 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
  *  merged and been superseded by a fresh pass. Confirming the PR is STILL OPEN and not already
  *  queued to merge is the caller's job — a live GitHub read, never derivable from the ledger alone. */
 export function mostRecentApprovePr(
-  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown }[],
-): { branch: string; prUrl: string; prNumber?: number } | undefined {
-  let best: { branch: string; prUrl: string; prNumber?: number } | undefined;
+  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown; actor_pid?: unknown; host?: unknown }[],
+): ApprovePrCandidate | undefined {
+  let best: ApprovePrCandidate | undefined;
   for (const line of ledgerLines) {
     if (line.step !== "ratify.approved") continue;
     if (typeof line.branch !== "string" || typeof line.pr_url !== "string") continue;
-    best = { branch: line.branch, prUrl: line.pr_url, prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined };
+    best = {
+      branch: line.branch,
+      prUrl: line.pr_url,
+      prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined,
+      // W1-T9161: the process that wrote the row (appendLedger stamps both), so the join can tell an approve that is
+      // still deciding this PR from one that has exited. Absent on a row written before the stamp: no process named.
+      ...(typeof line.actor_pid === "number" ? { actorPid: line.actor_pid } : {}),
+      ...(typeof line.host === "string" ? { host: line.host } : {}),
+    };
   }
   return best;
+}
+
+/** W1-T9161: {@link mostRecentApprovePr}'s answer — the PR, and the approve process whose row named it. */
+export interface ApprovePrCandidate {
+  branch: string;
+  prUrl: string;
+  prNumber?: number;
+  actorPid?: number;
+  host?: string;
 }
 
 /** Parse a fragment's tasks WITHOUT requiring every `depends_on` to resolve inside it — {@link unmetOutsideDeps}
@@ -3048,8 +3065,12 @@ export interface RatifyGateway {
    *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
    *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
    *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
+   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch.
+   *  W1-T9161: `undefined` when another approve moved the branch first and git refused this push as a
+   *  non-fast-forward. Nothing was joined, and {@link approveProposal} files this proposal through
+   *  {@link createRatificationBranch} and {@link openPlanPr} instead, the pre-W1-T4437 shape. The join is never
+   *  retried. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string | undefined;
 }
 
 export type ApproveResult =
@@ -3208,29 +3229,28 @@ export function approveProposal(
   // of its OWN to resume, and never for a skill draft (which carries a file, not a plan fragment, and
   // opens its own `chore(skill):`-titled PR) — resuming/skill-writing above always wins.
   const joinable = resumeBranch === undefined && !skillFile ? gateway.findJoinablePr?.() : undefined;
-  const joined = joinable !== undefined && gateway.joinRatificationBranch !== undefined;
 
-  let branch: string;
+  let branch: string | undefined;
+  let joinedPr: typeof joinable;
   if (adopted) {
     branch = resumeBranch as string;
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
-  } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
-  } else if (skillFile && gateway.writeSkillFile) {
-    branch = gateway.writeSkillFile(classification.proposalId, skillFile);
-  } else {
-    branch = gateway.createRatificationBranch(payload);
+  } else if (joinable !== undefined && gateway.joinRatificationBranch !== undefined) {
+    // W1-T9161: `undefined` is a join that lost the push to another approve; it falls through to its own PR below.
+    branch = gateway.joinRatificationBranch(joinable.branch, payload, joinable.prUrl);
+    joinedPr = branch === undefined ? undefined : joinable;
   }
+  branch ??= skillFile && gateway.writeSkillFile ? gateway.writeSkillFile(classification.proposalId, skillFile) : gateway.createRatificationBranch(payload);
 
   let prUrl: string;
   let prNumber: number | undefined;
   if (adopted) {
     prUrl = adopted.prUrl;
     prNumber = adopted.prNumber;
-  } else if (joined) {
-    prUrl = joinable.prUrl;
-    prNumber = joinable.prNumber;
+  } else if (joinedPr) {
+    prUrl = joinedPr.prUrl;
+    prNumber = joinedPr.prNumber;
   } else {
     try {
       prUrl = gateway.openPlanPr(branch, classification.proposalId);
@@ -3248,7 +3268,7 @@ export function approveProposal(
     pr_number: prNumber,
     branch,
     ...(skillFile ? { skill_file: approvedSkillRelPath(skillFile.name) } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   });
   return {
     ok: true,
@@ -3258,7 +3278,7 @@ export function approveProposal(
     prNumber,
     payload,
     ...(adopted ? { adopted: true } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   };
 }
 
