@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
   plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940, W1-T5923, W1-T5705]
-  files: [.github/workflows/coverage-nightly.yml, .github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts, test/helpers/gh-shim.ts, test/helpers/gh-shim.test.ts]
+  files: [.github/workflows/coverage-nightly.yml, .github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts, test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts]
   status: queued
   priority: 2
   attempts: 0
