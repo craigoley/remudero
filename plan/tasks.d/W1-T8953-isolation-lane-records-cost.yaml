@@ -1,0 +1,25 @@
+- id: W1-T8953
+  title: "The isolation lane's worker calls record cost in only 88.7% of joined calls (102/115, 7-day window) — restore costUsd at the isolation ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `isolation`, field `cost`: 102/115 joined worker calls (88.7%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The isolation probe spawns via benchmarkNonDispatchSpawn('isolation') in src/lib/isolation.ts; src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gap: W1-T8947 (servedModel, same 102/115 count, likely the same missing rows)."
+  design: |
+    DIAGNOSE FIRST. Find which isolation-lane worker calls land without cost_usd. The identical 102/115 count as servedModel (W1-T8947) suggests the same 13 rows, e.g. failed/timed-out probes whose terminal row is written without the WorkerResult accounting. Coordinate with W1-T8947: fix the shared write path once rather than twice.
+    THEN EITHER restore: thread the worker's costUsd into the isolation-lane terminal row; OR, where the provider legitimately reports no cost (e.g. subscription billing with no notional cost), record that reason so the lane is excused honestly rather than counted missing.
+    Rule 19 merits test: one integration test must prove cost (or its named reason) survives the isolation spawn-to-ledger-to-evidence-reader path; isolated per-file proofs cannot establish that invariant.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes.
+  acceptance:
+    - claim: "a test drives the isolation probe's non-dispatch spawn path, including a failed or timed-out probe, and feeds the resulting ledger rows into the benchmark evidence reader: a reported costUsd is retained and counted observed, while a legitimately cost-less call retains a named reason and is excused rather than missing"
+      proof: "unit test: test/isolation-lane-cost.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-isolation-cost
+  plan_refs: ["§7B"]
+  files: [src/lib/isolation.ts, src/lib/benchmark-evidence.ts, test/isolation-lane-cost.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
