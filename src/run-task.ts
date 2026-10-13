@@ -42115,8 +42115,12 @@ function stepErrorContext(lines: readonly string[]): number[] {
 
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const pool = poolVerdictRetention();
-  for (const line of log.split("\n")) pool.push(line);
-  return pool.wrap(extractCiFailureRegionBase(log, tailLines));
+  const rule = ruleSuitesRetention();
+  for (const line of log.split("\n")) {
+    pool.push(line);
+    rule.push(line);
+  }
+  return rule.wrap(pool.wrap(extractCiFailureRegionBase(log, tailLines)));
 }
 
 function extractCiFailureRegionBase(log: string, tailLines: number): string {
@@ -42241,6 +42245,25 @@ export function poolVerdictRetention(): { push(line: string): void; wrap(region:
   };
 }
 
+/** W1-T7848: the rule-checks runner's closing line naming every suite it failed. Under node 24's spec reporter
+ *  the region is the first `failing tests:` block, far above it, so it rides along like the pool's verdicts. */
+const CI_RULE_SUITES_FAILED_LINE = /^rule-checks: failed suites: \S/;
+export const RETAINED_RULE_SUITES_HEADER = "--- rule-checks failed-suites line retained from this job ---";
+
+export function ruleSuitesRetention(): { push(line: string): void; wrap(region: string): string } {
+  let kept: string | undefined;
+  return {
+    push(line) {
+      const trimmed = line.replace(ACTIONS_LOG_TIMESTAMP, "").trim();
+      if (CI_RULE_SUITES_FAILED_LINE.test(trimmed)) kept = trimmed;
+    },
+    wrap(region) {
+      return kept === undefined || region.split("\n").some((l) => l.trim() === kept) ? region
+        : [RETAINED_RULE_SUITES_HEADER, kept, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -42257,6 +42280,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   let failingTestsState: "unseen" | "open" | "closed" = "unseen";
   const verdict = gateVerdictRetention();
   const pool = poolVerdictRetention();
+  const rule = ruleSuitesRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -42272,6 +42296,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
       verdict.push(line);
       pool.push(line);
+      rule.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -42307,7 +42332,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
             : tail.join("\n").trim();
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
-      return verdict.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n")));
+      return verdict.wrap(rule.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"))));
     },
   };
 }
