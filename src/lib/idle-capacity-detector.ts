@@ -230,7 +230,7 @@ export async function evaluateIdleCapacityDetectors(input: FleetFlowInput) {
   const memory: IdleMemory = store.detectors["idle-capacity"] ?? { history: [], emitted: [] };
   const history = [...memory.history];
   let summaryEndMs = memory.summaryEndMs ?? -Infinity;
-  const summaries = rows.filter((r) => r.step === "lane.idle_summary")
+  const summaries = rows.filter((r) => r.step === "lane.idle_summary" && r.partial !== true)
     .map((row) => ({ row, end: typeof row.window_end_ms === "number" ? row.window_end_ms : rowMs(row) }))
     .filter((s) => Number.isFinite(s.end) && s.end <= since && s.end > summaryEndMs)
     .sort((a, b) => a.end - b.end);

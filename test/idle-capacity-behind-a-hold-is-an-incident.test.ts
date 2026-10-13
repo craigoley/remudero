@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,10 +7,11 @@ import { gzipSync } from "node:zlib";
 
 import { type FleetFlowRow } from "../src/lib/fleet-flow-detectors.js";
 import { ALL_CAUSE_IDLE_POPULATION, evaluateIdleCapacityDetectors, idleCapacityDetector } from "../src/lib/idle-capacity-detector.js";
-import { aggregateIncidents, runSreLanePass, SRE_LANE_DETECTORS } from "../src/lib/sre-lane.js";
+import { aggregateIncidents, daemonSreLaneInput, runSreLanePass, SRE_LANE_DETECTORS } from "../src/lib/sre-lane.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { incidentSubject } from "../src/lib/sre-runbooks.js";
+import { idleLaneCauseForStep } from "../src/lib/idle-lane-accounting.js";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -59,15 +60,18 @@ test("W1-T8238: the recycle-drain replay fires and names its hold", async () => 
 
 test("W1-T8238: the operator-pause replay fires and names its setter", async () => {
   // 2026-10-11 11:46:29 - 12:29:30: a supervised serve-restoration window, the setter recorded as a session id.
-  const now = at("2026-10-11T12:29:00Z");
+  const now = at("2026-10-11T12:29:30Z");
   const hold = {
     reason: "maintenance: supervised serve restoration window (core only)",
     session_id: "operator-serve-restoration-20261011-supervised-v4", actor: "unknown",
   };
-  const rows = [changed("2026-10-11T11:46:29Z", { cause: "operator_pause", idle_slots: 2, dispatchable: 14, hold })];
-  const found = await run(stateWith("operator_pause", [4, 6, 5, 8, 7], now), rows, now);
+  const cause = idleLaneCauseForStep("daemon.pause", { detail: hold.reason });
+  assert.equal(cause, "restart", "the installed producer classifies serve restoration as restart");
+  const rows = [changed("2026-10-11T11:46:29Z", { cause, idle_slots: 2, dispatchable: 14, hold })];
+  const found = await run(stateWith("restart", [4, 6, 5, 8, 7], now), rows, now);
   assert.equal(found.length, 1);
-  assert.equal(found[0].name, "idle-capacity:operator_pause");
+  assert.equal(found[0].name, "idle-capacity:restart");
+  assert.equal(found[0].measured, 86.03);
   const [incident] = aggregateIncidents(found.map((row) => ({
     fingerprint: String(row.fingerprint), name: String(row.name), kind: String(row.kind),
     message: String(row.message), ts: now, instance: "core",
@@ -110,6 +114,38 @@ test("W1-T8238: the detector is registered in the SRE lane", () => {
   assert.ok(SRE_LANE_DETECTORS.some((d) => d.id === "idle-capacity"));
   const detector = idleCapacityDetector();
   assert.deepEqual([...detector.inputs], ["lane.idle_changed", "lane.idle_summary"]);
+});
+
+test("W1-T8238: producer rows without an instance name use the daemon's registry instance", async () => {
+  const now = at("2026-10-11T17:08:02Z");
+  const home = stateWith("recycle_drain", [3, 4, 4, 5, 3, 4], now);
+  const stateDir = join(home, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "fleet-flow-detectors.json"), readFileSync(join(home, "fleet-flow-detectors.json")));
+  const registryPath = join(home, "daemon-instances.yaml");
+  writeFileSync(registryPath, `instances:\n  core:\n    repo: craigoley/remudero\n    primary: true\n    state_dir: ${home}\n`);
+  const previous = process.env.RMD_INSTANCE_REGISTRY;
+  process.env.RMD_INSTANCE_REGISTRY = registryPath;
+  try {
+    const ledgerPath = join(stateDir, LEDGER_FILENAME);
+    writeFileSync(ledgerPath, JSON.stringify(changed("2026-10-11T16:16:08Z", {
+      cause: "recycle_drain", idle_slots: 2, dispatchable: 9,
+      hold: { reason: "fleet PAUSE hold: container recycle", pid: 4242 },
+    })) + "\n");
+    const deps = daemonSreLaneInput({
+      stateDir, root: home, ledgerPath, owner: "craigoley", repo: "remudero",
+      mergedLastDay: () => 0, log: () => {},
+    });
+    await runSreLanePass({ ...deps, clock: fixedClock(now) });
+    const [event] = deps.readEvents();
+    assert.equal(event?.name, "idle-capacity:recycle_drain");
+    assert.equal(event?.instance, "core");
+    assert.match(String(event?.message), /^instance=core hold=fleet_PAUSE_hold:_container_recycle setter=4242 /);
+    assert.ok(SRE_LANE_DETECTORS.some((detector) => detector.id === "idle-capacity"));
+  } finally {
+    if (previous === undefined) delete process.env.RMD_INSTANCE_REGISTRY;
+    else process.env.RMD_INSTANCE_REGISTRY = previous;
+  }
 });
 
 test("W1-T8238: a hold with no idle slot or no queued work measures nothing", async () => {
@@ -174,6 +210,26 @@ test("W1-T8238: all-cause summary history judges a first operator pause", async 
   const [event] = await srePass(state, rows, now);
   assert.equal(event?.population, ALL_CAUSE_IDLE_POPULATION);
   assert.equal(event?.bound, 4);
+});
+
+test("W1-T8238: shutdown fragments do not teach a full-window idle bound", async () => {
+  const now = at("2026-10-11T18:15:00Z");
+  const state = stateWith("recycle_drain", [], now);
+  const hold = changed("2026-10-11T18:09:00Z", {
+    cause: "recycle_drain", idle_slots: 1, dispatchable: 6,
+    hold: { reason: "fleet PAUSE hold: container recycle", pid: 4242 },
+  });
+  const fragments = summaries(now, "recycle_drain", [1, 1, 1, 1, 1]).map((row) => ({
+    ...row, window_start_ms: Number(row.window_end_ms) - 60_000, partial: true,
+  }));
+  assert.deepEqual(await run(state, [...fragments, hold], now), []);
+  const store = JSON.parse(readFileSync(join(state, "fleet-flow-detectors.json"), "utf8"));
+  assert.deepEqual(store.detectors["idle-capacity"].history, []);
+  // Full hourly windows with the same cost are valid evidence and do judge the live hold.
+  const [event] = await run(state, [...summaries(now, "recycle_drain", [1, 1, 1, 1, 1]), hold], now);
+  assert.equal(event?.population, "recycle_drain");
+  assert.equal(event?.bound, 1);
+  assert.equal(event?.measured, 6);
 });
 
 test("W1-T8238: malformed summaries never teach a healthy zero-cost window", async () => {

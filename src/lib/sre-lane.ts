@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
-import { instanceForStateRoot } from "./deployer.js";
+import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
@@ -390,13 +390,19 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 export function daemonSreLaneInput(
   input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
+  const instance = resolveSreLaneInstance({
+    stateRoot: dirname(input.stateDir),
+    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+  });
+  const name = instance.resolved ? instance.name : "unknown";
   return {
     stateDir: input.stateDir,
     root: input.root,
+    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
-        .map((row) => incidentEventFromLedgerRow(row, input.repo))
+        .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
     hasOpenTask: () => false,
     framesFor: () => [],
