@@ -1,0 +1,108 @@
+- id: W1-T9117
+  title: "THE DAEMON PROCESS RUNS FROM THE ADR 0006 BUNDLE WHEN IT IS CURRENT, SHADOW-VALIDATED AND WITH A TSX ROLLBACK — bin/rmd still execs tsx src/run-task.ts daemon because ADR 0006 decision 1 kept the daemon on tsx, and W1-T8777 removes the obstacle it named (self-URL workers), so the daemon is the last long-lived process paying tsx's load cost and transform cache on every boot"
+  repo: remudero
+  depends_on: [W1-T8777]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which entry the daemon process starts from; it spans the launcher, the bundle recipe, the entry resolver, the boot row, the superseding ADR and the new test
+  band_meaning: span
+  origin: "operator ruling 2026-10-13 (Craig), item (b): the daemon itself runs from the precompiled bundle, reversing ADR 0006's daemon carve-out, filed after W1-T8777 and shadow-validated; standing direction: fix at the root, no hard fixed thresholds, automated flow. ADR 0007 (merged #11349) left it as an open question"
+  plan_refs: [W1-T7729, W1-T8775, W1-T8776, W1-T8777, W1-T8778, W1-T9091, W1-T9106, W1-T5724]
+  files:
+    - bin/rmd
+    - scripts/build-child-entries.mjs
+    - src/run-task.ts
+    - docs/adr/0006-precompiled-daemon-child-entries.md
+    - docs/adr/0008-the-daemon-runs-from-the-bundle.md
+    - docs/adr/README.md
+    - docs/docs-index.json
+    - test/the-daemon-runs-from-the-bundle.test.ts
+  status: queued
+  priority: 1.5  # operator ruling 2026-10-13 (b)
+  attempts: 0
+  rationale: |
+    THE CARVE-OUT. ADR 0006 decision 1: "The daemon and serve parents stay on tsx: they own the read plane, the read
+    models and the slow lane." Decision 4 names why: a worker started from a module's own URL resolves to its .ts
+    source, and a bundled process has no tsx loader. W1-T8777 (A BUNDLED PARENT STARTS ITS WORKERS FROM BUNDLED
+    WORKER ENTRIES) removes exactly that obstacle. ADR 0007's open questions: "Running the daemon itself from the
+    bundle would save tsx's overhead (284 against 173–182 MiB in ADR 0006) and the cold transform at each boot ...
+    W1-T8777 removes the obstacle it named. Not filed here."
+    READ on origin/main 9ea9dd671 (symbols, not lines):
+      - `bin/rmd` ends in `exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"`, and deploy/entrypoint.sh
+        runs the daemon through the live tree's `bin/rmd`. So every daemon boot loads the tsx loader and transforms
+        through its path-keyed cache.
+      - `CHILD_ENTRIES` (scripts/build-child-entries.mjs) declares only `run-task`; `childEntryIsCurrent` is the
+        current-or-fallback check (ADR 0006 decision 5).
+    MEASURED ELSEWHERE, TO BE RE-MEASURED HERE: ADR 0006 (2026-10-10) puts tsx cold at 519 MB peak with 474 cache
+    writes, tsx warm at 284 MB, the esbuild bundle at 173-182 MB, and the fleet's path-keyed cache churn at about
+    700 MB/h (mostly children in fresh worktrees, which W1-T8776..W1-T8778 address). ADR 0007's census of core's
+    `daemon.alive` rows (2026-10-11 22:56Z to 10-13 11:45Z): daemon RSS p50 1,933 MiB, p90 2,539, and a boot peak
+    VmHWM of 2,806 MiB four minutes after the 11:43Z boot. How much of that is tsx is not measured; this task's shadow
+    measures it before anything switches.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 344 open origin heads for "daemon carve-out", "daemon
+    itself ... bundle" and "daemon runs from the". Control: main reads 3 shards for the last pattern (none about the
+    daemon's own entry); no head reads more. W1-T9091 narrows the daemon entry but leaves it on tsx; W1-T8776..W1-T8778
+    switch children, never the daemon. No open head adds docs/adr/0008.
+  design: |
+    No fixed threshold. The switch is a mode with evidence-driven promotion and an automatic fallback.
+    1. THE DAEMON ENTRY IS A BUNDLE ENTRY. `CHILD_ENTRIES` gains the daemon's entry: `src/run-task.ts` with the
+       `daemon` verb today, or `src/daemon-main.ts` once W1-T9091 lands (whichever `bin/rmd daemon` would run). The
+       recipe and keying are ADR 0006's, unchanged.
+    2. THE LAUNCHER CHOOSES, AND FALLS BACK BY ITSELF. For the `daemon` verb, `bin/rmd` runs
+       `node scripts/build-child-entries.mjs --print-argv daemon` under plain node (no tsx; `childEntryIsCurrent` is
+       already plain JS there, about 180-330 ms) and `exec`s the argv it prints, so the daemon keeps the launcher's
+       pid. `daemonEntryArgv(root)` returns the bundle under plain `node` when `childEntryIsCurrent` holds for the
+       daemon's own tree AND the mode allows it, else today's tsx line. Any failure of the resolver itself prints
+       today's tsx line. Every worker the bundled daemon
+       starts must resolve to a W1-T8777 worker bundle; a worker with no current bundle makes the whole daemon take
+       tsx for that boot (never a mixed process with an unloadable worker).
+    3. MODE `daemon.entry.mode`: off | shadow | on | auto.
+       - shadow: the daemon stays on tsx. At each boot it spawns the bundled entry in a probe mode that loads the
+         module graph, starts and stops each worker entry once, and exits. It ledgers `daemon.entry.shadow`
+         {load_ms, peak_rss_mib, worker_entries, entry_kind}. The tsx boot ledgers the same fields for itself from
+         the same boot (`daemon.boot` gains `entry_kind`, `load_ms`, `vm_hwm_mib` at first tick).
+       - on: the bundle when current, tsx otherwise; each boot says which and why (`daemon.entry.selected`
+         {entry_kind, reason: current | no-manifest | source-changed | worker-not-bundled | mode}).
+       - auto: on after one full boot cycle in which the shadow probe loaded every worker entry and its measured
+         peak and load time were no worse than the same boot's tsx figures; the window is the boot cycle, not a count.
+    4. ROLLBACK. A bundled boot that exits before its first `daemon.tick_phases` row (crash, missing module,
+       heap-limit exit) writes `state/daemon-entry-demoted.json` with the boot's sha and reason before it dies where
+       it can, and the launcher reads it: the next boot takes tsx and ledgers `daemon.entry.demoted`. The marker is
+       cleared only by a later shadow cycle that passes on a newer source hash. `daemon.entry.mode: off` (or the
+       marker) restores today's launcher exactly; the bundle never has to be deleted to roll back.
+    5. THE ADR. A new ADR (next free number at build time; 0008 when filed) records the supersession: ADR 0006
+       decision 1's daemon carve-out is superseded, serve stays on tsx until its own task. ADR 0006 is marked
+       "Superseded in part by 0008 (decision 1, the daemon)" with a forward link, never rewritten
+       (docs/adr/README.md's lifecycle), and the README index and docs/docs-index.json gain the new record.
+    Tests go in test/the-daemon-runs-from-the-bundle.test.ts, with `test(` titles verbatim as in the proofs below.
+    Drive `daemonEntryArgv` with a temp tree and a fixture manifest; drive the launcher choice through the resolver,
+    not by spawning a daemon.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-daemon-runs-from-the-bundle.test.ts"
+    - claim: "with a current bundle and mode on, the daemon argv is the bundle under plain node"
+      proof: 'grep: test("W1-T9117: a current bundle under mode on starts the daemon from the bundle" in test/the-daemon-runs-from-the-bundle.test.ts'
+    - claim: "a stale manifest, a missing worker bundle or mode off gives today's tsx argv and names the reason"
+      proof: 'grep: test("W1-T9117: any doubt starts the daemon on tsx and says why" in test/the-daemon-runs-from-the-bundle.test.ts'
+    - claim: "a demotion marker from a failed bundled boot makes the next boot take tsx"
+      proof: 'grep: test("W1-T9117: a failed bundled boot demotes the next boot to tsx" in test/the-daemon-runs-from-the-bundle.test.ts'
+    - claim: "auto promotes only after a shadow boot cycle no worse than tsx on the same boot"
+      proof: 'grep: test("W1-T9117: auto promotes on a shadow cycle no worse than tsx" in test/the-daemon-runs-from-the-bundle.test.ts'
+    - claim: "the bundle script resolves the daemon argv for the launcher"
+      proof: "grep: daemonEntryArgv( in scripts/build-child-entries.mjs"
+    - claim: "ADR 0006's daemon carve-out is superseded by a new ADR, not rewritten"
+      proof: "grep: Superseded in part by in docs/adr/0006-precompiled-daemon-child-entries.md"
+  falsifier: |
+    Ignore the worker check and the stale-worker test gets a bundle argv for a daemon whose read-model worker has no
+    bundle. Skip the marker and the demotion test boots the bundle again after a failed boot. Promote on a count of
+    boots and the auto test promotes a cycle whose probe peaked above the tsx boot.
+  note: |
+    SHADOW-VALIDATE, BEFORE AND AFTER, from the core ledger union and host, with no numeric pass mark: boot time
+    (`daemon.boot` to first `daemon.tick_phases`), daemon RSS and VmHWM (`daemon.alive`, first 10 minutes and
+    10-30 minutes of uptime, as ADR 0007 split them), and tsx cache churn (bytes written under the daemon's tsx cache
+    directory per hour, read by `du` and mtime on the host, against ADR 0006's ~700 MB/h fleet figure). Healthy shape:
+    the bundled boot is no slower and no larger than the tsx boot of the same sha, and the daemon writes no tsx cache.
+    ORDER: after W1-T8777 (worker bundles). W1-T8777's priority raise and W1-T9091 are in PR #11347, OPEN when this
+    record was filed; W1-T8777 itself is on origin/main.

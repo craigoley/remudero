@@ -1,0 +1,103 @@
+- id: W1-T9114
+  title: "REVIEWS AND DETACHED SWEEP ACTIONS RUN AS RUN CHILDREN UNDER ADR 0007'S CONTRACT, AND A BOOTING DAEMON ADOPTS THEM INSTEAD OF A RESTART DRAINING THEM — once W1-T9086 lets build runs outlive a restart, drainBeforeRestart still waits for every in-process review and detached action (fix dispatch, retro, auto-triage, ci-learning, benchmark cohort), and review drain alone idled 186 lane-min on 2026-10-12/13"
+  repo: remudero
+  depends_on: [W1-T9086]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the detached work a restart drains today runs as adoptable run children; it spans the drain and boot path (daemon.ts), the detached registries (sweep.ts), the contract (run-child.ts), the wiring (run-task.ts) and the new test
+  band_meaning: span
+  origin: "operator ruling 2026-10-13 (Craig), item (a): reviews and other detached actions move to child processes under ADR 0007's contract, filed after W1-T9086; standing direction: fix at the root, no hard fixed thresholds, automated flow. ADR 0007 (docs/adr/0007-build-runs-outlive-the-daemon.md, merged #11349) left it as an open question"
+  plan_refs: [W1-T9070, W1-T9080, W1-T9085, W1-T9086, W1-T9087, W1-T9089, W1-T2379, W1-T2744, W1-T4053, W1-T5723, W1-T5932, W1-T100, W1-T147]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/lib/run-child.ts
+    - src/run-task.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
+  status: queued
+  priority: 1.5  # operator ruling 2026-10-13 (a); review drain is the largest restart-idle phase W1-T9086 leaves behind
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-12 12:00Z to 10-13 11:45Z (~/Remudero-notes/flow-remeasure-2026-10-13b/idle-out.txt): restart
+    idle 1,008 lane-min, 23.6% of capacity. By phase: boot_gate 321, review_drain 186, latched_holdout 176,
+    latched_exit_lag 118, post_gate 105, recycle_drain 59. W1-T9086 removes the latch and holdout phases for build
+    runs. Review drain is what remains: in single boots it reached 28-30 lane-min (17:23Z, 23:03Z, 04:16Z windows).
+    READ on origin/main 9ea9dd671 (symbols, not lines):
+      - `drainBeforeRestart` (src/lib/daemon.ts) waits on two in-process registries before every freshness and memory
+        exit: `drainDetachedSweepActions` and `drainInFlightReviews` (src/lib/sweep.ts), each bounded by
+        `sweepWallClockBoundMs`. `drainInFlightReviews` also sets `lightPassRefillsClosed`, so a freed lane is not
+        refilled while it waits.
+      - Reviews: `trackInFlightReview(runReview(job))` in the light pass's review admission. A review lives in the
+        daemon's heap, so an exit either waits for it or kills it mid-judgement (PR 6993, 2026-09-24).
+      - Detached actions: `detachSweepAction` callers by `DetachedActionKind`: `fix-dispatch` (four sites in
+        src/lib/sweep.ts, including W1-T5932's), `retro` and `auto-triage` and `benchmark-cohort` and
+        `measurement-cadence` (src/lib/daemon.ts), and `ci-learning`. `measurement-cadence` already runs out of
+        process (W1-T5723); its in-process part is the settle poll.
+      - ADR 0007 A.6 says the daemon "exits once its in-process work has drained (reviews and detached sweep
+        actions)", and its open questions name this: "The same contract could host them. Not filed here."
+    OVERLAP: lint-plan reports W1-T100 (route blocked_ci to the ci-log fix path) and W1-T147 (the overnight chaos
+    drill) as sharing src/lib/sweep.ts, src/lib/daemon.ts and src/run-task.ts. That is the whole-file surface only:
+    W1-T100 routes a CI failure class, W1-T147 injects faults and checks recovery rows; this task changes where
+    detached work runs and how a restart treats it.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 344 open origin heads for detachSweepAction,
+    drainInFlightReviews, "review drain", "reviews and fix actions as children" and "review child". Control: main
+    reads 7 shards for detachSweepAction; no head reads more than main. W1-T9086 adopts build runs only; W1-T9089
+    retires the build-run latch, not the drain.
+  design: |
+    No new bound and no fixed list. The contract is W1-T9070's; this task adds kinds to it.
+    1. INVENTORY FIRST, AS DATA. Enumerate every in-process unit a restart drains today (the `DetachedActionKind`
+       union plus the review registry) into one table in src/lib/run-child.ts, read through
+       `detachedWorkPlacement(kind, evidence)`, which `drainBeforeRestart` (src/lib/daemon.ts) calls to decide what it
+       still waits for. The table holds kind, what it holds in memory, whether
+       it can resume from files, and its measured drain cost. The cost comes from the ledger, not a guess:
+       `daemon.freshness_drain.completed` and `daemon.memory_drain.completed` already carry `in_flight_reviews`,
+       `detached_sweep_actions` and `duration_ms`, and `daemon.detached_action_released` / `_abandoned` carry
+       `action_kind` and `age_ms`. A kind moves to a child only when its measured drain time is non-zero over the
+       window the task measures; a kind that never held a drain stays in process and the table says why. Expected from
+       the 10-12/13 window: reviews and fix-dispatch move; retro already spawns its own subprocess
+       (`runAutomatedRetroSubprocess`, W1-T2870) and only its settle moves.
+    2. THE SAME CONTRACT. A moved kind runs as a run child: a run directory with `spec.json` (kind, the serializable
+       inputs the in-process call takes today, the PR number and head sha for a review), `status.json` written by the
+       child, and the identity triple (pid, start ticks, container generation). The child's reservation opens on its
+       own root (W1-T9080), so the memory governor counts it. Results map back through the closed failure union; an
+       unknown failure settles as lost, never as success.
+    3. ADOPTION ON BOOT, THE SAME AS RUNS. The boot path's `adoptRunChildren` (W1-T9086) classifies these kinds with
+       the same four outcomes (live, terminal, lost, dead). A live review child keeps its review slot and counts in
+       the review width; a terminal one posts nothing twice (idempotent by run id and head sha); a lost one releases
+       the slot and the next light pass re-admits the PR.
+    4. A RESTART WAITS FOR NOTHING IT DOES NOT OWN. Under the mode that moved them, `drainBeforeRestart` waits only
+       for kinds still in process, `lightPassRefillsClosed` is not set for child reviews, and
+       `daemon.freshness_drain.completed` gains `detached_children_left_running` by kind.
+    5. BEHIND THE EXISTING SWITCH. Moved kinds follow `sweep.runChild.mode` (W1-T9082/W1-T9087): `shadow` spawns a
+       probe that round-trips the contract for one review and records its cost; `auto` promotes on the same
+       boot-cycle evidence W1-T9087 uses, and demotes on a lost or misidentified child.
+    Tests go in test/reviews-and-detached-actions-run-as-run-children.test.ts, with `test(` titles verbatim as in the
+    proofs below, over a temp state dir, a fake spawn and a fake clock.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/reviews-and-detached-actions-run-as-run-children.test.ts"
+    - claim: "the inventory classifies every DetachedActionKind and the review registry, and a kind moves only on a measured drain cost"
+      proof: 'grep: test("W1-T9114: the inventory moves a kind only on a measured drain cost" in test/reviews-and-detached-actions-run-as-run-children.test.ts'
+    - claim: "a booting daemon adopts a live review child and it keeps its review slot"
+      proof: 'grep: test("W1-T9114: a boot adopts a live review child" in test/reviews-and-detached-actions-run-as-run-children.test.ts'
+    - claim: "a terminal review child settles once across two boots and posts no second verdict"
+      proof: 'grep: test("W1-T9114: a terminal review child settles once" in test/reviews-and-detached-actions-run-as-run-children.test.ts'
+    - claim: "a freshness restart under the moved mode does not wait for child reviews or child fix dispatches"
+      proof: 'grep: test("W1-T9114: a restart does not drain child reviews or fix dispatches" in test/reviews-and-detached-actions-run-as-run-children.test.ts'
+    - claim: "the restart drain asks the inventory where each kind runs"
+      proof: "grep: detachedWorkPlacement( in src/lib/daemon.ts"
+    - claim: "the drain row names the children it left running"
+      proof: "grep: detached_children_left_running in src/lib/daemon.ts"
+  falsifier: |
+    Keep `drainInFlightReviews` awaiting child reviews and the restart test's exit waits for the fake child. Skip
+    adoption for review kinds and the boot test finds the slot freed and the PR re-admitted while the child still
+    runs. Settle a terminal child on each boot and the second boot posts a second verdict.
+  note: |
+    EFFECT, measured after the merge sha deploys and the mode promotes, from the core ledger union, with no numeric
+    pass mark: `review_drain` lane-min in the flow remeasure (healthy shape: near zero once reviews are children);
+    `daemon.freshness_drain.completed` `in_flight_reviews` (healthy shape: zero under the promoted mode);
+    `run_child.lost` rows by kind (healthy shape: none that were not there before).
+    ORDER: after W1-T9086 (adoption exists for build runs). W1-T9070..W1-T9087 are filed in PR #11347, OPEN when this
+    record was filed; the ids are reserved, so this dependency holds once that filing merges.
