@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { systemClock } from "../src/lib/clock.js";
 import {
-  applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath,
-  readGhReadCadenceStampMs, stampGhRead, withGhTransportFloorMode,
+  applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath, GhReadCadenceRefusal,
+  readGhReadCadenceStampMs, resetGhCadenceAdvisoryForTest, stampGhRead, withGhTransportFloorMode,
   type GhReadCadenceDeps,
 } from "../src/lib/github-transport.js";
 import { HANDLERS } from "../src/run-task.js";
@@ -64,6 +64,7 @@ test("W1-T7957: a wait-mode read waits out the shared floor before reading", asy
 });
 
 async function runHandler(t: TestContext, advisory: boolean) {
+  resetGhCadenceAdvisoryForTest();
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-dispatch-"));
   const keys = ["RMD_GH_CACHE_HOME", "RMD_GH_COOLDOWN_S", "RMD_GH_TRANSPORT_FLOOR"] as const;
   const saved = keys.map((key) => process.env[key]);
@@ -136,10 +137,14 @@ test("W1-T7957: the transport window reads RMD_GH_COOLDOWN_S like the hook", asy
     ["0\n", 180, 60_000], ["240\r\n", 180, 60_000],
     ["0", 0, 0], ["000", 0, 0],
   ] as const) {
-    const f = fixture(t, raw);
-    const decision = applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
-    assert.equal(decision.windowS, windowS, `override: ${raw}`);
-    assert.deepEqual(f.events, [...(waitMs > 0 ? [`sleep:${waitMs}`] : []), `stamp:${1_000_000 + waitMs}`]);
+    for (const asyncRead of [false, true]) {
+      const f = fixture(t, raw);
+      const decision = asyncRead
+        ? await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], f.deps)
+        : applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
+      assert.equal(decision.windowS, windowS, `override: ${raw}, async: ${asyncRead}`);
+      assert.deepEqual(f.events, [...(waitMs > 0 ? [`sleep:${waitMs}`] : []), `stamp:${1_000_000 + waitMs}`]);
+    }
   }
 });
 
@@ -147,4 +152,11 @@ test("W1-T7957: an inherited advisory floor does not wait", async (t) => {
   const result = await runHandler(t, true);
   assert.deepEqual(result.events, ["stamp", "read:0"]);
   assert.ok(result.warnings.some((line) => line.includes("advisory, W1-T3297")));
+  const f = fixture(t);
+  f.env.RMD_GH_TRANSPORT_FLOOR = "enforce";
+  await withGhTransportFloorMode("wait", () => {
+    assert.throws(() => applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps), GhReadCadenceRefusal);
+  }, f.env);
+  assert.deepEqual(f.events, []);
+  assert.equal(f.env.RMD_GH_TRANSPORT_FLOOR, "enforce");
 });
