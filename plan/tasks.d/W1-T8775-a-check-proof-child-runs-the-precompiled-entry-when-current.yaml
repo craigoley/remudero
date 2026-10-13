@@ -28,15 +28,27 @@
     EFFECT NEEDS W1-T8776: a fresh worktree has no dist/ (ADR 0006, Consequences), so until the shared store exists the
     bundle is current only in a tree that ran the build. This task is still correct alone (the fallback is today's
     behaviour), and it creates the argv helper the store plugs into.
+    PRE-ACTIVATION FALSIFIER 2026-10-13: unchanged a6d61e0c source on existing Azure built an owned 337-byte fixture.
+    Changing only its same-size bundle payload changed plain-node output while childEntryIsCurrent still returned
+    source-hash-match. An owned ../escaped.mjs manifest path was also accepted (not executed). The complete native
+    receipt flow-integrity-oracle-1791851941651 records both. A source hash is not payload integrity: harden this guard
+    BEFORE introducing its first execution consumer, not in a later cache task. No live payload was changed.
   design: |
     1. Add `{ name: "check-proof-main", source: "src/check-proof-main.ts" }` to CHILD_ENTRIES (ADR 0006 decision 1: the
-       check-proof entry joins CHILD_ENTRIES in the PR that switches to it). Bump nothing else in the recipe.
+       check-proof entry joins CHILD_ENTRIES in the PR that switches to it). Bump the manifest/recipe contract for
+       per-entry SHA-256 payload digests. Emit the manifest last, after checking the same source hash before/after build.
+       childEntryIsCurrent validates the supported schema/recipe, declared entry identity/source, literal <name>.mjs
+       filename, constrained canonical regular-file path (no traversal/symlink/special file), size and actual payload
+       digest before accepting it. Malformed metadata, unreadable bytes, unsupported old manifest, or corruption
+       returns not-current with a bounded reason, never a success-shaped value or uncaught exception. Do not treat a
+       digest as authenticity against an actor who can replace both payload and manifest; the store is instance-owned.
     2. New src/lib/child-entry-argv.ts: `childEntryArgv(root, name, sourceEntry, args)` returns
        `{ argv, kind: "bundle" | "tsx", reason }`. When childEntryIsCurrent(root, name) holds, argv is
        `[<root>/dist/child-entries/<name>.mjs, ...args]` with NO `--import tsx`; otherwise
        `["--import", "tsx", sourceEntry, ...args]`, with the reason childEntryIsCurrent gave (no-manifest,
        entry-not-built, bundle-missing, source-changed). Import childEntryIsCurrent from scripts/build-child-entries.mjs,
        or move it into this module with the script re-exporting it; never fork a second hash function.
+       Revalidation failure, including payload corruption or path escape, always uses the existing tsx fallback.
     3. plan-pr-emitter builds each check-proof child through childEntryArgv for the tree it spawns into, with the
        entry W1-T7728 creates (`check-proof-main`, src/check-proof-main.ts) and the arguments its checkProofChildArgv
        gives, so W1-T7728's module stays untouched here. pr-open.ts's launcher path and
@@ -52,6 +64,12 @@
       proof: 'grep: test("W1-T8775: the child-entry build declares the check-proof entry" in test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts'
     - claim: "the plan-PR preflight spawns its check-proof children through the shared child-entry helper"
       proof: "grep: childEntryArgv( in src/lib/plan-pr-emitter.ts"
+    - claim: "a same-size changed bundle payload never executes through the bundle consumer"
+      proof: 'grep: test("W1-T8775: a corrupted bundle payload falls back before execution" in test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts'
+    - claim: "malformed or escaped manifest paths are refused as not current without executing or blocking on special files"
+      proof: 'grep: test("W1-T8775: invalid bundle metadata and paths fall back safely" in test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts'
   falsifier: |
     Return the bundle argv without consulting childEntryIsCurrent and the stale-source case runs the bundle: the second
     test fails. Keep `--import tsx` in front of the bundle path and the first test's no-tsx assertion fails.
+    Remove payload digest validation: the same-size mutation becomes accepted and the corruption case fails.
+    Remove path/shape validation: traversal, symbolic/special-file and malformed-entry cases fail before any spawn.
