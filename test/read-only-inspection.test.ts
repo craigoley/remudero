@@ -91,8 +91,8 @@ test("read-only inspection rejects unsupported options, relative targets and mis
 test("read-only inspection reports an exceptional reader failure without its private message", () => {
   const f = fixture();
   try {
-    assert.equal(readOnlyInspectionCommand(["--state-dir", f.state, "skill", "effectiveness", "fixture"], {
-      readLedger: () => { throw new Error("private-reader-detail"); },
-    }), 1);
+    assert.equal(readOnlyInspectionCommand(["--state-dir", f.state, "skill", "effectiveness", "fixture"],
+      () => { throw new Error("private-reader-detail"); },
+    ), 1);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });

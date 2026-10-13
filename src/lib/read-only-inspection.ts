@@ -12,9 +12,9 @@ export const READ_ONLY_INSPECTION_USAGE =
 /** A closed list, not a generic dispatch escape that could admit a future write verb. */
 export const READ_ONLY_INSPECTION_VERBS = ["ledger-grep", "skill effectiveness"] as const;
 
-export function readOnlyInspectionCommand(rest: string[], deps: {
-  readLedger?: typeof readLedgerUnionRecordsSync;
-} = {}): number {
+export function readOnlyInspectionCommand(rest: string[],
+  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): number {
   let stateDir: string | undefined;
   let args: string[];
   try {
@@ -40,7 +40,7 @@ export function readOnlyInspectionCommand(rest: string[], deps: {
   }
   if (args[0] === "skill" && args[1] === "effectiveness" && args.length === 3) {
     try {
-      const union = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+      const union = readLedger(stateDir, {
         step: ["skills.selection", "verdict"], requireArchives: true, refuseIncomplete: true,
       });
       if (!union.ok) { console.error("rmd inspect: incomplete ledger union; no effectiveness claim"); return 1; }
