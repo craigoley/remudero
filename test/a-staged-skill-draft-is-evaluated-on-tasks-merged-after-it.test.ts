@@ -35,6 +35,15 @@ import { writeLedger } from "./helpers/ledger-fixture.js";
 /** Loaded inside each test, so on a tree without the verb each proof FAILS rather than the file failing to load. */
 const command = (): Promise<typeof import("../src/lib/skill-eval-command.js")> => import("../src/lib/skill-eval-command.js");
 
+test("a cancelled eval command preserves the staged proposal bytes and never records partial judgement", async () => {
+  const { skillEvalCommand } = await command(), fx = fixture();
+  const before = readFileSync(fx.registryPath);
+  fx.deps.control = { finishByMs: 1000, shutdownReserveMs: 100 };
+  assert.equal(await skillEvalCommand([PROPOSAL_ID, "--confirm-spend"], fx.deps), 2);
+  assert.equal(fx.dispatched.length, 0);assert.deepEqual(readFileSync(fx.registryPath), before);
+  assert.ok(fx.printed.some(line => line.includes("capacity retained, whole-tree termination unverified")));
+});
+
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 const iso = (ms: number): string => new Date(ms).toISOString();

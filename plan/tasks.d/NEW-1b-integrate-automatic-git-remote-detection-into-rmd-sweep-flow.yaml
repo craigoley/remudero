@@ -1,0 +1,22 @@
+- id: NEW-1b
+  title: Integrate automatic git remote detection into rmd sweep flow
+  repo: remudero
+  depends_on:
+    - NEW-1a
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
+  
+    spans runner and sweep concerns
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/sweep.ts
+    - test/rmd-sweep-runs-the-pr-terminal-rung.test.ts
+  acceptance:
+    - claim: rmd sweep succeeds without a configured git remote
+      proof: "unit test: rmd sweep succeeds when remote.origin.url is unset"
+  origin: architect

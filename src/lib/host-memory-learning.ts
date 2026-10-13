@@ -34,6 +34,7 @@ import {
   DEFAULT_ESTIMATE_MIB,
   DEFAULT_WALK_LIMITS,
   WORKER_CLASSES,
+  adoptMemoryReservation,
   defaultInstance,
   defaultListProcesses,
   defaultMemoryLedgerLocation,
@@ -42,6 +43,8 @@ import {
   type EstimateSource,
   type HostMemoryLedgerOptions,
   type MemoryReservationHandle,
+  type ContainerGeneration,
+  type ProcessIdentity,
   type ProcessListing,
   type WorkerClass,
 } from "./host-memory-ledger.js";
@@ -68,6 +71,7 @@ export interface PeakSample {
   workerClass: WorkerClass;
   peakMib: number;
   at: number;
+  entryKind?: "bundle" | "tsx";
 }
 
 export interface LearnedEstimate {
@@ -101,6 +105,8 @@ export function learnEstimate(
 // ── classification of non-dispatch lanes (pure) ─────────────────────────────────────────────────────────────────────
 
 const LANE_CLASS: Readonly<Record<string, WorkerClass>> = {
+  implement: "implement",
+  fix: "fix",
   review: "review",
   "sweep-fix": "fix",
   "alert-fix": "fix",
@@ -134,6 +140,7 @@ export const PEAK_COMPACT_BYTES = 1024 * 1024;
 export const ESTIMATE_CACHE_MS = 60_000;
 
 export interface PeakStoreOptions {
+  entryKind?: "bundle" | "tsx";
   location?: () => { dir: string; scope?: "host" | "local" };
   root?: string;
   instance?: (root: string) => { name: string };
@@ -192,10 +199,11 @@ function parseSamples(text: string): PeakSample[] {
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown };
+      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; entry_kind?: unknown };
       const at = typeof row.at === "string" ? Date.parse(row.at) : NaN;
       if (!WORKER_CLASSES.includes(row.c as WorkerClass) || typeof row.p !== "number" || !Number.isFinite(at)) continue;
-      out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at });
+      out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at,
+        ...(row.entry_kind === "bundle" || row.entry_kind === "tsx" ? { entryKind: row.entry_kind } : {}) });
     } catch (error) {
       void error; // A torn line: one sample among many.
     }
@@ -213,7 +221,8 @@ export function compactSamples(samples: readonly PeakSample[], keep: number): Pe
 }
 
 const lineOf = (s: PeakSample): string =>
-  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso() })}\n`;
+  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso(),
+    ...(s.entryKind ? { entry_kind: s.entryKind } : {}) })}\n`;
 
 /** Record one measured tree peak for this instance. NEVER throws. */
 export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}): boolean {
@@ -225,7 +234,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
       mkdirSync(storeDir(opts), { recursive: true, mode: 0o700 });
       appendFileSync(target, line, { mode: 0o600 });
     });
-    append(path, lineOf({ workerClass, peakMib, at }));
+    append(path, lineOf({ workerClass, peakMib, at, ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) }));
     cachedEstimates.delete(workerClass);
     const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
     if (size > PEAK_COMPACT_BYTES) {
@@ -583,7 +592,7 @@ function openNestedTestRun(
  * a failure anywhere leaves the ledger's own no-op or default behaviour.
  */
 export function openLearnedReservation(
-  input: { workerClass: WorkerClass; root?: string },
+  input: { workerClass: WorkerClass; root?: string; entryKind?: "bundle" | "tsx" },
   deps: LearnedReservationOptions = {},
 ): LearnedReservation {
   // The store lives beside the ledger it learns for: a caller that moved the ledger moved the store with it.
@@ -592,6 +601,7 @@ export function openLearnedReservation(
     ...(deps.ledger?.instance ? { instance: deps.ledger.instance } : {}),
     ...deps.store,
     ...(input.root ? { root: input.root } : {}),
+    ...(input.entryKind ? { entryKind: input.entryKind } : {}),
   };
   let estimate: LearnedEstimate = { estimateMib: DEFAULT_ESTIMATE_MIB[input.workerClass], samples: 0 };
   try {
@@ -602,20 +612,28 @@ export function openLearnedReservation(
   const handle = openMemoryReservation({
     workerClass: input.workerClass,
     root: input.root,
+    ...(input.entryKind ? { entryKind: input.entryKind } : {}),
     ...(estimate.samples > 0 ? { measured: { estimateMib: estimate.estimateMib, samples: estimate.samples } } : {}),
   }, deps.ledger);
+  return learnedHandle(handle, input.workerClass, estimate.estimateMib, estimateSourceOf(estimate), input.root, deps, store);
+}
+
+function learnedHandle(
+  handle: MemoryReservationHandle, workerClass: WorkerClass, estimateMib: number, estimateSource: EstimateSource,
+  root: string | undefined, deps: LearnedReservationOptions, store: PeakStoreOptions,
+): LearnedReservation {
   const sampler = deps.sampler ?? sharedSampler();
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
-  const hooks: TrackHooks | undefined = input.workerClass === "test" ? undefined : {
-    onTestRunner: (pid) => openNestedTestRun(pid, { ...(input.root ? { root: input.root } : {}), ledger: deps.ledger, store }),
+  const hooks: TrackHooks | undefined = workerClass === "test" ? undefined : {
+    onTestRunner: (pid) => openNestedTestRun(pid, { ...(root ? { root } : {}), ledger: deps.ledger, store: { ...store, entryKind: undefined } }),
   };
   return {
     id: handle.id,
     get published() { return handle.published; },
-    workerClass: input.workerClass,
-    estimateMib: estimate.estimateMib,
-    estimateSource: estimateSourceOf(estimate),
+    workerClass,
+    estimateMib,
+    estimateSource,
     bindRoot(pid: number): void {
       handle.bindRoot(pid);
       try {
@@ -629,7 +647,7 @@ export function openLearnedReservation(
         finished = true;
         try {
           const peak = sampler.finish(key);
-          if (peak !== undefined) recordPeak(input.workerClass, peak, store);
+          if (peak !== undefined) recordPeak(workerClass, peak, store);
         } catch (error) {
           recordError(store, "finish", error);
         }
@@ -637,6 +655,24 @@ export function openLearnedReservation(
       handle.releaseOccupancy();
     },
   };
+}
+
+/** Resume learning on an adopted child's root without opening another reservation or changing its estimate. */
+export function adoptLearnedReservation(
+  id: string,
+  identity: ProcessIdentity & { generation: ContainerGeneration },
+  deps: LearnedReservationOptions = {},
+): LearnedReservation | undefined {
+  const adopted = adoptMemoryReservation(id, identity, deps.ledger);
+  if (!adopted) return undefined;
+  const { entry, handle } = adopted;
+  const store: PeakStoreOptions = {
+    location: deps.ledger?.location, instance: deps.ledger?.instance, root: deps.ledger?.root,
+    ...deps.store, ...(entry.entry_kind ? { entryKind: entry.entry_kind } : {}),
+  };
+  const learned = learnedHandle(handle, entry.workerClass, entry.estimateMib, entry.estimateSource, deps.ledger?.root, deps, store);
+  learned.bindRoot(identity.pid);
+  return learned;
 }
 
 /**

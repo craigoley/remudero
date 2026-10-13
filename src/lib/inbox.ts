@@ -1316,10 +1316,10 @@ export function classifyProposal(
         `never deleted`,
     };
   }
-  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
-  // is now history, not a second request for the same decision. Never apply this to a different
-  // proposal kind or to an id the current plan does not hold.
-  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
   if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
@@ -2000,6 +2000,8 @@ export function lintDraftedFragment(
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
   pathExists: (path: string) => boolean = HARNESS_FACTS.moduleExists,
   readGrepProofFile: DraftRepoFacts["readGrepProofFile"] = HARNESS_FACTS.readGrepProofFile,
+  pathIsDirectory: (path: string) => boolean = (path) =>
+    fs.statSync(resolvePath(HARNESS_ROOT, path), { throwIfNoEntry: false })?.isDirectory() === true,
 ): DraftLintViolation[] {
   let tasks;
   try {
@@ -2009,10 +2011,21 @@ export function lintDraftedFragment(
   }
   const violations: DraftLintViolation[] = [];
   const opts = draftFilingLintOptions({ moduleExists: pathExists, readGrepProofFile }, knownRepos);
+  const directory = (path: string): boolean => path.endsWith("/") || pathIsDirectory(path);
+  const directoryGuidance = "; name the files the task changes, never a directory";
   for (const task of tasks) {
     violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
+    for (const path of task.files ?? []) {
+      if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
+        message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
+    for (const criterion of task.acceptance ?? []) {
+      const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
+      if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",
+        message: `${task.id} grep proof target ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
   }
   if (stampLine !== undefined) {
     violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
@@ -3532,22 +3545,9 @@ export function assertRatificationDraftFileable(
   const facts = checkoutRepoFacts(worktreePath);
   const relinted = relintRatificationFragment(fragmentYaml, proposalId, facts);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
-    facts.moduleExists, facts.readGrepProofFile);
+    facts.moduleExists, facts.readGrepProofFile,
+    (path) => fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
-  const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
-  if ("plan" in parsed) {
-    const directory = (path: string): boolean => path.endsWith("/") ||
-      fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true;
-    for (const task of parsed.plan.tasks) {
-      for (const path of task.files ?? []) {
-        if (directory(path)) violations.push(`[draft-directory-files] ${task.id} files entry ${JSON.stringify(path)} is a directory`);
-      }
-      for (const criterion of task.acceptance ?? []) {
-        const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
-        if (path && directory(path)) violations.push(`[draft-directory-grep] ${task.id} grep proof target ${JSON.stringify(path)} is a directory`);
-      }
-    }
-  }
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
 }
