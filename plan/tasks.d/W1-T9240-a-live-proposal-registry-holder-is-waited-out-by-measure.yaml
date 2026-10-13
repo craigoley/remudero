@@ -1,0 +1,71 @@
+- id: W1-T9240
+  title: "A LIVE PROPOSAL-REGISTRY HOLDER IS WAITED OUT BY MEASURE, NOT A FIXED 2000 MS — updateProposalRegistry throws after `opts.maxWaitMs ?? 2000` while a LIVE holder still owns the lock; no caller of its 27 passes a wait, its critical section re-reads every proposal shard and rewrites the blob, and on 2026-10-13 the daemon held it past the bound (self-healed)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # one concern: the registry lock's wait bound comes from the holder and the measured holds, not a constant; src/lib/inbox.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: an updateProposalRegistry call timed out on a lock the core daemon held; it cleared on its own"
+  plan_refs: [W1-T240, W1-T337, W1-T289, W1-T368, W1-T2490]
+  files:
+    - src/lib/inbox.ts
+    - test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts
+  status: queued
+  priority: 2  # a thrown update loses that caller's proposal write for the pass; self-heals, so not urgent
+  attempts: 0
+  rationale: |
+    OPERATOR-REPORTED 2026-10-13: an `updateProposalRegistry` call threw "timed out after 2000ms waiting for
+    <registry>.lock (held by pid <daemon pid>)"; the lock was the core daemon's and was released later.
+    Control: the Mac's live ledger (~/Remudero/state/ledger.ndjson) holds 384 rows stamped 2026-10-13 and none naming
+    this timeout, because the throw writes no ledger row. The wait is invisible unless a caller logs its own error.
+    READ on origin/main 6732a7690 (symbols, not lines), src/lib/inbox.ts:
+      - `updateProposalRegistry` sets `const maxWaitMs = opts.maxWaitMs ?? 2000`. Its doc comment justifies the number:
+        "every critical section takes microseconds, so a lock held after 2s means a crashed holder, not contention".
+      - That premise no longer holds. Since W1-T2490 the section calls `readProposalShards` (every shard file), parses
+        the blob, runs the caller's `update`, writes one shard file per new or sharded proposal and rewrites the whole
+        blob. Its cost grows with the registry and with host load.
+      - A crashed holder is already handled without the timer: `reclaimStaleLock` with `isHolderStale` (host, pid
+        liveness, start-time reuse; W1-T289/W1-T368) reclaims a dead holder's lock on the next poll. So the timer only
+        ever fires on a LIVE holder: it turns contention into a lost write.
+      - 27 call sites (run-task.ts 9, and inbox, measurement-cadence, knowledge-gardener, rule-efficacy, skill-workshop
+        and 7 more modules) and none passes `maxWaitMs`.
+    W1-T337 is related and different: it diagnosed test/inbox-registry-atomic.test.ts's intermittent ordering failure and
+    shipped as #1326 ("force isPidAlive false on claim 2's nested reclaim"), a test fix that left the 2000 ms wait as it
+    was. This task changes only how long a live holder is waited for.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for `maxWaitMs` (main 0, no head more)
+    and updateProposalRegistry (22 shards on main, all callers of it, none on its wait). Control: `acceptance-author-gate`
+    reads 93 shards on main and every head.
+  design: |
+    No fixed wait. Remove the `2000` default and the doc comment's microseconds premise.
+    1. A DEAD HOLDER IS RECLAIMED, AS TODAY. `reclaimStaleLock` is unchanged.
+    2. A LIVE HOLDER IS WAITED OUT WHILE IT IS PLAUSIBLY WORKING. Each completed critical section records its hold time
+       (acquire to release) beside the lock (a small sidecar the next holder reads; a lost write of it is harmless). A
+       waiter seeing a live holder keeps polling while the lock's age (from the holder's `startedAt`) is within the
+       recorded holds' observed range, extended as longer holds are recorded; past it, it writes one ledger row
+       `proposal_registry.lock_wait_long` {holder pid, host, lock age, observed max hold} and keeps waiting while the
+       holder stays live and the lock keeps its identity.
+    3. THE CALLER'S OWN DEADLINE, WHERE IT HAS ONE. `maxWaitMs` stays as an option for a caller with a real deadline (a
+       daemon tick's remaining budget). On expiry it throws a typed error, and the row above is written first, so the
+       timeout is visible in the ledger rather than only in a caller's stderr.
+    4. A HOLDER THAT IS LIVE BUT WEDGED is the row's job to surface (one row per waited lock, escalation reads it), not a
+       timer's job to guess.
+    Tests go in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts with the existing injected
+    `isPidAlive`, `sleep` and `getProcessStartTime` seams and a fake clock.
+  acceptance:
+    - claim: "a live holder that releases after longer than the old 2000 ms bound is waited out and the update lands"
+      proof: 'grep: test("W1-T9240: a live holder past two seconds is waited out and the update lands" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "a wait past the observed hold range writes one lock_wait_long row naming the holder and keeps waiting"
+      proof: 'grep: test("W1-T9240: a wait past the observed holds writes one row and keeps waiting" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "a caller's explicit maxWaitMs still throws a typed error, after writing the row"
+      proof: 'grep: test("W1-T9240: an explicit caller deadline throws after writing the row" in test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts'
+    - claim: "the registry lock writes the long-wait row"
+      proof: 'grep: proposal_registry\.lock_wait_long in src/lib/inbox.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts"
+  falsifier: |
+    Restore `?? 2000`: the first test throws at the fake clock's 2000 ms with the holder still live. Throw past the
+    observed range instead of writing the row: the second test fails. Skip the row on the explicit-deadline throw: the
+    third test finds no row.

@@ -21,7 +21,7 @@ import {
   resolveReviewProvenance,
   type PrLifecycleState,
 } from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView } from "../src/lib/sweep.js";
 
 /**
  * W1-T913 (fb-1784901239119-1be356, PR #707): `remudero-review` was posted ONLY in a terminal
@@ -709,6 +709,29 @@ function basePr(over: Partial<OpenPrView> = {}): OpenPrView {
     ...over,
   };
 }
+
+test("a fresh pending proof-load review is not retried as an incomplete promise harvest", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-pending-proof-load-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson"), now = Date.now();
+  const pr = basePr({ reviewPendingSince: new Date(now).toISOString() });
+  const row = { step: "review.posted", task_id: pr.taskId, pr_url: pr.prUrl, head_sha: pr.headSha,
+    state: "pending", ts: new Date(now).toISOString(), decision_verdict: { state: "pending",
+      criteria: [{ proof_exec: "cannot_evaluate", loadError: "Cannot find module" }] } };
+  writeFileSync(ledgerPath, JSON.stringify(row) + "\n");
+  let posts = 0;
+  const deps = { ledgerPath, runId: "proof-load-pending", now: () => now,
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: () => { posts++; },
+  };
+  const summary = await runSweep([pr], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(posts, 0);
+  assert.equal(summary.actions[0]?.disposition, "wait");
+  writeFileSync(ledgerPath, JSON.stringify({ ...row, decision_verdict: { ...row.decision_verdict,
+    promisedFollowUpObservation: { state: "unknown", cause: "promise-harvest-incomplete", reason: "promise harvest unavailable: AbortError" },
+  } }) + "\n");
+  await runSweep([pr], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(posts, 0, "the harvest retry cannot mask a real proof-load hold");
+});
 
 test("W1-T913 criterion 2: a STALE remudero-review pending (posted well past the ceiling) is still offered to the post-review lane — a dead owner cannot strand it pending forever", () => {
   const now = Date.parse("2026-08-16T12:00:00.000Z");

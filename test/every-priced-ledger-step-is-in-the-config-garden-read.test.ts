@@ -133,6 +133,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "dep-review.migrate.incomplete": A_LANE_RUN_ID,
   "approve.join_body_refreshed": A_LANE_RUN_ID,
   "approve.join_body_stale": A_LANE_RUN_ID,
+  "approve.join_skipped": A_LANE_RUN_ID, // W1-T9161: names the PR it did not join, under the APPROVE- run id
   "ratify.approved": A_LANE_RUN_ID,
   "alert-fix.acceptance_check_error": A_LANE_RUN_ID,
   "alert-fix.acceptance_defect": A_LANE_RUN_ID,
