@@ -224,9 +224,10 @@ export function lowYieldGardenPass(
   opts: { clock?: Clock; inputs: () => string },
 ): (() => Promise<void>) & { due: () => boolean } {
   const run = async (): Promise<void> => {
+    const startedAt = (opts.clock ?? systemClock).now();
     const inputs = opts.inputs();
     await pass();
-    recordGardenPacing(stateDir, name, true, { clock: opts.clock, inputs });
+    recordGardenPacing(stateDir, name, true, { clock: fixedClock(startedAt), inputs });
   };
   return Object.assign(run, { due: () => gardenPacingDue(stateDir, name, opts) && (pass.due?.() ?? true) });
 }

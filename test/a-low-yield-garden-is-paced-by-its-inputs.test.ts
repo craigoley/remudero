@@ -116,3 +116,14 @@ test("two unchanged hours start only the initial and hourly host passes, not twe
   for (let minute = 1; minute <= 120; minute++) { now += MINUTE; t.mock.timers.tick(MINUTE); await settle(); }
   assert.equal(calls, 3, "initial, sixty-minute and hundred-twenty-minute refreshes only");
 });
+
+test("a long successful pass does not postpone the hourly fallback until an hour after completion", async (t) => {
+  const fixture = gitRepo({ kind: "low-yield-start-clock" });
+  t.after(() => fixture.cleanup());
+  let now = 0;
+  const clock = clockFromMillisFn(() => now);
+  const pass = registry.lowYieldGardenPass(fixture.dir, "host-resource", () => { now += 55 * MINUTE; }, { clock, inputs: () => "same" });
+  await pass();
+  now = 60 * MINUTE;
+  assert.equal(pass.due(), true, "the hourly cadence is measured from when the pass began");
+});
