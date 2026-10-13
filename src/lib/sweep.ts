@@ -27,7 +27,8 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
+  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
+  isMainGreenOnItsOwnHead, mainFailingTestFiles, RULE_CHECKS_CHECK,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
   assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
   refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
@@ -8372,11 +8373,39 @@ export interface MainLatestRun {
   failingChecks: readonly string[];
   /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
   observedChecks?: readonly string[];
+  /** W1-T7848: what a probe saw of the rule suites at this `sha`; main's own CI never runs `rule-checks`. */
+  ruleChecks?: { state: "red" | "green"; suites: readonly string[] };
+  /** W1-T7848: main's CI reading, present only when a rule-suite probe turned `state` red. */
+  ciState?: string;
+}
+
+/** W1-T7848 — a base-reproduction probe of the suites a `rule-checks` red names, at one main sha: `red` when
+ *  every one fails there, `green` when every one passes. One row per main sha and suite set. */
+export const MAIN_RULE_CHECKS_OBSERVED_STEP = "main.rule_checks.observed";
+
+function ruleChecksObservationKey(mainSha: unknown, suites: readonly string[]): string {
+  return `${String(mainSha)}@${[...suites].sort().join(",")}`;
+}
+
+/** Fold the rule-suite rows at main's head into its reading. Any red suite at that sha keeps rule-checks red;
+ *  a row for any other sha is ignored, because main has moved and the next probe decides. */
+function withRuleChecks(run: MainLatestRun, rows: readonly Record<string, unknown>[]): MainLatestRun {
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((n): n is string => typeof n === "string") : []);
+  const atHead = rows.filter((row) => row.main_sha === run.sha);
+  const red = [...new Set(atHead.filter((row) => row.state === "red").flatMap((row) => strings(row.failing_suites)))];
+  const green = [...new Set(atHead.filter((row) => row.state === "green").flatMap((row) => strings(row.suites)))];
+  if (red.length === 0 && green.length === 0) return run;
+  const observedChecks = run.observedChecks === undefined ? {} : { observedChecks: [...new Set([...run.observedChecks, RULE_CHECKS_CHECK])] };
+  if (red.length === 0) return { ...run, ...observedChecks, ruleChecks: { state: "green", suites: green } };
+  return { ...run, state: "red", failingChecks: [...new Set([...run.failingChecks, RULE_CHECKS_CHECK])], ...observedChecks,
+    ruleChecks: { state: "red", suites: red }, ...(run.state === "red" ? {} : { ciState: run.state }) };
 }
 
 export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
   let latest: MainLatestRun | undefined;
+  const ruleRows: Record<string, unknown>[] = [];
   for (const line of lines) {
+    if (line.step === MAIN_RULE_CHECKS_OBSERVED_STEP) ruleRows.push(line);
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
     // A failing check outside ci-gate's required set (a shard under a required aggregate) is still
     // one main's run fails: the census below names it, so the failing list must too, or a PR red on
@@ -8391,7 +8420,7 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
         : {}),
     };
   }
-  return latest;
+  return latest === undefined ? undefined : withRuleChecks(latest, ruleRows);
 }
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
@@ -8491,7 +8520,9 @@ export function decideBaseRed(
   if (main?.state === "red" && main.observedChecks !== undefined) {
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
-    const absent = names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
+    // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
+    const absent = main.ciState !== undefined ? undefined
+      : names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
@@ -12450,6 +12481,27 @@ function reviewOutcomeKeyForPr(pr: OpenPrView): string {
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
+function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  if (pr.reviewState !== "pending") return false;
+  const row = lines.findLast(row => row.task_id === reviewOutcomeTaskIdFor(pr) && row.pr_url === pr.prUrl &&
+    row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  if (row?.step !== "review.posted" || row.state !== "pending") return false;
+  if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
+  if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  if (verdict?.criteria?.some(criterion => criterion.proof_exec === "cannot_evaluate" &&
+      criterion.cause !== "promise-harvest-incomplete" && !/^promise harvest (?:unavailable:|corpus is unreadable)/.test(criterion.loadError ?? criterion.reason))) return false;
+  const observation = verdict?.promisedFollowUpObservation;
+  return observation?.state === "unknown" && (observation.cause === "promise-harvest-incomplete" ||
+    /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
+}
+
+function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
+  // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
+  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+}
+
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
  *  and carried verbatim into the PR's own reason. THIS TABLE NAMES A COST; IT DECIDES NOTHING — by
  *  the time it is read the guarded call has ALREADY been refused. */
@@ -13280,7 +13332,7 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key))) reviewDelivered.delete(key);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -14520,6 +14572,7 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
   const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
   const stuckStages = new Map<string, Record<string, unknown>>();
@@ -14876,6 +14929,18 @@ export async function runSweep(
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
+  // W1-T7848: one `main.rule_checks.observed` row per main sha and suite set, across passes.
+  const ruleObservations = new Set(ledgerLines.filter((line) => line.step === MAIN_RULE_CHECKS_OBSERVED_STEP).map((line) =>
+    ruleChecksObservationKey(line.main_sha, (Array.isArray(line.failing_suites) ? line.failing_suites : Array.isArray(line.suites) ? line.suites : [])
+      .filter((suite): suite is string => typeof suite === "string"))));
+  const observeRuleChecks = (pr: OpenPrView, mainSha: string, verdict: string, suites: readonly string[]) => {
+    const key = ruleChecksObservationKey(mainSha, suites);
+    if (suites.length === 0 || (verdict !== "reproduced" && verdict !== "clear") || ruleObservations.has(key)) return;
+    ruleObservations.add(key);
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: MAIN_RULE_CHECKS_OBSERVED_STEP, main_sha: mainSha,
+      ...(verdict === "reproduced" ? { state: "red", failing_suites: [...suites] } : { state: "green", suites: [...suites] }),
+      pr_number: pr.prNumber, head_sha: pr.headSha });
+  };
   const probeMain = async (pr: OpenPrView, reproductionFiles: readonly string[], mainSha: string,
     reproduce: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>) => {
     const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainSha, file)));
@@ -15440,8 +15505,9 @@ export async function runSweep(
     }
     claimedReviewKeys.add(reviewKey);
     try {
-      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath), openPrs);
-      const delivered = fresh.reviewDelivered.has(reviewKey);
+      const freshLines = readLedger(deps.ledgerPath);
+      const fresh = priorActionsFromLedger(freshLines, openPrs);
+      const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
@@ -15945,7 +16011,8 @@ export async function runSweep(
     const refusedCurrentPending = pr.reviewState === "pending" &&
       refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
       refusalAttemptedAt >= pendingSince;
-    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
+    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : promiseHarvestRetryView(pr, ledgerLines);
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -15960,6 +16027,9 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    if (disposition === "post-review" && harvestIncomplete) {
+      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
+    }
     // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
     // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
     // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
@@ -17366,6 +17436,8 @@ export async function runSweep(
                 if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
                 standDownReason = baseRed.kind === "refresh"
                   ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : baseRed.check === RULE_CHECKS_CHECK && mainLatestRun?.ruleChecks?.state === "red"
+                    ? `base red: rule-checks fails at main ${mainSha}: a probe reproduced ${mainLatestRun.ruleChecks.suites.join(", ")} there — not this diff's; no fix dispatched, the branch refreshes once main is green`
                   : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
                     ? `base red: ${baseRed.check} is absent from main's latest run (${decidedSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
                     : mainLatestRun?.state === "red"
@@ -17563,6 +17635,8 @@ export async function runSweep(
                 const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
                 const { verdict } = row;
                 const contradicted = verdict !== "clear" && reproductionFiles.every((file) => ciContradictedProbeFiles([...reproductionHistory, { ...row, step: "sweep.base_reproduction" }]).has(file));
+                // W1-T7848: what this probe saw of main's rule suites, the only observer rule-checks has on main.
+                if (!contradicted) observeRuleChecks(pr, mainTipSha, verdict, failingRuleSuitesFromCiFailures(ciFailuresForFix));
                 if (contradicted) {
                   appendLine(deps.ledgerPath, { ...row, step: BASE_REPRODUCTION_CONTRADICTED_STEP });
                 } else if (verdict === "reproduced") {
@@ -18458,6 +18532,7 @@ export async function runSweep(
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
       review_mode: job.mode.kind,
+      ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });
@@ -18945,6 +19020,7 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {

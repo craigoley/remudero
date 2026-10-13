@@ -231,9 +231,9 @@ test("REST parsing keeps labels and times, drops pull requests, and refuses a ma
     { number: 11, url: issueUrl(11), title: "", body: "", labels: [], createdAt: "", updatedAt: "" },
   ]);
   assert.throws(() => parseOpenIssuesRest("{}"), /JSON array/);
-  assert.deepEqual(parseIssueCommentsRest(JSON.stringify([{ user: { login: "a", type: "Bot" }, author_association: "NONE", created_at: at(0) }, {}])), [
-    { authorLogin: "a", authorType: "Bot", authorAssociation: "NONE", createdAt: at(0) },
-    { authorLogin: "", authorType: "User", authorAssociation: "NONE", createdAt: "" },
+  assert.deepEqual(parseIssueCommentsRest(JSON.stringify([{ user: { login: "a", type: "Bot" }, author_association: "NONE", created_at: at(0), body: "seen" }, {}])), [
+    { authorLogin: "a", authorType: "Bot", authorAssociation: "NONE", createdAt: at(0), body: "seen" },
+    { authorLogin: "", authorType: "User", authorAssociation: "NONE", createdAt: "", body: "" },
   ]);
   assert.throws(() => parseIssueCommentsRest("{}"), /JSON array/);
   assert.deepEqual(openIssuesRestArgs("acme", "remudero"), ["api", "repos/acme/remudero/issues?state=open&per_page=100", "--paginate"]);
