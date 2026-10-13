@@ -110,6 +110,7 @@ import {
   escalateLifetimeCapExceeded,
   escalatePostReviewStall,
   escalateQuotaExhaustion,
+  escalateReplayStranded,
   escalateStarvation,
   escalateStarvationCleared,
 } from "./lib/escalation-catalogue.js";
@@ -39675,6 +39676,7 @@ export async function daemonCommand(
           ledgerPath,
           mergedLastDay: () => mergedInLastDayAsync(repoRoot),
           approve: (proposalId) => void fleetRatify.approve(proposalId),
+          escalateReplayStranded: (stranded) => escalateReplayStranded(stranded, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
           handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
           originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
         },
