@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
-import { instanceForStateRoot } from "./deployer.js";
+import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
-import { evaluateFleetFlowDetectors, type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
@@ -18,7 +19,7 @@ import { readLedgerLines } from "./status.js";
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -314,7 +315,7 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
-  const flowRows = await evaluateFleetFlowDetectors({
+  const flowRows = await evaluateIdleCapacityDetectors({
     stateDir: deps.stateDir, nowMs: now, detectors: deps.detectors ?? SRE_LANE_DETECTORS,
     readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent,
   });
@@ -389,13 +390,19 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 export function daemonSreLaneInput(
   input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
+  const instance = resolveSreLaneInstance({
+    stateRoot: dirname(input.stateDir),
+    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+  });
+  const name = instance.resolved ? instance.name : "unknown";
   return {
     stateDir: input.stateDir,
     root: input.root,
+    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
-        .map((row) => incidentEventFromLedgerRow(row, input.repo))
+        .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
     hasOpenTask: () => false,
     framesFor: () => [],
