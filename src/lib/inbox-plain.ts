@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
-import type { SummarizeDeps } from "./feedback.js";
+import type { OptionIntent, SummarizeDeps } from "./feedback.js";
 import { validateDecisionSummary } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import { inboxThreadId } from "./inbox-thread.js";
 import { checkOperatorMessage } from "./operator-message.js";
 
 /**
@@ -34,6 +35,62 @@ import { checkOperatorMessage } from "./operator-message.js";
 export interface PlainOption {
   label: string;
   consequence: string;
+  /** W1-T8826: which inbox verb the choice performs. Untagged stored options are served as "reply". */
+  intent?: OptionIntent;
+}
+
+/** W1-T8826 — the existing route a served option posts to. Never stored: attached at serve time. */
+export interface PlainOptionAction {
+  method: "POST";
+  path: string;
+  fields: Record<string, string>;
+  /** The one free-text field the console collects before posting. */
+  input?: "reason" | "feedback" | "text";
+}
+
+/** An option as GET /v1/inbox serves it: always an intent, an action only when a route is valid. */
+export interface ServedPlainOption extends PlainOption {
+  intent: OptionIntent;
+  action?: PlainOptionAction;
+}
+
+/** A plain message as GET /v1/inbox serves it. */
+export type ServedPlainInboxMessage = Omit<PlainInboxMessage, "options"> & { options: ServedPlainOption[] };
+
+export type InboxOptionLane = "ready" | "drafting" | "notReady" | "declined";
+
+/** The route a choice maps onto, or none when the lane (or the choice) has no valid route. Each action
+ *  points at an existing route with its existing tier and auth. */
+export function optionAction(intent: OptionIntent, lane: InboxOptionLane, proposalId: string): PlainOptionAction | undefined {
+  switch (intent) {
+    case "approve":
+      return lane === "ready" ? { method: "POST", path: "/v1/inbox/approve", fields: { proposalId } } : undefined;
+    case "decline":
+      return lane === "declined" ? undefined : { method: "POST", path: "/v1/inbox/decline", fields: { proposalId }, input: "reason" };
+    case "reframe":
+      return { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId }, input: "feedback" };
+    case "reply":
+      // The thread route answers only an operator-owned item.
+      return inboxOwner({ id: proposalId }) === "operator"
+        ? { method: "POST", path: "/v1/inbox/thread/reply", fields: { threadId: inboxThreadId(proposalId) }, input: "text" }
+        : undefined;
+    case "keep":
+      return undefined;
+  }
+}
+
+/** Serve a plain message with each option's intent and, where a route is valid, its action. An option
+ *  stored without an intent is served as "reply" with no action until the backfill re-writes it. */
+export function servePlainOptions(plain: PlainInboxMessage, lane: InboxOptionLane, proposalId: string): ServedPlainInboxMessage {
+  return {
+    ...plain,
+    options: plain.options.map((o): ServedPlainOption => {
+      const option: ServedPlainOption = { label: o.label, consequence: o.consequence, intent: o.intent ?? "reply" };
+      if (o.intent === undefined) return option;
+      const action = optionAction(o.intent, lane, proposalId);
+      return { ...option, ...(action ? { action } : {}) };
+    }),
+  };
 }
 
 export interface PlainInboxMessage {
@@ -121,8 +178,8 @@ export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
 // ── The per-kind templates ─────────────────────────────────────────────────────────────────────
 
 const ASK_OPTIONS: PlainOption[] = [
-  { label: "Explain this item", consequence: "Ask for the original evidence and exact decision." },
-  { label: "Leave undecided", consequence: "This summary alone provides no authorization to act." },
+  { label: "Explain this item", consequence: "Ask for the original evidence and exact decision.", intent: "reply" },
+  { label: "Leave undecided", consequence: "This summary alone provides no authorization to act.", intent: "keep" },
 ];
 
 function daysWaiting(summary: string): string {
@@ -133,8 +190,8 @@ function daysWaiting(summary: string): string {
 type Template = (summary: string) => Omit<PlainInboxMessage, "source" | "options"> & { options?: PlainOption[] };
 
 const FLEET_WORK_OPTIONS: PlainOption[] = [
-  { label: "Let the fleet handle it", consequence: "The fleet decides whether to fix it, merge it with similar work, or close it." },
-  { label: "Drop it", consequence: "The item is closed. You can bring it back later." },
+  { label: "Let the fleet handle it", consequence: "The fleet decides whether to fix it, merge it with similar work, or close it.", intent: "keep" },
+  { label: "Drop it", consequence: "The item is closed. You can bring it back later.", intent: "decline" },
 ];
 
 const fleetFinding = (what: string, headline: string): Template => () => ({
@@ -214,6 +271,7 @@ function writerContext(proposal: { id: string; summary: string }, retryProblems:
     "Write for a busy person who does not read code. Use short, everyday words and active voice.",
     "Do NOT include code, file names, file paths, task ids, PR numbers, commands, or internal names.",
     "Say what happened and what the person should decide; the raw details are shown separately.",
+    'Give every option an "intent": approve (go ahead), decline (close it), reframe (ask for a different proposal or clearer proof), reply (ask a question) or keep (leave it as it is).',
     'Also include the key "if_nothing_happens": one plain line saying what concretely happens if the person does nothing',
     '(for example "the fix stays parked and the cost it targets continues", or "the task stays blocked").',
     "Do not write that nothing is decided by reading the summary; say what waiting costs or leaves undone.",
@@ -236,6 +294,7 @@ async function askWriter(
   }
   const card = validateDecisionSummary(out);
   if (!card) return { message: null, problems: ["not a decision card"] };
+  if (card.options.some((option) => option.intent === undefined)) return { message: null, problems: ["give every option an intent"] };
   const message: PlainInboxMessage = {
     headline: card.headline,
     whatHappened: card.what_happened,
@@ -311,6 +370,10 @@ export interface PlainBackfillDeps {
   summarize?: SummarizeDeps["summarize"];
 }
 
+function hasOptionIntents(message: PlainInboxMessage | undefined): boolean {
+  return message?.options.every((option) => option.intent !== undefined) ?? false;
+}
+
 /** Write plain messages for operator-owned items with no current message, oldest registry order first,
  *  one at a time so a slow writer never piles up. Returns how many it wrote. */
 export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number): Promise<number> {
@@ -318,7 +381,7 @@ export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number
   const snapshot = readPlainStore(path);
   const pending = deps
     .readProposals()
-    .filter((p) => inboxOwner(p) === "operator" && !currentStoredMessage(p, snapshot))
+    .filter((p) => inboxOwner(p) === "operator" && !hasOptionIntents(currentStoredMessage(p, snapshot)))
     .slice(0, max);
   let written = 0;
   for (const proposal of pending) {
@@ -326,7 +389,8 @@ export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number
     const current = deps.readProposals().find((p) => p.id === proposal.id);
     if (!current || inboxOwner(current) !== "operator" || plainSourceFingerprint(current) !== plainSourceFingerprint(proposal)) continue;
     const store = readPlainStore(path);
-    if (currentStoredMessage(current, store)) continue;
+    const latest = currentStoredMessage(current, store);
+    if (latest && (hasOptionIntents(latest) || JSON.stringify(latest) !== JSON.stringify(snapshot[proposal.id]))) continue;
     store[proposal.id] = { ...message, sourceFingerprint: plainSourceFingerprint(proposal) };
     writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
     written += 1;
