@@ -1,10 +1,11 @@
 import { ghJson, ghJsonAsync } from "./github-transport.js";
+import { RmdError } from "./errors.js";
 // @ts-expect-error — shared metadata program is dependency-free ESM outside tsconfig source roots.
 import { readSecurityMergeDecision, readSecurityMergeDecisionSync } from "../../scripts/lib/code-scanning-merge-adapter.mjs";
 
-export class SecurityMergeRefused extends Error {
+export class SecurityMergeRefused extends RmdError {
  constructor(readonly state: "blocked" | "unknown", readonly reason: string) {
-  super(`security merge ${state}: ${reason}`);
+  super("github", 1, `security merge ${state}: ${reason}`, { state, reason });
  }
 }
 function targetFor(prUrl: string): { owner: string; repo: string; prNumber: number } | undefined {
