@@ -154,3 +154,13 @@ The parts of the decision:
     that starts them is bundled;
   - switch the garden and preflight children once their verbs are shown to
     start no self-URL worker.
+
+Update (W1-T8775): the first follow-up is done for the plan-PR preflight.
+`src/lib/child-entry-argv.ts` returns the bundle argv when
+`childEntryIsCurrent` holds and the tsx argv, with the reason, otherwise.
+`check-proof-main` joined `CHILD_ENTRIES`, and the manifest is schema 2 with
+a SHA-256 digest per entry. A source hash names what a bundle was built from,
+not what the file now holds, so `childEntryIsCurrent` also checks the entry's
+name and source, the `<name>.mjs` filename, a canonical regular-file path,
+size and digest. A digest is integrity, not authenticity: the store is
+instance-owned. The `run-task.ts` check-proof call sites stay on tsx.
