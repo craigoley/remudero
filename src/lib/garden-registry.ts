@@ -39,8 +39,6 @@ import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js"
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
-  // W1-T5420: knowledge used to start separately and still ran its whole pass on the daemon loop.
-  "knowledge",
   "plan",
   "gate",
   "test",
@@ -62,6 +60,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "flow-remedy",
   // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
   "fix-lane",
+  // W1-T5420: append the formerly separate knowledge starter; existing registered slots stay unchanged.
+  "knowledge",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

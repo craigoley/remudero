@@ -30,6 +30,7 @@ test("knowledge garden production wiring uses the off-loop registry", async (t) 
   const f = fixture(t);
   assert.equal(isRegisteredGardenName("knowledge"), true);
   assert.equal(REGISTERED_GARDEN_NAMES.filter((name: string) => name === "knowledge").length, 1);
+  assert.deepEqual(REGISTERED_GARDEN_NAMES.slice(0, 8), ["plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "evidence-coverage"], "existing registered gardener slots retain their names and order");
   const pass = await buildRegisteredGarden("knowledge", f.ctx);
   assert.equal(typeof pass, "function", "the CLI and production names build through the same registry");
   assert.equal(typeof pass.due, "function", "the parent has the established cheap due probe");
