@@ -1,0 +1,66 @@
+- id: W1-T8863
+  title: "THE ROOT DISK FILLS WITH WORK THE JANITOR CAN SEE BUT NEVER RECLAIMS — 40 orphaned worktrees (~3.5 GB, gitdir gone) are KEPT forever as 'Git metadata is unreadable', 13 clean pushed scratch clones (~2.3 GB in 30 h) sit inside the live ~/rmd-mint checkout where no root reaches, and retention waits up to 48 h: anything saved and untouched for six hours is reclaimed wherever an agent left it, never the live checkouts themselves"
+  repo: remudero
+  depends_on: [W1-T8861]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what idle, saved work the janitor reclaims and after how long; the never-remove rules are W1-T8861's
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: the janitor cleans up anything older than six hours and untouched, without removing what we want kept or killing work in progress; no VM resize"
+  plan_refs: [W1-T4770, W1-T8861, W1-T5707]
+  files: [deploy/rmd-host-cleanup.sh, deploy/mac/tmp-reclaim.sh, deploy/install-host-units.sh, test/the-janitor-reclaims-saved-work-idle-six-hours.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8.
+    OBSERVED (du -x, read-only):
+    - / is at 80% (5.9 GB free of 29 GB).
+    - ~/rmd-mint has 13 standalone clones created by agent sessions between 10-11 15:26 and 10-12 17:58 (~180 MB each,
+      ~2.3 GB). All are clean, have HEAD on a remote branch, and have no process cwd inside.
+    - ~/rmd-work has 33 linked worktrees whose gitdir (~/rmd-work/core/.git/worktrees/*) no longer exists (~3.3-4.0 GB);
+      /mnt/scratch has 7 more.
+    - INFERRED from the rmd-mint growth rate: 85% in ~15 h and full in ~2.5 days.
+    THE CODE (deploy/rmd-host-cleanup.sh):
+    - `sweep_worktree` returns KEEP "Git metadata is unreadable or missing" for a linked worktree whose gitdir is gone.
+      host-cleanup.log has ~394 such KEEP lines: those trees are kept forever.
+    - WORKTREE_ROOTS (line 127) deliberately excludes $HOME checkouts ("2026-10-01 coordinator: $HOME trees are live
+      checkouts (rmd-mint, rmd-op); never swept"), so a scratch clone an agent nests INSIDE a live checkout is never
+      judged. Correct for the checkout; wrong for the nested clone.
+    - `retention_window` keeps idle work 48 h when the disk is 20+ points below its mark, then 24/12 h. The operator rules
+      the window is six hours untouched, which is already FLOOR_MINUTES.
+    - deploy/mac/tmp-reclaim.sh carries the twin `retention_window` ("change the two together").
+    OWNERSHIP: no shard on main reclaims orphaned worktrees or nested scratch clones. Open PRs 2026-10-12 23:10Z: none
+    touches the janitor.
+  design: |
+    1. ORPHANED LINKED WORKTREE (a `.git` FILE whose gitdir path no longer exists, and whose parent clone is gone): once
+       idle (the window) and not open, ARCHIVE it, then remove it.
+       - The archive is a tar of the tree minus node_modules/coverage, written to WORKTREE_ARCHIVE_ROOT/orphans/ on a
+         filesystem other than the source.
+       - The archive is verified (`tar -t` succeeds and the byte count is non-zero) BEFORE `rm -rf`.
+       - An archive failure is KEEP. The archive ages out after ARCHIVE_DAYS like the transcript archive.
+       - A tree whose gitdir is missing but whose parent clone still exists is left to `git worktree prune` semantics
+         (KEEP).
+    2. NESTED SCRATCH CLONES IN LIVE CHECKOUTS: new RMD_CLEANUP_LIVE_CHECKOUTS (default `$HOME/rmd-mint:$HOME/rmd-op`).
+       - For each live checkout, judge only its IMMEDIATE children that are standalone clones (own `.git/` directory)
+         and are untracked by the live checkout (`git -C <checkout> ls-files --error-unmatch` fails and the path is not
+         a submodule).
+       - Each such child goes through the full sweep_worktree gates, including W1-T8861's never-remove rules.
+       - The live checkout itself, its tracked children and any non-git child are never touched or logged as candidates.
+    3. SIX HOURS UNTOUCHED: `retention_window` returns FLOOR_MINUTES (360) at every pressure tier, in both scripts.
+       - A pinned IDLE_MINUTES under 360 is still clamped to 360.
+       - Pinning a longer IDLE_MINUTES remains possible.
+    4. WORK IN PROGRESS STAYS SAFE (unchanged, and asserted for the new paths): written within the window, held open
+       (the lsof snapshot covers cwd and open files, container paths via RMD_CLEANUP_CONTAINER_MAP), a docker mount
+       (`is_docker_mount`), locked, or dirty, all mean KEEP.
+    5. deploy/install-host-units.sh: the cron line carries RMD_CLEANUP_LIVE_CHECKOUTS, and the installer's drift check
+       knows it.
+  acceptance:
+    - claim: "an orphaned worktree idle six hours is archived then removed, a clean pushed clone nested in a live checkout is removed while the checkout and a dirty or recently written nested clone are kept, and retention is six hours at every disk tier"
+      proof: 'grep: test("W1-T8863: the janitor reclaims saved work idle six hours wherever it sits" in test/the-janitor-reclaims-saved-work-idle-six-hours.test.ts'
+  falsifier: |
+    Drop the orphan rung: the fixture orphan (gitdir deleted, idle 7 h) is still KEPT as "Git metadata is unreadable",
+    and the test fails. Remove the RMD_CLEANUP_LIVE_CHECKOUTS scan: the nested clean clone survives, and the test fails.
+    Restore the 48 h tier: the 7 h-idle fixtures under a low-usage disk survive, and the test fails.
