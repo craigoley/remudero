@@ -16,7 +16,8 @@
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
  * A COLD start, or replacing the only generation after a crash, has nothing to protect, so it promotes once
- * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
+ * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, a bounded `serve.cold_start_still_degraded`
+ * per interval while it stays so, then `serve.cold_start_ready`): gating it only kept 4317 dark.
  *
  * Kill switch: `RMD_SERVE_HANDOFF=off`, or a `handoff.off` file in the generations directory, turns a
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
@@ -34,6 +35,8 @@ export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
 export const HANDOFF_OFF_FILE = "handoff.off";
 /** BACKSTOP on a wedged boot, about 5x the slowest boot measured (66 s); never a bound on a healthy one. */
 export const STANDBY_READY_BOUND_MS = 330_000;
+/** BACKSTOP: the slowest boot measured, so a healthy cold start writes no `serve.cold_start_still_degraded` row. */
+export const COLD_START_STILL_DEGRADED_EVERY_MS = STANDBY_READY_BOUND_MS / 5;
 /** The drain's own bound (10 s) plus the exit watchdog (5 s), with room: past it the old generation is killed. */
 export const DRAIN_BACKSTOP_MS = 30_000;
 /** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
@@ -429,6 +432,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref()));
   const readyBoundMs = opts.readyBoundMs ?? STANDBY_READY_BOUND_MS;
+  const stillDegradedRows = Math.floor(readyBoundMs / COLD_START_STILL_DEGRADED_EVERY_MS);
   const pollMs = opts.pollMs ?? 500;
   const drainBackstopMs = opts.drainBackstopMs ?? DRAIN_BACKSTOP_MS;
   const deferMs = opts.deferMs ?? 60_000;
@@ -524,19 +528,30 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     }
   };
 
-  /** The handoff gate's criteria, as names a promoted cold generation does not yet meet. */
-  const coldUnmet = async (generation: Generation): Promise<string[]> => {
+  /** The handoff gate's criteria a promoted cold generation does not yet meet, each with its readiness detail. */
+  const coldUnmet = async (generation: Generation): Promise<UnmetCriterion[]> => {
     const ready = await get(generation.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
     if (ready.status !== 200) return unmetCriteria(ready.body);
     const smoke = await smokeFailure(generation);
-    return smoke ? [smoke.criterion] : [];
+    return smoke ? [{ name: smoke.criterion, detail: smoke.detail }] : [];
   };
 
-  /** A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s. */
+  /**
+   * A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s.
+   * #8429: while it stays degraded, each interval says so with every unmet criterion's detail, never past the ready bound's worth.
+   */
   const watchColdStart = async (generation: Generation, startedAt: number): Promise<void> => {
+    let rows = 0;
+    let dueAt = startedAt + COLD_START_STILL_DEGRADED_EVERY_MS;
     while (generation === active && generation.isAlive() && !stopping) {
       await sleep(pollMs);
-      if ((await coldUnmet(generation)).length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: clock.now() - startedAt });
+      const unmet = await coldUnmet(generation);
+      const now = clock.now();
+      if (unmet.length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: now - startedAt });
+      if (now < dueAt || rows >= stillDegradedRows) continue;
+      rows += 1;
+      dueAt = now + COLD_START_STILL_DEGRADED_EVERY_MS;
+      opts.log("serve.cold_start_still_degraded", { sha: generation.slot.sha, unmet: unmet.map((c) => c.name), criteria: unmet, elapsedMs: now - startedAt, row: rows });
     }
   };
 
@@ -610,7 +625,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   };
 
   const reportAlone = async (generation: Generation, startedAt: number, readyMs: number): Promise<void> => {
-    const unmet = await coldUnmet(generation);
+    const unmet = (await coldUnmet(generation)).map((c) => c.name);
     if (unmet.length === 0) return;
     opts.log("serve.cold_start_degraded", { sha: generation.slot.sha, unmet, readyMs });
     void watchColdStart(generation, startedAt);
@@ -835,10 +850,15 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   return supervisor;
 }
 
-function unmetCriteria(body: string): string[] {
-  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean }> } | undefined;
-  const names = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map((c) => c.name) : [];
-  return names.length > 0 ? names : ["ready"];
+interface UnmetCriterion {
+  name: string;
+  detail?: unknown;
+}
+
+function unmetCriteria(body: string): UnmetCriterion[] {
+  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean; detail?: unknown }> } | undefined;
+  const unmet = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map(({ name, detail }) => ({ name, detail })) : [];
+  return unmet.length > 0 ? unmet : [{ name: "ready", detail: report }];
 }
 
 function safeJson(text: string): unknown {
