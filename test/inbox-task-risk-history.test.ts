@@ -66,8 +66,12 @@ test("an active risk-judge ask survives automatic verification holds and unavail
   }
   const ctx = context();
   ctx.isReleasedHumanTask = () => true;
-  assert.notEqual(classifyProposal(proposal(), undefined, ctx).state, "retired",
-    "a verify-human release does not silently resolve a separate risk-judge finding");
+  // A machine-judge ask asks for exactly this release (`rmd approve <task>`), so the release answers it
+  // (inbox-released-machine-judge-ask.test.ts); the other task-referent kinds stay separate findings.
+  for (const sibling of [`proof-debt:${ID}`, `verify-human-automate:${ID}`]) {
+    assert.notEqual(classifyProposal(proposal(sibling), undefined, ctx).state, "retired",
+      `a verify-human release does not silently resolve the separate ${sibling} finding`);
+  }
   assert.equal(classifyProposal(proposal(`verify-human:${ID}`), undefined, ctx).state, "retired",
     "positive control: obsolete verify-human asks still use their existing auto-verification rule");
 });
