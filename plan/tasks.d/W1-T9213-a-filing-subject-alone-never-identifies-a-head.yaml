@@ -1,0 +1,50 @@
+- id: W1-T9213
+  title: "A FILING SUBJECT ALONE NEVER IDENTIFIES A HEAD — head-identity-gate exempts any head whose subject matches LINT_FILING_SUBJECT_RE (which includes bare `chore:`, `docs:` and `plan:`) before reading its diff, so a `chore: tidy` head touching src/ passes with no run-shaped branch and no Remudero-Task trailer"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high # a required merge gate's admission predicate
+  band_meaning: span
+  origin: "operator session 2026-10-13 (\"go ahead with your recommended follow ups to fix and improve all of this\"): found while fixing #11319's head-identity-gate red"
+  plan_refs: [W1-T1004, W1-T3706, W1-T3680, W1-T3388, W1-T3745]
+  files: [scripts/head-identity-gate.mjs, test/a-filing-subject-alone-never-identifies-a-head.test.ts, test/a-non-code-head-is-identified-by-its-diff.test.ts, test/a-dependabot-head-is-identified-without-a-task.test.ts, test/the-branch-name-contract-has-no-form-for-unfiled-work.test.ts]
+  status: queued
+  priority: 1.5 # operator-2026-10-13: a merge gate's identity check can be satisfied by commit-subject wording alone
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main 2026-10-13:
+      - scripts/head-identity-gate.mjs `evaluateHeadIdentityGate` returns ok ("filing-shaped subject … exempt from the
+        head-identity check", W1-T1004) as its FIRST branch whenever `isFilingShapedSubject(subject)` holds, before any
+        diff is read. `isFilingShapedSubject` wraps LINT_FILING_SUBJECT_RE (src/run-task.ts):
+        `/^(?:chore\(plan\)|fix\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\)|plan:|docs:|chore:)/i`.
+      - test/a-non-code-head-is-identified-by-its-diff.test.ts "the four pre-existing admitted forms are untouched"
+        asserts `chore: tidy` and `docs: update` heads touching src/run-task.ts PASS — W1-T3706 kept the subject form
+        unchanged when it added the diff-keyed form.
+      - W1-T3706 already admits what a real filing needs on its diff: every changed path matching NON_CODE_PATH_PATTERNS
+        (`*.md`, `plan/`, `docs/`, `learnings/`). The subject-only form therefore admits nothing a filing needs that the
+        diff form does not — it only admits code heads that happen to be worded like a filing.
+      - Seen today: #11319's fix agent noted an empty `chore: identify this pull request` commit would likely have passed
+        without its Remudero-Task trailer.
+  design: |
+    1. A filing-shaped subject is admitted only together with a READABLE diff in which every changed path is non-code
+       (isNonCodePath, the W1-T3706 list) — i.e. the subject form becomes a labelled case of the diff form, never an
+       exemption on its own. An unreadable or absent diff fails closed (refused, with the repair message the gate
+       already prints), exactly as the dependency-bump form does.
+    2. LINT_FILING_SUBJECT_RE itself is unchanged (lint-plan merge evidence and scripts/credit-surface-gate.mjs reuse
+       it for other purposes); only head-identity-gate's use of it changes.
+    3. The refusal message for a filing-worded head that touches code names the code paths and the two conforming
+       repairs (a run-<taskId>-<epochMs>/run-unfiled-<epochMs> branch, or a Remudero-Task trailer).
+    4. Update the three existing tests that assert subject-only admission (the "four pre-existing admitted forms"
+       test's `chore:`/`docs:` + src/ cases, and the two filing cases with no diff) to the new contract; keep every
+       plan/docs-only filing admitted.
+  acceptance:
+    - claim: "a chore:-subject head on a non-run branch whose diff touches src/ is refused"
+      proof: 'grep: test("W1-T9213: a filing-worded head that touches code is refused" in test/a-filing-subject-alone-never-identifies-a-head.test.ts'
+    - claim: "a plan-only filing under a filing subject is still admitted, and an unreadable diff fails closed"
+      proof: 'grep: test("W1-T9213: a plan-only filing is admitted and an unreadable diff is refused" in test/a-filing-subject-alone-never-identifies-a-head.test.ts'
+  falsifier: |
+    Restore the subject-only exemption: the `chore: tidy` head touching src/run-task.ts passes and the first test fails.
+    Refuse every filing subject: the plan-only filing is refused and the second test fails.

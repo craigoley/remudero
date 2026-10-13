@@ -50,7 +50,7 @@ const SHARED_PROOF_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts, test/example.test.ts]
+  files: [src/lib/plan.ts, test/example.test.ts]
   acceptance:
     - claim: "the first behaviour"
       proof: "unit test: test/example.test.ts"
@@ -122,9 +122,13 @@ test("classifyProposal repairs a misnamed stamp before checking draft readiness"
   const bad = classify(DISTINCT_PROOF_FRAGMENT, "- P44 (proof-debt: repair) — RATIFIED 2026-09-15 -> NEW-1.");
   assert.equal(bad.state, "ready", JSON.stringify(bad.reasons));
   assert.equal(bad.draft?.stampLine, "- proof-debt:W1-T4048 (proof-debt: repair) — RATIFIED 2026-10-13 -> NEW-1.");
-  const unclean = classify(SHARED_PROOF_FRAGMENT, "- P44 (repair) — RATIFIED 2026-09-15 -> NEW-1.");
+  // W1-T9039: approve repairs a shared whole-file proof, so readiness judges the draft as repaired; an uncalled
+  // module is a defect approve cannot repair.
+  assert.equal(classify(SHARED_PROOF_FRAGMENT, GOOD_STAMP).state, "ready");
+  const uncalled = DISTINCT_PROOF_FRAGMENT.replace("src/lib/plan.ts", "src/lib/an-uncalled-module.ts");
+  const unclean = classify(uncalled, "- P44 (repair) — RATIFIED 2026-09-15 -> NEW-1.");
   assert.equal(unclean.state, "not_ready");
-  assert.ok(unclean.reasons.some((r) => r.predicate === "lint_clean" && /shared-proof/.test(r.detail)));
+  assert.ok(unclean.reasons.some((r) => r.predicate === "lint_clean" && /call-site/.test(r.detail)));
   assert.ok(unclean.reasons.every((r) => !r.detail.includes("stamp:")));
 });
 

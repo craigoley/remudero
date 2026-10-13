@@ -9,8 +9,8 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { parseTasksFromYaml, PlanError, TASK_TYPES, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintViolation } from "./task-linter.js";
+import { parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
+import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -820,10 +820,13 @@ export interface ReadinessContext {
   /** W1-T4261: reuse of each draft's fragment parse and lint verdict across passes over the SAME plan object — see
    *  {@link FragmentMemo}. Optional; absent recomputes both, exactly as before. */
   fragmentMemo?: FragmentMemo;
+  /** W1-T9039: the checkout a draft is judged against; absent means the harness's own. */
+  draftRepoFacts?: DraftRepoFacts;
 }
 
-/** One drafted fragment's parse and (lazily) its blocking lint messages against one plan. */
+/** One drafted fragment as approve's repair leaves it, its parse and (lazily) its blocking lint messages. */
 interface FragmentVerdict {
+  judged: string;
   parsed: { plan: Plan } | { error: string };
   blocking?: string[];
 }
@@ -852,7 +855,12 @@ export function beginFragmentPass(memo: FragmentMemo): void {
 }
 
 function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYaml: string, proposalId: string): FragmentVerdict {
-  if (memo === undefined) return { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  const judge = (): FragmentVerdict => {
+    const repaired = repairRatificationFragment(fragmentYaml, proposalId);
+    const judged = repaired.ok ? repaired.fragmentYaml : fragmentYaml;
+    return { judged, parsed: safeParseFragment(judged, proposalId) };
+  };
+  if (memo === undefined) return judge();
   if (memo.plan !== plan) {
     memo.plan = plan;
     memo.previous = new Map();
@@ -860,7 +868,7 @@ function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYam
   }
   const key = `${proposalId}\u0000${fragmentYaml}`;
   let verdict = memo.current.get(key) ?? memo.previous.get(key);
-  if (verdict === undefined) verdict = { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  if (verdict === undefined) verdict = judge();
   memo.current.set(key, verdict);
   return verdict;
 }
@@ -1092,6 +1100,7 @@ export function blockingLintMessages(
   // narrow when asked. A previous fix in this repo narrowed a predicate correctly and left its one
   // caller still invoking the wide form (#5816); the saving lives entirely in the argument below.
   lint: typeof lintPlan = lintPlan,
+  facts?: DraftRepoFacts,
 ): string[] {
   const merged = mergedPlan(basePlan, fragmentPlan);
   // LINT ONLY WHAT IS READ BACK. The loop below reads `results` for the FRAGMENT's tasks and
@@ -1106,7 +1115,8 @@ export function blockingLintMessages(
   // and Analytics beside it: `boundConsoleReadRoute`'s 750ms budget is a `setTimeout` racing the
   // handler, and a `setTimeout` cannot fire while the event loop is blocked.
   const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
-  const results = lint(merged, () => ({}), fragmentIds);
+  const filingOpts = facts ? draftFilingLintOptions(facts) : {};
+  const results = lint(merged, () => filingOpts, fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
     const baseTask = basePlan.tasks.find((t) => t.id === task.id);
@@ -1352,7 +1362,8 @@ export function classifyProposal(
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
-    draft = { ...draft, stampLine: composeStampLine(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id), ctx.clock) };
+    const stampLine = composeStampLine(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id), ctx.clock);
+    draft = { ...draft, fragmentYaml: verdict.judged, stampLine };
     const { unmet, unobservable } = unmetOutsideDeps(ctx.plan, fragment.plan, ctx.isMerged, ctx.depsUnobservable);
     if (unmet.length > 0) {
       reasons.push({ predicate: "deps_merged", detail: `dep-unmet: ${unmet.join(", ")} not merged` });
@@ -1366,7 +1377,7 @@ export function classifyProposal(
         detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
       });
     }
-    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan);
+    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan, lintPlan, ctx.draftRepoFacts ?? HARNESS_FACTS);
     const blocking = [
       ...verdict.blocking,
       ...stampLineViolations(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id)).map((v) => `stamp: ${v.message}`),
@@ -1483,7 +1494,7 @@ export function inboxDraftExampleFragmentYaml(): string {
   const exampleType: (typeof TASK_TYPES)[number] = TASK_TYPES.includes("implement") ? "implement" : TASK_TYPES[0];
   return [
     "- id: NEW-1",
-    '  title: "Tighten the empty-input guard in parseWidget"',
+    '  title: "Tighten the empty-input guard in parseTasksFromYaml"',
     "  repo: remudero",
     "  depends_on: []",
     `  type: ${exampleType}`,
@@ -1492,10 +1503,10 @@ export function inboxDraftExampleFragmentYaml(): string {
     "  status: queued",
     "  attempts: 0",
     "  files:",
-    "    - src/lib/widget.ts",
+    "    - src/lib/plan.ts",
     "  acceptance:",
-    '    - claim: "parseWidget rejects an empty input instead of throwing a raw TypeError"',
-    '      proof: "unit test: parseWidget rejects an empty input instead of throwing a raw TypeError"',
+    '    - claim: "parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
+    '      proof: "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
     '  origin: "architect"',
   ].join("\n");
 }
@@ -1602,9 +1613,10 @@ export interface ParsedDraft {
 }
 
 function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
-  const fragment = safeParseFragment(draft.fragmentYaml, proposalId);
+  const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
+  const fragment = safeParseFragment(fragmentYaml, proposalId);
   const ids = "error" in fragment ? [] : fragment.plan.tasks.map((task) => task.id);
-  return { ...draft, stampLine: composeStampLine(proposalId, draft.stampLine, ids, clock) };
+  return { ...draft, fragmentYaml, stampLine: composeStampLine(proposalId, draft.stampLine, ids, clock) };
 }
 
 const FRAGMENT_RE = /=== FRAGMENT START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT END ===/g;
@@ -1924,25 +1936,68 @@ export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
   proofSelfPath: "block",
 } as const);
 
-/** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link DRAFT_FILING_LINT_OPTIONS} (W1-T8714), a new
- *  task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
+/** W1-T9039: what `lint-plan --base` reads off the checkout a task lands in. */
+export interface DraftRepoFacts {
+  moduleExists: (repoRelPath: string) => boolean;
+  readGrepProofFile: (repoRelPath: string) => string | undefined;
+}
+
+export function checkoutRepoFacts(root: string): DraftRepoFacts {
+  return {
+    moduleExists: (path) => fs.existsSync(resolvePath(root, path)),
+    readGrepProofFile: (path) => {
+      try {
+        return fs.readFileSync(resolvePath(root, path), "utf8");
+      } catch {
+        return undefined; // absent or unreadable: no opinion, as `lint-plan --base` reads it
+      }
+    },
+  };
+}
+
+const HARNESS_FACTS = checkoutRepoFacts(HARNESS_ROOT);
+
+/** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
+export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
+  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [], ...facts, knownRepos };
+}
+
+/** W1-T9039: a drafted `status: blocked` with no legal retirement is the plan index copied, so the harness queues it. */
+export function queueDraftedBlockedTasks(fragmentYaml: string): string {
+  const document = parseDocument(fragmentYaml);
+  if (document.errors.length > 0 || !isSeq(document.contents)) return fragmentYaml;
+  const ranges: number[][] = [];
+  for (const node of document.contents.items) {
+    const status = isMap(node) ? node.get("status", true) : undefined;
+    const retired = isMap(node) && (RETIREMENT_REASONS as readonly unknown[]).includes(node.get("retirement"));
+    if (isScalar(status) && String(status.value) === "blocked" && status.range && !retired) ranges.push(status.range);
+  }
+  let queued = fragmentYaml;
+  for (const [start, end] of ranges.sort((a, b) => b[0] - a[0])) queued = `${queued.slice(0, start)}queued${queued.slice(end)}`;
+  return queued;
+}
+
+/** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link draftFilingLintOptions} (W1-T8714, W1-T9039), a
+ *  new task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
 export function lintDraftedFragment(
   fragmentYaml: string,
   proposalId: string,
   stampLine?: string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
-  directoryExists: (path: string) => boolean = (path) => fs.existsSync(resolvePath(HARNESS_ROOT, path)),
+  pathExists: (path: string) => boolean = HARNESS_FACTS.moduleExists,
+  readGrepProofFile: DraftRepoFacts["readGrepProofFile"] = HARNESS_FACTS.readGrepProofFile,
 ): DraftLintViolation[] {
   let tasks;
   try {
-    tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
+    tasks = parseTasksFromYaml(queueDraftedBlockedTasks(fragmentYaml), `inbox draft ${proposalId}`);
   } catch (e) {
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
+  const opts = draftFilingLintOptions({ moduleExists: pathExists, readGrepProofFile }, knownRepos);
   for (const task of tasks) {
-    violations.push(...filingBlockers(lintTask(task, { ...DRAFT_FILING_LINT_OPTIONS, knownRepos }).violations, undefined, true));
-    violations.push(...draftPlaceholderViolations(task, directoryExists));
+    violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
+    violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
   }
   if (stampLine !== undefined) {
@@ -3330,10 +3385,31 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
   return carried;
 }
 
-/** Repair only mechanical filing failures (proofs, sizing, W1-T8714's undeclared band). Ranges keep all other bytes. */
-export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
+/** Repair only mechanical filing failures (proofs, sizing, W1-T8714's undeclared band, W1-T9039's drafted status), then
+ *  lint as the push floor will. Ranges keep all other bytes. */
+export function relintRatificationFragment(fragmentYaml: string, proposalId: string, facts: DraftRepoFacts = HARNESS_FACTS):
   | { ok: true; fragmentYaml: string }
   | { ok: false; reason: string } {
+  const repaired = repairRatificationFragment(fragmentYaml, proposalId);
+  if (!repaired.ok) return repaired;
+  const violations: DraftLintViolation[] = [];
+  try {
+    for (const task of parseTasksFromYaml(repaired.fragmentYaml, `approve ${proposalId}`)) {
+      violations.push(...filingBlockers(lintTask(task, draftFilingLintOptions(facts)).violations, undefined, true));
+    }
+  } catch (error) {
+    return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
+  }
+  if (violations.length) {
+    return { ok: false, reason: violations.map((v) => `[${v.check}] ${v.message}`).join("; ") };
+  }
+  return repaired;
+}
+
+function repairRatificationFragment(draftYaml: string, proposalId: string):
+  | { ok: true; fragmentYaml: string }
+  | { ok: false; reason: string } {
+  const fragmentYaml = queueDraftedBlockedTasks(draftYaml);
   const document = parseDocument(fragmentYaml);
   const tasks = isSeq(document.contents) ? document.contents.items : [];
   const parsed = (() => {
@@ -3398,17 +3474,6 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
   for (const edit of edits.sort((a, b) => b.start - a.start)) {
     repaired = repaired.slice(0, edit.start) + edit.text + repaired.slice(edit.end);
   }
-  const violations: DraftLintViolation[] = [];
-  try {
-    for (const task of parseTasksFromYaml(repaired, `approve ${proposalId}`)) {
-      violations.push(...filingBlockers(lintTask(task, DRAFT_FILING_LINT_OPTIONS).violations, undefined, true));
-    }
-  } catch (error) {
-    return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
-  }
-  if (violations.length) {
-    return { ok: false, reason: violations.map((v) => `[${v.check}] ${v.message}`).join("; ") };
-  }
   return { ok: true, fragmentYaml: repaired };
 }
 
@@ -3452,9 +3517,10 @@ export function assertRatificationDraftFileable(
   knownRepos: ReadonlySet<string> | undefined,
   worktreePath = process.cwd(),
 ): void {
-  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  const facts = checkoutRepoFacts(worktreePath);
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId, facts);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
-    (path) => fs.existsSync(resolvePath(worktreePath, path)));
+    facts.moduleExists, facts.readGrepProofFile);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
   const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
   if ("plan" in parsed) {

@@ -83,6 +83,9 @@ function runBody(
   stub("git", `case "$1" in fetch) exit 0 ;; diff) cat "${join(dir, "diff.txt")}" ;; *) exit 1 ;; esac`);
   stub("npm", `echo "npm $*" >> "${log}"`);
   stub("npx", `echo "npx $*" >> "${log}"`);
+  // Millisecond admission timestamps must not depend on GNU date extensions.
+  // This positive platform control also falsifies the old command on Linux.
+  stub("date", "exit 1");
   if (opts.stubNode !== undefined) stub("node", `echo "node $*" >> "${log}"\n${opts.stubNode}`);
   let text = body;
   for (const [from, to] of Object.entries(opts.subs ?? {})) text = text.replaceAll(from, to);
@@ -168,10 +171,14 @@ test("W1-T5697: a SOURCE pull request installs no Chromium on any ci shard, and 
 test("W1-T5697: push and merge_group install on every ci shard, unconditionally", () => {
   for (const event of ["push", "merge_group"]) {
     for (let shard = 1; shard <= 8; shard += 1) {
+      const beforeMs = Date.now();
       const r = ciShard(event, ["src/lib/leaf.ts"], shard);
+      const afterMs = Date.now();
       // started_ms is the job-start stamp the flake screen reads; it is a clock reading, not a decision.
       const { started_ms: startedMs, ...decided } = r.outputs;
       assert.match(startedMs ?? "", /^[1-9]\d*$/, `${event} shard ${shard}/8 stamps its start`);
+      assert.ok(Number.isSafeInteger(Number(startedMs)) && Number(startedMs) >= beforeMs && Number(startedMs) <= afterMs,
+        `${event} shard ${shard}/8 records a genuine millisecond clock reading without date`);
       assert.deepEqual(decided, { setup: "true", browser: "true" }, `${event} shard ${shard}/8`);
       assert.deepEqual([r.npm, r.chromium], [true, true], `${event} shard ${shard}/8 must install`);
     }

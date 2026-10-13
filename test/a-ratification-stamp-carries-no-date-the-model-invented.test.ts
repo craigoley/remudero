@@ -89,12 +89,11 @@ test("W1-T8828: a stored draft held only on its stamp becomes ready without a re
   assert.ok(batch.masterPlanMd.includes(result.draft!.stampLine));
   assert.equal(draft.stampLine, "ratified verify-human:W1-T147 -> NEW-1, NEW-2");
   assert.deepEqual(inbox.draftsDueOnDaemon([proposal], { [proposal.id]: draft }, {}, 3), []);
-  const dirtyFragment = fragmentYaml
-    .replace('proof: "unit test: parseWidget rejects an empty input instead of throwing a raw TypeError"', 'proof: "unit test: test/widget.test.ts"')
-    .replace('  origin:', '    - claim: "another behaviour"\n      proof: "unit test: test/widget.test.ts"\n  origin:');
+  // W1-T9039: approve repairs a shared whole-file proof, so the dirty draft here is one it cannot repair.
+  const dirtyFragment = fragmentYaml.replace("    - src/lib/plan.ts", "    - src/lib/an-uncalled-module.ts");
   const dirty = inbox.classifyProposal(proposal, { ...draft, fragmentYaml: dirtyFragment }, context);
   assert.equal(dirty.state, "not_ready");
-  assert.ok(dirty.reasons.some((reason) => reason.predicate === "lint_clean" && reason.detail.includes("shared-proof")));
+  assert.ok(dirty.reasons.some((reason) => reason.predicate === "lint_clean" && reason.detail.includes("call-site")));
   assert.ok(dirty.reasons.every((reason) => !reason.detail.includes("stamp:")));
   const malformed = inbox.classifyProposal(proposal, { ...draft, fragmentYaml: "[broken" }, context);
   assert.equal(malformed.state, "not_ready");
