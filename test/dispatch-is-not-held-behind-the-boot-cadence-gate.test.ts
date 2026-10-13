@@ -12,7 +12,7 @@ import type { RunResult } from "../src/run-task.js";
 // W1-T9072 — DISPATCH IS NOT HELD BEHIND THE BOOT CADENCE GATE. W1-T5720's gate held tick 1's dispatch along
 // with its cadences, so every boot's lanes waited for the first full pass (59 boots: median 4.1 min, max 8.4).
 // Every input tick 1's selection reads is valid at boot without that pass, so dispatch runs on tick 1 while
-// the gated cadences still wait, and they still never run beside a lane: only at an iteration top.
+// the gated cadences still wait for the gate (W1-T9321: and run as soon as it opens, not at an iteration top).
 
 function fixturePlan(ids: readonly string[]): Plan {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}tick-one-dispatch-`));
@@ -108,11 +108,12 @@ test("W1-T9072: the gated cadences stay deferred and never run beside a tick-1 l
   assert.deepEqual(h.steps("daemon.boot_gate.deferred").map((l) => l.extra.cadence), ["gardens", "checkMeasurementCadence", "checkRetroTrigger"],
     "each deferral is still named, once");
   assert.ok(at("garden") > at("gate-opened"), `the deferred gardens start when the gate opens (${saw})`);
+  // W1-T9321: once the gate opens they no longer wait for an iteration top (tick 2 never came on the core daemon);
+  // test/gated-cadences-run-once-the-boot-gate-opens.test.ts holds the lane open and proves they run beside it.
   for (const cadence of ["measurement", "retro"]) {
-    assert.equal(h.events.filter((e) => e === cadence).length, 1, `${cadence} is deferred, not skipped (${saw})`);
+    assert.ok(at(cadence) >= 0, `${cadence} is deferred, not skipped (${saw})`);
     assert.ok(at(cadence) > at("gate-opened"), `${cadence} waits for the gate (${saw})`);
-    assert.ok(at(cadence) > at("lane-end:A"), `${cadence} never runs beside the tick-1 lane (${saw})`);
-    assert.ok(at(cadence) < at("lane-start:B"), `${cadence} runs at the next iteration top, ahead of that tick's dispatch (${saw})`);
+    assert.ok(at(cadence) < at("lane-start:B"), `${cadence} runs no later than the next tick's dispatch (${saw})`);
   }
 });
 
