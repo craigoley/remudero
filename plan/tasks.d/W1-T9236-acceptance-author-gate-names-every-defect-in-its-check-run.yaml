@@ -1,0 +1,66 @@
+- id: W1-T9236
+  title: "ACCEPTANCE-AUTHOR-GATE NAMES EVERY DEFECT IN ITS CHECK RUN, NOT ONLY IN THE JOB LOG — #11353's failing check run on 2026-10-13 carried title, summary and text all null; its one annotation was 'Process completed with exit code 1', and the refusal reached only the job log, naming criterion 1 alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # one concern: the gate's refusal reaches the check run (annotation + step summary) and lists every defect; one script and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11353's acceptance-author-gate red showed nothing on the PR; the reason was only in the job log"
+  plan_refs: [W1-T1060, W1-T3278, W1-T3675, W1-T2272]
+  files:
+    - scripts/acceptance-author-gate.mjs
+    - test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts
+  status: queued
+  priority: 2  # every refusal costs a log read the fleet token cannot make (W1-T3278); hand authors open the log by hand
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13, two GitHub reads:
+      - GraphQL, PR #11353 (plan-file-1791897336437) head 246cfd102: the acceptance-author-gate check run with conclusion
+        FAILURE has `title: null`, `summary: null`, `text: null` (job 115327895646). The two later SUCCESS runs on the
+        same head are also null, so nothing on the PR page or in the checks API says why it was red.
+      - That job's log: `acceptance-author-gate: REFUSED (grep-proof-target-missing) — criterion 1's grep proof names
+        test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts, which does not exist at this head ...`,
+        followed by `##[error]Process completed with exit code 1.` That generic line is the job's only annotation.
+    WHY, READ on origin/main 6732a7690 (symbols, not lines):
+      - `main` in scripts/acceptance-author-gate.mjs reports a refusal with `console.error(...)` and sets
+        `process.exitCode = 1`. It writes no `::error` workflow command and nothing to `$GITHUB_STEP_SUMMARY`, so the
+        check run's output and annotations carry no reason.
+      - The fleet's fix rung reads failures from the annotations API because the fleet token cannot read job logs
+        (W1-T3278, merged). For this gate there is no annotation to read beyond the exit code.
+      - The gate also stops at the FIRST defect: `bodyProofTargetMissing` returns on the first missing target and
+        `evaluateGate` returns one result. A body with three stale proofs is refused three times, one push each.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for acceptance-author-gate together
+    with annotation / step summary / check-run output: W1-T3278 (the annotation reader, merged), W1-T1131 and W1-T2804
+    (ci-gate) match; none makes this gate write its reason. Control: `acceptance-author-gate` reads 93 shards on main and
+    on every head.
+  design: |
+    1. EVERY DEFECT, NOT THE FIRST. The body-proof checks collect every failing criterion before returning: each missing
+       grep target, each wrapped pattern, each unexecutable proof, with its criterion number, proof text and reason.
+       The single-result arms above them (rule 15, self-credit, trailer refusals) keep their order and stay one result.
+       The result keeps `defect` (the first defect's name) and gains `defects: [{criterion, proof, defect, why}]`.
+    2. THE REASON REACHES THE CHECK RUN. On a refusal, `main` also writes (a) one `::error title=acceptance-author-gate
+       (<defect>)::<message>` workflow command whose message lists every defect (newlines escaped as the workflow-command
+       syntax requires), and (b) a markdown section to `$GITHUB_STEP_SUMMARY` when that variable is set: one row per
+       defect with criterion, proof and why, plus the one-line remedy the message already carries. A run outside Actions
+       (no `GITHUB_ACTIONS`) prints exactly what it prints today. One annotation, not one per defect, so no count of
+       defects can be dropped by the runner's per-step annotation limit.
+    3. THE EXIT CODE AND THE VERDICT ARE UNCHANGED. Only where the reason is written changes.
+    Tests go in test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts. Drive `main` with a fixture event
+    payload (the existing gate tests' shape), `GITHUB_ACTIONS=true` and a temp `GITHUB_STEP_SUMMARY` file, and capture
+    stdout/stderr.
+  acceptance:
+    - claim: "a refused body with several missing grep targets names every one of them, not only the first"
+      proof: 'grep: test("W1-T9236: a refusal names every failing proof, not only the first" in test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts'
+    - claim: "under Actions a refusal writes an ::error annotation listing every defect"
+      proof: 'grep: test("W1-T9236: a refusal writes one error annotation listing every defect" in test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts'
+    - claim: "under Actions a refusal writes a step summary row per defect, and a run outside Actions writes neither"
+      proof: 'grep: test("W1-T9236: a refusal writes a step summary row per defect" in test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/acceptance-author-gate-names-every-defect-in-its-check-run.test.ts"
+  falsifier: |
+    Return on the first missing target again: the first test finds one defect where the fixture body has three. Drop the
+    `::error` line: the second test captures no annotation. Write the summary even without GITHUB_ACTIONS: the third
+    test's outside-Actions arm finds a summary file it expected empty.
