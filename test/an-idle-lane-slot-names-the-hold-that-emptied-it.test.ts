@@ -212,6 +212,14 @@ test("W1-T8235: the gap across a restart is charged to restart", async () => {
   assert.equal(charged, 20, "ten minutes at the two slots the previous process left empty");
 });
 
+test("W1-T8235: a torn lane.idle_changed line is skipped and the older intact record is returned", () => {
+  const intact = JSON.stringify({ step: "lane.idle_changed", at_ms: 1000, idle_slots: 1, capacity: 2, dispatchable: 3 });
+  // The newest line names the step but is cut off mid-write: JSON.parse throws and the scan moves on.
+  const torn = '{"step":"lane.idle_changed","at_ms":2000,"idle_sl';
+  assert.deepEqual(lastIdleLaneRecord([intact, torn]), { atMs: 1000, idleSlots: 1, capacity: 2, dispatchable: 3 });
+  assert.equal(lastIdleLaneRecord([torn]), undefined);
+});
+
 test("W1-T8235: a hold change writes one lane.idle_changed row", async () => {
   const prev = idleLaneStateOf({ atMs: 0, busyLanes: 0, capacity: 3, dispatchable: 2, cause: "wip_limit" });
   assert.equal(idleLaneStateChanged(prev, idleLaneStateOf({ atMs: 1, busyLanes: 0, capacity: 3, dispatchable: 5, cause: "wip_limit" })), false);
