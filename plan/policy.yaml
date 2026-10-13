@@ -1691,3 +1691,15 @@ daemonMemory:
     origin: "net-new"
     min: 0.1
     max: 1
+
+# WHO DECIDES WHETHER AN ESCALATION NEEDS THE OPERATOR (W1-T8868), read by
+# src/lib/escalation-triage.ts's `parseEscalationTriagePolicy` (OPTIONAL: absent reads as the
+# defaults below; NOT threaded through src/lib/policy.ts's `validatePolicy`, exactly like `risk:`).
+#
+# Every escalation is triaged at src/lib/escalate.ts into auto_resolve (a reversible executor from a
+# closed set), digest, or deliver. `shadow` ledgers `escalation.triaged` with the would-be outcome and
+# still delivers every escalation as needs-human; `act` follows the outcome. MANUAL and HARD_STOP are
+# always delivered in either mode. `maxAutoResolvesPerPass` is capped at 5 by the parser.
+escalationTriage:
+  mode: shadow
+  maxAutoResolvesPerPass: 5
