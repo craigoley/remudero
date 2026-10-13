@@ -96,7 +96,8 @@ export type LintCheck =
   | "proof-unit-test-base-wrapper"
   | "proof-test-only-discrimination"
   | "new-shard-rule-suite"
-  | "shard-shape";
+  | "shard-shape"
+  | "unminted-task-id";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -3463,6 +3464,38 @@ export function monolithFilingViolations(task: Task, opts: LintOpts = {}): LintV
   ];
 }
 
+/** W1-T9292 — THE SHAPE OF A MINTED TASK ID: a prefix, `-T`, digits and an optional single letter (W1-T12e and
+ *  W1-T1B are real). The same shape `HAND_WORKTREE_TASK_ID_RE` (hand-worktree.ts) names; `materializeDraftTaskIds`
+ *  (inbox.ts) refuses a fragment declaring anything else, and {@link unmintedTaskIdViolations} lints it. */
+export const MINTED_TASK_ID_RE = /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/;
+
+/**
+ * W1-T9292 — AN UNMINTED ID NEVER LANDS IN THE PLAN. `rmd approve` landed NEW-1A and NEW-1B (#11378) and NEW-1a and
+ * NEW-1b (#11402) on main, and no lint checked an id's shape: every reservation, ownership check and id-shaped reader
+ * skips such a task rather than reporting it. BLOCK when the diff adds the task ({@link LintOpts.addedTaskIds});
+ * WARN otherwise, so the shards already on main stay visible without reddening main or an unrelated PR.
+ * `lint-plan` without `--base` passes an empty set, so it WARNS for every unminted id.
+ */
+export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  // NO SET ⇒ NO OPINION: only `lint-plan` knows which ids a diff adds, and a fragment still being drafted carries
+  // NEW-<n> placeholders by design, so every other caller (dispatch, the draft relint, fixtures) stays silent.
+  if (!opts.addedTaskIds) return [];
+  const id = String(task.id);
+  if (MINTED_TASK_ID_RE.test(id)) return [];
+  const added = opts.addedTaskIds.has(id);
+  return [
+    {
+      check: "unminted-task-id",
+      severity: added ? "block" : "warn",
+      message:
+        `task id ${JSON.stringify(id)} is not a minted task id (expected ${MINTED_TASK_ID_RE.source}, e.g. W1-T123). ` +
+        (added
+          ? "This diff adds it: mint and reserve a real id (`rmd next-task-id`) and rename the shard and every depends_on reference to it."
+          : "No diff being linted adds it (it is on the base, or there is no base), so this only warns; renumbering or retiring it is its own change."),
+    },
+  ];
+}
+
 export interface LintOpts {
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
   mountMaxTurns?: number;
@@ -3497,6 +3530,10 @@ export interface LintOpts {
   /** Ids present in THIS branch's `plan/tasks.yaml` and absent from the base ref's monolith.
    *  Supplied only in `--base` mode; undefined ⇒ {@link monolithFilingViolations} is silent. */
   newMonolithIds?: ReadonlySet<string>;
+  /** W1-T9292 — ids this diff ADDS to the plan (absent at the base ref), for {@link unmintedTaskIdViolations}: an
+   *  unminted id in the set BLOCKS, any other unminted id WARNS. Supplied only by `lint-plan` (empty without a base);
+   *  absent ⇒ that check is silent. */
+  addedTaskIds?: ReadonlySet<string>;
   /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
   monolithFiling?: LintSeverity;
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
@@ -3719,6 +3756,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...advisoryRoutingViolations(task));
   violations.push(...deferredFollowUpViolations(task));
   violations.push(...shardShapeViolations(task, opts));
+  violations.push(...unmintedTaskIdViolations(task, opts));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

@@ -29494,6 +29494,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
     opts.knownRepos = knownRepos;
+    // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
+    // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
+    opts.addedTaskIds = newTaskIds ?? new Set<string>();
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
