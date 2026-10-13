@@ -1392,6 +1392,7 @@ import {
   renderSkillEffectivenessReport,
   renderSkillsPart,
   skillsInjectedEvent,
+  skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
   workerAllowlistFromSettings,
@@ -19959,13 +19960,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
     const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
-    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
+    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
     const skillSelection = observeSkillSelection(
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
       task.files,
+      (skillName) => skillWithheldForRun(runId, skillName),
     );
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
