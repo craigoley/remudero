@@ -16,8 +16,11 @@ export interface WorkerInitSummary {
   mcpToolNames: InitNameEvidence;
 }
 
+/** PRIMARY CONTROL: bound parser work; exceeding this reports partial inventory, never a worker failure. */
 export const INIT_INSPECTION_LIMIT = 256;
+/** PRIMARY CONTROL: bounded retained server identifiers, not a limit on configured servers. */
 export const INIT_SERVER_NAME_LIMIT = 16;
+/** PRIMARY CONTROL: bounded retained MCP tool identifiers, not a tool-admission limit. */
 export const INIT_TOOL_NAME_LIMIT = 32;
 
 function unavailableNames(): InitNameEvidence {
