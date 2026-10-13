@@ -4,6 +4,18 @@ This is a staged, trusted metadata producer, not a claim that repository protect
 has been activated. Source merge, producer adoption, smoke qualification and GitHub
 enforcement are distinct boundaries. The operator approved the high/critical policy.
 
+The Actions-produced status is ADVISORY: other PR workflows share the same Actions
+App identity and may have check-write permission. Do not mistake that app binding
+for a separately trusted security authority. Enforcement must use the existing
+operator-controlled App/native protection after qualification; do not copy its
+private key into a PR runner or create infrastructure to solve this.
+
+Normal source effectors check the same trusted metadata program before arm,
+re-arm, direct REST fallback, worker merge and enqueue; writes bind the verified
+head with REST `sha` or CLI `--match-head-commit`. Other repositories are untouched.
+This source guard is not adopted merely because a private test passes. Durable
+UNKNOWN escalation and server enforcement remain mandatory before declaring done.
+
 The producer runs only main's script. It executes no PR source or artifacts, installs
 no dependencies, calls no models, and creates no infrastructure. It checks complete
 changed-file/check corpora, rename predecessors, trusted GitHub Advanced Security

@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { unavailableWorkerInitSummary, workerInitSummaryFromMessage, type WorkerInitSummary } from "./worker-init-summary.js";
@@ -7144,12 +7145,13 @@ export function ghPrMergeSquash(prUrl: string, closingReferences: (prUrl: string
     );
   }
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
+  const securityHead = securityMergeHead(prUrl);
   // TRAP: NO `--delete-branch`. `gh pr merge --help` documents it as deleting the LOCAL branch too, which needs a resolvable
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
   // on any branch" even when the merge landed. The repository carries `delete_branch_on_merge: true`, so the head branch is
   // still deleted, server-side (W1-T1050).
   // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
-  return ghExec(["pr", "merge", prUrl, "--squash"], {
+  return ghExec(["pr", "merge", prUrl, "--squash", ...(securityHead ? ["--match-head-commit", securityHead] : [])], {
     encoding: "utf8",
   });
 }

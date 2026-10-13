@@ -9,13 +9,13 @@ const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
  * no PR checkout, uploaded artifact, evaluator, install, merge or dispatch is executed.
  * SHIPS-UNWIRED: GitHub producer/protection activation awaits main adoption and smoke evidence.
  */
-export async function readSecurityMergeDecision(target, read) {
+export function* securityMergeMetadataRequests(target) {
   if (target?.owner !== 'craigoley' || target.repo !== 'remudero' || !Number.isSafeInteger(target.prNumber) || target.prNumber < 1 ||
       (target.expectedHead !== undefined && !sha(target.expectedHead))) return {decision:unknown('invalid-target')};
   const prefix = `repos/${target.owner}/${target.repo}`, prPath = `${prefix}/pulls/${target.prNumber}`;
   let headSha;
   try {
-    const first = await read(prPath);
+    const first = yield prPath;
     headSha = first?.head?.sha;
     if (!sha(headSha) || first.state !== 'open' || first.base?.repo?.full_name !== 'craigoley/remudero' || first.base.ref !== 'main' ||
         (target.expectedHead !== undefined && target.expectedHead !== headSha)) return {headSha,decision:unknown('head-unavailable-or-changed')};
@@ -23,7 +23,7 @@ export async function readSecurityMergeDecision(target, read) {
       return {headSha,decision:unknown('changed-file-corpus-incomplete')};
     const files = [];
     for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
-      const rows = await read(`${prPath}/files?per_page=100&page=${page}`);
+      const rows = yield `${prPath}/files?per_page=100&page=${page}`;
       if (!Array.isArray(rows) || rows.length > 100) return {headSha,decision:unknown('changed-file-corpus-incomplete')};
       files.push(...rows);
       if (files.length >= first.changed_files || rows.length < 100) break;
@@ -35,7 +35,7 @@ export async function readSecurityMergeDecision(target, read) {
     if (decision.state !== 'not-applicable' && decision.reason === 'check-corpus-incomplete') {
       const checks = [];let total;
       for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
-        const corpus = await read(`${prefix}/commits/${headSha}/check-runs?filter=all&per_page=100&page=${page}`);
+        const corpus = yield `${prefix}/commits/${headSha}/check-runs?filter=all&per_page=100&page=${page}`;
         if (!Number.isSafeInteger(corpus?.total_count) || corpus.total_count < 0 || corpus.total_count > 100 * SECURITY_METADATA_MAX_PAGES ||
             !Array.isArray(corpus.check_runs) || corpus.check_runs.length > 100 || (total !== undefined && total !== corpus.total_count))
           return {headSha,decision:unknown('check-corpus-incomplete-or-changing')};
@@ -45,7 +45,7 @@ export async function readSecurityMergeDecision(target, read) {
       decision = classifyCodeScanningMergePolicy({...input,checksComplete:checks.length === total,checksHeadSha:headSha,checks});
     }
     // Changes to head/base/file-count during pagination invalidate even a docs-only result.
-    const last = await read(prPath);
+    const last = yield prPath;
     if (last?.head?.sha !== headSha || last.state !== 'open' || last.base?.sha !== first.base.sha || last.changed_files !== first.changed_files ||
         last.base?.repo?.full_name !== first.base.repo.full_name || last.base.ref !== first.base.ref)
       return {headSha,decision:unknown('head-or-base-changed-during-observation')};
@@ -53,6 +53,18 @@ export async function readSecurityMergeDecision(target, read) {
   } catch {
     return {headSha,decision:unknown('security-api-unavailable')};
   }
+}
+
+/** The synchronous CLI and awaited daemon/workflow drive the SAME observation program. */
+export function readSecurityMergeDecisionSync(target, read) {
+  const requests=securityMergeMetadataRequests(target);let next=requests.next();
+  while(!next.done){try{next=requests.next(read(next.value));}catch(error){next=requests.throw(error);}}
+  return next.value;
+}
+export async function readSecurityMergeDecision(target, read) {
+  const requests=securityMergeMetadataRequests(target);let next=requests.next();
+  while(!next.done){try{next=requests.next(await read(next.value));}catch(error){next=requests.throw(error);}}
+  return next.value;
 }
 
 /** Publish only a SHA-scoped status, never merge permission for another head.

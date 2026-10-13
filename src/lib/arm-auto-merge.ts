@@ -24,6 +24,7 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock, type Clock } from "./clock.js";
+import { securityMergeHead, securityMergeHeadAsync } from "./security-merge-admission.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -403,8 +404,9 @@ function* headShaSteps(prUrl: string, fetch: RestReader): Steps<string> {
 /** W1-T1255: the argv for GitHub's own MERGE endpoint — the REST/core-budget twin of
  *  `gh pr merge --squash`, which is GraphQL. See run-task.ts's own `ghUpdateBranchArgv`, whose
  *  shape this copies deliberately: same `gh api --method PUT` mechanism, different endpoint. */
-export function ghMergePrArgv(owner: string, repo: string, prNumber: number): string[] {
-  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash"];
+export function ghMergePrArgv(owner: string, repo: string, prNumber: number, expectedHead?: string): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash",
+    ...(expectedHead ? ["-f", `sha=${expectedHead}`] : [])];
 }
 
 /** W1-T1255: resolve the three REST path components out of a PR URL, or `undefined` when the URL
@@ -421,12 +423,14 @@ export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: stri
 export function mergeDirectViaRest(
   prUrl: string,
   exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+  securityRead?: (path: string) => unknown,
 ): void {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
+  const head = securityMergeHead(prUrl, securityRead);
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head), { encoding: "utf8", stdio: "pipe" });
 }
 
 const execFilePromise = promisify(execFile);
@@ -435,12 +439,14 @@ const execFilePromise = promisify(execFile);
 export async function mergeDirectViaRestAsync(
   prUrl: string,
   exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = execFilePromise,
+  securityRead?: (path: string) => Promise<unknown>,
 ): Promise<void> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8" });
+  const head = await securityMergeHeadAsync(prUrl, securityRead);
+  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head), { encoding: "utf8" });
 }
 
 /**
@@ -615,7 +621,8 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      runGh(["pr", "merge", prUrl, "--auto", "--squash"], {
+      const head = securityMergeHead(prUrl);
+      runGh(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -652,7 +659,8 @@ export function realArmDeps(
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      runGh(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
+      const head = securityMergeHead(prUrl);
+      runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
     closingReferences: (prUrl) => runStepsSync(closingReferenceGuardSteps(prUrl, ghJson, (args) => {
@@ -693,7 +701,8 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     sleep: async (ms) => { if (ms > 0) await delay(ms); },
     armAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      await ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash"]);
+      const head = await securityMergeHeadAsync(prUrl);
+      await ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]);
     },
     mergeDirect: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
@@ -707,7 +716,8 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     readPlanMergeSafety: (prUrl) => runStepsAsync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync)),
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      await ghTextAsync(["pr", "merge", prUrl]);
+      const head = await securityMergeHeadAsync(prUrl);
+      await ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]);
     },
   };
 }
