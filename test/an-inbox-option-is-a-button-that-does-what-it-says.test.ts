@@ -5,12 +5,15 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { InboxClassification, InboxState } from "../src/lib/inbox.js";
 import { buildDecisionSummaryPrompt, validateDecisionSummary } from "../src/lib/feedback.js";
-import { backfillPlainMessages, plainSourceFingerprint, plainStorePath, plainTemplate, writePlainMessage, type PlainOption } from "../src/lib/inbox-plain.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { inboxLanes } from "../src/lib/panel-graph.js";
+import { backfillPlainMessages, plainSourceFingerprint, plainStorePath, plainTemplate, writePlainMessage, type PlainInboxMessage, type PlainOption } from "../src/lib/inbox-plain.js";
+import { inboxThreadId, readThread } from "../src/lib/inbox-thread.js";
+import { writePersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
+import { buildPanelGraphRoutes, inboxLanes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { createService } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const ID = "machine-judge:W1-T5418";
@@ -22,7 +25,7 @@ const TAGGED: PlainOption[] = [
   { label: "Approve now", consequence: "The fix is approved and lands.", intent: "approve" },
 ];
 
-function stored(options: PlainOption[]) {
+function stored(options: PlainOption[]): PlainInboxMessage {
   return {
     headline: "A parked fix needs your ruling",
     whatHappened: "A fix for a slow build is parked and waiting for a ruling.",
@@ -55,7 +58,7 @@ test("W1-T8826: approve is actionable only on a ready item", (t) => {
   assert.equal(ready.byLabel("Approve now").intent, "approve");
   assert.deepEqual(ready.byLabel("Request clearer proof").action, { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback" });
 
-  for (const state of ["declined", "not_ready", "drafting"] as const) {
+  for (const state of ["declined", "not_ready", "drafting", "deferred_with_trigger"] as const) {
     const other = served(t, state, TAGGED);
     assert.equal(other.byLabel("Approve now").intent, "approve", `${state}: the intent is still served`);
     assert.equal(other.byLabel("Approve now").action, undefined, `${state}: approve has no route`);
@@ -102,9 +105,13 @@ test("W1-T8826: the decision card validates an option intent and rejects an unkn
     decision: "Decide whether the fix should go ahead.",
     options: [{ label: "Let it go", consequence: "It lands.", ...(intent === undefined ? {} : { intent }) }, { label: "Drop it", consequence: "It is closed." }],
   });
-  assert.equal(validateDecisionSummary(card("approve"))!.options[0]!.intent, "approve");
+  for (const intent of ["approve", "decline", "reframe", "reply", "keep"] as const) {
+    assert.equal(validateDecisionSummary(card(intent))!.options[0]!.intent, intent);
+  }
   assert.equal(validateDecisionSummary(card())!.options[0]!.intent, undefined, "an escalation card without intent validates as before");
-  assert.equal(validateDecisionSummary(card("delete-everything")), null);
+  for (const intent of ["delete-everything", "", "APPROVE", null, 0, false, {}, []]) {
+    assert.equal(validateDecisionSummary(card(intent)), null, `invalid intent: ${JSON.stringify(intent)}`);
+  }
 });
 
 test("W1-T8826: a template option is tagged and a fleet finding is not offered a thread reply", (t) => {
@@ -149,11 +156,53 @@ test("W1-T8826: actions are recomputed from the current lane without trusting st
   assert.equal(untagged.action, undefined, "an untagged option never inherits a stored action");
 });
 
+test("W1-T8826: a carried slow-lane message recomputes actions for a deferred item", (t) => {
+  const root = makeTempDir("rmd-inbox-option-snapshot");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const message = stored(TAGGED);
+  const before = JSON.stringify(message);
+  const classification: InboxClassification = { proposalId: ID, state: "ready", reasons: [] };
+  const classified = {
+    proposals: [{ id: ID, summary: SUMMARY, evidenceAnchors: [] }],
+    classifications: [classification],
+    ledgerLines: Object.assign([], { torn: 0, present: true }),
+    stores: { fleetDecisions: {}, plainMessages: { [ID]: message } },
+  };
+  const ready = inboxLanes(classified, root);
+  assert.deepEqual(ready.ready[0]!.plain.options[2]!.action, {
+    method: "POST", path: "/v1/inbox/approve", fields: { proposalId: ID },
+  });
+  assert.deepEqual(ready.needsYou.ready[0]!.plain, ready.ready[0]!.plain);
+
+  classification.state = "deferred_with_trigger";
+  const deferred = inboxLanes(classified, root);
+  assert.equal(deferred.ready.length, 0);
+  const options = deferred.notReady[0]!.plain.options;
+  assert.equal(options[0]!.intent, "keep");
+  assert.equal(options[0]!.action, undefined);
+  assert.equal(options[2]!.intent, "approve");
+  assert.equal(options[2]!.action, undefined);
+  assert.deepEqual(options[1]!.action, {
+    method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback",
+  });
+  assert.deepEqual(deferred.needsYou.notReady[0]!.plain, deferred.notReady[0]!.plain);
+  assert.equal(JSON.stringify(message), before, "serving leaves the persisted slow-lane message unchanged");
+});
+
 test("W1-T8826: the backfill preserves writer intents and stores no model supplied action", async (t) => {
   const root = makeTempDir("rmd-inbox-option-writer");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"), { recursive: true });
   const message = stored(TAGGED);
+  const untagged = stored(TAGGED.map(({ label, consequence }) => ({ label, consequence })));
+  writeFileSync(plainStorePath(join(root, "state")), JSON.stringify({ [ID]: untagged }));
+  const classified = {
+    proposals: [{ id: ID, summary: SUMMARY, evidenceAnchors: [] }],
+    classifications: [{ proposalId: ID, state: "ready" as const, reasons: [] }],
+    ledgerLines: Object.assign([], { torn: 0, present: true }),
+  };
+  const before = inboxLanes(classified, root).ready[0]!.plain.options;
+  assert.ok(before.every((option) => option.intent === "reply" && option.action === undefined));
   const count = await backfillPlainMessages({
     stateDir: join(root, "state"),
     readProposals: () => [{ id: ID, summary: SUMMARY }],
@@ -169,6 +218,13 @@ test("W1-T8826: the backfill preserves writer intents and stores no model suppli
   const saved = JSON.parse(readFileSync(plainStorePath(join(root, "state")), "utf8"))[ID];
   assert.equal(saved.source, "writer");
   assert.deepEqual(saved.options, TAGGED);
+  const after = inboxLanes(classified, root).ready[0]!.plain.options;
+  assert.deepEqual(after[2]!.action, { method: "POST", path: "/v1/inbox/approve", fields: { proposalId: ID } });
+  assert.equal(await backfillPlainMessages({
+    stateDir: join(root, "state"),
+    readProposals: () => classified.proposals,
+    summarize: () => { throw new Error("a tagged current message must not be rewritten"); },
+  }, 1), 0);
 });
 
 test("W1-T8826: the writer schema permits intents and retries an untagged answer", async () => {
@@ -213,4 +269,85 @@ test("W1-T8826: repeated untagged writer answers fall back to tagged template ch
   assert.equal(calls, 2);
   assert.deepEqual(result, plainTemplate({ id: ID, summary: SUMMARY }));
   assert.ok(result.options.every((option) => option.intent !== undefined));
+});
+
+test("W1-T8826: HTTP inbox options use existing write routes and refresh when the persisted lane changes", async (t) => {
+  const root = makeTempDir("rmd-inbox-option-http");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const options: PlainOption[] = [
+    TAGGED[2]!,
+    { label: "Close it", consequence: "The item is closed.", intent: "decline" },
+    { label: "Ask why", consequence: "Your question is added to the thread.", intent: "reply" },
+  ];
+  const content: PersistedInboxContent = {
+    proposals: [{ id: ID, summary: SUMMARY, evidenceAnchors: [] }],
+    classifications: [{ proposalId: ID, state: "ready", reasons: [] }],
+    ledgerRows: [], mergedTaskIds: [], projectionIndeterminate: false, complete: true,
+    stores: { fleetDecisions: {}, plainMessages: { [ID]: stored(options) } },
+  };
+  const persist = () => writePersistedInbox(stateDir, content, Date.now());
+  persist();
+  const deps: PanelGraphDeps = {
+    root, inboxRoot: root, planPath: join(root, "plan", "tasks.yaml"), ledgerPath: join(stateDir, "ledger.ndjson"),
+    inboxFromSlowLane: true,
+    github: { prView: () => null },
+    statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    ratify: { approve: () => assert.fail("a read token cannot approve"), reframe: () => assert.fail("a read token cannot reframe") },
+  };
+  const routes = buildPanelGraphRoutes(deps);
+  const server = createService({ tokens: { read: "option-reader", write: "option-writer" }, routes });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async () => {
+    const response = await fetch(`${base}/v1/inbox`, { headers: { authorization: "Bearer option-reader" } });
+    assert.equal(response.status, 200);
+    return response.json() as Promise<ReturnType<typeof inboxLanes>>;
+  };
+  const ready = await get();
+  assert.deepEqual(ready.needsYou.ready[0]!.plain.options, ready.ready[0]!.plain.options);
+  for (const option of ready.ready[0]!.plain.options) {
+    const action = option.action!;
+    assert.ok(action, `${option.intent} has an action on the ready item`);
+    const route = routes.find((route) => route.method === action.method && route.path === action.path);
+    assert.equal(route?.scope, "write");
+    assert.equal(route?.tier, option.intent === "approve" ? "high" : "low");
+    const response = await fetch(`${base}${action.path}`, {
+      method: action.method,
+      headers: { authorization: "Bearer option-reader", "content-type": "application/json" },
+      body: JSON.stringify({ ...action.fields, ...(action.input ? { [action.input]: "Please explain." } : {}) }),
+    });
+    assert.equal(response.status, 403, `${option.intent} retains its write authorization`);
+    await response.arrayBuffer();
+  }
+  const replyAction = ready.ready[0]!.plain.options[2]!.action!;
+  const postReply = (text?: string) => fetch(`${base}${replyAction.path}`, {
+    method: replyAction.method,
+    headers: { authorization: "Bearer option-writer", "content-type": "application/json" },
+    body: JSON.stringify({ ...replyAction.fields, ...(text === undefined ? {} : { [replyAction.input!]: text }) }),
+  });
+  const missingInput = await postReply();
+  assert.equal(missingInput.status, 400, "the advertised text input must be collected before posting");
+  await missingInput.arrayBuffer();
+  const replyText = "Please explain the evidence for this fix.";
+  const replied = await postReply(replyText);
+  assert.equal(replied.status, 200, "the served action delivers a reply through the existing route");
+  const receipt = await replied.json() as { threadId: string; delivery: string };
+  assert.equal(receipt.threadId, inboxThreadId(ID));
+  assert.equal(receipt.delivery, "delivered");
+  const thread = readThread(inboxThreadId(ID), { threadStorePath: inboxThreadStorePath(root) });
+  assert.equal(thread.status, "ok");
+  assert.deepEqual(thread.messages.filter((message) => message.role === "reply").map((message) => message.body), [replyText]);
+  const audit = readFileSync(deps.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(audit.some((row) => row.step === "inbox.thread_replied" && row.thread_id === inboxThreadId(ID)));
+  content.classifications[0]!.state = "declined";
+  persist();
+  const declined = await get();
+  assert.equal(declined.ready.length, 0);
+  assert.equal(declined.declined[0]!.plain.options[0]!.action, undefined);
+  assert.equal(declined.declined[0]!.plain.options[1]!.action, undefined);
+  assert.equal(declined.declined[0]!.plain.options[2]!.action?.path, "/v1/inbox/thread/reply");
+  assert.deepEqual(content.stores!.plainMessages[ID]!.options, options, "serving never stores an action");
 });

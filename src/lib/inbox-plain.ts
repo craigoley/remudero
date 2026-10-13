@@ -370,6 +370,10 @@ export interface PlainBackfillDeps {
   summarize?: SummarizeDeps["summarize"];
 }
 
+function hasOptionIntents(message: PlainInboxMessage | undefined): boolean {
+  return message?.options.every((option) => option.intent !== undefined) ?? false;
+}
+
 /** Write plain messages for operator-owned items with no current message, oldest registry order first,
  *  one at a time so a slow writer never piles up. Returns how many it wrote. */
 export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number): Promise<number> {
@@ -377,7 +381,7 @@ export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number
   const snapshot = readPlainStore(path);
   const pending = deps
     .readProposals()
-    .filter((p) => inboxOwner(p) === "operator" && !currentStoredMessage(p, snapshot))
+    .filter((p) => inboxOwner(p) === "operator" && !hasOptionIntents(currentStoredMessage(p, snapshot)))
     .slice(0, max);
   let written = 0;
   for (const proposal of pending) {
@@ -385,7 +389,8 @@ export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number
     const current = deps.readProposals().find((p) => p.id === proposal.id);
     if (!current || inboxOwner(current) !== "operator" || plainSourceFingerprint(current) !== plainSourceFingerprint(proposal)) continue;
     const store = readPlainStore(path);
-    if (currentStoredMessage(current, store)) continue;
+    const latest = currentStoredMessage(current, store);
+    if (latest && (hasOptionIntents(latest) || JSON.stringify(latest) !== JSON.stringify(snapshot[proposal.id]))) continue;
     store[proposal.id] = { ...message, sourceFingerprint: plainSourceFingerprint(proposal) };
     writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
     written += 1;
