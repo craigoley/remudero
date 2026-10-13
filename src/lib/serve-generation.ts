@@ -10,6 +10,8 @@
  */
 import { existsSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { BoardSnapshotSource } from "./board.js";
+import { systemClock, type Clock } from "./clock.js";
 import type { GitHub } from "./status.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
@@ -143,8 +145,35 @@ export function gatewayPrimedProbe(github: Pick<GitHub, "factsAgeMs" | "factsSta
   };
 }
 
-export function boardComputedProbe(computed: () => boolean): ReadinessProbe {
-  return () => ({ name: "board_computed", ok: computed() });
+/** BACKSTOP: long enough for a stage and its error message; short enough for every readiness poll and ledger row. */
+export const BOARD_REASON_BOUND = 500;
+
+/**
+ * #8429: a cold standby sat at a bare `ok: false` here for its whole 330 s bound, and nobody could
+ * tell a first projection still running (`not_ready`) from one that failed, crashed or went stale.
+ * The verdict is still `isReady()`; the board's own state rides beside it, and a handoff that times
+ * out ledgers this whole report (`serve.handoff_aborted`). A source that cannot say (the injected
+ * precompute gate) is marked unmeasurable rather than given a made-up reason.
+ */
+export function boardComputedProbe(
+  board: { isReady(): boolean } & Partial<BoardSnapshotSource>,
+  clock: Pick<Clock, "now"> = systemClock,
+): ReadinessProbe {
+  return () => {
+    const ok = board.isReady();
+    const state = board.current?.();
+    if (!state) return { name: "board_computed", ok, detail: { measurable: false } };
+    if (state.state === "ready") {
+      const generatedAt = state.snapshot.generated_at;
+      return { name: "board_computed", ok, detail: { state: "ready", generatedAt, snapshotAgeMs: clock.now() - Date.parse(generatedAt) } };
+    }
+    const reason = state.reason.length > BOARD_REASON_BOUND ? `${state.reason.slice(0, BOARD_REASON_BOUND - 1)}…` : state.reason;
+    return {
+      name: "board_computed",
+      ok,
+      detail: { state: "unavailable", reason, buildStartedAt: state.buildStartedAt, msSinceBuildStarted: clock.now() - Date.parse(state.buildStartedAt) },
+    };
+  };
 }
 
 /**
