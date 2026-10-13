@@ -64,7 +64,6 @@ import {
   notifyRecipient,
   providerRoutingOwnsHeadroom,
   resolveHeadroomEnabled,
-  resolveHeavyReadyDirectory,
   softBudgetThreshold,
   synthesisEffort,
   synthesisModel,
@@ -3028,7 +3027,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
-import { heavyNewBuildGate } from "./lib/heavy-build-reservation.js";
+import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -36841,7 +36840,7 @@ async function drainCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
@@ -40118,7 +40117,7 @@ export async function daemonCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
