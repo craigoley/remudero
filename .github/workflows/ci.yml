@@ -1120,6 +1120,7 @@ jobs:
           npm run --silent claude-md-budget-ratchet
 
       - name: Collect the fold debt this run filed (W1-T7853)
+        id: collect-fold-debt
         if: always()
         continue-on-error: true
         run: |
@@ -1127,6 +1128,7 @@ jobs:
           git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
 
       - name: Upload the fold debt this run filed (W1-T7853)
+        id: upload-fold-debt
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
