@@ -5459,9 +5459,9 @@ export async function runDaemon(
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
       const dispatchOpts: NextRunnableOpts = {
-      priorityBackfill,
-      onDeferredForPriority: logPriorityDeferral,
-      onPriorityReservationReleased: logPriorityRelease,
+        priorityBackfill,
+        onDeferredForPriority: logPriorityDeferral,
+        onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
