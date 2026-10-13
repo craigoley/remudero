@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire NEW-1A — It depends on W1-T5, which will never be built.
   attempts: 0
   files:
     - src/lib/worker.ts
