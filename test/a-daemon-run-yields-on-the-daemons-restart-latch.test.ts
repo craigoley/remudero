@@ -67,6 +67,7 @@ async function fixture(t: TestContext, options: {
   let calls = 0;
   let gates = 0;
   let ownReads = 0;
+  let repairPhase: unknown;
   const ownRead = ciWaitFreshness(() => { ownReads++; return OWN; });
   assert.equal(ownRead(), OWN, "the positive control is an advance that independently triggers a restart");
   ownReads = 0;
@@ -85,7 +86,12 @@ async function fixture(t: TestContext, options: {
     spawn: async (args) => {
       if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
       if (options.ci) return worker(`REPORT\nPR_URL: ${PR}\n`);
-      if (calls > 2) return worker("fixture stops after reaching the preopen gate", true);
+      if (calls > 2) {
+        const phases = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        repairPhase = phases.findLast((row) => row.step === "run.phase")?.waiting_on;
+        return worker("fixture stops after reaching the preopen gate", true);
+      }
       mkdirSync(join(args.cwd, "src"), { recursive: true });
       writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
       return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
@@ -99,7 +105,7 @@ async function fixture(t: TestContext, options: {
   }));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { outcome, rows, calls, gates, ownReads };
+  return { outcome, rows, calls, gates, ownReads, repairPhase };
 }
 
 test("W1-T8198: a stale own read with no latch does not yield at a boundary", async (t) => {
@@ -182,12 +188,12 @@ test("W1-T8927: run-task supplies the phase and run identity at each restart bou
   const h = await fixture(t, { latch: (context) => { assert.ok(context); seen.push(context); return undefined; } });
   assert.equal(h.gates, 1);
   assert.equal(h.outcome.verdict, "failed");
-  assert.deepEqual(seen.map((context) => context.waitingOn), ["preopen_gate", "preopen_gate"]);
+  assert.deepEqual(seen.map((context) => context.waitingOn), ["preopen_gate", "implementing"]);
   const start = h.rows.find((row) => row.step === "run.start");
   assert.ok(start);
   assert.ok(seen.every((context) => context.runId === start.run_id));
   assert.deepEqual(h.rows.filter((row) => row.step === "run.phase").map((row) => row.waiting_on),
-    ["recon", "implementing", "implementing", "preopen_gate", "preopen_gate", "preopen_gate"]);
+    ["recon", "implementing", "implementing", "preopen_gate", "implementing", "implementing", "implementing"]);
   assert.equal(h.rows.some((row) => row.step === "run.freshness_handoff"), false);
 });
 
@@ -203,6 +209,29 @@ test("W1-T8927: the watchdog reads the same phase-aware latch without bypassing 
   phase = "preopen_gate";
   assert.equal(detail?.(), undefined);
   assert.deepEqual(seen, [{ waitingOn: "implementing", runId: "D-watch" }, { waitingOn: "preopen_gate", runId: "D-watch" }]);
+});
+
+test("W1-T8927: a gate repair reports implementing before the worker resumes", async (t) => {
+  const h = await fixture(t, { latch: () => undefined });
+  assert.equal(h.gates, 1);
+  assert.equal(h.calls, 3);
+  assert.equal(h.outcome.verdict, "failed");
+  assert.equal(h.repairPhase, "implementing");
+  assert.equal(h.rows.some((row) => row.step === "run.freshness_handoff"), false);
+});
+
+test("W1-T8927: a failed gate asks the latch about repair work before granting a holdout", async (t) => {
+  const seen: RestartBoundaryContext[] = [];
+  const h = await fixture(t, { latch: (context) => {
+    assert.ok(context);
+    seen.push(context);
+    return context.waitingOn === "implementing" ? LATCH : undefined;
+  } });
+  assert.equal(h.outcome.verdict, "handed_off");
+  assert.equal(h.calls, 2, "repair work must yield before another implement worker starts");
+  assert.equal(h.gates, 1);
+  assert.deepEqual(seen.map((context) => context.waitingOn), ["preopen_gate", "implementing"]);
+  assert.equal(h.rows.find((row) => row.step === "run.freshness_handoff")?.waiting_on, "preopen_gate");
 });
 
 test("W1-T8927: a holdout continues through the gate and push to its opened PR", async (t) => {

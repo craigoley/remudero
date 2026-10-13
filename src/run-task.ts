@@ -20492,8 +20492,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
         ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}) });
       if (gate.kind === "fail") {
-        const preopenYield = await yieldAtWorkerBoundary("preopen_gate");
+        const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
         if (preopenYield) return preopenYield;
+        noteRestartPhase("implementing");
         impl = account(
           await spawn({
             cwd: worktreePath,
@@ -51983,7 +51984,7 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 /** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail. */
-export function readRestartHistoryLines(stateDir: string, nowMs = Date.now()): readonly string[] {
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
     refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,

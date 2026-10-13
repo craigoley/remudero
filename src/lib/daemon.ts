@@ -3444,7 +3444,7 @@ export async function runDaemon(
     restartHistoryLines = [];
     log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
   }
-  const restartHistory = restartWorkHistory(restartHistoryLines, (deps.now?.() ?? new Date()).getTime());
+  const restartHistory = restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now());
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
   // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
   // pass's run-branch guard reads it. A failed read keeps the entry it had.
