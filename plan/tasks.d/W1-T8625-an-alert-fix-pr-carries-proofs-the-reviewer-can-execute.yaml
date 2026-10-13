@@ -14,7 +14,7 @@
     - src/lib/proof-grammar.ts
     - src/run-task.ts
     - test/an-alert-fix-pr-carries-proofs-the-reviewer-can-execute.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-12: W1-T8572 (priority 1) depends_on this task (amended in #11120) for the PR-body grammar and the inert-proof count
   attempts: 0
   rationale: |

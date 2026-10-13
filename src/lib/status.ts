@@ -3419,10 +3419,15 @@ export const INDEPENDENT_BLOCK_RELEASED_STEP = "dispatch.independent_block_relea
 export interface IndependentBlockRelease {
   blockingRunId: string;
   blockedAt: string;
-  evidence: "main_moved" | "contract_revised";
+  evidence: "main_moved" | "contract_revised" | "provider_recovered";
   /** For `main_moved`: the first merge credit (any task) dated after the block. */
   mergedTaskId?: string;
   mergedAt?: string;
+  /** W1-T8676, for `provider_recovered`: the failed worker's provider and its first later clean result row. */
+  provider?: string;
+  recoveredAt?: string;
+  recoveredTaskId?: string;
+  recoveredStep?: string;
   /** Consecutive `failed`/`no_pr` latches on this task, this one included. */
   latchCount: number;
   /** The back-off served: the base doubled for each earlier consecutive latch. */
@@ -3449,6 +3454,39 @@ function firstMergeAfter(
     first = { taskId, ts: line.ts, ms };
   }
   return first;
+}
+
+/** W1-T8676: the rows a worker writes when its call ends, each naming its `provider` and `subtype`. */
+const WORKER_RESULT_STEPS: ReadonlySet<string> = new Set(["recon.done", "implement.done", "implement.continued", "fix.done"]);
+/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. */
+const WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/;
+
+/** W1-T8676: the first worker result row (any task) from `provider` that ended clean strictly after `afterMs`. */
+function firstCleanWorkerResultAfter(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  provider: string,
+  afterMs: number,
+  index: LedgerIndex | undefined,
+): { taskId: string; ts: string; step: string; ms: number } | undefined {
+  let first: { taskId: string; ts: string; step: string; ms: number } | undefined;
+  const rows = index?.rows === lines ? [...WORKER_RESULT_STEPS].flatMap((step) => indexedStepRows(lines, step, index)) : lines;
+  for (const line of rows) {
+    if (typeof line.step !== "string" || !WORKER_RESULT_STEPS.has(line.step) || line.provider !== provider ||
+      line.subtype !== "success" || line.api_error === true || typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (!Number.isFinite(ms) || ms <= afterMs || (first && ms >= first.ms)) continue;
+    first = { taskId: typeof line.task_id === "string" ? line.task_id : "", ts: line.ts, step: line.step, ms };
+  }
+  return first;
+}
+
+/** W1-T8676: every task's projected latch release, read off one status projection for the daemon to ledger. */
+export function independentBlockReleasesFrom(
+  projection: ReadonlyMap<string, StatusProjection> | undefined,
+): ReadonlyMap<string, IndependentBlockRelease> {
+  const releases = new Map<string, IndependentBlockRelease>();
+  for (const [taskId, p] of projection ?? []) if (p.independentBlockRelease) releases.set(taskId, p.independentBlockRelease);
+  return releases;
 }
 
 /** The latest durable independent-failure block if no later dispatch superseded it.
@@ -3484,7 +3522,9 @@ export function latestIndependentFailureBlock(
 
 /** W1-T7533: a `failed`/`no_pr` latch blocked the run.start that alone could clear it. It now releases
  * once main moved (a merge credit after the block) or the task's contract revision changed, AND the block
- * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules. */
+ * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules.
+ * W1-T8676: a `failed` latch from a worker error releases at once when the same provider later ends a worker
+ * call clean, for any task: the task did nothing wrong, and that row is the evidence the provider is back. */
 export function independentFailureLatch(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -3507,8 +3547,11 @@ export function independentFailureLatch(
   // W1-T7533: the latest `failed`/`no_pr` latch, how many consecutive runs latched that way, and the
   // contract revision each run's verdict saw. A run that ends without any block resets the streak.
   const revisionByRun = new Map<string, unknown>();
+  // W1-T8676: each run's worker-error verdict (when, and which provider), and the provider its worker rows name.
+  const workerErrorByRun = new Map<string, { ms: number; provider: unknown }>();
+  const providerByRun = new Map<string, string>();
   const releasedRuns = new Set<string>();
-  let failureLatch: { runId: string; ts: string; ms: number } | undefined;
+  let failureLatch: { runId: string; ts: string; ms: number; verdict: unknown } | undefined;
   let failureStreak = 0;
   let runOpen = false;
   let runLatched = false;
@@ -3522,9 +3565,14 @@ export function independentFailureLatch(
       runOpen = true;
       runLatched = false;
     }
+    if (typeof line.step === "string" && WORKER_RESULT_STEPS.has(line.step) && typeof line.run_id === "string" &&
+      typeof line.provider === "string") providerByRun.set(line.run_id, line.provider);
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
       revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
+      const verdictMs = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (line.verdict === "failed" && typeof line.reason === "string" && WORKER_ERROR_REASON.test(line.reason) &&
+        Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
@@ -3570,7 +3618,7 @@ export function independentFailureLatch(
       if (last === "blocked" && !environmental && (line.verdict === "failed" || line.verdict === "no_pr") &&
         runId && typeof line.ts === "string" && Number.isFinite(ms)) {
         if (!runLatched) failureStreak += 1;
-        failureLatch = { runId, ts: line.ts, ms };
+        failureLatch = { runId, ts: line.ts, ms, verdict: line.verdict };
       } else {
         failureLatch = undefined;
       }
@@ -3593,6 +3641,14 @@ export function independentFailureLatch(
   if (last === "blocked" && failureLatch !== undefined && failureLatch.runId !== categorizedRefusalRunId) {
     const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? failureLatch.ms;
     const latchCount = Math.max(1, failureStreak);
+    const workerError = failureLatch.verdict === "failed" ? workerErrorByRun.get(failureLatch.runId) : undefined;
+    const provider = typeof workerError?.provider === "string" ? workerError.provider : providerByRun.get(failureLatch.runId);
+    const recovered = workerError && provider ? firstCleanWorkerResultAfter(lines, provider, workerError.ms, index) : undefined;
+    if (recovered) {
+      return { blocked: false, release: { blockingRunId: failureLatch.runId, blockedAt: failureLatch.ts, latchCount, backoffMs: 0,
+        receiptRecorded: releasedRuns.has(failureLatch.runId), evidence: "provider_recovered", provider,
+        recoveredAt: recovered.ts, recoveredTaskId: recovered.taskId, recoveredStep: recovered.step } };
+    }
     const backoffMs = INDEPENDENT_BLOCK_BASE_BACKOFF_MS * 2 ** (latchCount - 1);
     if (now - failureLatch.ms >= backoffMs) {
       const seenRevision = revisionByRun.get(failureLatch.runId);

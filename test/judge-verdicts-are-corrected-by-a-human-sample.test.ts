@@ -32,6 +32,7 @@ import {
   JUDGE_SAMPLE_PER_STRATUM,
   JUDGE_VERDICT_REF_RE,
   judgeCalibrationRow,
+  judgeTruePositiveTrueNegative,
   loadJudgeLabels,
   MIN_PAIRED_OBSERVATIONS,
   ppiEstimate,
@@ -403,4 +404,52 @@ test("the ledger readers load labels beside the ledger and the checkpoint carrie
 
   const injected = await deriveAnalyticsSnapshotFromCheckpointedLedger(dir, clock, undefined, undefined, { judgeLabels: { labels: [] } });
   assert.equal(injected.snapshot.judgeCalibration?.labels.matched, 0, "injected labels win over the store");
+});
+
+/** Wilson score interval, written out independently of the module's arithmetic. */
+function wilson(successes: number, n: number): [number, number] {
+  const p = successes / n;
+  const z = JUDGE_INTERVAL_Z;
+  const denominator = 1 + (z * z) / n;
+  const centre = (p + (z * z) / (2 * n)) / denominator;
+  const half = (z / denominator) * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return [centre - half, centre + half];
+}
+
+test("true-positive and true-negative rates match the hand computation, each with its own per-class floor", () => {
+  // PAIRS: 5 human passes (judge passed 4), 5 human fails (judge failed 3).
+  const rates = judgeTruePositiveTrueNegative(PAIRS, 5);
+  assert.ok(rates.truePositive.state === "estimated" && rates.trueNegative.state === "estimated");
+  assert.ok(Math.abs(rates.truePositive.rate - 0.8) < 1e-12);
+  assert.ok(Math.abs(rates.trueNegative.rate - 0.6) < 1e-12);
+  assert.equal(rates.truePositive.count, 5);
+  const [tpLower, tpUpper] = wilson(4, 5);
+  assert.ok(Math.abs(rates.truePositive.lower - tpLower) < 1e-12 && Math.abs(rates.truePositive.upper - tpUpper) < 1e-12);
+  const [tnLower, tnUpper] = wilson(3, 5);
+  assert.ok(Math.abs(rates.trueNegative.lower - tnLower) < 1e-12 && Math.abs(rates.trueNegative.upper - tnUpper) < 1e-12);
+
+  assert.deepEqual(judgeTruePositiveTrueNegative(PAIRS), {
+    truePositive: { state: "unknown", reason: `too-few-human-pass-labels (5 of ${MIN_PAIRED_OBSERVATIONS})`, count: 5 },
+    trueNegative: { state: "unknown", reason: `too-few-human-fail-labels (5 of ${MIN_PAIRED_OBSERVATIONS})`, count: 5 },
+  }, "ten labels in total are not ten in each class; kappa's total-pairs floor would hide that");
+  const allPass = judgeTruePositiveTrueNegative(PAIRS.filter((p) => p.human), 1);
+  assert.deepEqual(allPass.trueNegative, { state: "unknown", reason: "no-human-fail-labels", count: 0 },
+    "with no human-fail label there is no true-negative rate, never a 0 or a 1");
+});
+
+test("the calibration reports both rates per stratum and per judge, and unknown when labels are unavailable", () => {
+  const { rows, labels } = fixture();
+  const calibration = deriveJudgeCalibration(rows, { asOf: NOW, labels: { labels }, minPairedObservations: 5 });
+  assert.match(calibration.method.rates, /P\(judge fail \| human fail\)/);
+  const a = stratum(calibration, "review:judge-1", "author-a");
+  assert.ok(a.humanRates.truePositive.state === "estimated" && a.humanRates.trueNegative.state === "estimated");
+  assert.ok(Math.abs(a.humanRates.truePositive.rate - 0.8) < 1e-12);
+  assert.ok(Math.abs(a.humanRates.trueNegative.rate - 0.6) < 1e-12);
+  const judge = calibration.judges.find((j) => j.judge.kind === "review")!;
+  assert.deepEqual(judge.humanRates, a.humanRates, "author-b is unlabelled, so the judge's labelled pairs are author-a's");
+
+  const blind = deriveJudgeCalibration(rows, { asOf: NOW, labels: { unavailable: "label-store-unreadable" } });
+  for (const s of blind.strata) {
+    assert.deepEqual(s.humanRates.trueNegative, { state: "unknown", reason: "label-store-unreadable", count: 0 });
+  }
 });

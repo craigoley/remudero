@@ -47,7 +47,7 @@ function fixture(kind: string, ownerFile: string) {
     ledgerRecords: () => [],
     gateFireRates: () => ({
       status: "measured", prsScanned: 9, neverFired: [], alwaysFired: [],
-      gates: [{ gate: "gate", prs: 9, runs: 12, redRuns: 12, refusals: 12, repaired: 12, overridden: 0, minutes: 300 }],
+      gates: [{ gate: "gate", prs: 9, runs: 12, redRuns: 12, refusals: 12, repaired: 12, overridden: 0, minutes: 300, redMinutes: 300, redPrs: 9 }],
     }),
     planState: () => ({ tasks: [] }),
     ownerSearch,

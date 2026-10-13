@@ -102,6 +102,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
     "serve",
     "relay",
     "headroom",
+    "heavyReadyDirectory",
     "workerProviders",
     "learningsHomes",
   ]);

@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

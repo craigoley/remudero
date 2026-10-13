@@ -96,6 +96,8 @@ export interface Config {
   };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
+  /** Explicit private host-local READY store, captured at startup; absent keeps reservation admission disabled. */
+  heavyReadyDirectory?: string;
   workerProviders?: {
     enabled?: WorkerProviderId[];
     /** Operator consent for OUTBOUND WEB ACCESS on behalf of cash workers (W1-T3558). Default false,
@@ -374,6 +376,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
     kind: "object",
     fields: [configField("enabled", "boolean", true, true, "config.json", "Whether headroom dispatch gating is enabled.", booleanShape)],
   }),
+  configField("heavyReadyDirectory", "string", true, undefined, "config.json", "Explicit private local heavy READY directory. Startup-only; governs NEW implement admissions, never active work, reviews or serving.", stringShape),
   configField("workerProviders", "object", true, { enabled: ["claude"] }, "config.json", "Worker provider routing settings.", workerProvidersShape),
   configField("learningsHomes", "object", true, undefined, "config.json", "Shared-knowledge home overrides.", {
     kind: "object",
@@ -391,7 +394,7 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
-  envEntry("RMD_HEAVY_READY_DIR", "Opt-in canonical private single-account heavy READY directory. Unset disables only NEW-implement reservation admission; configured unreadable state defers it.", ["src/run-task.ts"]),
+  envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
   envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
