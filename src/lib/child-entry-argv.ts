@@ -6,7 +6,16 @@
 // shape), never by a second implementation here.
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
-import { childEntryIsCurrent } from "../../scripts/build-child-entries.mjs";
+
+interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
+type CurrencyCheck = (root: string, name: string) => ChildEntryCurrency;
+/**
+ * Loaded on demand, not imported: the emitter must still load in a tree that carries src/ but not scripts/
+ * (a consumer checkout, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts), where the
+ * absent script reads as "no bundle can be vouched for" and the child runs under tsx.
+ */
+const loadCurrencyCheck = (): CurrencyCheck =>
+  (createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as { childEntryIsCurrent: CurrencyCheck }).childEntryIsCurrent;
 
 export type ChildEntryKind = "bundle" | "tsx";
 export interface ChildEntryLaunch {
@@ -24,11 +33,11 @@ export interface ChildEntryLaunch {
  * checkProofChildArgv does, so a tree without its own node_modules still launches.
  */
 export function childEntryArgv(root: string, name: string, sourceEntry: string, args: readonly string[]): ChildEntryLaunch {
-  let verdict: { current: boolean; reason: string; bundle?: string };
+  let verdict: ChildEntryCurrency;
   try {
-    verdict = childEntryIsCurrent(root, name);
+    verdict = loadCurrencyCheck()(root, name);
   } catch (err) {
-    verdict = { current: false, reason: `validation-error: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
+    verdict = { current: false, reason: `currency-check-unavailable: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
   }
   if (verdict.current && typeof verdict.bundle === "string") {
     return { argv: [verdict.bundle, ...args], kind: "bundle", reason: verdict.reason };

@@ -266,5 +266,6 @@ async function main(argv) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = await main(process.argv.slice(2));
+  // No top-level await: src/lib/child-entry-argv.ts require()s this module, which a TLA module refuses.
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }

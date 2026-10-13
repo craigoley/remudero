@@ -618,13 +618,11 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budg
 
 const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
 
-/** Where the check-proof child's launch kind goes: the caller's log hook, or one stderr line when it passed none. */
 export type CheckProofChildLog = (step: string, extra?: Record<string, unknown>) => void;
 const CHECK_PROOF_CHILD_NAME = "check-proof-main";
 const stderrChildLog: CheckProofChildLog = (step, extra) => {
   process.stderr.write(`${step} ${Object.entries(extra ?? {}).map(([k, v]) => `${k}=${String(v)}`).join(" ")}\n`);
 };
-/** (W1-T8775) The check-proof child's node argv for `cwd`: the precompiled bundle when it is current, tsx otherwise. Logs which, and why. */
 function checkProofLaunchArgv(cwd: string, proof: string, log: CheckProofChildLog = stderrChildLog): string[] {
   const launch = childEntryArgv(cwd, CHECK_PROOF_CHILD_NAME, CHECK_PROOF_CHILD_ENTRY, [proof, "--base", "origin/main"]);
   log("plan_pr.check_proof_child", { kind: launch.kind, reason: launch.reason });
