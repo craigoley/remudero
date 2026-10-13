@@ -76,9 +76,9 @@ raw: >-
   at current main first.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11320
 summary: null
 expansion: null
 submission_key: nanoclaw-2026-10-13/scratch-sweep-spares-live-sessions

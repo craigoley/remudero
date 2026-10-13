@@ -1,0 +1,48 @@
+- id: W1-T9044
+  title: "THE GARDENER OVERSEER SEES EVERY GARDEN'S OWN PASS AND A LADDER THAT STOPPED FILING — it ignores garden.pass exit codes, heap exhaustion and due failures, cannot see flow, machine-judge, host-resource or flake-incident pass at all, and never noticed the ci-friction ladder filing nothing while its top cause kept growing"
+  repo: remudero
+  depends_on: [W1-T8866]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how the overseer decides a gardener is healthy
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T5114, W1-T8866, W1-T4435]
+  files: [src/lib/gardener-overseer.ts, test/gardener-overseer.test.ts, test/the-overseer-sees-every-garden-pass-and-a-stalled-ladder.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main (src/lib/gardener-overseer.ts):
+    - `OVERSEER_STEP_PATTERN` covers no `garden.pass` (written per pass by garden-registry.ts with the child's exit code
+      and `heap_exhausted`) and no `garden.due_failed`. Only gardener-spend.ts reads them.
+    - Health keys on `<name>.scorecard`. flow logs `flow.report`; `machine_judge.failed` and `host_resource.failed` match
+      no suffix; flake-incident runs inside the selector-shadow pass and logs no pass.
+    - flow and flake_incident log `gardener_failed` with no pass row, so in `judgeHealth` `lastPassAt` is -∞: ONE failure
+      reads "failing" for the whole 14-day window.
+    - A garden that scorecards every pass but never files is "healthy". The ci-friction ladder filed nothing new for days:
+      its top eight priced causes were all settled, `ciFrictionLadder` looked no further than eight, and `next` stayed
+      undefined. #11228 fixed that ladder, but nothing noticed it, and nothing would notice the next one.
+  design: |
+    1. Read `garden.pass` as the pass signal for EVERY registered garden. Exit 0 is a pass; a non-zero exit or
+       `heap_exhausted` is a failure; `garden.due_failed` is degraded. Map registry names to legacy step prefixes
+       (machine-judge -> machine_judge, host-resource -> host_resource, selector-shadow -> flake_incident) so old
+       scorecard rows still count.
+    2. Take the registered garden names through a port (importing REGISTERED_GARDEN_NAMES would form a cycle). A
+       registered garden with no pass row in the window logs `gardener_overseer.unobserved` and escalates once.
+    3. Stalled ladder: for a ladder gardener (ci-friction, flow-remedy, fix-lane), compare its last scorecards. When its
+       top cause's priced cost grew across successive passes while no draft or filing happened, log
+       `gardener_overseer.stalled_cause` and escalate once per (gardener, cause), naming the settled causes above it.
+  acceptance:
+    - claim: "a garden.pass row with a non-zero exit or heap exhaustion is a failure the overseer notices, for any registered garden"
+      proof: "grep: test(\"W1-T9044: a garden\\.pass row with a non-zero exit or heap exhaustion is a failure the overseer notices\" in test/the-overseer-sees-every-garden-pass-and-a-stalled-ladder.test.ts"
+    - claim: "a registered garden with no pass in the window is reported unobserved"
+      proof: "grep: test(\"W1-T9044: a registered garden with no pass in the window is reported unobserved\" in test/the-overseer-sees-every-garden-pass-and-a-stalled-ladder.test.ts"
+    - claim: "a ladder whose top cause keeps growing while nothing is drafted is escalated once"
+      proof: "grep: test(\"W1-T9044: a ladder whose top cause keeps growing while nothing is drafted is escalated once\" in test/the-overseer-sees-every-garden-pass-and-a-stalled-ladder.test.ts"
+  falsifier: |
+    Feed the overseer `garden.pass` rows for `flow` with exit 1 and heap_exhausted, and ci-friction scorecards whose top
+    cause grows across three passes with `next: null`. At origin/main it reports nothing; with the change it notices the
+    failing flow garden and escalates the stalled ladder once.

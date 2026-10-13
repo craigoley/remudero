@@ -1,0 +1,36 @@
+- id: W1-T9053
+  title: "THE BACKLOG GARDENER STOPS RE-PLACING ONE TASK EVERY HOUR — 25 of its 38 placements in a week rewrote W1-T6117, flipping band 2 and 3 on routine ledger volume, and 7 rewrote band 2 as band 2 with only a new evidence hash"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
+  plan_refs: [W1-T8350]
+  files: [src/lib/backlog-gardener.ts, test/the-backlog-gardener-stops-re-placing-one-task.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06..12 on main: 37 "backlog gardener proposes place for 1 task(s)" PRs merged. 25 rewrote W1-T6117.
+    VERIFIED (src/lib/backlog-gardener.ts):
+    - `judgeBacklog` sets band 2 when `recent > previousDay`. W1-T6117 cites routine high-volume steps (`pr.opened`,
+      `run.awaiting_external`), so that comparison crosses back and forth every hour.
+    - `applyBacklogActions` rewrites the marker even when main already carries the target band, because the daemon's plan
+      read is older than the fresh workspace.
+    - There is no interval floor, and the batch is capped by `mergedLastDay`.
+    The existing test "rolling evidence does not re-propose the same band, but a changed band is proposed" must keep passing.
+  design: |
+    1. `applyBacklogActions` skips a task whose marker on the fresh workspace already carries the target band.
+    2. Hysteresis: a gardener-marked task is re-banded at most once per 24h, and band 2 needs a clear rise (e.g.
+       `recent >= 2 * previousDay`), not any rise.
+  acceptance:
+    - claim: "a band main already carries is not rewritten for new evidence alone"
+      proof: "grep: test(\"W1-T9053: a band main already carries is not rewritten for new evidence alone\" in test/the-backlog-gardener-stops-re-placing-one-task.test.ts"
+    - claim: "a task re-banded within the last day is not re-banded again"
+      proof: "grep: test(\"W1-T9053: a task re-banded within the last day is not re-banded again\" in test/the-backlog-gardener-stops-re-placing-one-task.test.ts"
+  falsifier: |
+    Replay W1-T6117's evidence across 24 hourly passes. At origin/main the gardener proposes several placements; with
+    the change it proposes at most one.

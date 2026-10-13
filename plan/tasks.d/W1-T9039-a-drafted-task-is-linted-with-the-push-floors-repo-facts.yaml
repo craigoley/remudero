@@ -1,0 +1,125 @@
+- id: W1-T9039
+  title: "A DRAFTED TASK IS LINTED WITH THE PUSH FLOOR'S REPO FACTS BEFORE IT IS CACHED READY — the draft and approve floors lint without the base facts lint-plan --base supplies, so call-site, blocked-task-disposition and proof-grep-already-true fire only at the plan-PR preflight after the shards are written: 26 approve pushes refused since 2026-10-08, and no inbox approve has opened a plan PR since 2026-10-08T03:42Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the draft, approve and push floors apply one lint contract to a new task; it spans the shared draft lint and approve repair (inbox.ts) and the redraft guidance (relint.ts)
+  band_meaning: span
+  origin: "operator-approved investigation 2026-10-13 (\"go\"): why the W1-T8714 band_meaning replay mostly fails"
+  plan_refs: [W1-T8714, W1-T8828, W1-T5348, W1-T2487, W1-T3218, W1-T3814, W1-T4352, W1-T4700]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/relint.ts
+    - test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts
+  status: queued
+  priority: 1  # every fleet approve that reaches its push is refused there, so the inbox path files nothing
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 in the core daemon's ledger on host remudero (~/rmd-state2/state), read niced, the union of
+    the dated .ndjson.gz rotations and the live file:
+      - The W1-T8714 replay recorded followup:DAEMON-1790206008025:2026-09-24T00:25:49.881Z:0 `refiled` at 05:49:58Z
+        from `approve.shards_written` (05:49:49Z). At 05:50:49Z the same run wrote `approve.error`: "plan-PR preflight
+        refused the approve push: [lint-plan] lint-plan-precheck: the plan lint CI runs on this diff REFUSES it
+        [blocked-task-disposition, call-site, sizing]". followup:W1-T3332-1789184449627 (03:23Z) and
+        proof-debt:W1-T5060 (06:56Z) were refused the same way, on [blocked-task-disposition, call-site].
+      - Per day, counting `approve.shards_written` / push refusals / `ratify.approved`: 10-08 5/4/1, 10-09 11/11/0,
+        10-10 1/1/0, 10-11 2/2/0, 10-12 6/5/0, 10-13 (to 10:47Z) 3/3/0. The 26 distinct refusals name
+        blocked-task-disposition 15 times, call-site 13, proof-grep-already-true 5 and sizing 3. Control: the live file
+        holds 43 `ratify.approved` rows, the newest 2026-10-08T03:42:17Z.
+    WHY, READ on origin/main 58e1376af (symbols, not lines):
+      - `lintDraftedFragment` and `relintRatificationFragment` (src/lib/inbox.ts) both lint with
+        `DRAFT_FILING_LINT_OPTIONS` (W1-T8714): `riskTransition` and `proofSelfPath` only.
+      - `lint-plan --base` (src/run-task.ts's changed-tasks pass) also passes `blockedDisposition: { baseTask }`,
+        `moduleExists`, `readGrepProofFile` and `baseAcceptance`. Without them `blockedDispositionViolations`,
+        `callSiteViolations` and `proofGrepAlreadyTrueViolations` (src/lib/task-linter.ts) are silent. So a draft the
+        push floor must refuse is cached READY, the fleet lane hands it to `rmd approve`, an id is materialized and the
+        shards are written, and `preflightApprovePush` (W1-T5348) refuses the push.
+      - The drafter writes `status: blocked` on a new task. In state/inbox-drafts.json, 501 of 2,062 drafted tasks
+        across 248 of 1,106 cached drafts carry it. `inboxDraftPrompt` shows the model a plan/tasks.yaml index with
+        each task's status, and 196 of its 256 tasks read `status: blocked`. A new task that is blocked with no
+        `retirement:` is exactly what `blockedDispositionViolations` refuses. A
+        retirement is an operator act, so the drafter cannot repair this by redrafting; the harness owns the field, as
+        W1-T8828 made it own the stamp.
+    MEASURED, by linting every cached draft in-process with today's `lintDraftedFragment` and again with the four
+    base facts a new task gets (`blockedDisposition: { baseTask: undefined }`, `moduleExists` over the checkout,
+    `callSite: block`), filtered through `filingBlockers`:
+      - Positive control: the two refused drafts still cached unchanged (W1-T3332's and W1-T5060's) read exactly
+        [blocked-task-disposition, call-site], as the preflight said.
+      - Of 248 cached drafts the draft floor reads clean, 139 would be refused at the push. Across the cache, call-site
+        fires on 619 drafts and blocked-task-disposition on 244 that the draft floor passes.
+      - Of the 18 proposals the W1-T8714 replay re-drafted, 17 cached drafts would be refused at the push: call-site 15,
+        blocked-task-disposition 9. None of them ever reaches a plan PR as things stand.
+    The call-site refusals are real defects in the drafts, not noise. For example ledgerRowActor's draft adds
+    src/lib/ledgerCaller.ts whose only call proof greps the new file itself. `relintGuidanceLines` (src/lib/relint.ts)
+    already explains [call-site]; the drafter never sees the violation, so the guidance is never used.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 396 origin heads for DRAFT_FILING_LINT_OPTIONS,
+    redraft_not_ready, blockedDisposition, inbox-replay and avoidModels. Control: main reads 7 hits, and no head reads
+    more. W1-T8714 aligned the draft floor with the approve floor's options; this aligns both with the push floor.
+    W1-T5348 built the push preflight that catches these, and it is working as designed.
+  design: |
+    No new bound. A drafted task is new by definition, so every floor lints it as `lint-plan --base` lints a task
+    added in the diff.
+    1. ONE SET OF FILING FACTS. In src/lib/inbox.ts, the options `lintDraftedFragment` and
+       `relintRatificationFragment` pass to `lintTask` gain the facts the changed-tasks pass gives a newly added task:
+       `blockedDisposition: { baseTask: undefined }`, `baseAcceptance: []`, `moduleExists` and `readGrepProofFile`,
+       both resolved against the same checkout the draft is linted in (HARNESS_ROOT by default, injectable as
+       `directoryExists` already is). Both floors build them in one place, so they cannot drift apart again. The draft
+       rung's bounded self-lint then sees [call-site] and [proof-grep-already-true] and redrafts with them in hand. A
+       fragment still dirty after the existing bound is cached NOT-READY with its violations named, as today, and no
+       approve spends an id on it.
+    2. THE HARNESS OWNS A NEW TASK'S STATUS. Before linting, the draft rung writes `status: queued` on every drafted
+       task whose `status` is `blocked` with no legal `retirement:`, the way W1-T8828's `composeDraftStamp` writes the
+       stamp. `classifyProposal` applies the same normalization to a STORED draft before linting it, and
+       `relintRatificationFragment`'s mechanical repair applies it at approve, so the 248 cached drafts carrying it heal
+       without a redraft. A drafted task that declares a legal retirement is left unchanged.
+    3. A DRAFT IS JUDGED AFTER THE REPAIR APPROVE WILL APPLY. `relintRatificationFragment`'s mechanical repair (the
+       shared whole-file proof rewrite, the band insert and the W1-T4352 sizing raise) runs at approve on every draft.
+       The draft floor's final lint and `classifyProposal` judge the draft as that repair leaves it, so a draft dirty
+       only on what approve repairs is not held NOT-READY. MEASURED: 2 of the 12 replay drafts held not-ready
+       (followup:DAEMON-1789186992579 and followup:W1-T1258-1790140317806) fail only Rule 19 sizing at risk:low,
+       which the repair raises to risk:high with band_meaning: span.
+    4. THE GUIDANCE NAMES THE NEW CHECK. `relintGuidanceLines` gains a [proof-grep-already-true] paragraph: the grep
+       already matches on the base tree, so it proves nothing the task changes; grep for text the change adds, or use
+       a unit test.
+    Tests go in a new file, test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive `lintDraftedFragment` and `relintRatificationFragment` with fragments shaped
+    like the refused drafts above: a task creating a src module whose only call proof greps itself, a task at
+    `status: blocked` with no retirement, and a grep proof whose pattern already matches a fixture file. Inject
+    `moduleExists` and `readGrepProofFile` over a fixture tree.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts"
+    - claim: "the draft lint blocks a drafted task that creates a module no other src file is proven to call"
+      proof: 'grep: test("W1-T9039: the draft lint blocks a new module with no call site" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "the draft lint blocks a grep proof whose pattern already matches the checkout"
+      proof: 'grep: test("W1-T9039: the draft lint blocks a grep proof that already matches" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "a drafted task at status blocked with no retirement is cached as queued and lints clean"
+      proof: 'grep: test("W1-T9039: a drafted blocked task is cached queued" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "a stored draft held only on its blocked status is ready on the next pass without a redraft"
+      proof: 'grep: test("W1-T9039: a stored blocked draft becomes ready without a redraft" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "a draft dirty only on a sizing violation the approve repair fixes is classified ready"
+      proof: 'grep: test("W1-T9039: a draft the approve repair fixes is not held not ready" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "the approve relint refuses what the draft lint refuses, with the same repo facts"
+      proof: 'grep: test("W1-T9039: the approve relint applies the draft floor repo facts" in test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts'
+    - claim: "the shared draft lint passes the blocked-disposition base fact"
+      proof: "grep: blockedDisposition: { baseTask: undefined } in src/lib/inbox.ts"
+    - claim: "the redraft guidance names the already-true grep check"
+      proof: "grep: proof-grep-already-true in src/lib/relint.ts"
+  falsifier: |
+    Leave the draft options without `moduleExists`, and the first test reads no violation for a draft that adds
+    src/lib/ledgerCaller.ts proven only by a grep of itself, as ledgerRowActor's cached draft reads clean today. Leave
+    `blockedDisposition` out and skip the status normalization, and a draft shaped like W1-T5060's (two tasks at
+    `status: blocked`, no retirement) is cached READY and then refused by the push preflight, as at 06:56:57Z.
+    Normalize a task that declares a legal retirement, and the declared-retirement case fails.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger with no numeric pass mark: count `approve.error`
+    rows carrying "plan-PR preflight refused the approve push" that name call-site, blocked-task-disposition or
+    proof-grep-already-true. Healthy shape: none. Count `ratify.approved` rows written by fleet approves. Healthy shape:
+    present again after none since 2026-10-08.
+    SEPARATE, NOT IN THIS TASK: the fleet lane's detached `rmd approve` (`ratifyCliGateway`, src/lib/panel-graph.ts)
+    is refused by the self-sync check on the daemon's detached, behind checkout ("refusing to auto-sync ... DETACHED
+    HEAD") before any verb runs. 59 of 73 approve logs under state/logs in the 24 h to 10:47Z hold only that refusal,
+    and it writes no ledger row.

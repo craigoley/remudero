@@ -93,13 +93,14 @@ test("W1-T3351: a SUCCEEDING approve chains the note, and the same approve witho
   const config = { root } as never;
 
   // (1) WITHOUT --note: approve stays exactly the one bit it documents.
-  assert.equal(await approveCommand(["W1-T1041"], { config, root }), 0);
+  assert.equal(await approveCommand(["W1-T1041"], { config, root, planPath: join(root, "plan", "tasks.yaml") }), 0);
   assert.equal(storeLines(root).length, 0, "no --note, no note — the optional half is a true no-op");
 
   // (2) WITH --note, on a release that SUCCEEDS: the words land on the docket's surface.
   const code = await approveCommand(["W1-T1041", "--note", "release this   one   early next   cycle"], {
     config,
     root,
+    planPath: join(root, "plan", "tasks.yaml"),
     clock: fixedClock(Date.parse("2026-09-10T13:00:00.000Z")),
   });
   assert.equal(code, 0, "--note does not disturb the release path's own verdict");
@@ -150,7 +151,7 @@ test("W1-T3351: a SUCCEEDING approve whose note-store write is REFUSED still rep
   mkdirSync(join(root, "plan", "operator-notes.ndjson"));
   const config = { root } as never;
 
-  const code = await approveCommand(["W1-T1042", "--note", "this note cannot land"], { config, root });
+  const code = await approveCommand(["W1-T1042", "--note", "this note cannot land"], { config, root, planPath: join(root, "plan", "tasks.yaml") });
 
   assert.equal(code, 0, "the release still succeeded — a note-store failure never demotes it");
   assert.ok(statSync(join(root, "plan", "operator-notes.ndjson")).isDirectory(), "still a directory — untouched");
