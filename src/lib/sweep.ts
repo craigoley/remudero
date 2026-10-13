@@ -4507,15 +4507,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
     pullFoldDebt: async (ingested) => {
       try {
-        const outcomes = pullFoldDebtEntries({
+        const input = {
           owner,
           repo,
           ingested,
           settled: settledFoldDebtArtifacts,
-          readJson: (args) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
-          readZip: (args) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
-        });
-        return landFoldDebt(outcomes, { root: repoRoot, settled: settledFoldDebtArtifacts, log, land: deps.landFeedbackImpl });
+          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          root: repoRoot,
+          log,
+          land: deps.landFeedbackImpl,
+        };
+        return landFoldDebt(pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];

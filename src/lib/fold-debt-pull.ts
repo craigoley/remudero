@@ -112,6 +112,11 @@ export interface FoldDebtPullInput {
   readJson: (args: string[]) => unknown;
   /** The sweep's paced binary read, for the artifact zip. */
   readZip: (args: string[]) => Buffer;
+  /** The checkout whose `plan/feedback` {@link landFoldDebt} writes the entries into and lands from. */
+  root: string;
+  log: (step: string, fields: Record<string, unknown>) => void;
+  land?: (root: string) => { landed: boolean; error?: string };
+  write?: (path: string, text: string) => void;
 }
 
 /** Pull un-ingested fold-debt artifacts, main's lane first, oldest first. A failed LIST throws: the
@@ -170,20 +175,10 @@ export function pullFoldDebtEntries(deps: FoldDebtPullInput): FoldDebtOutcome[] 
   return outcomes;
 }
 
-export interface FoldDebtLandDeps {
-  /** The checkout whose `plan/feedback` the entries are written into and landed from. */
-  root: string;
-  /** The same set {@link pullFoldDebtEntries} settles: a write that failed is released for a retry. */
-  settled: Set<number>;
-  log: (step: string, fields: Record<string, unknown>) => void;
-  land?: (root: string) => { landed: boolean; error?: string };
-  write?: (path: string, text: string) => void;
-}
-
 /** Write each accepted entry with exclusive create, land them once, and return the terminal rows. An
  *  entry already on disk is already filed, the idempotence `fileFoldDebt` keeps. A failed write is
  *  logged and left un-ingested, so the next pass reads that artifact again. */
-export function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDebtLandDeps): Record<string, unknown>[] {
+export function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDebtPullInput): Record<string, unknown>[] {
   const write = deps.write ?? ((path: string, text: string) => writeFileSync(path, text, { flag: "wx" }));
   const dir = join(deps.root, "plan", "feedback");
   const rows: Record<string, unknown>[] = [];
