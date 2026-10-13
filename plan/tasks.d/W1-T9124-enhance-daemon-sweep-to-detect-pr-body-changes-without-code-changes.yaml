@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=63929141e0c94998
   attempts: 0
   files:
     - src/lib/sweep.ts

@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=8d88c3d279ef09c5
   attempts: 0
   files:
     - src/lib/worker.ts

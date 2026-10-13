@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=1f893d2f5fb6a99a
   attempts: 0
   files:
     - src/lib/mounts.ts

@@ -8,7 +8,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=e283d5360c628050
   attempts: 0
   files:
     - src/lib/mounts.yaml
