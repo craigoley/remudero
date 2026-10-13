@@ -12,7 +12,7 @@
   plan_refs: []
   files: [src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-heap-ceiling-shadow-learns-from-live-samples.test.ts]
   status: queued
-  priority: 3
+  priority: 1.5 # operator-2026-10-13: ADR 0007 applies the learned ceiling once a restart costs only a boot (lever A)
   attempts: 0
   rationale: |
     READ 2026-10-12 at origin/main 42dae2eb8; daemon.alive n=2,366 over 48 h.
