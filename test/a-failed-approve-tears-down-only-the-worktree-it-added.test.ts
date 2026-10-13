@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { afterEach, test } from "node:test";
+import { afterEach, mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -121,8 +121,10 @@ test("W1-T9153: a dead holder lock is reclaimed and the add succeeds", async () 
 
 const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/9153";
 
-/** An offline `rmd approve <id>` world whose ledger names a PRIOR run of `id` that pushed its branch: the
- *  approve resumes that branch at `worktrees/<branch>`, the path two approves of one plan PR share. */
+/** An offline `rmd approve <id>` world whose ledger names a PRIOR run of `id` that pushed its branch: the approve
+ *  resumes that branch. W1-T9161: a resume cuts its OWN tree, `worktrees/<approveRunBranch(its run id)>`, so the run
+ *  id is pinned (`Date.now` during `run`) and `path` is that tree's: anything this approve did not add that sits there
+ *  meets its add. */
 function resumableApprove(kind: string, id: string) {
   const fx = managedFixture(kind, (dir) => {
     mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
@@ -165,14 +167,17 @@ function resumableApprove(kind: string, id: string) {
     ],
     { kind: "t9153-gh" },
   );
-  const path = join(fx.worktreesRoot, branch);
+  const pinnedMs = Date.now();
+  const path = join(fx.worktreesRoot, approveRunBranch(`APPROVE-${id}-${pinnedMs}`));
   /** Run the approve in THIS process; what it throws is not under test, what it leaves behind is. */
   const run = async (): Promise<Row[]> => {
     process.env.HOME = home;
     process.env.PATH = `${shim.dir}:${SAVED.PATH}`;
+    const now = mock.method(Date, "now", () => pinnedMs);
     try {
       await withLiveWritesAllowed(() => approveCommand([id], { config: config as never })).catch(() => undefined);
     } finally {
+      now.mock.restore();
       process.env.HOME = SAVED.HOME;
       process.env.PATH = SAVED.PATH;
     }
