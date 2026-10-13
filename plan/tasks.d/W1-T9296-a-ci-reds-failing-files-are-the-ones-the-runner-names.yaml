@@ -1,0 +1,54 @@
+- id: W1-T9296
+  title: "A CI RED'S FAILING TEST FILES ARE THE ONES THE RUNNER NAMES, NOT EVERY test/ PATH ITS LOG PRINTS — on 2026-10-13 #11444 failed one test whose assertion diff quoted test/sweep-gateway-warm.test.ts, so the probe graded the trial merge partial and the sweep merged main into a red the merge could not clear"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # one extraction function's input set; src/lib/base-reproduction.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11444 (W1-T9057) hand-fixed after the fleet refreshed it instead of fixing it"
+  plan_refs: [W1-T8396, W1-T7848, W1-T6024, W1-T5528]
+  files:
+    - src/lib/base-reproduction.ts
+    - test/a-ci-reds-failing-files-are-the-ones-the-runner-names.test.ts
+  status: queued
+  priority: 2  # each occurrence spends a full CI cycle on a refresh its own trial merge showed cannot clear the red
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host ledger (read-only, niced; the 18-53 rotation plus the live file, every row
+    naming 11444 or W1-T9057):
+      - #11444 (head d0dd658) was red on coverage-shard (5/8) for ONE failing test, "a ci-log fix dispatch records each
+        red check and the failing test file its log names" in test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts.
+        Its assertion diff prints a fixture string holding file:///workspace/remudero/test/sweep-gateway-warm.test.ts:88:3.
+      - Every `sweep.base_reproduction` row from 18:21Z probed BOTH files (test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts
+        and test/sweep-gateway-warm.test.ts): `failingTestFilesFromCiFailures` (src/lib/base-reproduction.ts) adds every
+        test/ path in the log tail, wherever it appears. W1-T7848 narrowed this for rule-checks only.
+      - 19:19:07Z `refresh.clearance` arm base-fixed: merged_files = the real file "fails", the quoted file "passes",
+        merged_verdict partial, refresh true, reason "some failing test files still fail on the trial merge; keeping
+        today's refresh". 19:19:10Z `sweep.base_fixed.refresh` outcome updated: the fleet merged main (head 414061c)
+        and spent a CI cycle on a red its own probe had shown the merge could not clear. With the real file alone the
+        trial merge grades reproduced and W1-T8396 step 2 routes the head to the fix lane.
+      - The node runner already names its failures: the spec reporter's "failing tests:" block prints
+        "test at <path>:<line>:<col>" for each failing test, and TAP prints "not ok N - <title>" with a location.
+  design: |
+    1. NAMED FAILURES FIRST. In `failingTestFilesFromCiFailures`, when a failure's log tail carries the runner's own
+       failure attribution (the spec reporter's "test at test/<file>.test.ts:<line>:<col>" lines under its failing-tests
+       block, or the file a `not ok` subtest's location names), the failing files are those paths only. A test/ path
+       printed anywhere else in that log (an assertion diff, a fixture string, a helper's stack frame) is not a failing
+       file.
+    2. TODAY'S READ IS THE FALLBACK. A log with no runner attribution (a census, a truncated tail, a non-node gate)
+       keeps today's every-path read, and the rule-checks arm (W1-T7848) is unchanged.
+    3. NO NEW BOUNDS. The rule is a shape (where the path appears), not a count.
+    Tests go in test/a-ci-reds-failing-files-are-the-ones-the-runner-names.test.ts: feed `baseReproductionFiles` a
+    coverage-shard tail shaped like #11444's (one "test at" line naming file A, an assertion diff quoting file B) and a
+    tail with no attribution.
+  acceptance:
+    - claim: "a log whose runner names its failing test yields only that file, not a path quoted in its assertion output"
+      proof: 'grep: test("W1-T9296: a path quoted in an assertion diff is not a failing file" in test/a-ci-reds-failing-files-are-the-ones-the-runner-names.test.ts'
+    - claim: "a log with no runner attribution keeps every test path it prints"
+      proof: 'grep: test("W1-T9296: a log with no runner attribution keeps every test path" in test/a-ci-reds-failing-files-are-the-ones-the-runner-names.test.ts'
+  falsifier: |
+    Keep the every-path read: the #11444-shaped tail yields both files and the first test fails. Drop the fallback: the
+    unattributed tail yields nothing and the second test fails.
