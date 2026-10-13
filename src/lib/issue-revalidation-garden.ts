@@ -1,12 +1,10 @@
 /**
  * lib/issue-revalidation-garden.ts — the issue-revalidation garden (W1-T8864).
  *
- * THE GAP THIS CLOSES. The escalation reconciler (`runEscalationReconcile`, lib/sweep.ts) lists only
- * needs-human/fleet-notice issues and closes one only when its task or PR referent went terminal; every
- * issue with no referent is dropped (22 of 30 per pass, 2026-10-12), and hand-filed observation issues
- * carry neither label nor referent, so nothing ever reads them again. 53 sat open while the fleet closed
- * 92% of its own. This garden reads EVERY open issue once a pass, classifies it, asks "is the condition
- * still true?" of CURRENT evidence for its class, and records one verdict per issue:
+ * THE GAP THIS CLOSES. The escalation reconciler (`runEscalationReconcile`, lib/sweep.ts) closes an
+ * issue only when its task or PR referent went terminal, so issues with no referent, and hand-filed ones,
+ * were never read again (measured in W1-T8864's rationale). This garden reads EVERY open issue, asks "is
+ * the condition still true?" of CURRENT evidence for its class, and records one verdict per issue:
  *   resolved        positive evidence the condition is gone (a citation is required)
  *   still-true      the condition holds now
  *   convert-to-task the issue names work no plan task owns
