@@ -1623,6 +1623,7 @@ import {
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
+  independentBlockReleasesFrom,
   readLedgerLines,
   type DeriveDeps,
   type GitHub,
@@ -19077,6 +19078,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     return r;
   };
 
+  // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
+  let restoredCheckpoint: { branch: string; headSha: string } | undefined;
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
    * error). Turn it into a terminal verdict: clean the worktree so no debris
@@ -19088,6 +19091,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
+    // W1-T8676: a worker error is not the checkpoint's fault. Unless this run pushed its own branch (the newer
+    // checkpoint, W1-T7837) — read while the worktree stands; only a proven absence (exit 1) keeps it.
+    const keptCheckpoint = v.verdict === "failed" && restoredCheckpoint !== undefined &&
+      hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
+      ? restoredCheckpoint : undefined;
     try {
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", { on: `${stage}.error` });
@@ -19095,6 +19103,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
     log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
+    if (keptCheckpoint) {
+      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
+        failed_stage: stage, failed_subtype: r.subtype });
+    }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -19587,10 +19599,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (checkpoint) {
       try {
         const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args), log);
-        if (!(restored.base === "main" && restored.dropped)) log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
-          base: restored.base, restored_head_sha: restored.headSha,
-          ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
-          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        if (!(restored.base === "main" && restored.dropped)) {
+          restoredCheckpoint = checkpoint;
+          log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+            base: restored.base, restored_head_sha: restored.headSha,
+            ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
+            ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        }
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -40037,6 +40052,7 @@ export async function daemonCommand(
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
         isIndependentFailureBlocked,
+        independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
         // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through

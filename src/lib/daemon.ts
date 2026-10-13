@@ -110,7 +110,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
-import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, isEnvironmentalBlock } from "./status.js";
+import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -244,9 +244,14 @@ export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
- *  a `run.freshness_handoff` row is a receipt too (W1-T7747). */
+ *  a `run.freshness_handoff` row is a receipt too (W1-T7747). W1-T8676: an `implement.checkpoint_kept` row,
+ *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
+ *  the exact receipt that verdict consumed. */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
+  const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
+    typeof branch === "string" && branch.startsWith(`run-${taskId}-`) && /^run-.+-[0-9]+$/.test(branch) &&
+    typeof headSha === "string" && /^[a-f0-9]{40}$/.test(headSha);
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
@@ -256,14 +261,17 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       if (prior && row.source_branch === prior.branch && row.head_sha === prior.headSha) pending.delete(row.task_id);
       continue;
     }
+    if (row.step === "implement.checkpoint_kept") {
+      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha) });
+      continue;
+    }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
     if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     pending.delete(row.task_id);
-    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
-        /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
-      pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
+    if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
+      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
     }
   }
   return pending;
@@ -1137,6 +1145,9 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  /** W1-T8676: every latch release the status projection derives (`independentFailureLatch`), by task id. Each
+   *  selection pass ledgers the unrecorded ones, and a `provider_recovered` one lifts this process's own hold. */
+  independentBlockReleases?: () => ReadonlyMap<string, IndependentBlockRelease>;
   categorizedRefusalRejoinFor?: (taskId: string) => {
     sourceRunId: string; refusedContractRevision: string; contractRevision: string; receiptRecorded: boolean;
   } | undefined;
@@ -3313,6 +3324,24 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const runLengths = dispatchRunHistory(bootLedgerLines);
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
+  // pass's run-branch guard reads it. A failed read keeps the entry it had.
+  const refreshResumableHandoff = (taskId: string, report: typeof emitLog): void => {
+    if (!deps.readLedgerLines) return;
+    let rows: readonly string[];
+    try {
+      rows = deps.readLedgerLines();
+    } catch (error) {
+      report("daemon.handoff_receipt_refresh_failed", { task_id: taskId, error: String((error as Error)?.message ?? error) });
+      return;
+    }
+    const needle = JSON.stringify(taskId);
+    const receipt = pendingWorkerBoundaryHandoffs(rows.filter((raw) => raw.includes(needle))).get(taskId);
+    if (receipt) resumableHandoffs.set(taskId, receipt);
+    else resumableHandoffs.delete(taskId);
+  };
+  // W1-T8676: the blocking runs whose release this process already ledgered, beside the projection's receipt.
+  const ledgeredIndependentBlockReleases = new Set<string>();
   for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
     log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
   }
@@ -3694,6 +3723,7 @@ export async function runDaemon(
     | { kind: "continue" }
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
+    refreshResumableHandoff(task.id, report);
     if (result.verdict === "task_already_merged") {
       // This verdict is a positive merge observation by run-task, even though the run opened no PR.
       // Refresh before the next selection and retain a local hold if the daemon's projection lags.
@@ -5195,6 +5225,18 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    // W1-T8676: every release the latch projects leaves its row, once per blocking run.
+    const independentBlockReleasesThisPass = deps.independentBlockReleases?.() ?? new Map<string, IndependentBlockRelease>();
+    for (const [taskId, release] of independentBlockReleasesThisPass) {
+      if (release.receiptRecorded || ledgeredIndependentBlockReleases.has(release.blockingRunId)) continue;
+      ledgeredIndependentBlockReleases.add(release.blockingRunId);
+      log(INDEPENDENT_BLOCK_RELEASED_STEP, {
+        task_id: taskId, blocking_run_id: release.blockingRunId, blocked_at: release.blockedAt, evidence: release.evidence,
+        evidence_at: release.recoveredAt ?? release.mergedAt ?? null, latch_count: release.latchCount, backoff_ms: release.backoffMs,
+        ...(release.mergedTaskId ? { merged_task_id: release.mergedTaskId } : {}),
+        ...(release.provider ? { provider: release.provider, recovered_task_id: release.recoveredTaskId, recovered_step: release.recoveredStep } : {}),
+      });
+    }
     let terminalPreDispatchRefusalRevisions: ReadonlyMap<string, string> = new Map();
     try {
       terminalPreDispatchRefusalRevisions = deps.readTerminalPreDispatchRefusalRevisions?.() ?? terminalPreDispatchRefusalRevisions;
@@ -5312,6 +5354,8 @@ export async function runDaemon(
       onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       isIndependentFailureBlocked: (taskId) => {
         if (deps.categorizedRefusalRejoinFor?.(taskId)) independentFailureBlocksThisRun.delete(taskId);
+        // W1-T8676: a worker-error hold defers to the ledger's provider release, so this process cannot outlast it.
+        if (independentBlockReleasesThisPass.get(taskId)?.evidence === "provider_recovered") independentFailureBlocksThisRun.delete(taskId);
         const environmentalAt = environmentalBlocksThisRun.get(taskId);
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
