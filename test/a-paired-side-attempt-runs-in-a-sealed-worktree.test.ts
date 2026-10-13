@@ -427,3 +427,19 @@ test("the daemon's run wires the sealed dispatcher; a CLI run refuses the pair b
   assert.equal(cli.side.length, 0, "a CLI run never spawns a side attempt");
   assert.equal(assignmentsOf(daemon.rows), assignmentsOf(cli.rows), "the side attempts wrote no worker.assignment of their own");
 });
+
+test("a sealed attempt carries the skills part its request is given, and an empty part is byte-identical to no hook", async () => {
+  const fixture = sealedFixture();
+  const spawned: SpawnWorkerArgs[] = [];
+  const draft = "## skill: draft-procedure\n\nRun the declared proof before claiming the task is done.";
+  const hooked = sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned), {
+    skillsPartFor: (request) => (request.arm === "paid" ? draft : ""),
+  }));
+  (await hooked(attemptRequest("paid"))).cleanup?.();
+  (await hooked(attemptRequest("control"))).cleanup?.();
+  (await sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned)))(attemptRequest("control"))).cleanup?.();
+  const [skilled, unskilled, unhooked] = spawned.map((args) => args.prompt);
+  assert.ok(skilled!.includes(draft), "the arm given the draft skill carries it");
+  assert.ok(!unskilled!.includes("draft-procedure"), "the other arm of the same dispatcher does not");
+  assert.equal(unskilled, unhooked, "an empty skills part renders exactly the prompt a dispatcher without the hook renders");
+});

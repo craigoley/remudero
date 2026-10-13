@@ -147,6 +147,14 @@ export function readGardenerState(path: string): GardenerState {
  *  in a PR, and judged by its outcome like every other action. */
 export const MERGE_SIMILARITY = 0.6;
 
+/** PRIMARY CONTROL: at most this many merge or retire actions land in one pass (operator ruling,
+ *  2026-10-13). One pass retired 14 learnings at once (#7205); bounded edits per pass keep a wholesale
+ *  rewrite from collapsing workers' context. One class acts a pass, so capping each class caps the
+ *  pass. The rest are deferred, named in the scorecard row and the garden log, and judged next pass. */
+export const GARDEN_MAX_ACTIONS_PER_PASS = 3;
+
+const learningSimilarity = (a: KnowledgeItem, b: KnowledgeItem) => Math.min(textContainment(a.text, b.text), textContainment(b.text, a.text));
+
 /** Pairs [newer, older] of active learnings that mostly repeat each other, older = earlier in the
  *  inventory (shard order, then position). Each learning is folded at most once. */
 export function duplicateLearningPairs(items: KnowledgeItem[]): Array<[KnowledgeItem, KnowledgeItem]> {
@@ -157,7 +165,7 @@ export function duplicateLearningPairs(items: KnowledgeItem[]): Array<[Knowledge
     for (let i = 0; i < j; i++) {
       const [older, newer] = [active[i]!, active[j]!];
       if (folded.has(older.id) || folded.has(newer.id)) continue;
-      const similarity = Math.min(textContainment(newer.text, older.text), textContainment(older.text, newer.text));
+      const similarity = learningSimilarity(newer, older);
       if (similarity >= MERGE_SIMILARITY) {
         pairs.push([newer, older]);
         folded.add(newer.id);
@@ -171,16 +179,23 @@ export function duplicateLearningPairs(items: KnowledgeItem[]): Array<[Knowledge
 /** Learnings that, with posterior probability of at least `confidence`, are less useful than the
  *  corpus's typical (median posterior-mean) learning. Only learnings with usage history qualify. */
 export function retireCandidates(usage: LearningUsage, activeIds: string[], rng: () => number, confidence = 0.95, draws = 400): string[] {
+  return retireCertainties(usage, activeIds, rng, confidence, draws).map((c) => c.id);
+}
+
+/** {@link retireCandidates} with each one's certainty: its share of draws below the median. */
+function retireCertainties(usage: LearningUsage, activeIds: string[], rng: () => number, confidence = 0.95, draws = 400): Array<{ id: string; certainty: number }> {
   const measured = activeIds.filter((id) => (usage[id]?.offered ?? 0) > 0);
   if (measured.length < 2) return [];
   const means = measured.map((id) => learningValue(id, usage).mean).sort((a, b) => a - b);
   const median = means[Math.floor(means.length / 2)]!;
-  return measured.filter((id) => {
+  const out: Array<{ id: string; certainty: number }> = [];
+  for (const id of measured) {
     const value = learningValue(id, usage);
     let below = 0;
     for (let k = 0; k < draws; k++) if (sampleBeta(value, rng) < median) below++;
-    return below / draws >= confidence;
-  });
+    if (below / draws >= confidence) out.push({ id, certainty: below / draws });
+  }
+  return out;
 }
 
 /** Each learning id a test names as a string literal, mapped to the first test file naming it.
@@ -701,16 +716,18 @@ function candidateActions(opts: {
   testPins?: Record<string, string>;
   revertedRunIds?: ReadonlySet<string>;
   revertedPrNumbers?: ReadonlySet<number>;
-}): { actions: GardenAction[]; kept: GardenAction[] } {
-  const actions: GardenAction[] = duplicateLearningPairs(opts.items).map(([newer, older]) => ({
-    class: "merge" as const,
-    target: bare(newer.id),
-    into: bare(older.id),
-    reason: "Its fact mostly repeats an older learning.",
-  }));
+}): { actions: GardenAction[]; kept: GardenAction[]; deferred: GardenAction[] } {
+  const certainty = new Map<GardenAction, number>();
+  const actions: GardenAction[] = duplicateLearningPairs(opts.items).map(([newer, older]) => {
+    const a = { class: "merge" as const, target: bare(newer.id), into: bare(older.id), reason: "Its fact mostly repeats an older learning." };
+    certainty.set(a, learningSimilarity(newer, older));
+    return a;
+  });
   const active = opts.items.filter((i) => i.kind === "learning" && i.lifecycle === "active").map((i) => bare(i.id));
-  for (const id of retireCandidates(opts.usage, active, opts.rng)) {
-    actions.push({ class: "retire", target: id, reason: "Workers offered it have rarely used it, compared with other learnings." });
+  for (const { id, certainty: c } of retireCertainties(opts.usage, active, opts.rng)) {
+    const a: GardenAction = { class: "retire", target: id, reason: "Workers offered it have rarely used it, compared with other learnings." };
+    certainty.set(a, c);
+    actions.push(a);
   }
   actions.push({ class: "refresh", target: "", reason: "Re-check every learning's assertion." });
   for (const [newer, older] of doctrineDuplicatePairs(opts.items)) {
@@ -736,10 +753,26 @@ function candidateActions(opts: {
       revertedPrNumbers: opts.revertedPrNumbers,
     }),
   );
-  return withoutTestPinned(actions, opts.testPins ?? {});
+  // The cap counts only what may act: a test-pinned entry never takes a slot from the next in line.
+  const unpinned = withoutTestPinned(actions, opts.testPins ?? {});
+  return { ...capByCertainty(unpinned.actions, certainty), kept: unpinned.kept };
+}
+
+/** Keep each of MERGE and RETIRE to its {@link GARDEN_MAX_ACTIONS_PER_PASS} most certain actions
+ *  (ties by id), in their original order; the rest come back deferred, most certain first. */
+function capByCertainty(actions: GardenAction[], certainty: Map<GardenAction, number>): { actions: GardenAction[]; deferred: GardenAction[] } {
+  const deferred: GardenAction[] = [];
+  for (const cls of ["merge", "retire"] as const) {
+    const ranked = actions.filter((a) => a.class === cls).sort((a, b) => certainty.get(b)! - certainty.get(a)! || (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+    deferred.push(...ranked.slice(GARDEN_MAX_ACTIONS_PER_PASS));
+  }
+  return { actions: actions.filter((a) => !deferred.includes(a)), deferred };
 }
 
 const bare = (id: string) => id.replace(/^learnings#/, "");
+
+/** How a log line names an action: `retire x`, `merge x into y`, or just the class for refresh. */
+const actionLabel = (a: GardenAction) => `${a.class}${a.target ? ` ${a.target}` : ""}${a.into ? ` into ${a.into}` : ""}`;
 
 /** Supersede learnings in their shards by text surgery on each entry's own block, so the diff is
  *  exactly the changed lines. Returns the shard files it changed. */
@@ -788,6 +821,8 @@ export interface KnowledgeScorecard {
   /** The items carrying the largest share of their kind's bytes — the fold candidates, ranked, not cut off. */
   heaviest: Array<{ id: string; kind: string; bytes: number; shareOfKind: number }>;
   memory?: { danglingIndexLines: number; indexLoad: string };
+  /** The acting class's candidates the per-pass cap left for the next pass, e.g. `retire x`. */
+  deferred?: string[];
 }
 
 export function heaviestItems(items: KnowledgeItem[], n: number): KnowledgeScorecard["heaviest"] {
@@ -804,8 +839,10 @@ export function buildScorecard(opts: {
   dangling: number;
   plan: GardenPlan;
   memoryDirs?: string[];
+  deferred?: GardenAction[];
 }): KnowledgeScorecard {
   const memoryReports = (opts.memoryDirs ?? []).filter((d) => existsSync(d)).map((d) => lintMemoryDir(d));
+  const deferred = (opts.deferred ?? []).filter((a) => opts.plan.acting.includes(a.class)).map(actionLabel);
   return {
     usedShare: usedShare(opts.usage),
     totals: inventoryTotals(opts.items),
@@ -821,6 +858,7 @@ export function buildScorecard(opts: {
           },
         }
       : {}),
+    ...(deferred.length > 0 ? { deferred } : {}),
   };
 }
 
@@ -866,7 +904,8 @@ export function appendGardenLog(root: string, at: Date, actions: GardenAction[],
     "",
     heading,
     "",
-    ...actions.map((a) => `- ${a.class}${a.target ? ` ${a.target}` : ""}${a.into ? ` into ${a.into}` : ""}: ${a.reason}`),
+    ...actions.map((a) => `- ${actionLabel(a)}: ${a.reason}`),
+    ...(card.deferred ?? []).map((d) => `- deferred ${d}: over this pass's cap of ${GARDEN_MAX_ACTIONS_PER_PASS}; the next pass judges it again.`),
     "",
     `Learnings used when offered: ${share}. Dangling Why pointers: ${card.danglingPointers}.`,
     "",
@@ -1096,6 +1135,10 @@ interface KnowledgeInventory {
   testPins: Record<string, string>;
 }
 
+/** The candidates the cap deferred, keyed by the pass's own inventory: `candidates` sees the cut,
+ *  `scorecard` reports it, and a spec reused across passes carries nothing into the next one. */
+const deferredByPass = new WeakMap<KnowledgeInventory, GardenAction[]>();
+
 /** The knowledge base as a gardener spec: its corpus, its evidence and its actions. RULE-MERGE and
  *  REPAIR-REFERENCE land a reviewed PR exactly like MERGE/RETIRE/REFRESH; SKILL-LIFECYCLE and
  *  GUARD-RETIREMENT land no PR at all — they stage a proposal into the SAME ratification inbox
@@ -1129,11 +1172,12 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
     // this metric is never actually read for them — `rmd approve` is their judge, not this loop.
     metric: (inv) => toOutcome(usageTotals(inv.usage)),
     candidates: (inv, rng) => {
-      const { actions, kept } = candidateActions({ ...inv, rng, root: deps.repoRoot });
+      const { actions, kept, deferred } = candidateActions({ ...inv, rng, root: deps.repoRoot });
       for (const k of kept) deps.log("knowledge.kept_for_test", { class: k.class, target: k.target, test: inv.testPins[k.target], reason: k.reason });
+      deferredByPass.set(inv, deferred);
       return actions;
     },
-    scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs }) }),
+    scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs, deferred: deferredByPass.get(inv) }) }),
     apply: (ws, plan0, card) => {
       let plan = plan0;
       const learningsDir = resolveRepoLayout(ws.root).learningsDir;
