@@ -326,6 +326,42 @@ export function buildDispatchValueContext(
   };
 }
 
+/** Pool ceil(sqrt(dated runs)) nearest runs, including every equal-distance group.
+ * Grouped evidence retains its whole tally; no input order or fixed age bucket decides a tie. */
+export function validityShareNearAge(
+  samples: ReadonlyArray<readonly [number, { readonly valid: number; readonly total: number }]>, age: number,
+): { valid: number; total: number } {
+  if (!Number.isFinite(age) || samples.some(([at, tally]) => !Number.isFinite(at) ||
+    !Number.isSafeInteger(tally.total) || tally.total <= 0 || !Number.isSafeInteger(tally.valid) ||
+    tally.valid < 0 || tally.valid > tally.total)) throw new RangeError("Invalid age-validity evidence");
+  const datedRuns = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
+  if (!Number.isSafeInteger(datedRuns)) throw new RangeError("Invalid dated-run count");
+  if (datedRuns === 0) return { valid: 0, total: 0 };
+  const ordered = samples.every(([at], i) => i === 0 || samples[i - 1][0] <= at)
+    ? samples : [...samples].sort(([a], [b]) => a - b);
+  let lo = 0, hi = ordered.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (ordered[mid][0] < age) lo = mid + 1;
+    else hi = mid;
+  }
+  const wanted = Math.ceil(Math.sqrt(datedRuns));
+  let left = lo - 1, right = lo, valid = 0, total = 0;
+  while (total < wanted && (left >= 0 || right < ordered.length)) {
+    const distance = Math.min(left >= 0 ? Math.abs(ordered[left][0] - age) : Infinity,
+      right < ordered.length ? Math.abs(ordered[right][0] - age) : Infinity);
+    while (left >= 0 && Math.abs(ordered[left][0] - age) === distance) {
+      valid += ordered[left][1].valid;
+      total += ordered[left--][1].total;
+    }
+    while (right < ordered.length && Math.abs(ordered[right][0] - age) === distance) {
+      valid += ordered[right][1].valid;
+      total += ordered[right++][1].total;
+    }
+  }
+  return { valid, total };
+}
+
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
@@ -389,10 +425,9 @@ function costOfDelayContext(
     const estimate = estimates.get(deriveTaskClass(task));
     if (!estimate || estimate.costPerAttempt <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-cost`] };
     const age = nowMs - filedAt;
-    const nearest = samples.reduce<typeof samples[number] | undefined>((best, sample) =>
-      best === undefined || Math.abs(sample[0] - age) < Math.abs(best[0] - age) ? sample : best, undefined);
-    const probability = nearest === undefined ? prior
-      : (nearest[1].valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (nearest[1].total + DISPATCH_VALUE_PRIOR_WEIGHT);
+    const share = validityShareNearAge(samples, age);
+    const probability = share.total === 0 ? prior
+      : (share.valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (share.total + DISPATCH_VALUE_PRIOR_WEIGHT);
     const classScore = context.scoreByClass.get(deriveTaskClass(task));
     // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
     // gives every class a share even when its raw merge count is zero.
