@@ -9877,17 +9877,47 @@ components:
     # subset has no oneOf/allOf, so a TypeScript union or `extends` is flattened into one object
     # and the flattening is named in that schema's description.
 
+    PlainOptionAction:
+      type: object
+      description: An existing inbox write route, attached at serve time when valid for the item's lane.
+      required:
+        - method
+        - path
+        - fields
+      properties:
+        method:
+          type: string
+          enum: [POST]
+        path:
+          type: string
+        fields:
+          type: object
+          description: Fixed string fields to include in the request body.
+          additionalProperties:
+            type: string
+        input:
+          type: string
+          description: The free-text field the console must collect before posting.
+          enum: [reason, feedback, text]
+
     PlainOption:
       type: object
-      description: One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`).
+      description: One served inbox choice (src/lib/inbox-plain.ts's `ServedPlainOption`).
       required:
         - label
         - consequence
+        - intent
       properties:
         label:
           type: string
         consequence:
           type: string
+        intent:
+          type: string
+          description: Untagged stored options are served as reply suggestions without an action.
+          enum: [approve, decline, reframe, reply, keep]
+        action:
+          $ref: "#/components/schemas/PlainOptionAction"
 
     PlainInboxMessage:
       type: object
@@ -9925,6 +9955,9 @@ components:
           enum:
             - writer
             - template
+        sourceFingerprint:
+          type: string
+          description: Optional cache provenance, not verification of the writer's factual claims.
 
     InboxDraftedTask:
       type: object

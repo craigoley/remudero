@@ -15,6 +15,7 @@ import { writePersistedInbox, type PersistedInboxContent } from "../src/lib/flee
 import { buildPanelGraphRoutes, inboxLanes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { SPEC, violations } from "./helpers/openapi-strict.js";
 
 const ID = "machine-judge:W1-T5418";
 const SUMMARY = "A parked fix is waiting for a ruling on whether to land it.";
@@ -105,6 +106,48 @@ test("W1-T8826: keep and untagged options carry no action", (t) => {
     assert.deepEqual(byLabel("Request clearer proof").action, {
       method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback",
     }, "control: a tagged sibling in the same message is actionable in every lane");
+  }
+});
+
+test("W1-T8826: served writer options match the plain message contract in every lane", (t) => {
+  const schema = SPEC.components.schemas.PlainInboxMessage!;
+  const choices: PlainOption[][] = [
+    TAGGED,
+    [
+      { label: "Close it", consequence: "The item is closed.", intent: "decline" },
+      { label: "Ask why", consequence: "Your question is added to the thread.", intent: "reply" },
+      { label: "Leave parked", consequence: "The item stays parked." },
+    ],
+  ];
+  for (const state of ["ready", "drafting", "not_ready", "deferred_with_trigger", "declined"] as const) {
+    for (const options of choices) {
+      const { item } = served(t, state, options);
+      assert.equal(item.plain.source, "writer", "control: validate stored writer data, not a fallback template");
+      assert.equal(item.plain.sourceFingerprint, plainSourceFingerprint({ id: ID, summary: SUMMARY }));
+      assert.deepEqual(violations(item.plain, schema), [], state);
+    }
+  }
+});
+
+test("W1-T8826: the served option contract refuses malformed intents and actions", (t) => {
+  const schema = SPEC.components.schemas.PlainOption!;
+  const option = served(t, "ready", TAGGED).byLabel("Request clearer proof");
+  assert.deepEqual(violations(option, schema), [], "control: a real served action validates");
+  const { intent, ...untagged } = option;
+  const { fields, ...withoutFields } = option.action!;
+  const malformed = [
+    untagged,
+    { ...option, intent: "execute" },
+    { ...option, action: { ...option.action, method: "GET" } },
+    { ...option, action: { ...option.action, input: "command" } },
+    { ...option, action: { ...option.action, path: 42 } },
+    { ...option, action: { ...option.action, fields: { proposalId: 42 } } },
+    { ...option, action: withoutFields },
+    { ...option, action: { ...option.action, surprise: true } },
+    { ...option, surprise: true },
+  ];
+  for (const invalid of malformed) {
+    assert.ok(violations(invalid, schema).length > 0, `must reject ${JSON.stringify(invalid)}`);
   }
 });
 
