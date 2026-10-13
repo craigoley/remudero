@@ -284,7 +284,8 @@ test("W1-T8868: the stale rejudge records shadow triage without demoting", async
 
 test("W1-T8868: unreadable history delivers before a rule or model can hide the issue", async () => {
   const lp = ledger();
-  writeFileSync(lp, "not a ledger row\n");
+  // A torn row of the very step the tier is read from: it could be the evidence that stops a digest.
+  writeFileSync(lp, '{"step":"panel.escalation_marked_handled","class":"STALE_PR\n');
   const issues = gateway();
   let executed = 0;
   let judged = 0;

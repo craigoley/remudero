@@ -1416,9 +1416,14 @@ export function escalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGatewa
 /** An unreadable precision ledger propagates to the funnel's deliver fallback. */
 function ledgerClassTier(e: Escalation, ledgerPath: string): TriageEvidence["classTier"] {
   if (e.class === "MANUAL" || e.class === "HARD_STOP") return undefined;
+  // A torn row that NAMES the step could have been the evidence that stops a digest, so it refuses;
+  // an unattributable torn line elsewhere in the corpus is a healthy ledger's normal residue.
+  let damaged = false;
   const lines = readLedgerUnionRecordsSync(dirname(ledgerPath), {
     step: "panel.escalation_marked_handled", refuseIncomplete: true,
+    onTorn: (raw) => { if (raw.includes("panel.escalation_marked_handled")) damaged = true; },
   });
+  if (!lines.ok || damaged) throw new Error("escalation precision history is unreadable");
   return escalationClassSignal(lines.rows, e.class).tier;
 }
 

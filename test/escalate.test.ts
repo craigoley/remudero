@@ -1459,11 +1459,12 @@ test("escalateWithSummary: a THROWING summarizer still opens the issue with the 
 
 // ── W1-T349: residual escalation judge — exemption + fail-open (acceptance 1) ───────────────
 
-test("isEscalationJudgeExempt: MANUAL and GRILL are exempt; BLOCKED and HARD_STOP are not", () => {
+test("isEscalationJudgeExempt: MANUAL, HARD_STOP and GRILL are exempt; BLOCKED is not", () => {
   assert.equal(isEscalationJudgeExempt(escalation({ class: "MANUAL" })), true);
   assert.equal(isEscalationJudgeExempt(escalation({ class: "GRILL" })), true);
   assert.equal(isEscalationJudgeExempt(escalation({ class: "BLOCKED" })), false);
-  assert.equal(isEscalationJudgeExempt(escalation({ class: "HARD_STOP" })), false);
+  // W1-T8868: a HARD_STOP is never demoted or digested — it is exempt from the judge like MANUAL.
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "HARD_STOP" })), true);
 });
 
 test("judgeEscalation: MANUAL is exempt — a judge stub that WOULD demote it is overridden, delivered anyway (the falsifier, direction 1)", async () => {
@@ -1682,6 +1683,8 @@ test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue wi
     ledgerPath: path,
     runId: "RUN-1",
     judge: async () => ({ decision: "demote", reason: "this class of storm always self-resolves" }),
+    // W1-T8868: triage ships in shadow (every outcome delivers); a demotion only lands in act mode.
+    triage: { mode: "act" },
   });
 
   assert.equal(url, "https://github.com/craigoley/remudero/issues/500");
