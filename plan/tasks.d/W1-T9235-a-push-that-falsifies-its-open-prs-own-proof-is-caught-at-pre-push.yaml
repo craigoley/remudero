@@ -1,0 +1,75 @@
+- id: W1-T9235
+  title: "A PUSH THAT FALSIFIES ITS OPEN PR'S OWN BODY PROOF IS CAUGHT AT PRE-PUSH — on 2026-10-13 a push to #11328's shards broke that PR's own ## Acceptance grep proof and it surfaced only as review-failed about 20 minutes later; the pre-push proof precheck reads plan criteria only and SKIPs a plan-only filing, so nothing re-runs a stored body's proofs before the push lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # the pre-push hook runs on every operator, agent and worker push; a wrong refusal strands a push, and the body read must stay inside the shared gh read floor
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11328's follow-up push falsified its own body proof; the miss cost a review round"
+  plan_refs: [W1-T4921, W1-T3222, W1-T3059, W1-T3275, W1-T1066]
+  files:
+    - hooks/pre-push
+    - scripts/open-pr-body-proof-precheck.mjs
+    - test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts
+  status: queued
+  priority: 2  # each miss costs a CI cycle and a review round; the class is every follow-up push to a hand or filing PR
+  attempts: 0
+  rationale: |
+    OPERATOR-REPORTED 2026-10-13: a follow-up push to #11328's shards falsified a `grep:` proof in that PR's own stored
+    `## Acceptance` block; nothing local said so, and it surfaced as remudero-review FAIL about 20 minutes later.
+    REPRODUCED THE GAP on origin/main 6732a7690 (symbols, not lines):
+      - hooks/pre-push's only proof check is the "proof-resolve precheck" block, which runs
+        scripts/proof-resolve-precheck.mjs. `proofResolveVerdict` resolves criteria from the PLAN
+        (`resolvePlanCriteriaAtHead`, keyed by a run-<taskId> branch or a `Remudero-Task:` trailer) and returns
+        "SKIP -- a plan-only filing (no run-<taskId> branch); its proofs are the build PR's" for a plan-only diff. No
+        arm reads the open PR's stored body, which is where a filing PR's and a run-unfiled hand PR's proofs live and
+        what remudero-review executes for them.
+      - So the review is the first executor of a body proof after every push. The body is fixed between pushes, so a
+        push that removes or rewords the text a body proof greps for is knowable offline in about a second.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads. pre-push + check-proof matches 8
+    shards on main (W1-T4921 the merge-base arm, W1-T3059/W1-T3222 arming the routes, W1-T4904/W1-T8759 base-stale
+    criteria, W1-T5348 machine plan PRs, W1-T338/W1-T373/W1-T986 preflight); every one judges PLAN criteria, none a
+    stored PR body. No head reads more than main. Control: `acceptance-author-gate` reads 93 shards on main and every head.
+  design: |
+    1. ONLY A BRANCH THAT CAN HAVE A PR. The precheck runs for a pushed `refs/heads/<branch>` update whose remote old sha
+       is not all-zero (a branch new to origin cannot have a PR yet, so a first push never reads anything) and whose
+       local ref is not a deletion.
+    2. THE STORED BODY, WITHIN THE SHARED READ FLOOR. Source, in order:
+       (a) one REST read, `pulls?head=<owner>:<branch>&state=open`, taken only when the shared gh read floor (the stamp
+           deny-floor rule 10 and ~/Remudero-notes/tools/gh-gap.sh read) is clear, and stamping it as any read does;
+           never a wait and never a loop. A daemon or worker push uses its own identity's bucket, as its other reads do.
+       (b) otherwise, a body cached by this clone under the git common dir, keyed by branch, written by (a) and by every
+           rmd path in this repo that opens or edits a PR body;
+       (c) otherwise one named line, "open-PR body proofs UNCHECKED: read floor busy and no cached body", exit 0.
+    3. THE VERDICT. Parse the body's block with the reviewer's `parseAcceptanceBlock`. A body whose `Remudero-Task:`
+       trailer resolves criteria at head is the existing precheck's (review reads the shard), so it is skipped here. For
+       each body proof, judge it at the remote's old tip and at the pushed sha with the reviewer's executor (a `grep:`
+       proof executed in a temporary checkout or by `git grep` over each tree; a `unit test:` proof by title resolution,
+       as `certainHeadRefusals` does, never by running the suite). A proof that PASSED at the old tip and fails at the
+       new one is NEWLY FALSIFIED: on a fresh body (a) the push is refused, naming the proof, both outcomes and the
+       remedy (fix the commit, or edit the body first and push again); on a cached body (b) it is reported and the
+       push goes on, since the body may have been edited elsewhere. A proof already failing at the old tip is reported
+       only.
+    4. NO NEW NUMBER. The read happens at most once per push and only when the floor permits; there is no timer, count or
+       page cap.
+    Tests go in test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts, driving the script's
+    pure verdict and its source selection with injected body readers and floor state, over a gitRepo() fixture with a
+    local identity.
+  acceptance:
+    - claim: "a push that makes a passing body grep proof fail is refused when the body was read fresh"
+      proof: 'grep: test("W1-T9235: a push that falsifies a fresh body proof is refused" in test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts'
+    - claim: "the same push with only a cached body is reported and not refused, and a proof already failing at the old tip is reported only"
+      proof: 'grep: test("W1-T9235: a cached body or an already failing proof only reports" in test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts'
+    - claim: "a first push of a new branch reads nothing, and a busy read floor with no cache reads nothing and names the skip"
+      proof: 'grep: test("W1-T9235: a first push or a busy floor makes no GitHub read" in test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts'
+    - claim: "hooks/pre-push runs the open-PR body precheck"
+      proof: 'grep: test("W1-T9235: hooks/pre-push runs the open-PR body precheck" in test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-push-that-falsifies-its-open-prs-own-proof-is-caught-at-pre-push.test.ts"
+  falsifier: |
+    Compare only the new tip (no old-tip run): the second test's already-failing proof is refused. Read GitHub whenever
+    the old sha is non-zero, ignoring the floor: the third test's busy-floor arm records a read. Remove the hook call:
+    the fourth test, which reads hooks/pre-push for the script call, fails.
