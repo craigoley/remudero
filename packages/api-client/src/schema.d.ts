@@ -4529,6 +4529,14 @@ export interface components {
       whyMe: string;
       sourceFacts: (InboxAttentionCensusFact)[];
       retiredReason?: string;
+      judgment?: InboxAttentionJudgment;
+    };
+    /** Current task-verification evidence; unclassified is never an operator ruling. */
+    InboxAttentionJudgment: {
+      state: "judged" | "unclassified";
+      reason: string;
+      decision?: "needs_operator" | "automate" | "backlog";
+      at?: string | null;
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
@@ -4558,6 +4566,8 @@ export interface components {
       decisionReadiness: {
         ready: number;
         needsPreparation: number;
+        /** Human-verification asks with unclassified judgement evidence. */
+        needsTriage: number;
         unknown: number;
       };
       /** Conservative lower bounds; zero when any needed source is partial. */

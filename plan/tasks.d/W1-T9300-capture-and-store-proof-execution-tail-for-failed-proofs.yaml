@@ -13,7 +13,9 @@
     From the 2026-10-13 proposal on proof-debt:W1-T6179, ratified via rmd approve:
   
     spans proofExecutor and review subsystems
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=cd651b44e88b62c3
   attempts: 0
   files:
     - src/lib/proofExecutor.ts

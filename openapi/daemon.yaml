@@ -10533,6 +10533,25 @@ components:
         retiredReason:
           type: string
 
+        judgment:
+          $ref: "#/components/schemas/InboxAttentionJudgment"
+
+    InboxAttentionJudgment:
+      type: object
+      required: [state, reason]
+      description: Current task-verification evidence; unclassified is never an operator ruling.
+      properties:
+        state:
+          type: string
+          enum: [judged, unclassified]
+        reason:
+          type: string
+        decision:
+          type: string
+          enum: [needs_operator, automate, backlog]
+        at:
+          type: [string, "null"]
+
     InboxAttentionCensusResult:
       type: object
       description: >
@@ -10592,7 +10611,7 @@ components:
             Classification of observed decision-labelled items. These categories sum to counts.decision;
             ready does not imply that operator judgment is required, and needsPreparation is not a
             dismissal instruction. All values are observational under partial source coverage.
-          required: [ready, needsPreparation, unknown]
+          required: [ready, needsPreparation, needsTriage, unknown]
           properties:
             ready:
               type: integer
@@ -10600,6 +10619,10 @@ components:
             needsPreparation:
               type: integer
               minimum: 0
+            needsTriage:
+              type: integer
+              minimum: 0
+              description: Human-verification asks with unclassified judgement evidence.
             unknown:
               type: integer
               minimum: 0

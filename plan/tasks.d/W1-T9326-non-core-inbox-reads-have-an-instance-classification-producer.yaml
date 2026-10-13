@@ -1,0 +1,29 @@
+- id: W1-T9326
+  title: "Non-core Inbox reads have an instance-owned classification producer"
+  repo: remudero
+  depends_on: [W1-T5339, W1-T5897, W1-T9282]
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved Inbox adoption verification"
+  plan_refs: ["W1-T5886", "W1-T9285", "CONSOLE-T132"]
+  files: ["src/lib/instance-gateway.ts", "src/lib/read-model-slow-lane.ts", "src/lib/read-model-worker.ts", "src/lib/serve.ts", "src/lib/inbox-view.ts", "src/run-task.ts", "test/a-non-core-inbox-has-its-own-classification-producer.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    At serving source bbab8894fc5801bfab324561aae8ef5faa814937, the instance capability view advertised site and console proposal lanes and reframe. Both real authenticated GET /v1/i/<instance>/inbox reads returned 503 inbox_not_ready. Their state roots lacked inbox-classification.json and inbox-classified.json; the core root had both fresh files. defaultInstanceInboxSources requires inboxFromSlowLane, while the maintained slow-lane Inbox configuration names only the core root. A route existing and proposal fixture tests passing do not prove instance-owned lane availability. This blocks the publication gate filed as CONSOLE-T132.
+  design: |
+    Supply an owned, off-loop classification producer for each eligible registered instance and bind its persisted snapshot to that instance's own repository, root, plan, ledger, registry and source coverage. Keep GETs read-only and bounded. Never borrow core's classification, join by task id alone, or turn an unreadable source into a successful empty Inbox. Preserve explicit unavailable and historical states and lifecycle shutdown/lease ownership. Classification materialization writes only its owned snapshot/cache evidence; it does not introduce proposal retirement, approval, security-drill execution or a host restart. Keep the held security ask unchanged as a mandatory negative control and a terminal mechanical ask from another instance as a foreign-source control. Prove the maintained production default reaches the producer and the mounted native route reads the resulting source-owned snapshot; injected route fixtures alone are insufficient. Positively observe live source-qualified 200 reads before publishing CONSOLE-T132. Any additional live replacement requires its own operator authority.
+  acceptance:
+    - claim: "a real default instance producer reaches its own mounted Inbox read"
+      proof: 'unit test: a non-core inbox reads its own persisted classification through the maintained default'
+    - claim: "missing and foreign instance evidence cannot substitute an empty or core Inbox"
+      proof: 'unit test: an unavailable non-core inbox cannot borrow a core classification'
+    - claim: "materializing an instance snapshot leaves held and foreign proposals unchanged"
+      proof: 'unit test: an instance classification producer preserves held and foreign proposal sources'
+  falsifier: |
+    Remove the instance producer wiring, point it at the core root, or synthesize an empty snapshot after a read failure. The default/native, foreign-source and unavailable fixtures must fail respectively. Assert proposal and plan bytes are unchanged.

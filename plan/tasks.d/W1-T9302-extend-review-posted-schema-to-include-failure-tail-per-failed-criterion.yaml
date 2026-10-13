@@ -7,7 +7,9 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=37daaf119d233841
   attempts: 0
   files:
     - src/lib/review.ts
