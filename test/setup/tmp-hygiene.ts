@@ -216,6 +216,9 @@ if (isMainThread) {
   reapDeadOwnerDirs(TEST_HOME_PREFIX);
   const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${setupDirOwnerTag()}`));
   process.env.HOME = testHome;
+  // fb-1791856944992-903702: a real worktreeRemove sweeps the claude-<uid> scratch root, which defaults to the one live
+  // Claude Code sessions share; a suite calling it deleted one mid-run. Each test process sweeps under its own HOME.
+  process.env.CLAUDE_CODE_TMPDIR = testHome;
   const testConfigDir = join(testHome, ".config", "remudero");
   fs.mkdirSync(testConfigDir, { recursive: true });
   fs.writeFileSync(join(testConfigDir, "config.json"), JSON.stringify({
