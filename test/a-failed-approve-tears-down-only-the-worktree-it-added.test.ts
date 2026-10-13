@@ -149,7 +149,7 @@ function resumableApprove(kind: string, id: string) {
     JSON.stringify({
       [id]: {
         proposalId: id,
-        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example-0.ts]\n",
+        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
         stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
         anchorFingerprint: "",
       },
