@@ -1653,7 +1653,8 @@ if [ -n "$CLEANUP_PATH" ]; then
   # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
   # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
   CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 
   crontab_read() {
