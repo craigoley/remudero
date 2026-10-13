@@ -1316,10 +1316,10 @@ export function classifyProposal(
         `never deleted`,
     };
   }
-  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
-  // is now history, not a second request for the same decision. Never apply this to a different
-  // proposal kind or to an id the current plan does not hold.
-  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
   if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
