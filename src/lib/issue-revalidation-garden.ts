@@ -50,6 +50,14 @@ export const STILL_TRUE_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 /** PRIMARY CONTROL: model judgements per pass. Each is a spawn, so a large backlog drains over several
  *  passes instead of spending an unbounded number of spawns in one; a healthy backlog is that large. */
 export const MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS = 10;
+/** PRIMARY CONTROL: an escalation opened or re-observed by the fleet this recently is live, whatever the
+ *  judge says (W1-T9181: #10269 was re-observed 4 h before a pass judged it resolved). The same 48 h the
+ *  evidence pack's ledger counts cover. */
+export const ISSUE_REVALIDATION_REOBSERVED_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** A dotted ledger step name, hyphens kept (`ci-friction.garden_filing_failed`), never one continuing a
+ *  path or a longer word (a shard path's `tasks.d`). W1-T9181. */
+const LEDGER_STEP_NAME = /(?<![\w./-])([a-z][a-z0-9_-]*\.[a-z_]+(?:\.[a-z_]+)?)(?![\w/-])/g;
+const LEDGER_STEP_NAME_WHOLE = /^[a-z][a-z0-9_-]*\.[a-z_]+(?:\.[a-z_]+)?$/;
 /** A READ-MODEL issue is resolved only on at least this many consecutive clean consistency runs. */
 export const READ_MODEL_CLEAN_RUNS = 6;
 /** The overseer's state must be at most this old for its liveness view to count as current. */
@@ -112,6 +120,8 @@ export interface RevalidationComment {
   authorType: string;
   authorAssociation: string;
   createdAt: string;
+  /** The comment's text; absent in fixtures that only test authorship. */
+  body?: string;
 }
 
 /** REST `/issues?state=open` rows, pull requests dropped, labels and times kept. THROWS on a malformed
@@ -189,7 +199,7 @@ export type RevalidationAction = "close" | "refresh" | "convert" | "keep";
 /** Why a verdict's natural action was withheld, or `undefined` when nothing withheld it. */
 export type RevalidationGuard =
   | "operator-owned-class" | "newer-operator-comment" | "no-citation" | "close-cap" | "refresh-not-due"
-  | "comments-unread";
+  | "comments-unread" | "absence-only-citation" | "condition-reobserved";
 
 export interface PriorVerdict {
   verdict: RevalidationVerdictKind;
@@ -228,6 +238,23 @@ export function operatorSpokeLast(comments: readonly RevalidationComment[], oper
   return operator > bot;
 }
 
+const ABSENCE = /\b0 row\(s\)|\bdoes not appear\b|\bnot present\b|\babsent\b|\bno (?:\w+ ){0,2}(?:rows?|records?|failures?|matches?|occurrences?)\b/i;
+const PRESENCE = /\bmerged\b|\bappears on origin\/main\b|\b[1-9]\d* row\(s\)|\b[0-9a-f]{7,40}\b/i;
+
+/** A citation that shows only that something is MISSING. A zero is not a measurement: a misread name
+ *  or an unwritten step reads zero too (W1-T9181, #10269), so it can never close an issue. */
+export function isAbsenceOnlyCitation(citation: string): boolean {
+  return ABSENCE.test(citation) && !PRESENCE.test(citation);
+}
+
+/** An escalation the fleet opened, or re-observed in an appended comment, within the window before
+ *  `nowMs`: its condition was seen live, whatever a judge reads from other evidence. */
+export function conditionReobserved(issue: Pick<RevalidationIssue, "createdAt">, comments: readonly RevalidationComment[], nowMs: number): boolean {
+  const recent = (at: string) => nowMs - Date.parse(at) < ISSUE_REVALIDATION_REOBSERVED_WINDOW_MS;
+  if (recent(issue.createdAt)) return true;
+  return comments.some((c) => /observed the same condition/i.test(c.body ?? "") && recent(c.createdAt));
+}
+
 /** The action a verdict takes, before the per-pass close cap. Pure, so the shadow table and act mode
  *  can never disagree about what would happen. */
 export function decideAction(input: {
@@ -235,6 +262,8 @@ export function decideAction(input: {
   escalationClass: string | undefined;
   /** `undefined` when the comments could not be read: every write is then withheld. */
   operatorSpokeLast: boolean | undefined;
+  /** The fleet re-observed this escalation within the window (conditionReobserved). */
+  reobserved?: boolean;
   prior: PriorVerdict | undefined;
   nowMs: number;
 }): { action: RevalidationAction; guard?: RevalidationGuard } {
@@ -245,7 +274,9 @@ export function decideAction(input: {
   const operatorOwned = input.escalationClass !== undefined && OPERATOR_OWNED_CLASSES.has(input.escalationClass);
   if (verdict.verdict === "resolved") {
     if (!verdict.citation) return { action: "keep", guard: "no-citation" };
+    if (isAbsenceOnlyCitation(verdict.citation)) return { action: "keep", guard: "absence-only-citation" };
     if (operatorOwned) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
+    if (input.reobserved) return { action: "keep", guard: "condition-reobserved" };
     return { action: "close" };
   }
   if (verdict.verdict === "convert-to-task") {
@@ -419,14 +450,17 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     verdict = normalise(verdict);
 
     let spokeLast: boolean | undefined;
+    let reobserved = false;
     if (verdict.verdict !== "unknown") {
       try {
-        spokeLast = operatorSpokeLast(await ports.listComments(issue.number), ports.operatorLogins);
+        const comments = await ports.listComments(issue.number);
+        spokeLast = operatorSpokeLast(comments, ports.operatorLogins);
+        reobserved = escalationClass !== undefined && conditionReobserved(issue, comments, nowMs);
       } catch (e) {
         ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: issue.number, error: String((e as Error)?.message ?? e) });
       }
     }
-    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, prior: before, nowMs });
+    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, prior: before, nowMs });
     if (action === "close" && closes >= policy.maxClosesPerPass) {
       action = "keep";
       guard = "close-cap";
@@ -538,6 +572,7 @@ export function buildIssueRevalidationPrompt(issue: RevalidationIssue, issueClas
     "You re-check ONE open GitHub issue against CURRENT evidence and say whether its condition still holds.",
     "The costly mistake is closing an issue whose condition is still true: WHEN IN DOUBT, ANSWER unknown.",
     "Answer resolved ONLY when the evidence below positively shows the condition is gone, and cite that evidence.",
+    "Absence is not proof: a zero count or a name that does not appear never shows a fix. Cite something PRESENT.",
     "",
     `ISSUE #${issue.number} (${issueClass}), opened ${issue.createdAt}, last updated ${issue.updatedAt}`,
     `TITLE: ${issue.title}`,
@@ -575,7 +610,7 @@ export function evidenceNames(issue: Pick<RevalidationIssue, "title" | "body">, 
   const names = new Set<string>();
   for (const m of text.matchAll(/`([^`\n]{3,80})`/g)) names.add(m[1]!.trim());
   for (const m of text.matchAll(/\b((?:src|test|scripts|deploy|docs)\/[\w./-]+\.\w+)\b/g)) names.add(m[1]!);
-  for (const m of text.matchAll(/\b([a-z][a-z_]+\.[a-z_]+(?:\.[a-z_]+)?)\b/g)) if (!/\.(ts|js|md|mjs|json|yaml|yml|sh)$/.test(m[1]!)) names.add(m[1]!);
+  for (const m of text.matchAll(LEDGER_STEP_NAME)) if (!/\.(ts|js|md|mjs|json|yaml|yml|sh)$/.test(m[1]!)) names.add(m[1]!);
   return [...names].slice(0, limit);
 }
 
@@ -591,6 +626,7 @@ export function parseIssueCommentsRest(raw: string): RevalidationComment[] {
         authorType: String(user.type ?? "User"),
         authorAssociation: String(r.author_association ?? "NONE"),
         createdAt: String(r.created_at ?? ""),
+        body: String(r.body ?? ""),
       };
     });
   });
@@ -685,13 +721,15 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
           facts.push(status === 1 ? `\`${name}\` does not appear on origin/main` : `\`${name}\` could not be searched (${String((e as Error)?.message ?? e).slice(0, 120)})`);
         }
       }
-      const steps = [...new Set(listed.flatMap((i) => evidenceNames(i)).filter((n) => /^[a-z][a-z_]+\.[a-z_.]+$/.test(n)))];
+      const steps = [...new Set(listed.flatMap((i) => evidenceNames(i)).filter((n) => LEDGER_STEP_NAME_WHOLE.test(n) && !/\.(ts|js|md|mjs|json|yaml|yml|sh)$/.test(n)))];
       try {
         stepRows ??= steps.length === 0 ? [] : readLedgerRows(steps, fixedClock(clock.now() - 48 * 60 * 60 * 1000).iso());
         for (const name of evidenceNames(issue).filter((n) => steps.includes(n))) {
           const mine = stepRows.filter((r) => r.step === name);
           const newest = mine.map((r) => String(r.ts)).sort().pop();
-          facts.push(`ledger step ${name}: ${mine.length} row(s) in the last 48 h${newest ? `, newest ${newest}` : ""}`);
+          facts.push(mine.length > 0
+            ? `ledger step ${name}: ${mine.length} row(s) in the last 48 h, newest ${newest}`
+            : `ledger step ${name}: 0 row(s) in the last 48 h — absence only: a misread or unwritten step reads 0 too, so this proves no fix`);
         }
       } catch (e) {
         // An unread ledger is told to the judge as such, so it cannot read silence as "no rows".
