@@ -6,9 +6,10 @@ import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { readOnlyInspectionCommand } from "../src/lib/read-only-inspection.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), "inspection-fixture-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}inspection-fixture-`));
   const state = join(dir, "state");
   const home = join(dir, "home");
   const scratch = join(dir, "scratch");
