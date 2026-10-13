@@ -16,7 +16,7 @@ import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
 import { citation } from "./provenance.js";
-import type { CriterionVerdict } from "./review.js";
+import { workerProofTitles, type CriterionVerdict } from "./review.js";
 import {
   describeCiLogUnavailable,
   ADDITIVE_REGISTRATION_SURFACES,
@@ -1167,6 +1167,18 @@ export function implementPromptParts(
   const body = (task.prompt ?? task.title)
     .split("${RUN_ID}").join(runId)
     .split("${TASK_ID}").join(task.id);
+  const titles = workerProofTitles(task.acceptance ?? []);
+  const admittedOutsideFiles = [
+    "This list names only what commitWorkerEdits already admits outside the task's files: scope.",
+    ...(titles.length > 0 ? [
+      "A NEW test/ file declaring one of these proof titles will be committed even when not in files: for this task; " +
+        "existing test files and unrelated new tests are not admitted by this exception.",
+      ...titles.map((title) => `- ${title}`),
+    ] : []),
+    "For each registered artifact below, the harness keeps a regenerated copy even when absent from files:.",
+    ...Object.entries(REGENERABLE_ARTIFACT_GENERATORS).map(([path, generator]) =>
+      `- ${path}: npm run --silent ${generator}`),
+  ].map((line) => `${line} ${citation(`plan#${task.id}`)}`).join("\n");
   return [
     { name: "doctrine", value: renderDoctrinePreamble() },
     // W1-T2761, design (ii): directly after doctrine — the other STABLE half of the CONTEXT
@@ -1183,6 +1195,7 @@ export function implementPromptParts(
     // W1-T3880: a RECORD of what already happened (capability grants used/refused earlier this
     // run), not injected knowledge — placed just before the task body, after every KNOWLEDGE part.
     { name: "capability_context", value: capabilityContextPart },
+    { name: "admitted_outside_files", value: admittedOutsideFiles },
     { name: "task_body", value: body },
   ];
 }
@@ -1245,6 +1258,7 @@ export function renderImplementPromptWithParts(
     // has none, so the prompt is byte-identical to today's — exactly the `skills`/`rule_headlines`
     // convention above.
     ...(partValue("capability_context") ? [partValue("capability_context")] : []),
+    ...(partValue("admitted_outside_files") ? [partValue("admitted_outside_files")] : []),
     "",
     "# TASK",
     partValue("task_body"),
