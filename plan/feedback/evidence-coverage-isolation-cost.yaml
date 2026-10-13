@@ -18,8 +18,25 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11238
+summary:
+  headline: Isolation lane's cost evidence is below the 90% floor; restore it or
+    document the exemption.
+  what_happened: In the last 7 days, 102 of 115 worker calls (88.7%) in the
+    isolation lane recorded the cost field, under the 90% floor. The gap has
+    persisted since 2026-09-28 and no baseline excuses it.
+  decision: Choose whether to restore the cost field at the isolation lane's
+    ledger write site, or record why this lane legitimately lacks it.
+  options:
+    - label: Restore the cost field
+      consequence: The isolation lane's ledger writes cost again, and coverage should
+        return above the 90% floor.
+    - label: Record a legitimate exemption
+      consequence: The isolation lane is documented as not carrying cost, and the
+        gardener stops flagging it.
+    - label: Keep the gap open for now
+      consequence: The entry stays in place and the gardener keeps updating it while
+        coverage remains below the floor.
 expansion: null
 submission_key: null
 thread_id: null
