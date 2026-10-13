@@ -4926,6 +4926,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     if (!names.includes(LEDGER_FILENAME)) incomplete = true;
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
+      let liveRead = false;
       if (!liveOnly) {
         const fetchPrCreatedAt = args.fetchPrCreatedAt ?? (async (prUrl: string) => {
           const target = prLifecycleUrlTarget(prUrl);
@@ -4952,6 +4953,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
       for await (const row of openLedgerUnion(stateDir, {
         step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
         ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
+        onLiveRead: () => { liveRead = true; },
         onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
       }, args.io)) {
         if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
@@ -4970,6 +4972,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
           if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
         }
       }
+      if (liveOnly && !liveRead) incomplete = true;
       const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
       if (unreportedFollowUps(observation.promised,
         followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {

@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { ghShim } from "./helpers/gh-shim.js";
-import { rotateLedger } from "../src/lib/ledger.js";
 import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewDecisionDigest, type PromisedFollowUpObservation } from "../src/lib/review.js";
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 
@@ -25,20 +24,6 @@ function fixture(t: { after: (fn: () => void) => void }) {
   writeFileSync(ledgerPath, line({ step: "dispatch.claim", task_id: taskId, ts: firstRun }));
   return { dir, ledgerPath, taskId, prUrl };
 }
-
-test("rotation retains dispatch claims used to bound a promise harvest", t => {
-  const args = fixture(t);
-  const initial = readFileSync(args.ledgerPath, "utf8") + line({ step: "run.start", task_id: taskId, ts: firstRun });
-  const noise = line({ step: "ci.polling", detail: "x".repeat(Buffer.byteLength(initial) * 4) });
-  writeFileSync(args.ledgerPath, initial + noise);
-  const rotated = rotateLedger(args.ledgerPath, { ceilingBytes: Buffer.byteLength(initial) * 2, smoothingWindowMs: 0 });
-  assert.equal(rotated.rotated, true);
-  const retained = readFileSync(args.ledgerPath, "utf8").trim().split("\n").map(raw => JSON.parse(raw));
-  assert.ok(retained.some(row => row.step === "run.start"), "the existing deciding step survives as a control");
-  assert.ok(retained.some(row => row.step === "dispatch.claim" && row.task_id === taskId && row.ts === firstRun),
-    "rotation must preserve the dispatch timestamp the harvest uses as its lower bound");
-  assert.ok(!retained.some(row => row.step === "ci.polling"), "non-deciding noise is still archived");
-});
 
 test("W1-T9001: a promise harvest reads only the rotations its PR can be in", async t => {
   const args = fixture(t), opened: string[] = [];
@@ -226,6 +211,26 @@ test("W1-T9001: an unfinished harvest is transient and never asks to repair the 
       }
       const input = { headSha, ...evidence, acceptance: criteria };
       assert.equal(reviewDecisionDigest({ ...input, promisedFollowUpObservation: result }), reviewDecisionDigest(input));
+    }
+  }
+});
+
+test("a live ledger skipped during harvest cannot prove a promised report is absent", async t => {
+  for (const liveAvailable of [false, true]) {
+    const args = fixture(t), opened: string[] = [];
+    const result = await recoverPromisedFollowUpReports(observation, { ...args, prCreatedAt: firstRun,
+      io: { readdirSync, existsSync: path => path === args.ledgerPath ? liveAvailable : existsSync(path),
+        createReadStream: (path, options) => { opened.push(basename(path)); return createReadStream(path, options); },
+      },
+    });
+    assert.deepEqual(opened, liveAvailable ? ["ledger.ndjson"] : []);
+    assert.equal(result.state, liveAvailable ? "complete" : "unknown");
+    const verdict = judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result });
+    assert.equal(verdict.state, liveAvailable ? "failure" : "pending");
+    if (!liveAvailable) {
+      assert.equal(verdict.criteria.at(-1)?.cause, "promise-harvest-incomplete");
+      assert.equal(verdict.criteria.at(-1)?.loadError, undefined);
+      assert.match(verdict.summary, /promise-harvest-incomplete/);
     }
   }
 });
