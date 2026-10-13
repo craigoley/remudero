@@ -233,7 +233,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointCommitSubject, checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -5224,6 +5224,30 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
     // Corrupt marker JSON fails open to a new retained-history window; cadence parsing is separate.
     void e;
     return undefined;
+  }
+}
+
+/** The worktree's HEAD sha, or undefined when git cannot say (W1-T9030: a round that cannot show its head is read as moved). */
+export function worktreeHeadOrUndefined(worktreePath: string): string | undefined {
+  try {
+    return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim() || undefined;
+  } catch (e) {
+    void e; // an unreadable head only costs the harness-tip shortcut; the subject rule still applies
+    return undefined;
+  }
+}
+
+/** The round's uncommitted work as the progress judge reads it (W1-T9030): tracked diff stat plus untracked paths,
+ *  bounded. Empty when there is none or git cannot say — the judge then simply sees no working-tree line. */
+export function worktreeDiffStat(worktreePath: string): string {
+  try {
+    const stat = hostWorktreeGit(worktreePath, ["diff", "--stat", "HEAD"]).trim().split("\n").filter(Boolean).slice(-12).join("; ");
+    const untracked = hostWorktreeGit(worktreePath, ["ls-files", "--others", "--exclude-standard"]).trim().split("\n").filter(Boolean);
+    const text = [stat, untracked.length ? `untracked: ${untracked.slice(0, 12).join(", ")}` : ""].filter(Boolean).join("; ");
+    return text.length > 800 ? `${text.slice(0, 800)}...` : text;
+  } catch (e) {
+    void e; // the stat is evidence for the judge, not a gate
+    return "";
   }
 }
 
@@ -20122,6 +20146,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     noteRestartPhase("implementing");
     say("implement worker");
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
+    // W1-T9030: the head every round starts from — after a checkpoint restore it is the harness's own merge commit.
+    let roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
     let impl!: WorkerResult;
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
@@ -20449,7 +20475,19 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     let checkpointJudge: FixProgressJudge | undefined;
     for (;;) {
       const tipSubject = lastCommitSubject(worktreePath);
-      if (tipSubject === undefined || !isWipSubject(tipSubject) || parseReport(fullText(impl))?.prUrl) break;
+      const roundReport = parseReport(fullText(impl));
+      const roundTip = classifyRoundTip({
+        tipSubject, headBefore: roundHeadBefore, headNow: worktreeHeadOrUndefined(worktreePath),
+        finishedByReport: roundReport?.prUrl !== undefined || (harnessOwnsGit && roundReport?.commitMessage !== undefined),
+        reportOpenedPr: roundReport?.prUrl !== undefined,
+      });
+      if (tipSubject === undefined || !roundTip.unfinished) {
+        // A wip-shaped tip the harness wrote, left unmoved by a round that reported its completion line: finished.
+        if (tipSubject !== undefined && isWipSubject(tipSubject) && !roundTip.headMoved && roundReport?.prUrl === undefined) {
+          log("implement.finished_on_harness_tip", { subject: tipSubject, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
+        }
+        break;
+      }
       const checkpointYield = await yieldAtWorkerBoundary("checkpoint");
       if (checkpointYield) return checkpointYield;
       let tipBody = "";
@@ -20460,8 +20498,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         void e;
       }
       const remaining = checkpointRemaining(tipBody);
-      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null });
-      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining });
+      log("implement.unfinished", { subject: tipSubject, remaining: remaining ?? null, tip_author: roundTip.tipAuthor, head_moved: roundTip.headMoved });
+      const workingTree = worktreeDiffStat(worktreePath);
+      checkpointStops.push({ round: checkpointStops.length + 1, subject: tipSubject, remaining, ...(workingTree ? { workingTree } : {}) });
       const decision = await judgeCheckpointStop(checkpointStops, {
         readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
         makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
@@ -20472,6 +20511,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const judgedYield = await yieldAtWorkerBoundary("checkpoint");
       if (judgedYield) return judgedYield;
       noteRestartPhase("implementing");
+      roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
       impl = account(
         await spawn({
           cwd: worktreePath,
