@@ -1,0 +1,40 @@
+id: fb-1791908207465-93d619
+ts: 2026-10-13T16:16:47.465Z
+raw: >-
+  HAND-ROUTE FEEDBACK CLOSURE GAP (observed 2026-10-13 at a28c3d23a).
+
+
+  A merged unfiled hand-route PR can fix a feedback entry without retiring it.
+  No source consumer reads a "Resolves feedback `<id>`" line in a merged PR
+  body. FEEDBACK_STATUSES in src/lib/feedback.ts defines new, grilling,
+  proposed, accepted, rejected and answered. src/lib/panel-graph.ts derives
+  accepted only when proposal_pr names a merged proposal. Auto-triage grounds
+  against plan tasks; an unfiled hand-route fix has no task, so an
+  already-resolved entry can remain new and draft redundant work.
+
+
+  Evidence: fb-1791856944992-903702 was resolved by PR #11320 but needed the
+  separate hand closure #11334 setting accepted and proposal_pr. The fix alone
+  did not close it.
+
+
+  Ask governed triage to choose the lifecycle owner: the merge path, the
+  feedback gardener, or triage grounding should verify a merged PR naming a
+  feedback id and write accepted plus proposal_pr. Decide the exact marker and
+  evidence requirements there. This entry requests design and filing only; it
+  does not implement a consumer or authorize live lifecycle edits.
+
+
+  Falsifier: a merged hand-route fixture naming one real feedback id closes
+  precisely that entry with the verified proposal_pr, does not draft a duplicate
+  task, and never closes an entry for an open or closed-unmerged PR or an
+  ambiguous id. Preserve existing proposal-driven and operator-owned decisions.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

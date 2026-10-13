@@ -1,0 +1,55 @@
+- id: W1-T9241
+  title: "A FAILED BATCH APPROVE TEARS DOWN ONLY THE WORKTREE IT ADDED — approveBatchCommand sets worktreePath before addLockedRunWorktree returns, and its catch removes that path and its run lock, the shape W1-T9153 fixes in approveCommand (#11392) but leaves in the batch lane"
+  repo: remudero
+  depends_on: [W1-T9153]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # one concern: the batch approve's teardown is gated on owning the worktree; src/run-task.ts (approveBatchCommand) and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13, reviewing W1-T9153 (#11392): the batch lane carries the same pre-add path assignment"
+  plan_refs: [W1-T9153, W1-T4706, W1-T5356, W1-T9065]
+  files:
+    - src/run-task.ts
+    - test/a-failed-batch-approve-tears-down-only-the-worktree-it-added.test.ts
+  status: queued
+  priority: 2  # the batch lane runs less often than the single approve W1-T9153 fixes; the damage on a hit is the same (a live run's tree removed)
+  attempts: 0
+  rationale: |
+    READ on origin/main 6732a7690 (symbols, not lines), src/run-task.ts `approveBatchCommand`:
+      - its default `batchGateway.createRatificationBranch` assigns `worktreePath = join(worktreesDir(config), branch)`
+        and only then calls `addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log)`.
+      - its `catch (e)` runs `if (repoDir && worktreePath) { worktreeRemove(repoDir, worktreePath); removeRunLock(worktreePath); }`.
+      - So an add that throws (the branch already exists, or, once W1-T9153 lands, `RunWorktreeHeldError` because
+        another live run holds the path's lock) still tears down whatever lives at that path, and removes the other
+        run's lock.
+    W1-T9153 (queued; PR #11392, branch run-W1-T9153-1791904128000, read with git) fixes this shape in `approveCommand`:
+    `claimRunLock` makes `addLockedRunWorktree` claim the lock exclusively, and a new `addApproveWorktree` helper sets
+    `addedWorktreePath` only after the add returns; the catch and `ownedWorktreePath` read `addedWorktreePath`. Its diff
+    touches no line of `approveBatchCommand` (the diff's src/run-task.ts hunks are addLockedRunWorktree,
+    addLockedRunWorktreeAsync and approveCommand). Its observed damage (four tree deletions 14:10-14:23Z on 10-13) was
+    the single lane; the batch lane has the same code shape and no observed hit yet.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for approveBatchCommand (4 shards on
+    main: W1-T4706, W1-T5356, W1-T6075, W1-T6121, none about its teardown; no head more). Control: `acceptance-author-gate`
+    reads 93 shards on main and every head.
+  design: |
+    Apply W1-T9153's pattern to the batch lane, reusing its pieces rather than a second copy.
+    1. `approveBatchCommand` records the worktree it may tear down only after `addLockedRunWorktree` returns (an
+       `addedWorktreePath`, as `approveCommand`'s `addApproveWorktree` does; share that helper if its shape fits).
+    2. The catch removes `addedWorktreePath` and its run lock, never a path whose add threw or was refused. The success
+       path's `ownedWorktreePath` reads the same variable, and the existing "gateway reported success but never created
+       a ratification branch" refusal keeps working.
+    3. Depends on W1-T9153 for `claimRunLock` and `RunWorktreeHeldError`; whichever lands second rebases.
+    Tests go in test/a-failed-batch-approve-tears-down-only-the-worktree-it-added.test.ts, driving `approveBatchCommand`
+    with a fixture where a live run already holds the batch path.
+  acceptance:
+    - claim: "a batch approve whose add is refused leaves the other run's worktree and run lock in place"
+      proof: 'grep: test("W1-T9241: a refused batch add leaves the holder worktree and lock" in test/a-failed-batch-approve-tears-down-only-the-worktree-it-added.test.ts'
+    - claim: "a batch approve that fails after its own add returned still removes its own worktree"
+      proof: 'grep: test("W1-T9241: a batch approve that fails after its add removes its own worktree" in test/a-failed-batch-approve-tears-down-only-the-worktree-it-added.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-failed-batch-approve-tears-down-only-the-worktree-it-added.test.ts"
+  falsifier: |
+    Assign the path before the add again: the first test finds the holder's worktree removed. Never remove on failure:
+    the second test finds the batch's own worktree left behind.
