@@ -229,7 +229,7 @@ test("W1-T5004: worker failure is unavailable not zero", async (t) => {
   const response = await fetch(`${url}/v1/status`);
   assert.equal(response.status, 503);
   const body = await response.json() as Record<string, unknown>;
-  assert.match(String(body.reason), /worker_crashed|worker_exited/);
+  assert.match(String(body.reason), /^worker_crashed: forced board worker crash/, "the exit that follows a crash keeps its message");
   assert.equal(body.counts, undefined);
   assert.equal((await fetch(`${url}/v1/version`)).status, 200);
 });

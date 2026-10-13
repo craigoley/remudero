@@ -197,9 +197,11 @@ export function createBoardProjectionWorker(
           options.onSnapshot?.(message.planIdentity);
         } else unavailable(`worker_projection_failed: ${message.reason}`);
       });
-      thread.once("error", (error) => unavailable(`worker_crashed: ${error.message}`));
+      let crash: string | undefined;
+      thread.once("error", (error) => unavailable(crash = `worker_crashed: ${error.message}`));
+      // 'exit' follows 'error': still unavailable, but naming the crash, not its exit code (#8429).
       thread.once("exit", (code) => {
-        if (!stopped) unavailable(`worker_exited: ${code}`);
+        if (!stopped) unavailable(crash ?? `worker_exited: ${code}`);
         thread = undefined;
         replyPort?.close();
         replyPort = undefined;
