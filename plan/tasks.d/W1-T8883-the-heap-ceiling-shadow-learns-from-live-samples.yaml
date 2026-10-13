@@ -1,0 +1,36 @@
+- id: W1-T8883
+  title: "THE DAEMON'S HEAP-CEILING SHADOW NEVER LEARNS, SO ITS 8 GB CEILING IS NEVER RIGHT-SIZED — daemon.heap_ceiling_shadow samples only at boot (live_samples 0 in 13 of 13 rows) and the daemon reboots about every 67 min, while the main heap used at most 2.19 GB in 48 h under --max-old-space-size=8192 and forced full GCs free a median 530 MiB every ~10 min: the shadow samples the live heap continuously across boots and proposes a ceiling, report-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the shadow learns from live samples and proposes a ceiling; no limit is applied
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: right-size what we have (heap limits change only with operator approval)"
+  plan_refs: []
+  files: [src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-heap-ceiling-shadow-learns-from-live-samples.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; daemon.alive n=2,366 over 48 h.
+    OBSERVED:
+    - Main process heap used p50 0.87 GB, max 2.19 GB; heap limit 8.19 GiB (--max-old-space-size=8192, deploy).
+    - Forced full GC 296 times in 48 h (~every 10 min, ~0.46 s each on the event loop), freeing median 530 MiB, p90
+      965 MiB.
+    - `daemon.heap_ceiling_shadow` logs at boot only; `live_samples` is 0 in 13 of 13 rows; 43 boots in 48 h.
+    OWNERSHIP: none.
+  design: |
+    1. The shadow persists live heap samples (used and size after GC) under the daemon's state dir across boots, as a
+       rolling 7-day window.
+    2. It ledgers a proposed ceiling: p99.9 of heap-after-GC × a policy headroom factor, never below 2× the max observed
+       live set.
+    3. Report-only. The ceiling in force is unchanged; the operator applies a proposal by an explicit config change.
+  acceptance:
+    - claim: "the heap-ceiling shadow accumulates live samples across boots and ledgers a proposed ceiling without changing the ceiling in force"
+      proof: 'grep: test("W1-T8883: the heap ceiling shadow learns from live samples" in test/the-heap-ceiling-shadow-learns-from-live-samples.test.ts'
+  falsifier: |
+    Sample only at boot: the fixture's three simulated boots with live heap growth report live_samples 0, and the test
+    fails.

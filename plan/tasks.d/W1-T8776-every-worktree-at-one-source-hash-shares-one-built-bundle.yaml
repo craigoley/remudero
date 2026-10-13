@@ -20,39 +20,61 @@
     mounted checkout (/home/node/Remudero/remudero), not /app, and spawns its children into per-pass worktrees, so on
     2026-10-12 no daemon child could find a current bundle. sourceHash never includes the absolute path, so every
     worktree holding main's source shares one key: one build per main revision can serve all of them.
-    WHY HARDLINK INTO THE TREE, NOT A ROOT PASSED IN: the ADR's bullet says the tree root should be "passed in rather
+    PROMISE IDENTITY (W1-T7729, ADR 0006, second bullet): a hash-addressed bundle store shared by all worktrees at one
+    source hash. It would be built once per main revision by the daemon, with the tree root passed in rather than
+    taken from the bundle's location;
+    This explicitly names the filed promise for W1-T8779; the design below corrects its path-resolution strategy
+    using owned worktree materialization, not execution from the store directory.
+    WHY MATERIALIZE INTO THE TREE, NOT A ROOT PASSED IN: the ADR's bullet says the tree root should be "passed in rather
     than taken from the bundle's location". But the recipe leaves bare imports external (`packages: "external"`) and
     resolves each module's `import.meta.url` relative to the bundle, so a bundle run from a store directory would
     resolve node_modules and src paths there, not in the spawning tree. Materializing the stored files into
-    `<tree>/dist/child-entries/` (a hardlink on the same filesystem, else a copy) keeps every location-relative
-    resolution exactly as the image build has it, with no recipe change. This task amends the ADR bullet to say so.
+    `<tree>/dist/child-entries/` keeps every location-relative resolution exactly as the image build has it. This task
+    amends the ADR bullet to say so. esbuild's primary API documents external packages and Node path-sensitive imports:
+    https://esbuild.github.io/api/#packages
+    PRE-ACTIVATION FALSIFIER 2026-10-13: a controlled native hardlink shared the store inode; writing the worktree link
+    mutated the store. COPYFILE_FICLONE|COPYFILE_EXCL produced an independent inode and copy writes preserved the store.
+    Native receipt flow-integrity-oracle-1791851941651 proves isolation, NOT physical block savings/reflink support.
+    Use CoW-or-copy, not mutable hardlinks. Node documents FICLONE's ordinary-copy fallback and non-atomicity:
+    https://nodejs.org/docs/latest-v24.x/api/fs.html#fspromisescopyfilesrc-dest-mode
   design: |
     1. src/lib/child-entry-store.ts: a store under the instance's state root, `<config.root>/child-entries/<sourceHash>/`,
        holding the bundles and manifest one build produced. `buildIntoStore(treeRoot)` runs buildChildEntries in a
        CHILD PROCESS (never on the daemon loop) into a temp dir, then renames it into place; a hash already present is
-       a no-op.
+       a no-op only after the same payload/metadata validation W1-T8775 requires. A corrupted or unverifiable stored
+       hash is a miss, not evidence that a build is current. Concurrent publication must not overwrite another owner's
+       completed valid hash; retain a typed failure/receipt and use tsx when validation cannot complete.
     2. The daemon builds once per main revision: after refreshManagedCheckout's fast-forward (src/run-task.ts) and after
        its own checkout moves, off the loop, ledgering `child_entry.store_built` (hash, ms, bytes) or
        `child_entry.store_build_failed` (reason). A failed build changes nothing: children fall back to tsx.
     3. childEntryArgv (W1-T8775) consults the store when the tree has no current bundle: if
        `<store>/<sourceHash(tree)>/manifest.json` names the entry, materialize the directory into
-       `<tree>/dist/child-entries/` (hardlink, else copy), then re-check childEntryIsCurrent before using it. Any doubt
+       `<tree>/dist/child-entries/` using an owned same-filesystem temporary staging directory and
+       COPYFILE_FICLONE|COPYFILE_EXCL (ordinary-copy fallback), never hardlinks to mutable worktrees. Validate staged
+       regular payloads/metadata, atomically publish, then re-check childEntryIsCurrent before using it. Any doubt
        is tsx. Ledger `child_entry.store_hit` / `child_entry.store_miss` with the reason, so the hit rate is measurable.
     4. Retention: drop a stored hash once no main revision of the last day and no live worktree uses it; never a fixed
        count. The host janitor's existing tiers own anything older.
-    5. Amend ADR 0006's store bullet with the hardlink decision and its reason.
+    5. Amend ADR 0006's store bullet with the CoW-or-copy isolation decision and its path-resolution reason. Keep the
+       shared build key source-bound and the payload validation unified with W1-T8775; do not create a second guard.
   acceptance:
     - claim: "a fresh worktree at the same source hash as a stored build gets the stored bundle, and its child argv runs it without tsx"
       proof: 'grep: test("W1-T8776: a fresh worktree at a stored source hash runs the stored bundle" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
     - claim: "a worktree whose source differs from every stored build falls back to tsx and records a store miss"
       proof: 'grep: test("W1-T8776: a worktree with changed source misses the store and runs tsx" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
-    - claim: "a materialized bundle resolves its modules and node_modules inside the worktree it was linked into"
+    - claim: "a materialized bundle resolves its modules and node_modules inside its own worktree"
       proof: 'grep: test("W1-T8776: a materialized bundle resolves its paths inside its own worktree" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
     - claim: "building into the store a hash it already holds does no work"
       proof: 'grep: test("W1-T8776: a source hash already stored is not rebuilt" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
     - claim: "the daemon builds the store once per main revision"
       proof: "grep: buildIntoStore( in src/run-task.ts"
+    - claim: "editing a materialized worktree bundle cannot mutate the stored bundle or another worktree"
+      proof: 'grep: test("W1-T8776: materialization isolates worktree writes from the store" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "a corrupted or incompletely published stored payload is a miss and never executes"
+      proof: 'grep: test("W1-T8776: invalid stored payloads safely miss before execution" in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
   falsifier: |
     Run the bundle from the store directory instead of materializing it: the third test sees a module path outside the
     worktree. Skip the re-check after materializing and a half-copied store entry runs: the first test's manifest
     corruption case fails.
+    Replace CoW-or-copy materialization with hardlinks: editing one worktree changes the shared store and the isolation
+    case fails. Trust only sourceHash on store hit: same-size payload corruption is accepted and the safe-miss case fails.

@@ -1,5 +1,5 @@
 /**
- * A build whose branch tip is a `wip:` checkpoint is unfinished. The worker contract
+ * A build whose tip is `chore(checkpoint):` or a legacy `wip:` checkpoint is unfinished. The worker contract
  * (compaction.ts, CHECKPOINT AS YOU GO) makes checkpoints ADDITIONAL to a terminal commit, and
  * their `[remudero-context]` body names what is still `remaining`. #10482 (W1-T6434) opened on
  * such a tip: titled "chore(wip): …" and carrying four reds the build's own remaining steps
@@ -7,7 +7,7 @@
  * resume the worker to finish, and never title a PR after a checkpoint. The first stop always
  * resumes; whether a later stop resumes again is the W1-T7096 progress judge's call.
  */
-import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
+import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle, normalizeSubjectCase } from "./commit-message.js";
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
 
 /** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line. */
@@ -82,15 +82,24 @@ export async function judgeCheckpointStop(
 }
 
 const WIP_HEAD = /^(?:wip(\([^)]*\))?|([a-z]+)\(wip\))(!?):\s*/i;
+const CHECKPOINT_HEAD = /^chore\(checkpoint\)(!?):\s*/i;
 
-/** True for `wip: x`, `wip(scope): x` and `chore(wip): x` subjects. */
+/** A conventional header for unfinished work; the body/context/trailers remain the caller's. */
+export function checkpointCommitSubject(reason: string): string {
+  const subject = normalizeSubjectCase(reason.replace(/\s+/g, " ").trim().replace(/\.+$/, "")) || "retain unfinished work";
+  return fitConventionalTitle(`chore(checkpoint): ${subject}`).header;
+}
+
+/** Only `chore(checkpoint)` is reserved; `fix(checkpoint)` is final. Legacy wip markers still resume. */
 export function isWipSubject(subject: string): boolean {
-  return WIP_HEAD.test(subject.trim());
+  return CHECKPOINT_HEAD.test(subject.trim()) || WIP_HEAD.test(subject.trim());
 }
 
 /** `chore(wip): x` -> `chore: x`; `wip: x` -> `chore: x`; `wip(s): x` -> `chore(s): x`. */
 export function stripWipMarker(subject: string): string {
   const trimmed = subject.trim();
+  const checkpoint = CHECKPOINT_HEAD.exec(trimmed);
+  if (checkpoint) return `chore${checkpoint[1]}: ${trimmed.slice(checkpoint[0].length)}`;
   const match = WIP_HEAD.exec(trimmed);
   if (!match) return trimmed;
   const rest = trimmed.slice(match[0].length);
@@ -118,10 +127,12 @@ export function renderContinuationPrompt(subject: string, remaining: string | un
   const left = remaining ? `Its [remudero-context] says remaining: ${remaining}.` : "It records no terminal commit.";
   const finish = harnessOwnsGit
     ? "save your edits, run NO git or gh commands, and end with a REPORT carrying `COMMIT_MESSAGE: <type>(<scope>): <subject>`."
-    : "make the terminal commit (a conventional subject, never `wip:`), `git push origin HEAD`, and end with the REPORT from before.";
+    : "make the terminal commit (a conventional subject, never `wip:` or `chore(wip):` or `chore(checkpoint):`), `git push origin HEAD`, and end with the REPORT from before.";
   return (
     `Your branch tip is a checkpoint, not a finished build: "${subject.trim()}". ${left} ` +
-    `Finish that remaining work now, run \`rmd preflight --fast\` and fix what it reports, then ${finish}`
+    `Finish that remaining work now, run \`rmd preflight --fast\` and fix what it reports, then ${finish} ` +
+    "The terminal message must not be a checkpoint. Local validation checks the commit range too; " +
+    "legacy checkpoint history remains unfinished, not exempt from those gates."
   );
 }
 

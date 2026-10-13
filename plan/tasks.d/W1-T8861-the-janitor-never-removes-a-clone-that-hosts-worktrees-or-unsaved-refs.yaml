@@ -1,0 +1,62 @@
+- id: W1-T8861
+  title: "THE JANITOR DELETED A CLONE THAT HOSTED 40 LINKED WORKTREES AND UNPUSHED BRANCHES — sweep_worktree judges a standalone clone saved by its HEAD alone, so on 2026-10-11 03:12Z a live janitor pass rm -rf'd ~/rmd-work/core while it was the git dir of 33 worktrees and held a local-only keep/ branch, and the pass left no trace in any log: a clone that hosts linked worktrees or carries any unsaved ref is never removed, and every removal leaves a durable audit line"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the janitor's worktree sweep may delete; what it reclaims and when are W1-T8863's
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: the janitor must keep things clean but never remove what we want kept or kill work in progress"
+  plan_refs: [W1-T4770, W1-T5634, W1-T5707]
+  files: [deploy/rmd-host-cleanup.sh, test/the-janitor-never-removes-a-clone-that-hosts-worktrees-or-unsaved-refs.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8 (the host copy ~/rmd-host-cleanup.sh is byte-identical).
+    OBSERVED (journal, sudo records):
+    - 03:07:36Z: a dry run; 03:12:00Z: a live run with `DRY_RUN=0 RMD_CLEANUP_WORKTREE_ROOTS=/home/craigoleyagent/rmd-work
+      … rmd-host-cleanup.sh` over SSH with no TTY.
+    - Before 06:07Z ~/rmd-work/core (a full clone of craigoley/remudero) was gone. It was the common git dir of 33 linked
+      worktrees under ~/rmd-work and 7 more under /mnt/scratch, all now "not a git repository".
+    - Lost with it: local-only refs such as keep/run-W1-T7092-1791549130707 (163a431d2, never pushed), and two unfiled
+      plan shards whose only copy was its worktree.
+    - The run's decisions went to stdout only: ~/host-cleanup.log (109k lines) has no `rmd-work/core` line. Only the
+      bundles it wrote in /mnt/rmd/host-cleanup-worktree-archive date it.
+    THE CODE (deploy/rmd-host-cleanup.sh):
+    - `sweep_worktree` classifies a dir with a `.git/` DIRECTORY as "standalone clone". After the idle, open, clean and
+      ignored-data gates it calls `worktree_saved`, which checks only that HEAD is on a remote branch (or a run-<id>
+      branch whose task merged). It then runs `rm -rf -- "$wt"`.
+    - It never asks whether `$gitdir/worktrees/` has entries (linked worktrees that live elsewhere and die with it), nor
+      whether OTHER local branches, tags or stashes are unsaved.
+    - The scratch-unit path already has the stricter check: `scratch_repo_saved` requires every refs/heads tip to be
+      contained in a remote branch. The worktree-root path never got it.
+    - `log` writes only to stdout, so a pass run outside the cron's redirect leaves no record.
+    - Since #10795 (e3256acda) the 6-hourly cron sweeps ~/rmd-work, so any clone placed there is exposed again.
+    OWNERSHIP: W1-T4770 (the janitor), W1-T5634 (scratch units that lend git objects) and W1-T5707 (state-disk parents) are
+    merged; none checks linked worktrees or every ref of a worktree-root clone. Open PRs 2026-10-12 23:10Z: none touches
+    the janitor.
+  design: |
+    1. A standalone clone under a worktree root is KEPT, with a named reason, when ANY of these holds:
+       - `$gitdir/worktrees/` has an entry whose `gitdir` file points at a worktree directory that still exists
+         ("hosts linked worktrees");
+       - a refs/heads tip, tag, refs/stash or any other ref outside refs/remotes is not contained in a remote-tracking
+         branch, unless it can be bundled into WORKTREE_ARCHIVE_ROOT first. Reuse `archive_worktree_head ... branches`,
+         extended to all non-remote refs.
+       - If the bundle cannot be written to a filesystem other than the source, it is KEEP.
+    2. A linked worktree is still removed only through `git worktree remove` (unchanged).
+    3. AUDIT: every REMOVE / ARCHIVE / PRUNE decision (not KEEPs) is also appended to a durable audit log
+       (RMD_CLEANUP_AUDIT_LOG, default $HOME/.local/state/remudero/janitor-audit.log), whatever stdout is redirected to.
+       - One line per decision: ISO time, uid, DRY_RUN, pid, path, action, reason.
+       - An unwritable audit log REFUSES the destructive step (KEEP "audit log unwritable") instead of acting silently.
+    4. Nothing else changes: the idle, open, clean and ignored-data gates, the roots and the retention policy stay as they
+       are.
+  acceptance:
+    - claim: "a clean, pushed, idle clone that hosts a live linked worktree or holds an unpushed local branch is kept with a named reason; an otherwise identical clone without them is removed; and every removal is written to the audit log"
+      proof: 'grep: test("W1-T8861: the janitor never removes a clone that hosts worktrees or unsaved refs" in test/the-janitor-never-removes-a-clone-that-hosts-worktrees-or-unsaved-refs.test.ts'
+  falsifier: |
+    Restore the HEAD-only `worktree_saved` gate in sweep_worktree. The fixture clone that hosts a linked worktree (and the
+    one with an unpushed side branch) is rm -rf'd, its linked worktree reads "not a git repository", and the test fails.
+    Remove the audit append: the removal case finds no audit line, and the test fails.

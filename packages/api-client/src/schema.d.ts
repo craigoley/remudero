@@ -2938,6 +2938,96 @@ export interface components {
         pricedSubtotalUsd: number | null;
       })[];
     };
+    RepositoryFlowBucket: {
+      date: string;
+      opened: number | null;
+      merged: number | null;
+      deliveredTasks: number | null;
+      repairedPrs: number | null;
+      repairRounds: number | null;
+    };
+    /** Optional cached repository-flow-v1. PR events use GitHub clocks and native structured delivery credit, never worker verdicts. Repair counts are observed retained receipts, not verified historical absence or proof of recovery. Null is unknown, not zero. Source observation clocks are independent of materialization; absent on older producers. */
+    RepositoryFlow: {
+      version: "repository-flow-v1";
+      scope: "repository";
+      repository: string;
+      state: "reported" | "partial" | "not_collected";
+      reason: "missing_source" | "invalid_source" | "over_budget" | null | null;
+      materializedAt: string;
+      sources: {
+        openObservedAt: string | null;
+        closedObservedAt: string | null;
+        prCorpus: "complete" | "partial" | "unavailable";
+        prFreshness: "fresh" | "stale" | "unknown";
+        ledgerObservedAt: string | null;
+        ledgerCorpus: "observed" | "partial" | "unavailable";
+        earliestLedgerAt: string | null;
+        latestLedgerAt: string | null;
+        observedPrs: number | null;
+        observedRepairIdentities: number | null;
+      };
+      limits: {
+        prRows: 100000;
+        repairIdentities: 65536;
+        publicBytes: 65536;
+        evidencePerWindow: 64;
+      };
+      gaps: (string)[];
+      notCollected: {
+        firstPass: "initial-head and required-check policy evidence not collected";
+        repairLatency: "required-current-head recovery evidence not collected";
+        backlog: "historical daily backlog observations not collected";
+        efficiency: "delivered-work price and token attribution evidence not collected";
+      };
+      windows: ({
+        days: 7 | 30;
+        from: string;
+        through: string;
+        coverage: {
+          opened: "complete" | "observed" | "unknown";
+          merged: "complete" | "observed" | "unknown";
+          repairs: "observed" | "unknown";
+          partialCounts: "observed lower bounds; not complete historical totals";
+        };
+        buckets: (RepositoryFlowBucket)[];
+        summary: {
+          opened: number | null;
+          merged: number | null;
+          deliveredTasks: number | null;
+          repairedPrs: number | null;
+          repairRounds: number | null;
+          repairReasons: {
+            code: number | null;
+            flake: number | null;
+            infrastructure: number | null;
+            conflict: number | null;
+            unknown: number | null;
+          };
+          mergeLatency: {
+            unit: "ms";
+            samples: number;
+            p50Ms: number | null;
+            p90Ms: number | null;
+            missingCreatedAt: number;
+          };
+          openAge: {
+            unit: "ms";
+            censored: true;
+            asOf: string | null;
+            samples: number;
+            oldestMs: number | null;
+            missingCreatedAt: number;
+          };
+        };
+        evidence: ({
+          prNumber: number;
+          url: string;
+          kind: "opened" | "merged" | "repair";
+          at: string;
+        })[];
+        evidenceTruncated: boolean;
+      })[];
+    };
     /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
     AnalyticsView: {
       view: "analytics";
@@ -2969,6 +3059,7 @@ export interface components {
           repository?: string;
           metrics?: (AnalyticsViewMetric)[];
           gardenerSpend?: GardenerSpend;
+          repositoryFlow?: RepositoryFlow;
           reason?: string;
           details?: AnalyticsStoredDetails;
         })[];
