@@ -10,6 +10,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import { replayBandMeaningRefusals } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 
@@ -263,6 +264,12 @@ export function triageFleetLaneAsync(deps: FleetLaneDeps<number | Promise<number
 }
 
 function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): Steps<FleetLanePass> {
+  // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
+  // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace.
+  replayBandMeaningRefusals({
+    stateDir: deps.stateDir, ledgerPath: deps.ledgerPath, clock: deps.clock,
+    classificationStates: () => readClassificationSnapshot(deps.stateDir)?.states,
+  });
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
   if (!snapshot) return { filed: [], merged: [], room: 0 };
