@@ -103,9 +103,12 @@ test("wiring: runReview computes the unwired section AND pushes it into the comm
   assert.match(runReviewSrc, /if \(unwiredSection\) parts\.push\(unwiredSection\)/, "…and append it to the body");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.
-  const judgeIdx = runReviewSrc.indexOf("const computed = await judgeReviewAsync(");
-  assert.ok(judgeIdx > -1, "could not locate the async judgeReview call site");
+  const preparedIdx = runReviewSrc.indexOf("const preparedDecision = await preparePromisedReviewDecision(");
+  const judgeIdx = runReviewSrc.indexOf("const computed = await preparedDecision.judge(");
+  assert.ok(preparedIdx > -1 && judgeIdx > preparedIdx, "the prepared decision must precede its binding judge");
+  const preparedArgs = runReviewSrc.slice(preparedIdx, runReviewSrc.indexOf("});", preparedIdx) + 3);
   const judgeArgs = runReviewSrc.slice(judgeIdx, runReviewSrc.indexOf("});", judgeIdx) + 3);
+  assert.doesNotMatch(preparedArgs, /\bunwired(Section|ExportAdvisorySection)\b/, "decision preparation never binds rendered unwired advisories");
   assert.doesNotMatch(judgeArgs, /\bunwired(Section|ExportAdvisorySection)\b/, "judgeReview's inputs never reference it");
 });
 
