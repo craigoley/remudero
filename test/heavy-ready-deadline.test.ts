@@ -3,14 +3,16 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import workerThreads from "node:worker_threads";
+import { syncBuiltinESMExports } from "node:module";
 import { captureHeavyNewBuildStartupGate } from "../src/lib/heavy-ready-startup.js";
 import { heavyReadyEscalationSink, readHeavyNewBuildHold, reserveHeavyNewBuilds, HEAVY_READY_ESCALATION_MS } from "../src/lib/heavy-build-reservation.js";
 
 function fixture(t: TestContext): string {
   let root = realpathSync(tmpdir());
   if (process.platform === "linux" && ![0xef53, 0x58465342].includes(statfsSync(root).type)) root = realpathSync(process.cwd());
-  assert.equal(lstatSync(root).uid, process.getuid?.());
   const dir = mkdtempSync(join(root, "heavy-deadline-"));
+  assert.equal(lstatSync(dir).uid, process.getuid?.());
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -52,6 +54,33 @@ test("heavy READY durable sink refuses unbound events and validates an immutable
   assert.equal(readHeavyNewBuildHold({ dir, now: h.request.expiresAtMs }).state, "unavailable");
   writeFileSync(receipt, original);
   assert.deepEqual(readHeavyNewBuildHold({ dir, now: h.request.expiresAtMs }), { state: "clear", observed: 1, pendingEscalations: 0 });
+});
+
+test("heavy READY durable sink rejects a pre-existing conflicting inbox receipt instead of acknowledging it", async t => {
+  const dir = fixture(t), h = reserveHeavyNewBuilds("conflicting-inbox", "gate", { dir });
+  readHeavyNewBuildHold({ dir, now: h.request.expiresAtMs });
+  const path = join(dir, `heavy-build-${h.request.id}-escalation.json`);
+  mkdirSync(path, { mode: 0o700 });writeFileSync(join(path, "record.json"), '{}', { mode: 0o600 });
+  const fields = { event_id: `${h.request.id}:escalated`, request_id: h.request.id, ready_at_ms: h.request.readyAtMs,
+    expires_at_ms: h.request.expiresAtMs, scope: "NEW-implement-only" };
+  assert.throws(() => heavyReadyEscalationSink(dir)("heavy_ready.escalated", fields), /foreign heavy READY escalation receipt/);
+  assert.equal(readFileSync(join(path, "record.json"), "utf8"), '{}', "conflicting provenance is never overwritten");
+  assert.equal(existsSync(join(dir, `heavy-build-${h.request.id}-delivered.json`)), false);
+});
+
+test("heavy READY real worker-constructor failure defers only NEW admission without a startup throw", t => {
+  const dir = fixture(t), actual = workerThreads.Worker;
+  t.mock.method(workerThreads, "Worker", function (_entry: unknown, options: ConstructorParameters<typeof workerThreads.Worker>[1]) {
+    // Real Node constructor rejects an unsupported protocol synchronously; no fake success/worker.
+    return new actual(new URL("https://invalid-worker.invalid/entry.js"), options);
+  });syncBuiltinESMExports();
+  try {
+    const gate = captureHeavyNewBuildStartupGate(() => {}, { heavyReadyDirectory: dir },
+      { env: { RMD_HEAVY_READY_DEADLINE_SERVICE: "1" }, startupFile: join(dir, "absent.json") });
+    assert.throws(gate, /heavy READY deadline startup unavailable/);
+    assert.equal(gate.stop, undefined);
+    assert.deepEqual(readHeavyNewBuildHold({ dir }), { state: "clear", observed: 0, pendingEscalations: 0 });
+  } finally { t.mock.restoreAll();syncBuiltinESMExports(); }
 });
 
 test("heavy READY independent service is default off before reading any directory", async () => {
