@@ -21,6 +21,7 @@ import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -4844,7 +4845,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     // The shared union deliberately tolerates absent state/live files. That is not
     // evidence of an empty harvest; prove the directory exists before inferring absence.
     const names = readdirSync(stateDir);
-    if (!names.includes("ledger.ndjson")) incomplete = true;
+    if (!names.includes(LEDGER_FILENAME)) incomplete = true;
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
     for await (const row of openLedgerUnion(stateDir, {
