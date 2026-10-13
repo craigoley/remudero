@@ -540,7 +540,7 @@ import {
   type GenerativeDigestItem,
 } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
-import { createDaemonClient, type DaemonClient } from "@remudero/api-client/client";
+import { createDaemonClient, type DaemonClient } from "../packages/api-client/src/client.js";
 import { newTriagePass, parseEscalationTriagePolicy } from "./lib/escalation-triage.js";
 import { escalationClassSignal } from "./lib/escalation-precision.js";
 import {
