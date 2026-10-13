@@ -52071,9 +52071,12 @@ export async function approveCommand(
     root?: string;
     clock?: Clock;
     log?: (step: string, extra?: Record<string, unknown>) => void;
+    /** The plan both branches read: the checkout's own, never `config.root` (a state root holds no plan). */
+    planPath?: string;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
+  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
   // well-formed task id is refused as a task rather than as a missing proposal.
@@ -52083,7 +52086,7 @@ export async function approveCommand(
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
     const outcome = approveParkedTask(proposalId, {
-      plan: loadPlan(join(config.root, "plan", "tasks.yaml")),
+      plan: loadPlan(planPath),
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -52120,7 +52123,7 @@ export async function approveCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const plan = loadPlan(planPath);
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();

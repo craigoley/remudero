@@ -1,0 +1,122 @@
+- id: W1-T9041
+  title: "THE BAND REPLAY RECORDS ONLY WHAT LANDED AND RE-OFFERS WHAT A LINT CHANGE CLEARS — it records refiled on approve.shards_written, which the push preflight refused a minute later, and stores redraft_not_ready as final, so the 6 of 12 not-ready drafts W1-T8828's composed stamp clears are never offered again and nothing escalates the other 6"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the replay's outcome record and its re-offer; it spans the replay (inbox-replay.ts), the fleet lane pass that calls it (fleet-lane.ts), the named escalation (escalation-catalogue.ts) and its wiring (run-task.ts)
+  band_meaning: span
+  origin: "operator-approved investigation 2026-10-13 (\"go\"): why the W1-T8714 band_meaning replay mostly fails"
+  plan_refs: [W1-T8714, W1-T8828, W1-T5348, W1-T4089, W1-T192]
+  files:
+    - src/lib/inbox-replay.ts
+    - src/lib/fleet-lane.ts
+    - src/lib/escalation-catalogue.ts
+    - src/run-task.ts
+    - test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts
+  status: queued
+  priority: 1  # the replay reports itself nearly done while none of its 18 re-drafted proposals has reached a plan PR
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero (~/rmd-state2/state), read niced. The store
+    state/inbox-replay-band-meaning.json, seeded 00:10:45Z, holds 38 proposals: 20 skipped_superseded, 12
+    redraft_not_ready, 5 with no outcome, 1 refiled. Control: 33 `inbox.replayed` rows in the ledger union, one per
+    stored outcome.
+    THE REPLAY'S RECORD IS WRONG IN TWO PLACES, READ on origin/main 58e1376af (symbols, not lines):
+      - `ledgerOutcome` (src/lib/inbox-replay.ts) returns `refiled` on any `approve.shards_written` row. That row is
+        written before the push. `preflightApprovePush` (src/run-task.ts, W1-T5348) runs after it and can still refuse.
+        followup:DAEMON-1790206008025:2026-09-24T00:25:49.881Z:0 was recorded refiled at 05:49:58Z. Its run wrote
+        `approve.error` "plan-PR preflight refused the approve push" at 05:50:49Z, and no `ratify.approved` row names
+        it. The only filing receipt is `ratify.approved`, which `approveProposal` writes once the plan PR is open and
+        which `classifyProposal` already trusts. So 0 of the 18 re-drafted proposals has filed, not 1.
+      - `replayPass` skips any entry with an outcome, and a pass returns `complete` once every entry has one. So
+        `redraft_not_ready` is terminal. A proposal that failed under the lint of 00:17Z to 00:58Z is never looked at
+        again, whatever changes after.
+    WHAT CHANGED AFTER: 10 of the 12 not-ready proposals carried "the STAMP line must open with ..." (7 also the
+    "-> <ids>" list check). The redraft prompt of that day (`inboxDraftRelintPrompt`, before W1-T8828) asked only for
+    "<the corrected one-line ratification stamp>" with no example, and every redraft, the Sonnet escalation included,
+    answered in prose ("Ratified: NEW-1 raised to risk:high with band_meaning: span ..."). W1-T8828 (#11278, merged
+    09:10:16Z) composes the stamp in the harness and re-composes a stored draft's stamp in `classifyProposal`. Linting
+    the 12 cached drafts in-process with today's `lintDraftedFragment`, 6 are clean: flight-signals burnRatePredicate,
+    DAEMON-1789594936651, DAEMON-1789651008429, DAEMON-1790255312892, proof-debt:W1-T4464 and
+    verify-human-automate:W1-T216. The other 6 still fail: sizing 3, proof-scope 2, proof-dialect 1, shared-proof 1.
+    The replay will never notice the 6 that cleared, and never tells anyone about the 6 that did not.
+    band_meaning IS NOT AMONG THEM. It appeared once in a first attempt (verify-human-automate:W1-T216, 00:57:22Z) and
+    was gone by the second. W1-T8714's band fix took.
+    THE 5 WITHOUT AN OUTCOME are classified `ready` and wait on the fleet lane's FILE step, which hands one finding a
+    pass to a detached `rmd approve`, oldest of the most common kind first, within the merged-last-day room. In the
+    10.5 h since the seed it handed 2 of them over. DAEMON-1790206008025 at 05:48:58Z was refused at the push, as
+    above. adoption ledgerRowActor at 06:20:18Z left no approve row at all: its log under state/logs holds only the
+    self-sync refusal (reported separately, below). followup:DAEMON-1789659915335 was decided `file` at
+    2026-10-12T23:45:20Z, before the seed, and is held by the lane's one-day retry until then. The lane has written no
+    `fleet_lane.decided` row since 07:58:16Z.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 396 origin heads for DRAFT_FILING_LINT_OPTIONS,
+    redraft_not_ready, blockedDisposition, inbox-replay and avoidModels. Control: main reads 7 hits, and no head reads
+    more. The push refusals themselves are W1-T9039's.
+  design: |
+    No new bound and no timer. Every re-offer is triggered by a change in what the lint says, or in the guidance it
+    gives, and is checked on the fleet lane pass that already calls the replay.
+    1. REFILED MEANS A PLAN PR OPENED. `ledgerOutcome` records `refiled` only on a `ratify.approved` row naming the
+       proposal after the seed. `ratify.approved` joins the union read's steps. `approve.shards_written` alone is no
+       outcome. A later `approve.error` is `refused` with its text, as today, and a push refusal is one of those.
+       MIGRATION: an entry stored `refiled` with no `ratify.approved` row after the seed is re-judged once, on the
+       next pass, by the same rule. The store is still never re-seeded.
+    2. ONLY refiled AND skipped_superseded ARE FINAL. `redraft_not_ready` and `refused` are open outcomes. Each stores
+       the violation set it was judged on, plus a fingerprint of the guidance text `relintGuidanceLines` gives for that
+       set. A pass reports `complete` only when every entry is final.
+    3. RE-OFFER ON A CHANGE. Each pass re-lints each open entry's CACHED draft in-process with today's
+       `lintDraftedFragment`, after the stamp composition `classifyProposal` applies. It calls no model.
+       a. Clean now: write `inbox.replayed` with outcome `reoffered` and reason "cleared by a lint change", then clear
+          the stored outcome. The fleet lane files it when the snapshot reads it ready. This is the path for the 6
+          drafts W1-T8828 cleared.
+       b. The violation set differs from the stored one, or the guidance fingerprint for it changed: drop the cached
+          draft and its attempt key, as the first pass does (`invalidateDrafts`), so the draft rung re-drafts it once
+          under today's lint and guidance. Write `reoffered` with the reason that matched.
+    4. ESCALATE WHAT NO CHANGE CAN FIX, BY NAME. When a re-draft under the current guidance comes back with the same
+       violation set it was offered on, the replay writes `inbox.replay_escalated` with `proposal_id`, `family` and the
+       unresolved violations grouped by lint check. It delivers once per proposal per violation set through a new
+       `escalateReplayStranded` in src/lib/escalation-catalogue.ts. That function follows the catalogue's pattern: the
+       ledger row is the dedup key, written whether or not delivery succeeds. `replayBandMeaningRefusals` takes it as
+       an injected `escalate` dep, which `FleetLaneDeps` carries. run-task.ts wires it where it builds the fleet lane's
+       deps, beside `approve`. Absent the dep, the row is still written.
+    Tests go in a new file, test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive `replayBandMeaningRefusals` over a fixture state dir: a store with one entry
+    per open outcome, draft caches whose fragments are clean, dirty-unchanged and dirty-changed under the injected lint,
+    and a ledger with `approve.shards_written` followed by a preflight `approve.error`, and one followed by
+    `ratify.approved`.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts"
+    - claim: "a replayed proposal is recorded refiled only once a ratify.approved row names it"
+      proof: 'grep: test("W1-T9041: a replayed proposal is refiled only when its plan PR opened" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "shards written and then refused by the push preflight are recorded refused, not refiled"
+      proof: 'grep: test("W1-T9041: a push refused after its shards were written is not refiled" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "a not-ready proposal whose cached draft now lints clean is re-offered and its outcome cleared"
+      proof: 'grep: test("W1-T9041: a not-ready draft a lint change cleared is re-offered" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "a not-ready proposal whose violations or guidance changed is re-drafted once"
+      proof: 'grep: test("W1-T9041: a not-ready draft whose violations changed is re-drafted once" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "a re-draft that returns the same violations escalates once, by name, with its violations grouped by check"
+      proof: 'grep: test("W1-T9041: an unchanged not-ready draft escalates once by name" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "the replay reports complete only when every proposal is refiled or superseded"
+      proof: 'grep: test("W1-T9041: the replay is complete only when every outcome is final" in test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts'
+    - claim: "the replay judges refiled from the plan PR receipt"
+      proof: 'grep: ratify\.approved in src/lib/inbox-replay.ts'
+    - claim: "the replay names its escalation"
+      proof: 'grep: inbox\.replay_escalated in src/lib/inbox-replay.ts'
+  falsifier: |
+    Keep `refiled` on `approve.shards_written`, and the fixture whose shards were followed by a preflight
+    `approve.error` reads refiled, as followup:DAEMON-1790206008025 does in the live store. Keep the
+    `if (entry.outcome) continue` skip for redraft_not_ready, and a cached draft that now lints clean (the
+    burnRatePredicate shape: prose stamp only) is never re-offered and the pass reads complete. Re-draft on every pass
+    instead of on a change, and the unchanged fixture spends a draft per pass. Escalate without the dedup row, and a
+    second pass escalates the same set twice.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger with no numeric pass mark: the `inbox.replayed`
+    rows grouped by `outcome`, and `inbox.replay_escalated` rows grouped by check. Healthy shape: every seeded proposal
+    ends `refiled`, `skipped_superseded` or escalated once per violation set, and none is refiled without a
+    `ratify.approved` row.
+    SEPARATE, NOT IN THIS TASK: the fleet lane's detached `rmd approve` (`ratifyCliGateway`, src/lib/panel-graph.ts)
+    is refused by the self-sync check on the daemon's detached, behind checkout before any verb runs, and writes no
+    ledger row. Until that is fixed, a re-offered proposal waits on an approve that may never run.

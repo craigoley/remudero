@@ -1,0 +1,48 @@
+- id: W1-T9042
+  title: "THE MACHINE JUDGE RULES ON THE EVIDENCE A FILING CARRIES — it is shown a record's title, prompt, acceptance and files but never its rationale or note, and its own rule escalates what cannot be verified from what is shown, so 14 of the 27 gardener filings parked on 2026-10-13 were escalated for missing evidence the record already held"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what the machine-filing judge is shown; it decides which gardener remedies need a person
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: gardener loop audit (27 machine filings held for a person, 1-11 days)"
+  plan_refs: [W1-T5359, W1-T5406, W1-T7724, W1-T8830]
+  files: [src/lib/machine-filing-judge.ts, src/lib/machine-filing.ts, test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on origin/main: 44 machine-filed tasks are queued and 27 are escalated to a person. Their risk
+    rulings split:
+    - 12 hit the deterministic backstop.
+    - 15 are model verdicts, 14 of them `high`. Every one of those 14 reasons says "on the change's description/files
+      alone, no diff was read" and names missing evidence.
+    VERIFIED (src/lib/machine-filing-judge.ts `machineJudgeInput`, src/lib/risk-judge.ts `buildFilingRiskJudgeInput`): the
+    judge sees title, prompt, acceptance and files. It never sees `rationale:` or `note:`, where every gardener writes its
+    measured cost, rounds and PR links. `MACHINE_JUDGE_ESCALATE_ONLY_IF` then escalates a finding that "cannot be verified
+    from what is shown", so withholding the evidence is what produces the escalation.
+    SECOND DEFECT (src/lib/machine-filing.ts `deterministicEscalation`): the text rules match over the whole title, which
+    quotes the cause key. W1-T5984, W1-T6021 and W1-T7155 carry the flow cause key `own-red:required checks red`, and
+    "required checks" trips the merge-policy backstop. None of the three touches merge policy.
+  design: |
+    1. `machineJudgeInput` adds the record's `rationale` and `note`, bounded (e.g. 4,000 chars, cut at a line boundary
+       with the cut stated), plus one deterministic evidence line the judge can trust: how many PRs or rounds the
+       rationale cites, whether every declared file exists at the pinned base, and each proof's dialect.
+    2. `deterministicEscalation` masks the record's own `origin:` cause key out of the text it matches. SENSITIVE_SURFACE
+       and MERGE_POLICY_PATH path rules are unchanged: a filing that declares `.github/` or auth still escalates.
+    3. test/fixtures/machine-judge-probes.json keeps its 6 escalate / 4 proceed mix; any probe that changes verdict is
+       named in the PR body with why.
+  acceptance:
+    - claim: "the machine judge is shown the record's rationale and note, bounded, with a deterministic evidence line"
+      proof: "grep: test(\"W1-T9042: the machine judge is shown the record's rationale and note\" in test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts"
+    - claim: "a cause key quoted in a machine filing's title no longer trips the merge-policy text backstop"
+      proof: "grep: test(\"W1-T9042: a cause key quoted in the title does not trip the merge-policy backstop\" in test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts"
+    - claim: "a filing that declares a sensitive path still escalates whatever evidence it carries"
+      proof: "grep: test(\"W1-T9042: a sensitive path still escalates whatever the evidence says\" in test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts"
+  falsifier: |
+    Judge a ci-friction shard whose rationale cites 40 rounds on 12 PRs. At origin/main the judge input holds no rationale
+    text; with the change it does. Then judge W1-T5984's title: at origin/main `deterministicEscalation` returns a
+    merge-policy reason; with the change it returns none.
