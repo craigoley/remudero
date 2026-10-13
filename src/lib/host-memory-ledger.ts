@@ -203,6 +203,8 @@ export function ownedMemoryRunBinding(id: string, deps: HostMemoryLedgerOptions 
   { state: "fresh" } | { state: "bound"; roots: readonly ProcessIdentity[] } | { state: "unavailable"; reason: string } {
   try {
     const ctx = contextOf(deps), owned = [...ownReservations].find(([path, entry]) => path.startsWith(`${ctx.dir}/`) && entry.id === id);
+    const observation = observeSentinel(ctx, false);
+    if (observation.state !== "present") throw new Error(`canonical reservation store ${observation.state}`);
     if (!owned) throw new Error("no original owned reservation");
     const [path, memory] = owned, disk = JSON.parse(ctx.read(path)) as MemoryReservationEntry;
     const actual = ctx.probe(process.pid);
