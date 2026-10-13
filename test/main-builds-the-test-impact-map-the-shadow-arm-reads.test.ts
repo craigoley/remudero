@@ -29,9 +29,11 @@ const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");
 
 type Step = { name?: string; id?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown>; env?: Record<string, string> };
 type Job = { name?: string; steps: Step[] };
-const workflow = (file: string) => parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8")) as { jobs: Record<string, Job> };
-const NIGHTLY = workflow("coverage-nightly.yml").jobs.merge!;
-const CI = workflow("ci.yml");
+// Literal paths on purpose: workflow-guard-mutation-ratchet finds ci.yml's readers by grepping for
+// `workflows/ci.yml`, and only a reader it finds can cover the fetch step's two `exit 0` guards.
+const workflow = (path: string) => parseYaml(readFileSync(join(REPO_ROOT, path), "utf8")) as { jobs: Record<string, Job> };
+const NIGHTLY = workflow(".github/workflows/coverage-nightly.yml").jobs.merge!;
+const CI = workflow(".github/workflows/ci.yml");
 const SHARD_JOB = Object.values(CI.jobs).find((job) => job.name === "coverage-shard (${{ matrix.shard }}/8)")!;
 
 function step(job: Job, prefix: string): Step {
@@ -249,7 +251,7 @@ test("W1-T6107: the shadow selector passes --impact-map with --base only when a 
 });
 
 test("W1-T6107: the map reaches only the shadow selector, so no other event's selection changes", () => {
-  const text = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const text = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
   const users = SHARD_JOB.steps.filter((s) => (s.run ?? "").includes("impact-map")).map((s) => s.name);
   assert.deepEqual(users, [FETCH, step(SHARD_JOB, "Test with coverage").name]);
   assert.equal(text.split("impact-map").length - 1, (step(SHARD_JOB, FETCH).run!.split("impact-map").length - 1) + (selectorBlock().split("impact-map").length - 1),
