@@ -1,0 +1,25 @@
+- id: W1-T9109
+  title: "The ci-judge lane's worker calls record cost in only 18.9% of joined calls (7/37, 7-day window) — restore costUsd at the ci-judge ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `ci-judge`, field `cost`: 7/37 joined worker calls (18.9%) against the field's 90.0% floor, first seen 2026-10-08T16:51:25Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The CI judge spawns via benchmarkNonDispatchSpawn('ci-judge') in src/lib/ci-escalation-judge.ts; src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gaps: W1-T8953 (isolation cost), W1-T8448 (daemon cost)."
+  design: |
+    DIAGNOSE FIRST. Find which ci-judge worker calls land without cost_usd: compare the worker.attempt rows written by benchmarkNonDispatchSpawn (src/lib/benchmark-run.ts) with the WorkerResult costUsd the judge logs as ci_judge.spend. Candidates: failed or malformed-reply attempts whose terminal row is written without the WorkerResult accounting, or a billing mode that reports no cost.
+    THEN EITHER restore: thread the worker's costUsd into the ci-judge terminal row; OR, where the provider legitimately reports no cost, record that reason so the lane is excused honestly rather than counted missing.
+    Rule 19 merits test: one integration test must prove cost (or its named reason) survives the ci-judge spawn-to-ledger-to-evidence-reader path; isolated per-file proofs cannot establish that invariant.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes.
+  acceptance:
+    - claim: "a test drives the ci-judge's non-dispatch spawn path, including a failed or malformed-reply attempt, and feeds the resulting ledger rows into the benchmark evidence reader: a reported costUsd is retained and counted observed, while a legitimately cost-less call retains a named reason and is excused rather than missing"
+      proof: "unit test: test/ci-judge-lane-cost.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-ci-judge-cost
+  plan_refs: ["§7B"]
+  files: [src/lib/ci-escalation-judge.ts, src/lib/benchmark-run.ts, src/lib/benchmark-evidence.ts, test/ci-judge-lane-cost.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
