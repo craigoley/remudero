@@ -12,7 +12,10 @@
 // W1-T8775: the check-proof spawn site in src/lib/plan-pr-emitter.ts runs a bundle through
 // src/lib/child-entry-argv.ts when childEntryIsCurrent holds, and tsx otherwise.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
+  rmSync, writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,13 +54,43 @@ function loadEsbuild(root) {
   throw new Error(`esbuild is not installed under ${root} or ${SELF_ROOT}; run npm ci first (tsx depends on it)`);
 }
 
+/** Every file under `dir`, sorted, each with whether it is a symlink (from readdir, so no lstat-then-read window). */
 function listFiles(dir, out = []) {
   for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const p = join(dir, ent.name);
     if (ent.isDirectory()) listFiles(p, out);
-    else out.push(p);
+    else out.push({ path: p, symlink: ent.isSymbolicLink() });
   }
   return out;
+}
+
+/** A file's bytes, or null when it does not exist: one read, not an exists-then-read pair (js/file-system-race). */
+function readIfPresent(path) {
+  try {
+    return readFileSync(path);
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/** Read-only, never through a final symlink (ELOOP), and a FIFO's open returns at once instead of blocking. */
+const READ_REGULAR_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/**
+ * Open `path` once and hand `use` the descriptor and its fstat, so the type check, the size and the bytes all
+ * describe one open file and nothing re-resolves the path between check and read (js/file-system-race).
+ * Throws `ELOOP` for a symlink and `ENOTREG` for anything that is not a regular file.
+ */
+function withRegularFile(path, use) {
+  const fd = openSync(path, READ_REGULAR_FLAGS);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error("not a regular file"), { code: "ENOTREG" });
+    return use(fd, st);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -74,16 +107,14 @@ export function sourceHash(root, esbuildVersion = loadEsbuild(root).version) {
   const srcDir = join(root, "src");
   if (!existsSync(srcDir)) throw new Error(`no src/ directory under ${root}`);
   for (const file of listFiles(srcDir)) {
-    const rel = relative(root, file).split(sep).join("/");
-    const st = lstatSync(file);
+    const rel = relative(root, file.path).split(sep).join("/");
     h.update(`file:${rel}\0`);
-    h.update(st.isSymbolicLink() ? `symlink:${readlinkSync(file)}` : readFileSync(file));
+    h.update(file.symlink ? `symlink:${readlinkSync(file.path)}` : readFileSync(file.path));
     h.update("\0");
   }
   for (const name of HASHED_ROOT_FILES) {
-    const p = join(root, name);
     h.update(`root:${name}\0`);
-    h.update(existsSync(p) ? readFileSync(p) : "<absent>");
+    h.update(readIfPresent(join(root, name)) ?? "<absent>");
     h.update("\0");
   }
   return h.digest("hex");
@@ -163,7 +194,7 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
       define: { "import.meta.url": "__rmd_module_url" },
       plugins: [moduleUrlPlugin(bundleDir)],
     });
-    const payload = existsSync(outfile) ? readFileSync(outfile) : Buffer.alloc(0);
+    const payload = readIfPresent(outfile) ?? Buffer.alloc(0);
     if (payload.length === 0) throw new Error(`child entry ${entry.name}: esbuild reported success but wrote no bundle at ${outfile}`);
     built.push({ name: entry.name, source: entry.source, bundle, bytes: payload.length, sha256: payloadDigest(payload) });
   }
@@ -178,9 +209,8 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
 export function readChildEntryManifest(root = SELF_ROOT, outDir = OUT_DIR) {
   const path = join(resolve(root, outDir), MANIFEST_NAME);
   try {
-    // lstat first: opening a FIFO or device named manifest.json could block or misread.
-    if (!lstatSync(path).isFile()) throw new Error("not a regular file");
-    return JSON.parse(readFileSync(path, "utf8"));
+    // One non-blocking descriptor: a FIFO or device named manifest.json is refused, never read or waited on.
+    return JSON.parse(withRegularFile(path, (fd) => readFileSync(fd, "utf8")));
   } catch (err) {
     if (err?.code === "ENOENT") return null;
     process.stderr.write(`build-child-entries: unreadable manifest at ${path}: ${err.message}\n`);
@@ -200,8 +230,9 @@ const isSafeRelativePath = (p) =>
 /**
  * Whether a bundle for `name` exists, is the file the manifest vouches for, AND was built from the source
  * now in `root`. Any doubt reads as not current, so a caller falls back to tsx: a bundle is never assumed
- * current, and this never throws. The checks run cheapest first, and no bundle is opened before `lstat`
- * says it is a regular file, so a FIFO or device cannot block the caller.
+ * current, and this never throws. The checks run cheapest first. The bundle is opened once, non-blocking
+ * and without following a symlink, and is read only after fstat says it is a regular file, so a FIFO or
+ * device cannot block the caller.
  *
  * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
  * manifest passes. The store is instance-owned, which is the boundary this relies on.
@@ -229,17 +260,20 @@ function judgeChildEntry(root, name, outDir) {
   if (!Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !SHA256_HEX.test(String(entry.sha256))) return notCurrent("entry-metadata-invalid");
   const dir = resolve(root, outDir);
   const bundle = join(dir, entry.bundle);
-  let st;
+  let refusal;
   try {
-    st = lstatSync(bundle);
+    refusal = withRegularFile(bundle, (fd, st) => {
+      if (realpathSync(bundle) !== join(realpathSync(dir), basename(bundle))) return notCurrent("bundle-path-escapes");
+      if (st.size !== entry.bytes) return notCurrent("bundle-size-mismatch");
+      if (payloadDigest(readFileSync(fd)) !== entry.sha256) return notCurrent("bundle-digest-mismatch");
+      return null;
+    });
   } catch (err) {
     if (err?.code === "ENOENT") return notCurrent("bundle-missing");
+    if (err?.code === "ELOOP" || err?.code === "ENOTREG") return notCurrent("bundle-not-regular-file");
     throw err;
   }
-  if (st.isSymbolicLink() || !st.isFile()) return notCurrent("bundle-not-regular-file");
-  if (realpathSync(bundle) !== join(realpathSync(dir), basename(bundle))) return notCurrent("bundle-path-escapes");
-  if (st.size !== entry.bytes) return notCurrent("bundle-size-mismatch");
-  if (payloadDigest(readFileSync(bundle)) !== entry.sha256) return notCurrent("bundle-digest-mismatch");
+  if (refusal) return refusal;
   const now = sourceHash(root);
   if (manifest.sourceHash !== now) return { current: false, reason: "source-changed", built: manifest.sourceHash, now };
   return { current: true, reason: "source-hash-match", bundle };
