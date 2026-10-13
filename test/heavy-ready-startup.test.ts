@@ -127,13 +127,14 @@ test("startup sidecar supported reads open before any path stat and retain every
 });
 
 test("startup sidecar unsupported hosts disable absence but never open present or unreadable evidence", t => {
-  const f = fixture(t), platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const absent = fixture(t), present = fixture(t), platform = Object.getOwnPropertyDescriptor(process, "platform");
+  present.publish();
   assert.ok(platform); Object.defineProperty(process, "platform", { value: "win32", configurable: true });
   t.mock.method(fs, "openSync", () => { throw new Error("unsupported host must never open a checked path"); }); syncBuiltinESMExports();
   try {
-    assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "absent" });
-    f.publish(); assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "unavailable", reason: "safe startup reads unavailable" });
+    assert.deepEqual(readHeavyReadyStartupFile(absent.path), { state: "absent" });
+    assert.deepEqual(readHeavyReadyStartupFile(present.path), { state: "unavailable", reason: "safe startup reads unavailable" });
     t.mock.method(fs, "lstatSync", () => { throw new Error("metadata unavailable"); }); syncBuiltinESMExports();
-    assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "unavailable", reason: "metadata unavailable" });
+    assert.deepEqual(readHeavyReadyStartupFile(present.path), { state: "unavailable", reason: "metadata unavailable" });
   } finally { Object.defineProperty(process, "platform", platform); t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
