@@ -10,10 +10,11 @@ raw: >-
   That host's janitor runs about every 6.0 h; the latest pass reclaimed 130 MB.
 attachments: []
 origin: incident#75dde1c4597817102af045f7a447744aab12b4cb55b9b188df98783a7b99cfc2
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
