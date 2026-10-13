@@ -3592,6 +3592,33 @@ function fastGateScriptNames(repoRoot: string, packageJsonText?: string): Set<st
   return new Set(Object.keys(pkg.scripts ?? {}));
 }
 
+/** The `package.json` "name" of the repository {@link FAST_GATE_STEPS} describes. */
+export const HARNESS_PACKAGE_NAME = "remudero";
+
+/** The repo-relative runner file each `runner:` step executes. */
+const FAST_GATE_RUNNER_FILES: Readonly<Record<NonNullable<FastGateStep["runner"]>, string>> = {
+  "rule-checks": "scripts/list-rule-suites.mjs",
+  "census-precheck": "scripts/census-precheck.mjs",
+};
+
+/**
+ * W1-T8920 — is `repoRoot` a repository OTHER than the harness's own? The marker is the
+ * `package.json` "name": a string that is not {@link HARNESS_PACKAGE_NAME}, in a tree that also lacks
+ * `scripts/list-rule-suites.mjs`. A nameless or unparseable package is treated as the harness (the
+ * step table's strict reading, unchanged), so only a repo that positively names itself something
+ * else gets the consumer treatment.
+ */
+function isConsumerRepo(repoRoot: string, packageJsonText?: string): boolean {
+  let name: unknown;
+  try {
+    name = (JSON.parse(packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8")) as { name?: unknown }).name;
+  } catch {
+    return false;
+  }
+  if (typeof name !== "string" || name === HARNESS_PACKAGE_NAME) return false;
+  return !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES["rule-checks"]));
+}
+
 export interface PreflightFastDeps {
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
@@ -3663,6 +3690,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
+  const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
   const timedCensus = (script: string) => {
     const startedAt = now();
     const result = withoutNodeTestContext(() =>
@@ -3678,6 +3707,12 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
     runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
+      }
+      if (consumer && runner !== undefined && !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES[runner]))) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${FAST_GATE_RUNNER_FILES[runner]}" is core's runner and this repo does not hold it` };
+      }
+      if (consumer && runner === undefined && !scriptNames.has(script)) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${script}" is core's step and this repo does not define it` };
       }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() =>
