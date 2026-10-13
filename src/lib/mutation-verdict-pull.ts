@@ -82,10 +82,17 @@ export function wellFormedVerdictRows(text: string): LedgerLine[] {
 /** The text of the artifact zip's `ledger.ndjson` member (stored or deflated), undefined when the
  *  zip has no such member. A buffer that is not a zip at all THROWS: that is a fault, not an absence. */
 export function ledgerTextFromArtifactZip(zip: Buffer): string | undefined {
+  return zipTextMembers(zip, (name) => name === LEDGER_FILENAME)[0]?.text;
+}
+
+/** Every stored or deflated member of an artifact zip whose base name `accept` takes, in archive
+ *  order, as text. W1-T7853's fold-debt pull reads its entries through this same reader. */
+export function zipTextMembers(zip: Buffer, accept: (name: string) => boolean = () => true): Array<{ name: string; text: string }> {
   const lowest = Math.max(0, zip.length - 65_557);
   let eocd = zip.length - 22;
   while (eocd >= lowest && zip.readUInt32LE(eocd) !== 0x06054b50) eocd--;
   if (eocd < lowest) throw new Error("not a zip: no end-of-central-directory record");
+  const members: Array<{ name: string; text: string }> = [];
   let at = zip.readUInt32LE(eocd + 16);
   for (let n = zip.readUInt16LE(eocd + 10); n > 0 && at + 46 <= zip.length; n--) {
     if (zip.readUInt32LE(at) !== 0x02014b50) throw new Error("corrupt zip: bad central-directory entry");
@@ -93,16 +100,16 @@ export function ledgerTextFromArtifactZip(zip: Buffer): string | undefined {
     const size = zip.readUInt32LE(at + 20);
     const nameLen = zip.readUInt16LE(at + 28);
     const next = at + 46 + nameLen + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
-    const name = zip.subarray(at + 46, at + 46 + nameLen).toString("utf8");
+    const name = zip.subarray(at + 46, at + 46 + nameLen).toString("utf8").split("/").pop() ?? "";
     const local = zip.readUInt32LE(at + 42);
     at = next;
-    if (name.split("/").pop() !== LEDGER_FILENAME || local + 30 > zip.length) continue;
+    if (!accept(name) || local + 30 > zip.length) continue;
     const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
     const body = zip.subarray(start, start + size);
-    if (method === 0) return body.toString("utf8");
-    if (method === 8) return inflateRawSync(body).toString("utf8");
+    if (method === 0) members.push({ name, text: body.toString("utf8") });
+    if (method === 8) members.push({ name, text: inflateRawSync(body).toString("utf8") });
   }
-  return undefined;
+  return members;
 }
 
 /** One live, un-recorded artifact, oldest first so a backlog lands in the order it was produced. */

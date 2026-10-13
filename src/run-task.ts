@@ -217,7 +217,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
@@ -1153,7 +1153,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1842,6 +1842,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -2290,7 +2291,7 @@ export function readyDraftViaGh(
 }
 
 let baseReproductionQueue: Promise<void> = Promise.resolve();
-const baseReproductionHostCache = new Map<string, BaseProbeFile>();
+const baseReproductionHostCache = createSizedMemo<string, BaseProbeFile>();
 
 export function buildBaseReproductionProbe(
   config: Config, repoDir: string, ledgerPath: string,
@@ -14022,7 +14023,9 @@ export async function runFixRung(opts: {
         // W1-T1219: the spawn's own elapsed milliseconds — see spawnFixWorkerBounded's own doc.
         elapsed_ms: spawnElapsedMs,
         // The ci-friction gardener prices a ci-log round against each check and failing test.
-        ci_failures: (currentCiFailures ?? []).map((f) => ({ check: f.name, signature: ciFailureSignature(f.logTail) ?? null })),
+        // W1-T9057: plus the failing titles, a bounded excerpt and where the tail came from, so the filing
+        // the gardener drafts can show the rounds it priced instead of "(none recorded)".
+        ci_failures: (currentCiFailures ?? []).map(ciFailureLedgerEntry),
         // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
         conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
@@ -35761,7 +35764,7 @@ export function openSiblingObservation(
   };
 }
 
-const dispatchFilingCache = new Map<string, CostOfDelaySnapshot>();
+const dispatchFilingCache = createSizedMemo<string, CostOfDelaySnapshot>();
 const dispatchFallbackKeys = new Map<string, string>();
 
 /** The dispatch filing read's answer: the committed filing dates, or why they could not be read. */
@@ -35858,9 +35861,17 @@ export function prefetchedDispatchFilingReader(
 /** The process's one prefetched filing reader: the daemon and the drain prime it, dispatch selection reads it. */
 export const dispatchFilingPrefetch = prefetchedDispatchFilingReader();
 
+const DISPATCH_LEDGER_FIELDS = new Set(["ts", "step", "run_id", "task_id", "task_class", "verdict", "cost_usd", "stage", "reason", "key"]);
+
+export function projectDispatchLedgerRow(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([field]) => DISPATCH_LEDGER_FIELDS.has(field)));
+}
+
 /** The daemon's dispatch-selection union: a repeated selection over an unchanged ledger reads nothing, and a
  * changed one reads only the live file's new tail and any new rotation (see createIncrementalLedgerUnion). */
-const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({ holder: "dispatch-value", reducerVersion: "1" });
+const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({
+  holder: "dispatch-value", reducerVersion: "2", project: projectDispatchLedgerRow,
+});
 /** The sorted evidence of a frozen (cached, so unchanging) union, so an unchanged union is never re-sorted. */
 const dispatchEvidenceByUnion = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReadonlyArray<Record<string, unknown>>>();
 
@@ -38718,6 +38729,13 @@ export function daemonMemoryTelemetryReader(
       heapStatistics: v8HeapStatistics,
       workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
       bootHeadSha,
+      memoSizes: () => ({
+        dispatchSelectionLedgerUnion: dispatchSelectionLedgerUnion.size(),
+        terminalUnionScans: terminalUnionScans.size(),
+        mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size(),
+        dispatchFilingCache: dispatchFilingCache.size(),
+        baseReproductionHostCache: baseReproductionHostCache.size(),
+      }),
     });
     // The same reading, kept as the daemon's own rolling footprint for the memory budget (daemon-footprint.ts). A
     // failed persist keeps the sample in memory and rides the row.
@@ -44011,7 +44029,10 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
-    if (opts.cache) opts.cache.mergedPathsByPr = byPr;
+    if (opts.cache) {
+      opts.cache.mergedPathsByPr = byPr;
+      if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
+    }
   } catch {
     /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
   }
@@ -44045,7 +44066,10 @@ function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptio
       const m = line.match(/\(#(\d+)\)\s*$/);
       if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
     }
-    if (opts.cache) opts.cache.mergeSubjects = byPr;
+    if (opts.cache) {
+      opts.cache.mergeSubjects = byPr;
+      if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
+    }
   } catch {
     /* best-effort: an unreadable log yields an empty map, and unknown declines */
   }
@@ -44062,7 +44086,7 @@ const MERGED_PATHS_PER_PR_CAP = 200;
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
-const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
+const mergeLogEvidenceByRoot = createSizedMemo<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
 /** W1-T4774: retain one successful snapshot per checkout; failed reads remain retryable. */
 function resolveMergeLogReadOptions(root: string | undefined): MergeLogReadOptions {

@@ -35,7 +35,7 @@ export interface CompanionPathClass {
 }
 
 export const COMPANION_PATH_CLASSES: ReadonlyArray<CompanionPathClass> = [
-  { tag: "test-suite", pathPattern: /^test\// },
+  { tag: "test-suite", pathPattern: /(?:^test\/(?!(?:setup|helpers)\/)|\.(?:test|spec)\.[cm]?[jt]sx?$)/ },
 ];
 
 /** True iff `path` belongs to some companion class — see {@link COMPANION_PATH_CLASSES}. */

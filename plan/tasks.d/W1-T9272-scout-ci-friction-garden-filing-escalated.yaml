@@ -20,3 +20,11 @@
     The ledger step ci-friction.garden_filing_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The record reports four escalation rows but supplies neither their decision reasons nor an identified cause; the finding that these escalations represent a defect cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task asks the builder to locate and fix an unidentified cause, while declaring only a new test file. The supplied scope does not establish a bounded remedy.; on the change's description/files alone, no diff was read — The acceptance proof checks for test-title text; that match alone cannot verify that the cause was fixed or that recurrence stopped."
+    judged_at: "2026-10-13T19:08:30.762Z"
+    pin: "c608eb5166d20b530ec4b2e28b47897315bad8e475140745b5dbddca6796b3d0"

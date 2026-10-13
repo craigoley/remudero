@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.09
   status: queued
@@ -20,3 +20,14 @@
     The ledger step scout.garden_filing_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 5 in the older half, 22 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared file is a single new test file (test/scout-scout-garden-filing-failed.test.ts). That points to test-level work, not secrets, auth, deletion, or merge, deploy or review policy."
+      - "The filing says the fix goes to the cause of a recurring ledger failure. It does not ask for an operator-only decision, such as a priority, budget or policy choice."
+      - "The acceptance criterion is a grep for a named test string, so it can be checked mechanically. The change will still go through CI and review."
+      - "The filing says the rows name no file, so the code that writes this step is still unlocated. The scope of the real fix is therefore uncertain, but nothing shown makes it risky. The scout family has no track record yet (0 merged, 0 declined), which is neutral."
+    judged_at: "2026-10-13T19:07:11.748Z"
+    pin: "cd6170ffd4f7d9dd3730449484e00417ef254402ae598acdaafa3a8b5f7ce158"

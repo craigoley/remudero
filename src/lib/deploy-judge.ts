@@ -17,6 +17,19 @@ export const IMAGE_BAKED_PATHS: readonly string[] = [
   ...BAKED_RUNTIME_SOURCE_PATHS,
 ];
 
+/** W1-T9094 — the image inputs a `build` (daemon) container executes from its image. Its daemon and
+ *  workers run from mounted checkouts, so the serve supervisor's source (BAKED_RUNTIME_SOURCE_PATHS)
+ *  never makes it stale: 13 of the 14 image rebuilds of 2026-10-12/13 touched only that source. */
+export const BUILD_ROLE_IMAGE_BAKED_PATHS: readonly string[] = IMAGE_BAKED_PATHS.filter(
+  (path) => !BAKED_RUNTIME_SOURCE_PATHS.includes(path),
+);
+
+/** W1-T9094 — the baked paths whose change makes a container of `role` stale. Only `build` is
+ *  narrowed; `serve` and an unknown role keep the full list, today's behaviour. */
+export function imageBakedPathsForRole(role: string | undefined): readonly string[] {
+  return role === "build" ? BUILD_ROLE_IMAGE_BAKED_PATHS : IMAGE_BAKED_PATHS;
+}
+
 function touchesImage(change: DeployWorthChange): boolean {
   return change.files.some((file) => IMAGE_BAKED_PATHS.includes(file));
 }

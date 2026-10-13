@@ -1,0 +1,29 @@
+- id: W1-T9284
+  title: "Revalidate Inbox asks with reversible retirement and positive source receipts"
+  repo: remudero
+  depends_on: ["W1-T9282","W1-T9285"]
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved follow-up; issue #7708"
+  plan_refs: ["W1-T4738","W1-T4768","W1-T4853"]
+  files: ["src/lib/inbox-gardener.ts","src/lib/inbox-responder.ts","src/lib/inbox-view.ts","src/lib/fleet-lane.ts","src/run-task.ts","test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    The existing Inbox heals release-proven asks and publishes an attention census, but issue #7708 still asks for bounded general revalidation and reversible receipts. The operator approved this separate gardener after the false-dismissal audit, not bulk closure based on age or wording.
+  design: |
+    Use changed input identity or the existing low-cost gardener cadence. Revalidate against the current source-qualified plan, merged PR trailer/build-branch credit, release receipts, superseding verdicts and open referents. Retire only from a positive terminal or handoff receipt proving the operator is no longer the next actor. Preserve registry/thread history, record the reason and source, and provide an idempotent restore path. Never infer consent, retire by age alone, or treat an unavailable source as terminal. Route mechanical follow-ups through the existing fleet lane. Ask a judge only for residual cases with changed inputs, and expose failure/low confidence through the needs-triage contract. Integrate the audit task before broad adoption; keep held security, budget, tenant, policy and irreversible questions visible.
+  acceptance:
+    - claim: "the daemon cadence reaches the bounded Inbox gardener"
+      proof: 'grep: runInboxGardener( in src/run-task.ts'
+    - claim: "retirement requires positive source evidence and remains reversible"
+      proof: "grep: test(\"the inbox gardener retires a proven terminal ask once and can restore it\" in test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts"
+    - claim: "held and genuine human questions survive missing data and cannot be dismissed by wording"
+      proof: "grep: test(\"the inbox gardener preserves a held security ask when source evidence is partial\" in test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts"
+  falsifier: |
+    Seed a terminal mechanical ask, a W1-T216-like held drill, an unanswered budget question and unreadable ledger/GitHub sources. Removing the terminal-receipt guard must fail the preservation fixture; a second pass must not duplicate retirement or judge spend.

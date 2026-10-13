@@ -1,0 +1,27 @@
+- id: W1-T9288
+  title: "Bind every Inbox page and cursor to the same classification snapshot"
+  repo: remudero
+  depends_on: []
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved follow-up; issue #8446"
+  plan_refs: ["W1-T4742","W1-T4261"]
+  files: ["src/lib/inbox-responder.ts","src/lib/inbox-view.ts","src/lib/panel-graph.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/every-inbox-page-shares-its-classification-snapshot.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Issue #8446 shows that generatedAt and independently retained source asOf values cannot prove equal-count pages belong to one classification. buildAttentionCensus already creates a content-derived snapshotKey. The operator approved reusing that identity, not starting reader-triggered classification.
+  design: |
+    Compute/reuse the attention census snapshotKey once for a completed classification and stamp it on every Inbox page and section from that classification. Embed the same key in cursors. Refuse a cursor from a different classification with an explicit snapshot-changed/restart outcome; never splice equal-count rows from different snapshots. Preserve cache/ETag efficiency, 64 KiB page bounds and truthful unavailable/partial/stale states. Readers only read maintained materialization. Document additive fields and cursor behavior in OpenAPI and regenerate the API client. The console pagination follow-up pins this key after the producer merges; existing count/page-shape guards remain useful but are not snapshot equality proof.
+  acceptance:
+    - claim: "a changed classification invalidates an otherwise plausible cursor"
+      proof: "grep: test(\"equal-count inbox pages cannot mix classification snapshots\" in test/every-inbox-page-shares-its-classification-snapshot.test.ts"
+    - claim: "one classification identity is reused across maintained sections and pages"
+      proof: "grep: test(\"all inbox sections retain one classification key without reader-triggered work\" in test/every-inbox-page-shares-its-classification-snapshot.test.ts"
+  falsifier: |
+    Change rows between page reads without changing counts. Dropping the cursor snapshot check or independently recomputing page identities must make the mixed-snapshot fixture fail.
