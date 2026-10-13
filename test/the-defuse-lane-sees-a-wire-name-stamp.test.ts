@@ -10,6 +10,7 @@
  * with the clock shifted past the crossing, and files only when the shift alone turns it red.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -229,8 +230,10 @@ test("W1-T6036: a finding an open filing already covers is deferred without runn
 
 test("W1-T6036: the default runner really spawns the file under the shifted clock and the repo's test setup", async () => {
   // Stamps are placed against the REAL clock, because the spawned suite reads it: the gardener's
-  // census clock is pinned to the same instant so its shift lands just past each crossing.
-  const at = Date.now();
+  // census clock is pinned to the same instant so its shift lands just past each crossing. Read from
+  // a child, as the suite's own: a clock-shift probe moves this process alone (scripts/clock-shift.mjs TRAP).
+  const at = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(Date.now()))"], { encoding: "utf8" }));
+  assert.ok(Number.isSafeInteger(at) && at > 0, `child clock read: ${at}`);
   const stamp = new Date(at - (STALE_DAYS - 3) * DAY).toISOString();
   const head = `import assert from "node:assert/strict";\nimport { test } from "node:test";\n`;
   const g = garden({

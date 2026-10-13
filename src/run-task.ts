@@ -204,7 +204,8 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
@@ -228,7 +229,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
+import { inboxThreadStorePath, ratifyCliGateway, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -2010,28 +2011,17 @@ export function buildFreshTreeReviewRunner(
     try {
       let worktree = prepared.get(sha);
       if (worktree === undefined) {
-        worktree = `${deps.worktreeRoot}/reviewer-${sha.slice(0, 12)}`;
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
-          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, worktree, sha);
-        if (existing === "unsafe") {
-          throw new Error(`reviewer worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
-        }
-        if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-        if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
-          throw new Error(`reviewer worktree at ${worktree} has no runnable canonical node_modules link`);
-        }
+        worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
       const reviewerTree = worktree;
       const run = async () => {
-        const existing = (deps.inspectExistingWorktree ?? ((dir, path, revision) =>
-          inspectFreshReviewerWorktree(dir, path, revision, deps.git)))(repoDir, reviewerTree, sha);
-        if (existing !== "reusable") {
+        if (freshTreeInspector(deps)(repoDir, reviewerTree, sha) !== "reusable") {
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
@@ -2048,6 +2038,75 @@ export function buildFreshTreeReviewRunner(
       return undefined;
     }
   };
+}
+
+/** The seams a fresh origin/main tree needs, the reviewer's less its spawn (W1-T9065 shares them). */
+export type FreshTreeTools = Omit<FreshTreeReviewSeams, "spawnReview">;
+
+function freshTreeInspector(deps: FreshTreeTools): NonNullable<FreshTreeTools["inspectExistingWorktree"]> {
+  return deps.inspectExistingWorktree ?? ((dir, path, revision) => inspectFreshReviewerWorktree(dir, path, revision, deps.git));
+}
+
+/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable. */
+function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string): string {
+  const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
+  const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
+  if (existing === "unsafe") {
+    throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
+  }
+  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
+  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
+    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  }
+  return worktree;
+}
+
+/**
+ * W1-T9065 — THE FLEET'S `rmd approve`/`rmd reframe` RUN FROM A TREE AT origin/main, as the reviewer does.
+ * The daemon's checkout is detached and behind, where the CLI's self-sync guard refused every lane
+ * approve before the verb ran, and setting the guard there would classify against a stale plan. Here
+ * the child's repoRoot IS origin/main, so its plan, policy and grep reads are fresh by construction.
+ * The tree is leased until `action` settles; every failure is rethrown with credentials scrubbed.
+ */
+export function freshOriginMainTreeRunner(
+  repoDir: string,
+  deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
+): RatifyCliTree["freshTree"] {
+  return async (action) => {
+    try {
+      const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
+      const path = prepareFreshOriginMainTree(repoDir, deps, "approve", sha);
+      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
+        if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
+          throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
+        }
+        return action({ path, sha });
+      });
+    } catch (err) {
+      throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
+    }
+  };
+}
+
+/** W1-T9065 — the daemon's ratify gateway: the reviewer's tree helpers, git through the hardened leaf. */
+export function fleetRatifyGateway(
+  repoDir: string,
+  logDir: string,
+  ledgerPath: string,
+  overrides: Partial<FreshTreeTools> & Pick<RatifyCliTree, "spawn"> & { mainTip?: (repoDir: string) => Promise<string> } = {},
+): RatifyCliHandle {
+  const { spawn: spawnChild, ...tree } = overrides;
+  return ratifyCliGateway(repoDir, logDir, {
+    ledgerPath,
+    freshTree: freshOriginMainTreeRunner(repoDir, {
+      // inspectFreshReviewerWorktree passes `-C <dir>` first; the leaf takes the dir apart.
+      git: (args) => hostWorktreeGit(args[1] ?? repoDir, args.slice(2)),
+      addWorktree: (dir, path, revision) => realDeps().reviewWorktree.addWorktree(dir, path, revision),
+      worktreeRoot: join(repoDir, "..", "worktrees"),
+      ...tree,
+    }),
+    ...(spawnChild ? { spawn: spawnChild } : {}),
+  });
 }
 
 /** W1-T4055 — PRIMARY CONTROL on how much of one fresh-tree failure a ledger row carries. The child's
@@ -37751,6 +37810,49 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
+/** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
+ *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
+ *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
+ *  judge's spawn in tests. */
+export function issueRevalidationRunTaskPorts(
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void },
+  seams: {
+    loadPlan?: () => Plan;
+    reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
+    spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
+  } = {},
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+  const { owner, repo, repoRoot, stateDir, log } = ctx;
+  let plan: Plan | undefined;
+  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
+  return {
+    hasReferent: (issue) => {
+      const taskId = issueTaskId(issue) ?? "";
+      return /^PR-\d+$/.test(taskId) || planNow().byId.has(taskId) ||
+        prReferentFromIssueText(issue.body) !== undefined || prReferentFromIssueText(issue.title) !== undefined;
+    },
+    referentVerdicts: async (issues) => {
+      const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
+        ...seams.reconcile,
+        issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
+      });
+      return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
+        const pr = c.derived.prNumber !== undefined ? `PR #${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
+        if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
+        if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
+        if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+      }));
+    },
+    judgeText: (prompt, issueNumber) => {
+      const mounts = loadMounts(mountsPath(repoRoot));
+      return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+    },
+  };
+}
+
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
@@ -37935,6 +38037,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "flow":
       return flowGardenPass(deps("flow"), owner, repo, ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         { admission: { owner, repo, settings: config.contributorAdmission } });
+    // W1-T8864: every open issue re-checked against current evidence. Shadow until the operator flips
+    // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
+    case "issue-revalidation":
+      return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
+        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
+      }));
     case "evidence-coverage":
       return withDue(() => {
         try {
@@ -38576,6 +38685,8 @@ export async function daemonCommand(
     lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
+  // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
+  const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath);
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
   const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
@@ -39614,13 +39725,15 @@ export async function daemonCommand(
           stateDir: join(config.root, "state"),
           ledgerPath,
           mergedLastDay: () => mergedInLastDayAsync(repoRoot),
-          approve: (proposalId) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).approve(proposalId),
+          approve: (proposalId) => void fleetRatify.approve(proposalId),
+          handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
+          originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
         },
         inboxResponder: {
           threadStorePath: inboxThreadStorePath(config.root),
           ledgerPath,
           readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
-          reframe: (proposalId, feedback) => ratifyCliGateway(repoRoot, join(config.root, "state", "logs")).reframe(proposalId, feedback),
+          reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
           decide: inboxThreadDecider(config, log),
         },
         runPrAction: async (request) => {
@@ -51617,7 +51730,7 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ageDays: shardAgeDays(task.id, root, nowMs),
+      ...shardAgeDays(task.id, root, nowMs),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc: idCitedInSrc(task.id, root),
       ...(() => {
@@ -51662,16 +51775,19 @@ export function shardEvidence(task: Task): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-/** Days since the shard's file first appeared in git history; 0 when unreadable. Age is
- *  CONTEXT for the judge, never a threshold — nothing here decides anything from it. */
-function shardAgeDays(taskId: string, root: string, nowMs: number): number {
+/** Days since the shard's file first appeared in git history, or `null` with the reason it could
+ *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
+ *  never a threshold — nothing here decides anything from it. */
+function shardAgeDays(taskId: string, root: string, nowMs: number): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const shardFile = `plan/tasks.d/${taskId}-*.yaml`;
+  let out: string;
   try {
-    const out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)plan/tasks.d/${taskId}-*.yaml`], { encoding: "utf8" }).trim();
-    if (!out) return 0;
-    return Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000));
+    out = execFileSync("git", ["-C", root, "log", "--diff-filter=A", "--format=%ct", "-1", "--", `:(icase)${shardFile}`], { encoding: "utf8" }).trim();
   } catch {
-    return 0; // no git, or no such file — age is context, and an unknown age is reported as 0
+    return { ageDays: null, ageUnknownReason: "git log failed: no git, or the root is not a repository" };
   }
+  if (!out) return { ageDays: null, ageUnknownReason: `no commit adds ${shardFile}; the record may be embedded in plan/tasks.yaml` };
+  return { ageDays: Math.max(0, Math.floor((nowMs - Number(out) * 1000) / 86400000)) };
 }
 
 /** Whether anything under src/ cites this id — evidence the work may already have landed under
@@ -56395,6 +56511,47 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   }
 }
 
+/** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
+ *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
+function cliLedgerPathWithoutConfig(): string {
+  let root = join(homedir(), "Remudero");
+  try {
+    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
+    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
+  } catch {
+    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+  }
+  return join(root, "state", LEDGER_FILENAME);
+}
+
+/**
+ * W1-T9065 — A REFUSED SELF-SYNC IS A LEDGER ROW. `checkCliFreshness`'s W1-T486 `log` was never wired, so
+ * 1,171 lane approves died with the refusal in their log file alone. The row carries `verb`, the sink's
+ * `reason`/shas and, off main, `detached`; never a path. Its `task_id` is the proposal an approve or reframe
+ * names, so the fleet lane finds it. A ledger that cannot be written gets the row as one stderr line.
+ */
+export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], ledgerPath: () => string = cliLedgerPathWithoutConfig): SelfSyncDeps {
+  let warned = "";
+  return {
+    warn: (msg) => {
+      warned = msg;
+      console.error(msg);
+    },
+    log: (step, extra = {}) => {
+      const subject = (cmd === "approve" || cmd === "reframe") && rest[0] !== undefined ? rest[0] : "CLI";
+      const row = {
+        run_id: `CLI-${systemClock.now()}`, task_id: subject, step, verb: cmd ?? "(none)", ...extra,
+        ...(extra.reason === "off-main" ? { detached: warned.includes("DETACHED HEAD") } : {}),
+      };
+      try {
+        appendLedger(ledgerPath(), row);
+      } catch (err) {
+        process.stderr.write(`${JSON.stringify({ ...row, ledger_error: String(err) })}\n`);
+      }
+    },
+  };
+}
+
 /**
  * W1-T1134: verbs exempt from `main()`'s CLI freshness gate because they only READ the
  * ledger/state/plan and print — they never decide-then-act on a stale plan, which is the
@@ -57023,7 +57180,7 @@ export async function main(
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
   } else {
-    const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
+    const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
       console.error(freshness.message);
       process.exit(1);

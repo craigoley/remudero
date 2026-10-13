@@ -22,6 +22,10 @@ import {
 
 const NOW = Date.parse("2026-09-03T01:33:05Z");
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Generous on purpose: the held fix is released only AFTER this race, so a daemon that waits on it
+ *  never returns in time at any bound, while a healthy one returns well inside it. 150 ms failed 14
+ *  of 32 healthy runs on a loaded 4-core host and took the 2026-10-13 clock sweep red. */
+const AMPLE_EXIT_BOUND_MS = 10_000;
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function fixturePlan(): Plan {
@@ -162,7 +166,7 @@ test("W1-T2744: an abandoned sweep releases the next review tick while its detac
 
   const progressedBeforeFixSettled = await Promise.race([
     daemon.then(() => true),
-    new Promise<false>((resolve) => setTimeout(() => resolve(false), 150)),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), AMPLE_EXIT_BOUND_MS)),
   ]);
 
   // Always release both held promises before asserting so the pre-fix implementation can exit

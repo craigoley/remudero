@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -33,4 +36,20 @@ test("unit test: test/the-gh-shim-answers-its-routes-verbatim.test.ts", () => {
   const envShim = ghShim([{ when: "env", stdoutEnv: "NAME" }]);
   assert.equal(run(envShim, "env").stdout, "expanded\n");
   assert.throws(() => envShim.addRoute({ when: "bad", stdoutEnv: "X; rm -rf /" }), /environment variable name/);
+});
+
+test("W1-T6107: a writes route leaves its file byte for byte, in a directory it creates, only when it matches", () => {
+  const out = mkdtempSync(join(tmpdir(), "rmd-gh-shim-writes-"));
+  try {
+    const content = '{"format":"x","body":"$NAME `echo hi` back\\\\slash"}\n';
+    const target = join(out, "nested", "map.json");
+    const shim = ghShim([{ when: "run download", writes: { path: target, content } }]);
+    assert.equal(run(shim, "run", "list").status, 0);
+    assert.equal(existsSync(target), false, "an unmatched invocation writes nothing");
+    const r = run(shim, "run", "download", "7", "-n", "artifact");
+    assert.equal(r.status, 0);
+    assert.equal(readFileSync(target, "utf8"), content);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });
