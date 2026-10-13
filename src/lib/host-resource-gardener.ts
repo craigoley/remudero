@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
-import { writeAtomic } from "./fs-race-safe.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { gitDirOf } from "./typecheck-buildinfo.js";
 import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
@@ -61,7 +62,47 @@ const FILE_MIN_JANITOR_PASSES = 2;
 const ATTRIBUTION_MIN_WINDOW_H = 48;
 const FILE_RETRY_MS = 6 * HOUR_MS;
 const JUDGE_AFTER_MS = 7 * DAY_MS;
-export const HOST_RESOURCE_MIN_INTERVAL_MS = 5 * 60_000;
+/** POLICY (W1-T8877): expensive fits have six-hour inputs; never start them more than twice an hour. */
+export const HOST_RESOURCE_MIN_INTERVAL_MS = 30 * 60_000;
+
+/** The parent's cheap local input identity, without a fetch, subprocess, or sample-history parse.
+ *  Worktree common refs and packed refs name the same beats as loose ones. Only missing optional files
+ *  are absent; unreadable or malformed heartbeat refs throw so the parent runs the diagnostic pass.
+ *  An hourly pass still fetches remote beats that no local ref could reveal. */
+export function hostResourceInputStamp(repoRoot: string, stateDir: string): string {
+  const gitDir = gitDirOf(repoRoot);
+  if (!gitDir) throw new Error("host-resource inputs: no readable git directory");
+  const common = readFileIfExists(join(gitDir, "commondir"))?.trim();
+  const commonDir = common === undefined ? gitDir : resolve(gitDir, common);
+  const prefix = "refs/remotes/origin/heartbeat-";
+  const beats = new Map<string, string>();
+  const add = (ref: string, sha: string): void => {
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) throw new Error("host-resource inputs: malformed heartbeat ref");
+    beats.set(ref, sha);
+  };
+  for (const line of (readFileIfExists(join(commonDir, "packed-refs")) ?? "").split("\n")) {
+    const [sha, ref] = line.split(" ");
+    if (ref?.startsWith(prefix)) add(ref, sha ?? "");
+  }
+  const origin = join(commonDir, "refs", "remotes", "origin");
+  let names: string[];
+  try { names = readdirSync(origin); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    names = []; // Positive ENOENT: refs may all be packed, or no heartbeat has been fetched yet.
+  }
+  for (const name of names.filter(n => n.startsWith("heartbeat-"))) {
+    const sha = readFileIfExists(join(origin, name));
+    if (sha === undefined) throw new Error("host-resource inputs: heartbeat ref disappeared during the read");
+    add(`refs/remotes/origin/${name}`, sha.trim());
+  }
+  const samples = statSync(samplesPath(stateDir), { throwIfNoEntry: false });
+  if (samples && !samples.isFile()) throw new Error("host-resource inputs: samples are not a file");
+  return createHash("sha256").update(JSON.stringify({
+    beats: [...beats].sort(([a], [b]) => a.localeCompare(b)),
+    samples: samples ? [samples.dev, samples.ino, samples.size, samples.mtimeMs] : null,
+  })).digest("hex");
+}
 
 export type Device = "root" | "state" | "swap" | "inodes";
 export const DEVICES: readonly Device[] = ["root", "state", "swap", "inodes"];
