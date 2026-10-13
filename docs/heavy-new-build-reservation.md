@@ -92,3 +92,41 @@ why the private journal pilot is not silently made a shared fleet default.
 The [POSIX rename contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html)
 specifies refusal of nonempty target directories. The interruption/race regressions
 verify this publication boundary with the actual native filesystem and fresh processes.
+
+## Whole-run cancellation and capacity preparation (OFF)
+
+The optional `SkillEvalControlInput` captures one fixed finish/shutdown boundary for
+the whole attempt loop, propagates cancellation to the sealed dispatcher's SDK call,
+and stops further attempts. Cancellation during grading/cleanup never becomes a
+judged proposal. Its result explicitly says `capacityReleaseAllowed: false`:
+cooperative SDK settlement cannot certify synchronous setup, graders, or escaped
+descendants gone. No production configuration supplies this control today; the
+existing CLI retains its quiet/spend gates.
+
+`createOwnedRunCgroup` is separately OFF by default. An enabled caller must be inside
+its OWN `rmd-heavy-run-<UUID>.service` with an explicitly delegated existing cgroup
+parent, never the daemon, serving, SSH or another service's group. It creates only a
+private unique leaf. A child bootstrap joins ITSELF before dependencies, SDK calls,
+probes, grading and cleanup. The supervisor never migrates a foreign PID or itself.
+`cancel()` writes only that identity-checked leaf's `cgroup.kill`; the kernel includes
+detached process groups and nested cgroups. An unobserved empty group is unqualified,
+not a positive termination measurement.
+
+Capacity binds one ORIGINAL fresh published canonical memory-ledger handle to that
+bootstrap child. Already-active, foreign, missing/reset or unreadable reservations
+cannot be borrowed. Release requires a positive populated-to-empty observation plus
+verified removal by the canonical ledger. UNKNOWN retains capacity and its history.
+This is cooperative single-account containment, not authentication or a migration
+sandbox against another writer of the same account.
+
+The cheap real-kernel rehearsal on existing Azure user-manager capacity killed a
+detached descendant and released only its original private lease. It is NOT a closed
+full-EVAL calibration or permission to run models. Automated admission remains OFF
+pending fixed service-deadline validation/survival, atomic one-use grant consumption,
+full-EVAL native cost/resource receipts, migration containment, consumer/backend
+qualification and a fresh pilot grant. No user-manager unit is created by this library.
+The original READY60 and all earlier failed/closed gates remain intact.
+
+Kernel reference: [cgroup v2 control files](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+define whole-tree kill and the `populated` witness. Hosted tests, review, source merge,
+natural safe startup adoption and live benefit remain separate claims.
