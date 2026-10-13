@@ -25,8 +25,10 @@ import {
   type GardenCheckout,
   type GardenerDeps,
   type GardenPlan as GenericPlan,
+  type DeclinedGardenTarget,
   type GardenSpec,
   type GardenState,
+  type GardenTarget,
   type Outcome,
   type PendingVerdict,
   type PrState,
@@ -113,7 +115,9 @@ export interface GardenerState {
   classes: GardenState<GardenActionClass>["classes"];
   lastPass?: { fingerprint: string };
   lastCheap?: string;
-  pending?: { prUrl: string; actionClass: GardenActionClass; baseline: UsageTotals; atMerge?: UsageTotals };
+  pending?: { prUrl: string; actionClass: GardenActionClass; baseline: UsageTotals; atMerge?: UsageTotals; targets?: GardenTarget<GardenActionClass>[] };
+  /** Merge and retire targets of gardener PRs an operator closed unmerged: never proposed again. */
+  declinedTargets?: DeclinedGardenTarget<GardenActionClass>[];
 }
 
 const toOutcome = (u: UsageTotals): Outcome => ({ trials: u.offered, successes: u.used });
@@ -138,8 +142,10 @@ export function gardenerStatePath(stateDir: string): string {
   return gardenStatePath(stateDir, "knowledge");
 }
 
+/** The recorded state; a record written before `declinedTargets` existed reads as nothing declined. */
 export function readGardenerState(path: string): GardenerState {
-  return fromGeneric(readGardenState(path, GARDEN_ACTION_CLASSES));
+  const state = fromGeneric(readGardenState(path, GARDEN_ACTION_CLASSES));
+  return { ...state, declinedTargets: state.declinedTargets ?? [] };
 }
 
 /** Share of a fact's phrasing that must repeat another active fact for the two to be merged. A
@@ -259,6 +265,19 @@ function withoutTestPinned(actions: GardenAction[], pins: Record<string, string>
   return {
     actions: actions.filter((a) => !pinned(a)),
     kept: actions.filter(pinned).map((a) => ({ class: a.class, target: a.target, reason: `${pins[a.target]} names it, so a test requires it.` })),
+  };
+}
+
+type Declined = DeclinedGardenTarget<string>;
+const targetKey = (t: GardenTarget<string>) => `${t.class}\0${t.target}\0${t.into ?? ""}`;
+
+/** Split off each merge or retire a closed gardener PR already proposed, naming the newest such PR. */
+function withoutDeclined(actions: GardenAction[], declined: readonly Declined[]): { actions: GardenAction[]; kept: Array<GardenAction & Pick<Declined, "prNumber">> } {
+  const prOf = new Map(declined.map((d) => [targetKey(d), d.prNumber]));
+  const isDeclined = (a: GardenAction) => (a.class === "merge" || a.class === "retire") && prOf.has(targetKey(a));
+  return {
+    actions: actions.filter((a) => !isDeclined(a)),
+    kept: actions.filter(isDeclined).map((a) => ({ ...a, prNumber: prOf.get(targetKey(a))!, reason: "An operator closed its gardener PR without merging it." })),
   };
 }
 
@@ -701,7 +720,7 @@ export function planGardenPass(opts: {
   revertedRunIds?: ReadonlySet<string>;
   revertedPrNumbers?: ReadonlySet<number>;
 }): GardenPlan {
-  return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions(opts).actions });
+  return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions({ ...opts, declined: opts.state.declinedTargets }).actions });
 }
 
 function candidateActions(opts: {
@@ -716,7 +735,8 @@ function candidateActions(opts: {
   testPins?: Record<string, string>;
   revertedRunIds?: ReadonlySet<string>;
   revertedPrNumbers?: ReadonlySet<number>;
-}): { actions: GardenAction[]; kept: GardenAction[]; deferred: GardenAction[] } {
+  declined?: readonly Declined[];
+}): { actions: GardenAction[]; kept: GardenAction[]; declined: ReturnType<typeof withoutDeclined>["kept"]; deferred: GardenAction[] } {
   const certainty = new Map<GardenAction, number>();
   const actions: GardenAction[] = duplicateLearningPairs(opts.items).map(([newer, older]) => {
     const a = { class: "merge" as const, target: bare(newer.id), into: bare(older.id), reason: "Its fact mostly repeats an older learning." };
@@ -753,9 +773,10 @@ function candidateActions(opts: {
       revertedPrNumbers: opts.revertedPrNumbers,
     }),
   );
-  // The cap counts only what may act: a test-pinned entry never takes a slot from the next in line.
+  // The cap counts only what may act: a test-pinned or declined entry never takes a slot from the next in line.
   const unpinned = withoutTestPinned(actions, opts.testPins ?? {});
-  return { ...capByCertainty(unpinned.actions, certainty), kept: unpinned.kept };
+  const undeclined = withoutDeclined(unpinned.actions, opts.declined ?? []);
+  return { ...capByCertainty(undeclined.actions, certainty), kept: unpinned.kept, declined: undeclined.kept };
 }
 
 /** Keep each of MERGE and RETIRE to its {@link GARDEN_MAX_ACTIONS_PER_PASS} most certain actions
@@ -1171,12 +1192,15 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
     // learnings they are offered. SKILL-LIFECYCLE/GUARD-RETIREMENT never land a PR (see above), so
     // this metric is never actually read for them — `rmd approve` is their judge, not this loop.
     metric: (inv) => toOutcome(usageTotals(inv.usage)),
-    candidates: (inv, rng) => {
-      const { actions, kept, deferred } = candidateActions({ ...inv, rng, root: deps.repoRoot });
+    candidates: (inv, rng, declinedTargets) => {
+      const { actions, kept, declined, deferred } = candidateActions({ ...inv, rng, root: deps.repoRoot, declined: declinedTargets });
       for (const k of kept) deps.log("knowledge.kept_for_test", { class: k.class, target: k.target, test: inv.testPins[k.target], reason: k.reason });
+      for (const d of declined) deps.log("knowledge.kept_for_decline", { class: d.class, target: d.target, ...(d.into ? { into: d.into } : {}), pr_number: d.prNumber, reason: d.reason });
       deferredByPass.set(inv, deferred);
       return actions;
     },
+    // Only merge and retire are set aside on a decline, so only they are remembered.
+    pendingTargets: (plan) => plan.actions.filter((a) => a.class === "merge" || a.class === "retire").map((a) => ({ class: a.class, target: a.target, ...(a.into ? { into: a.into } : {}) })),
     scorecard: (inv, plan) => ({ ...buildScorecard({ ...inv, dangling: danglingWhyPointers(deps.repoRoot).length, plan, memoryDirs: deps.memoryDirs, deferred: deferredByPass.get(inv) }) }),
     apply: (ws, plan0, card) => {
       let plan = plan0;

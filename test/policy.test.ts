@@ -663,6 +663,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // `acquireKeychainProvisionLock` polled forever. See plan/policy.yaml's own row for what the
     // value is anchored on, given that an unbounded wait recorded no population to derive it from.
     "keychainProvisionLockWaitMs",
+    // W1-T2761: the worker rule-headline gate, shipped ON by the operator's 2026-10-13 ruling. No
+    // prior literal gated a prompt part that did not exist before that task.
+    "workerRuleHeadlines.enabled",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

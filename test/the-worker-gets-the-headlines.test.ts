@@ -172,6 +172,13 @@ test("buildRuleHeadlinesPart: an unreadable source degrades to the full rule, ne
   assert.match(part, /unavailable — could not read rule source CLAUDE\.md/);
 });
 
+test("a tree with no readable CLAUDE.md still dispatches: the degraded headline part passes the provenance gate", () => {
+  const part = buildRuleHeadlinesPart(true, "CLAUDE.md", unreadableSource);
+  const prompt = renderImplementPrompt(task(), "", "RUN-1", "", "", part);
+  assert.ok(prompt.includes("unavailable — could not read rule source CLAUDE.md"), "the degraded line is still in the prompt");
+  assert.doesNotThrow(() => assertProvenance(prompt), "a repo without CLAUDE.md must not have every dispatch refused");
+});
+
 test("renderAnchorBlock: an unreadable source's degraded text still reaches the re-injected anchor, never silence", () => {
   const part = buildRuleHeadlinesPart(true, "CLAUDE.md", unreadableSource);
   const anchor = renderAnchorBlock(task(), "RUN-1", part);
@@ -215,8 +222,7 @@ test("validatePolicy: a PRESENT workerRuleHeadlines row is validated and lifted,
 });
 
 test("validatePolicy: workerRuleHeadlines ABSENT from raw still lifts a well-formed default (enabled: false)", () => {
-  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
-  assert.equal("workerRuleHeadlines" in raw, false, "the shipped policy.yaml ships this row absent, on purpose");
+  const { workerRuleHeadlines: _shipped, ...raw } = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
   const p = validatePolicy(raw);
   assert.deepEqual(p.values.workerRuleHeadlines, { enabled: false });
 });
