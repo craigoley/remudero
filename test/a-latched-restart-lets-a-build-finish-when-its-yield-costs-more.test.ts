@@ -123,18 +123,32 @@ test("W1-T8927: a run far from its PR or past its estimate still yields", async 
   }
 });
 
-test("W1-T8927: no history or a self-scoped change keeps every run yielding", async () => {
+test("W1-T8927: no history or an install-input change keeps every run yielding", async () => {
   for (const opts of [{ rows: [] }, { rows: ["torn", "null"] }, { unreadable: true },
     { rows: history().filter((raw) => JSON.parse(raw).step === "run.phase" || JSON.parse(raw).step === "pr.opened") },
     { rows: history().filter((raw) => JSON.parse(raw).step === "verdict" || JSON.parse(raw).step === "run.start") },
-    { self: "path" as const }, { self: "scope" as const }, { self: "install" as const }]) {
+    { self: "install" as const }]) {
     const h = await rig(opts);
     try {
       assert.ok(h.boundary("preopen_gate"));
       assert.equal(h.rows.some((row) => row.step === "daemon.restart_holdout"), false);
       const decision = h.rows.find((row) => row.step === "daemon.restart_yield_asked");
       assert.ok(decision);
-      assert.equal(decision.fields.reason, "self" in opts ? "self_scoped_change" : "no_history");
+      assert.equal(decision.fields.reason, "self" in opts ? "install_inputs_changed" : "no_history");
+    } finally { await h.close(); }
+  }
+});
+
+test("a self-scoped code change still holds a build whose finish costs less than its yield", async () => {
+  for (const self of ["path", "scope"] as const) {
+    const h = await rig({ self });
+    try {
+      assert.equal(h.boundary("preopen_gate"), undefined, `${self}: the near-done build keeps running`);
+      const held = h.rows.find((row) => row.step === "daemon.restart_holdout");
+      assert.ok(held, `${self}: a holdout row is written`);
+      assert.equal(held.fields.reason, "finish_is_cheaper");
+      assert.equal(held.fields.self_scoped, true);
+      assert.equal(h.rows.some((row) => row.step === "daemon.restart_yield_asked"), false);
     } finally { await h.close(); }
   }
 });

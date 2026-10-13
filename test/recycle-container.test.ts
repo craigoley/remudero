@@ -1257,3 +1257,48 @@ test("W1-T4198: an instances heap size reaches NODE_OPTIONS", () => {
   assert.match(bad.stderr, /REFUSING -- instance 'fixture' has a malformed max_old_space_mb 'lots'/);
   assert.equal(bad.calls.filter(isRm).length, 0, "a refusal must leave the container alone");
 });
+
+/** W1-T9071: a codex home with one settled session, a data-disk destination, a `stat` reporting the two on
+ *  different filesystems, and a state dir with the named recycle actions pending. */
+function codexSessionsRecycle(actions: string[]): { state: string; extraEnv: Record<string, string>; dst: string } {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-codex-sessions-`));
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const codex = join(root, "codex");
+  mkdirSync(join(codex, "sessions"), { recursive: true });
+  writeFileSync(join(codex, "sessions", "rollout.jsonl"), "x\n");
+  const dst = join(root, "data-disk", "codex-sessions");
+  const stat = join(root, "fake-stat");
+  writeFileSync(stat, `#!/usr/bin/env bash\ncase "$3" in ${root}/data-disk*) echo 2 ;; *) echo 1 ;; esac\n`);
+  chmodSync(stat, 0o755);
+  mkdirSync(join(state, "recycle-actions", "pending"), { recursive: true });
+  for (const a of actions) writeFileSync(join(state, "recycle-actions", "pending", a), "");
+  return { state, dst, extraEnv: { RMD_CODEX_DIR: codex, RMD_CODEX_SESSIONS_DIR: dst, RMD_CODEX_SESSIONS_STAT: stat,
+    STUB_EXTRA_MOUNTS: `${dst}\t/home/node/.codex/sessions\ttrue` } };
+}
+
+test("W1-T9071: a pending recycle action runs between docker rm and docker run, and its sessions bind reaches the new container", () => {
+  const { state, dst, extraEnv } = codexSessionsRecycle(["codex-sessions-to-data-disk"]);
+  const run = runRecycle("good", { stateDir: state, extraEnv });
+  assert.equal(run.status, 0, run.stderr);
+  const isActionPs = (c: Call) => c.bin === "docker" && c.argv.join(" ") === "ps --format {{.Names}}";
+  const rmAt = run.calls.findIndex(isRm);
+  const actionAt = run.calls.findLastIndex(isActionPs);
+  const runAt = run.calls.findIndex(isRun);
+  assert.ok(rmAt >= 0 && rmAt < actionAt && actionAt < runAt, `the action runs after docker rm and before docker run (rm ${rmAt}, action ${actionAt}, run ${runAt})`);
+  assert.ok(run.calls[runAt]!.argv.join(" ").includes(`-v ${dst}:/home/node/.codex/sessions`), "this very launch binds the moved sessions");
+  assert.equal(readFileSync(join(dst, "rollout.jsonl"), "utf8"), "x\n");
+  assert.equal(readFileSync(join(state, "codex-sessions.ready"), "utf8"), `${dst}\n`);
+  assert.deepEqual(readdirSync(join(state, "recycle-actions", "pending")), []);
+  assert.match(run.stdout, /recycle-actions: stopped: codex-sessions-to-data-disk DONE/);
+  assert.match(run.stdout, /recycle-container: codex sessions from /);
+});
+
+test("W1-T9071: a failing recycle action never stops the recycle, and no sessions bind is planned without a ready copy", () => {
+  const { state, dst, extraEnv } = codexSessionsRecycle(["not-a-reviewed-action"]);
+  const run = runRecycle("good", { stateDir: state, extraEnv });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.calls.filter(isRun).length, 1, "the replacement still starts");
+  assert.ok(!run.calls.find(isRun)!.argv.join(" ").includes(dst), "no bind without this instance's ready copy");
+  assert.equal(readdirSync(join(state, "recycle-actions", "failed")).length, 1);
+  assert.match(run.stderr, /not-a-reviewed-action FAILED \(no reviewed script/);
+});
