@@ -20,3 +20,11 @@
     The ledger step plan_pr.preflight_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 352 in the older half, 921 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The rationale supplies aggregate refusal counts but no underlying refusal reasons or identified cause; the finding that these refusals require a fix cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The record asks the implementer to locate the emitter and fix an unspecified cause, while declaring only a new test file. The supplied scope does not establish what production behavior the remedy would change.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration; that match alone cannot establish that recurring refusals stopped or their cause was fixed."
+    judged_at: "2026-10-13T19:06:15.530Z"
+    pin: "e863017bf938a47ac23b27bbb196c469705ee13e1f54460611652b11553b61e7"

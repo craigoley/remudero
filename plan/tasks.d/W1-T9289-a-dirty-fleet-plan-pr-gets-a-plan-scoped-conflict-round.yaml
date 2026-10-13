@@ -1,0 +1,103 @@
+- id: W1-T9289
+  title: "A DIRTY FLEET PLAN PR GETS A PLAN-SCOPED CONFLICT ROUND, NOT AN ESCALATION — the sweep's conflict rows admit only a PR task's own run branch, so a gardener, landing or TRIAGE/APPROVE/RETRO plan PR that another fleet plan merge makes dirty is refused ('head is not this PR task's rmd-owned run branch') and waits for an operator: #11381 (backlog gardener) dirty since 2026-10-13T15:25Z, #7976/#7977 (knowledge gardener) merged by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # the sweep's conflict routing and an unattended merge-commit push onto a fleet-owned plan branch; src/lib/sweep.ts, src/run-task.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: 'review why 11381 is not getting its merge conflicts auto resolved by a worker'"
+  plan_refs: [W1-T5543, W1-T3602, W1-T5537, W1-T5457, W1-T4350, W1-T4941, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts
+  status: queued
+  priority: 3  # about one fleet plan PR a week; each sits escalated for hours, holds its gardener's next proposal for up to a day, and has twice ended in an operator hand merge
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host ledger (read-only, niced; `sweep.disposed` rows in every rotation from
+    2026-09-15 plus the live file, 473 archives opened; the refusal text landed with #5616 on 2026-09-15):
+      - #11381, head backlog-garden-1791904155914 (b3b85a8f3), author app/remudero-fleet, opened 15:11:04Z by the
+        backlog gardener (W1-T4941) to add `priority:` lines to 9 shards. The plan gardener's retirements #11382
+        (15:19:33Z: NEW-1A, W1-T9168) and #11405 (17:58Z: NEW-1B) rewrote the same `status: queued` line in three of
+        those shards, so it went dirty. From 15:25:23Z to 19:00:08Z it has 56 `sweep.disposed` rows, all
+        blocked-ambiguous, blocker conflict, blocker_owner conflict-rebase, acted false, reason "merge conflict
+        (mergeState dirty) — head is not this PR task's rmd-owned run branch — not dispatched". The strike ladder
+        opened a digest issue at 17:02Z whose question offers "re-arm the W1-T76 fix rung" or "revise-spec", and
+        neither applies to a gardener PR. The backlog gardener's state (backlog-gardener.json) holds #11381 as
+        `pending` since 15:11:05Z. `planGarden` proposes nothing while a pending PR is open, and
+        `judgeGardenDecision` releases it only after GARDEN_DECISION_PENDING_RELEASE_MS (24 h) and leaves the PR open.
+      - The same refusal on other fleet-App plan heads: #7976 and #7977 (knowledge-garden-*, 2026-09-30, 2.85 h)
+        ended with "Merge branch 'main' into knowledge-garden-…" commits by the operator. #6951 (plan-garden,
+        2026-09-24, 8 min) and #5704 (2026-09-16, 5 min) also hit it. The other 16 PRs refused with this reason
+        since 2026-09-15 are operator, session or foreign-run heads (unjam-*, fix/*, 10671's "identify PR head"). For those the
+        refusal is correct, and they stay out of scope.
+    WHY, READ on origin/main 1489f1e01 (symbols, not lines), src/lib/sweep.ts `DISPOSITION_RULES`:
+      - The `conflicted` row needs `pr.taskId !== undefined && fixHeadAcceptable(pr.headRefName, taskId, …)`. A
+        gardener or landing PR has no task id (its digest reads "Task undefined"), so the dirty PR falls to the
+        `blocked-ambiguous` row, whose reason prints the cause above.
+      - The fleet already has a plan-scoped owner for these heads, but only for RED ones. W1-T5543's
+        `dispatchPlanGateRound` → `runPlanScopedFixRound` runs only for `disposition === "blocked-fixable" &&
+        isBlockedCi(pr) && pr.isPlanFiling === true`, on `isMachineLanePlanHead` + `isFleetAppAuthor` heads, with a
+        plan-scope file allowance (`isInPlanScope`), a lease push and preflight. `decidePlanRepair`'s mechanical
+        cures (renumber, retitle, base-red refresh) read check logs. None of them reads `mergeState`.
+      - `MACHINE_LANE_HEAD_RE` lists 12 gardeners. run-task.ts `GARDEN_NAMES` (which names every garden branch) and
+        sweep.ts `GARDEN_PLAN_HEAD_RE` list 16. flow, flow-remedy, fix-lane and scout garden PRs therefore are not
+        machine-lane heads, so not even a red one reaches the plan-scoped round.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main (271 shards mention a conflict) and the plan/tasks.d changes of
+    all 346 origin heads (38 changed shards) for "rmd-owned run branch|not this PR task|conflict-rebase|conflict owner"
+    and gardener/plan-only/foreign/non-run near conflict or dirty. Main hits are W1-T3602 (conflict rows for OWNED run
+    branches), W1-T4350 (ratification PRs colliding on MASTER-PLAN.md: one cause, merged), W1-T4927 (knowledge
+    gardener opening a second PR), W1-T5457 (a gardener lints the merged plan BEFORE landing), W1-T5543 (red plan
+    PRs), W1-T5537 (blocker owner names), W1-T4803/W1-T5095/W1-T7954 (hot files, friction tracking, learnings store).
+    None gives a dirty fleet plan PR an owner. No head adds one. W1-T100 shares src/lib/sweep.ts and src/run-task.ts
+    but routes blocked_ci to the ci-log fix path, and does not handle a dirty merge state. Control: the same regex finds W1-T3602 and
+    W1-T4350 on main, and "sweep" finds 16 of the 38 head-changed shards.
+  design: |
+    1. EVERY FLEET PLAN FAMILY HAS A CONFLICT OWNER. A dirty PR that is a plan filing (`isPlanFiling === true`) on
+       a machine-lane head (`isMachineLanePlanHead`) and authored by the fleet App (`isFleetAppAuthor`, from the
+       same facts the plan repair reads) is routed to a plan-scoped conflict round when its captured conflict
+       evidence names only plan-scope paths (`isInPlanScope`). Its disposition reason names that round, never
+       "head is not this PR task's rmd-owned run branch". An operator, session, contributor or Codex head and a
+       PR with a non-plan conflicting path keep today's refusal unchanged. Missing evidence while mergeability
+       reads unknown waits as the W1-T5908 row already does.
+    2. THE ROUND RESOLVES PLAN TEXT ON THE MERGED TREE. `runPlanScopedFixRound` (or a sibling that shares its
+       seams: claim, materialized head worktree, plan-scope allowance, `planPrPreflight` on the result, lease push,
+       `updateMetadata`, `sweep.plan_round.*` rows) gains a conflict mode. It merges origin/main into the head (a
+       merge commit, never a rebase or force push) and gives the worker the conflicted shards with both sides.
+       Main's side is the newer fleet decision (a retirement, a status, a field another lane added) and is kept.
+       The branch's change is re-applied only where it still applies to the merged task: a placement or edit
+       aimed at a task main has since retired or merged is dropped, and the PR body's matching bullet and
+       `## Acceptance` line are removed through `updateMetadata`. The pushed head must preflight clean. When
+       nothing of the branch's change is left, the round pushes nothing, and the existing empty-diff supersession
+       (`emptyDiffSupersedes`) closes the PR on the next pass.
+    3. BOUNDS ARE THE ROUND'S EXISTING ONES. One round per head, and W1-T5543's claim and refused-twice
+       exhaustion. No new count, ceiling or timer. A refused or exhausted round escalates once with a question
+       that names the plan-scoped conflict, not the code fix rung.
+    4. ONE HEAD LIST. The machine-lane head shape includes every name in run-task.ts `GARDEN_NAMES` (derived from
+       it or checked against it), so a new gardener cannot open a plan PR that has no conflict owner.
+    Tests go in test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts. Drive `runSweep` with fake
+    deps over an `OpenPrView` shaped like #11381 (head backlog-garden-<epoch>, isPlanFiling, mergeState dirty,
+    captured evidence on three plan/tasks.d shards, fleet-App author) and over the same view with an operator
+    author. Drive the round with a git fixture in which main retired a shard the branch adds `priority:` to.
+  acceptance:
+    - claim: "a dirty fleet-App plan PR on a machine-lane head with plan-only conflict evidence is dispatched to the plan-scoped conflict round, not escalated as blocked-ambiguous"
+      proof: 'grep: test("W1-T9289: a dirty fleet gardener plan PR is dispatched to the plan-scoped conflict round" in test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts'
+    - claim: "the same dirty PR authored by an operator or session head keeps the not-dispatched refusal"
+      proof: 'grep: test("W1-T9289: a dirty operator plan PR keeps the not-dispatched refusal" in test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts'
+    - claim: "the conflict round keeps main's retirement and drops the branch's placement on the retired task, and its pushed head preflights clean"
+      proof: 'grep: test("W1-T9289: the conflict round keeps the retirement from main and drops a placement on a retired task" in test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts'
+    - claim: "every registered gardener's branch is a machine-lane plan head"
+      proof: 'grep: test("W1-T9289: every GARDEN_NAMES branch is a machine-lane plan head" in test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts"
+  falsifier: |
+    Leave the `conflicted` row gated on `fixHeadAcceptable` alone: the #11381-shaped view still disposes
+    blocked-ambiguous with "head is not this PR task's rmd-owned run branch", and the first test fails. Admit
+    every dirty plan PR regardless of author: the operator-authored view is dispatched, and the second test fails.
+    Resolve by taking the branch's side: the merged shard loses `retirement: retired`, and the third test fails.
+    Leave `MACHINE_LANE_HEAD_RE` at 12 gardeners: `fix-lane-garden-1` is not a machine-lane head, and the
+    fourth test fails.

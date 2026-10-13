@@ -20,3 +20,11 @@
     The ledger step selector-shadow.gardener_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 48 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The rationale reports 50 ledger rows and no covering task, but supplies no underlying rows or coverage census; the finding cannot be verified from what is shown, an explicit escalation condition.; on the change's description/files alone, no diff was read — The record explicitly leaves the cause and emitting source file unidentified, while declaring only a new test file; the proposed remedy's scope remains unresolved.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test-title text with grep; that evidence alone cannot establish that the cause was fixed or recurrence stopped."
+    judged_at: "2026-10-13T19:07:04.564Z"
+    pin: "4ce0ac6e2942977f6610e5f5350af3d8f106b3afd99252660a01b73b1f712f52"
