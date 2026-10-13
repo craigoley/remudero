@@ -5,8 +5,15 @@ export function accountAuthorPhases(receipt) {
  const nativeDurationMs=timed.reduce((sum,step)=>sum+step.durationMs,0);
  const wallMeasured=Number.isSafeInteger(receipt.durationMs)&&receipt.durationMs>=nativeDurationMs;
  const tests=steps.find(step=>step.name==='affected-tests'||step.name==='affected-tests-subset');
- const complete=receipt.verdict==='passed'&&tests?.ok===true&&tests.testSummary?.fail===0&&
-  steps.length>0&&unmeasured.length===0&&wallMeasured;
+ const summary=tests?.testSummary;
+ const positiveSummary=summary && ['tests','suites','pass','fail','cancelled','skipped','todo']
+  .every(field=>Number.isSafeInteger(summary[field])&&summary[field]>=0) && summary.tests>0 && summary.pass===summary.tests &&
+  ['fail','cancelled','skipped','todo'].every(field=>summary[field]===0);
+ const complete=receipt.verdict==='passed'&&tests?.name==='affected-tests'&&positiveSummary&&
+  Array.isArray(receipt.suites)&&receipt.suites.length>0&&new Set(receipt.suites).size===receipt.suites.length&&
+  receipt.suites.every(path=>typeof path==='string'&&path.startsWith('test/')&&path.endsWith('.test.ts'))&&
+  receipt.tiered===undefined&&receipt.affectedTestsNotRunReason===undefined&&
+  steps.length>0&&steps.every(step=>step.ok===true)&&unmeasured.length===0&&wallMeasured&&Number.isSafeInteger(nativeDurationMs);
  return {state:complete?'measured':timed.length?'partial':'unavailable',trainingEligible:complete,
   nativeDurationMs,wallDurationMs:wallMeasured?receipt.durationMs:null,
   selectionAndAdmissionOverheadMs:wallMeasured?receipt.durationMs-nativeDurationMs:null,
