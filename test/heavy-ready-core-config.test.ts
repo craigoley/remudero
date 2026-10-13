@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import fs, { mkdtempSync, rmSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -35,7 +35,7 @@ test("startup directory resolution performs no filesystem or process activity", 
 });
 
 test("a configured native READY request safely releases and a captured adapter never hot-reloads config", t => {
-  const directory = mkdtempSync(join(tmpdir(), "rmd-heavy-ready-config-"));
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "rmd-heavy-ready-config-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const config = { heavyReadyDirectory: directory }, gate = heavyNewBuildGate(() => {}, { dir: resolveHeavyReadyDirectory(config, {}) });
   assert.equal(gate(), undefined);

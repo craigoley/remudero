@@ -17,7 +17,7 @@ import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { lintTask } from "../src/lib/task-linter.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
-function fixture(kind: string, ownerFile: string) {
+function fixture(kind: string, ownerFile: string, gate = "gate") {
   const repo = gitRepo({ kind });
   mkdirSync(join(repo.dir, ".github", "workflows"), { recursive: true });
   writeFileSync(join(repo.dir, ".github", "workflows", "ci.yml"), "name: ci\non: [pull_request]\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps: []\n");
@@ -47,7 +47,7 @@ function fixture(kind: string, ownerFile: string) {
     ledgerRecords: () => [],
     gateFireRates: () => ({
       status: "measured", prsScanned: 9, neverFired: [], alwaysFired: [],
-      gates: [{ gate: "gate", prs: 9, runs: 12, redRuns: 12, refusals: 12, repaired: 12, overridden: 0, minutes: 300, redMinutes: 300, redPrs: 9 }],
+      gates: [{ gate, prs: 9, runs: 12, redRuns: 12, refusals: 12, repaired: 12, overridden: 0, minutes: 300, redMinutes: 300, redPrs: 9 }],
     }),
     planState: () => ({ tasks: [] }),
     ownerSearch,
@@ -78,4 +78,31 @@ test("the ci-friction gardener refuses to land a draft machine-filing admission 
   assert.equal(pass.prUrl, undefined, "no PR opens for a shard lint-plan would turn red");
   assert.deepEqual(fx.landed, []);
   assert.ok(fx.events.includes("ci-friction.garden_filing_failed"), `the refusal is a recorded filing failure (events: ${fx.events.join(", ")})`);
+});
+
+function admittedNewDraft(gate: string) {
+  const fx = fixture("ci-friction-rule-word-draft", ".github/workflows/ci.yml", gate);
+  assert.equal(fx.pass().prUrl, "https://github.com/acme/remudero/pull/1");
+  const path = fx.landed[0]![0]!;
+  const plan = loadPlanFromYaml(readFileSync(join(fx.repo.dir, path), "utf8"), path);
+  const task = plan.tasks[0]!;
+  const exists = (p: string) => existsSync(join(fx.repo.dir, p));
+  const lint = lintTask(task, {
+    duplicateSlug: path.split("/").at(-1)!.replace(/^W1-T\d+-/, "").replace(/\.yaml$/, ""),
+    riskTransition: { baseTask: undefined }, pathExistsAtBase: exists,
+    machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: exists, pathExistsAtBase: exists },
+  });
+  assert.deepEqual(lint.violations.filter(v => v.severity === "block"), [], "the complete changed-shard lint admits the real filing");
+  assert.equal(task.origin, `ci-friction:check:${gate}`, "the cause identity survives the filename change");
+  return task;
+}
+
+test("the ci-friction coverage refusal files without inventing a CI rule suite", () => {
+  admittedNewDraft("ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero");
+});
+
+test("ci-friction census and baseline causes retain separate admitted regression identities", () => {
+  const census = admittedNewDraft("a-census-refusal");
+  const baseline = admittedNewDraft("a-baseline-refusal");
+  assert.notEqual(census.files?.[1], baseline.files?.[1]);
 });

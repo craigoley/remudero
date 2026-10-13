@@ -21,7 +21,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
@@ -4915,15 +4915,17 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
       unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
   const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
-  let incomplete = false;
-  let firstRun: string | undefined, afterRotation: string | undefined;
+  let incomplete = false, liveNotObserved = true;
+  const gaps = { unreadArchives: 0, malformedRows: 0, liveTornTails: 0, unreadLive: 0, invalidValues: 0 };
+  const gapReason = () => `unread archives: ${gaps.unreadArchives}; could-belong malformed rows: ${gaps.malformedRows}; live torn tails: ${gaps.liveTornTails}; unread live: ${gaps.unreadLive}; live not observed: ${liveNotObserved}; invalid follow-up values: ${gaps.invalidValues}`;
+  let firstRun: string | undefined, afterRotation: string | undefined, windowStart = args.prCreatedAt;
   try {
     const stateDir = dirname(args.ledgerPath);
     if (resolve(args.ledgerPath) !== resolve(ledgerLivePath(stateDir))) throw new Error("promise harvest path is not the union's live ledger");
     // The shared union deliberately tolerates absent state/live files. That is not
     // evidence of an empty harvest; prove the directory exists before inferring absence.
     const names = readdirSync(stateDir);
-    if (!names.includes(LEDGER_FILENAME)) incomplete = true;
+    if (!names.includes(LEDGER_FILENAME)) { incomplete = true; liveNotObserved = true; }
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
       let liveRead = false;
@@ -4948,14 +4950,22 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         }
         // The earliest live start may be a retry whose original start has already rotated away.
         const bound = firstRun !== undefined && Date.parse(firstRun) < Date.parse(prCreatedAt) ? firstRun : prCreatedAt;
+        windowStart = bound;
         afterRotation = rotationBeforeTime(names, bound);
       }
       for await (const row of openLedgerUnion(stateDir, {
         step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
         ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
-        onLiveRead: () => { liveRead = true; },
+        onLiveRead: () => { liveRead = true; liveNotObserved = false; },
         onUnreadDirectory: (_path, error) => { throw error; },
-        onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
+        onUnreadArchive: () => { incomplete = true; gaps.unreadArchives++; },
+        onUnreadLive: () => { incomplete = true; gaps.unreadLive++; },
+        onMalformedRow: finding => {
+          if (!malformedRowCouldBelong(finding, args.taskId, windowStart ?? finding.timestamp ?? "")) return;
+          incomplete = true;
+          if (finding.kind === "live-torn-tail") gaps.liveTornTails++;
+          else gaps.malformedRows++;
+        },
       }, args.io)) {
         if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
             typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts))) {
@@ -4963,10 +4973,10 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         }
         if (row.step !== "report.followups") continue;
         if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
-        if (!Array.isArray(row.entries)) { incomplete = true; continue; }
+        if (!Array.isArray(row.entries)) { incomplete = true; gaps.invalidValues++; continue; }
         for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
           if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
-            incomplete = true; continue;
+            incomplete = true; gaps.invalidValues++; continue;
           }
           const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
           entries.set(JSON.stringify(entry), entry);
@@ -4979,7 +4989,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
           }
         }
       }
-      if (liveOnly && !liveRead) incomplete = true;
+      if (liveOnly && !liveRead) { incomplete = true; liveNotObserved = true; }
       const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
       if (unreportedFollowUps(observation.promised,
         followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
@@ -4989,10 +4999,10 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
     if (incomplete && unreportedFollowUps(observation.promised, report, observation.planRecords).length > 0) {
-      return { state: "unknown", cause: "promise-harvest-incomplete", reason: "promise harvest corpus is unreadable or malformed; absence is unproved" };
+      return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest corpus is unreadable or malformed; ${gapReason()}; absence is unproved` };
     }
     return { ...observation, harvested, harvestCorpusComplete: !incomplete };
-  } catch (error) { return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest unavailable: ${String(error)}` }; }
+  } catch (error) { return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest unavailable: ${String(error)}; ${gapReason()}` }; }
   finally { clearTimeout(timer); }
 }
 

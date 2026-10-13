@@ -395,6 +395,7 @@ export interface EnvRegistryEntry {
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
+  envEntry("RMD_HEAVY_READY_DEADLINE_SERVICE", "Default OFF. Exact 1 separately enables the independent READY deadline worker at natural startup, with an explicit private READY directory. Unavailable service refuses only NEW builds; no eval dispatch or runtime activation authority.", ["src/lib/heavy-ready-startup.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
   envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
