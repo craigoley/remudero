@@ -41199,7 +41199,7 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
-    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection?.isReady ?? boardGate.isReady)], tokens.read);
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
     if (boardProjection) boardProjection.start();
