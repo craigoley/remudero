@@ -79,10 +79,8 @@ export const SPAWN_REACHING = new Map([
  * letting the list quietly grow. Same idiom the producer-completeness, route-registration and
  * config-reader-seam checks already use.
  */
-export const CLOCK_ARTIFACTS = new Map([
-  ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
-  ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
-]);
+// Empty since 2026-10-13: W1-T6035 moved the file clock, so prune-liveness passed shifted; serve.glance's suite is gone.
+export const CLOCK_ARTIFACTS = new Map();
 
 /** Tokens that mark a suite as touching an age-judging surface — the population's own criterion. */
 const AGE_SURFACE_RE =
@@ -281,7 +279,7 @@ export function headerLines(candidates, runnable) {
 }
 
 /** The report a single sweep and the W1-T5102 merge both print, as log lines. Pure. */
-export function renderReport({ drift, newDrift, staleExclusions, unreached, browsers = [], ceiling, ok, runnable }) {
+export function renderReport({ drift, newDrift, staleExclusions, unreached, browsers = [], ceiling, ok, runnable, artifacts = CLOCK_ARTIFACTS }) {
   const out = [""];
   if (unreached.length) {
     out.push(`UNREACHED — ${unreached.length} suite(s) not run inside the ${SWEEP_BUDGET_MS / 60000}-minute budget (oldest-touched last): ${unreached.slice(0, 10).join(", ")}${unreached.length > 10 ? ` + ${unreached.length - 10} more` : ""}`);
@@ -343,7 +341,7 @@ export function renderReport({ drift, newDrift, staleExclusions, unreached, brow
   if (ok) {
     // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` (negative under
     // `--only`); drifting suites within the ceiling are not "immune" either (W1-T1128).
-    const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
+    const artifactsRun = runnable.filter((s) => artifacts.has(s)).length;
     const immune = runnable.length - artifactsRun - drift.length;
     const notes = [];
     if (artifactsRun) notes.push(`${artifactsRun} known artifact(s) still failing as expected`);
@@ -370,6 +368,7 @@ export function main({
   now = Date.now,
   readSuite = readSuiteText,
   writeJson = writeJsonFile,
+  artifacts = CLOCK_ARTIFACTS,
   log = console.log,
   write = (s) => process.stdout.write(s),
 } = {}) {
@@ -400,7 +399,7 @@ export function main({
   for (const line of headerLines(candidates, runnable)) log(line);
   if (sharded) log(`  shard ${shard.i}/${shard.n}          : ${slice.length} suites`);
   if (listOnly) {
-    for (const s of slice) log(`    ${CLOCK_ARTIFACTS.has(s) ? "artifact" : "        "}  ${s}`);
+    for (const s of slice) log(`    ${artifacts.has(s) ? "artifact" : "        "}  ${s}`);
     return 0;
   }
 
@@ -426,13 +425,13 @@ export function main({
     const r = run(suite, SWEEP_SHIFT_DAYS);
     results.set(suite, r);
     done++;
-    const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
+    const verdict = r.failed ? (artifacts.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
     write(`  [${String(done).padStart(3)}/${slice.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
   const unreached = ordered.slice(done);
 
   if (sharded) {
-    const drift = [...results].filter(([s, r]) => r.failed && !CLOCK_ARTIFACTS.has(s)).map(([suite, r]) => describeDrift({ suite, ...r }, run));
+    const drift = [...results].filter(([s, r]) => r.failed && !artifacts.has(s)).map(([suite, r]) => describeDrift({ suite, ...r }, run));
     writeJson(resultsOut, {
       version: 1, shard: shard.i, of: shard.n, candidates: candidates.length, runnable: runnable.length, order,
       elapsedMs: now() - started, ran: [...results.keys()], unreached,
@@ -443,11 +442,11 @@ export function main({
     return unreached.length ? 1 : 0;
   }
 
-  const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
+  const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, artifacts, ceiling, recorded);
   const browsers = browserSuites(runnable, readSuite);
   const ok = classified && unreached.length === 0 && browsers.length === 0;
   const drift = drifted.map((d) => describeDrift(d, run));
-  for (const line of renderReport({ drift, newDrift, staleExclusions, unreached, browsers, ceiling, ok, runnable })) log(line);
+  for (const line of renderReport({ drift, newDrift, staleExclusions, unreached, browsers, ceiling, ok, runnable, artifacts })) log(line);
   return ok ? 0 : 1;
 }
 

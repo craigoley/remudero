@@ -62,9 +62,9 @@ import type { Config } from "../src/lib/config.js";
 const MIN = 60_000;
 const ago = (mins: number) => new Date(Date.now() - mins * MIN);
 // `newestActivityMs`/`reapStaleWorktrees` age-gate on REAL FILESYSTEM MTIMES, which
-// `scripts/clock-shift.mjs` cannot shift (it monkeypatches only this process's `Date`) — the
-// exact mechanism `CLOCK_ARTIFACTS`' `prune-liveness` entry (scripts/clock-sweep.mjs) already
-// names for this suite's own sibling. A file/dir created via `writeFileSync`/`mkdirSync` gets its
+// `scripts/clock-shift.mjs` could not shift before W1-T6035 (it moved only this process's `Date`),
+// the mechanism that once kept this suite's sibling `prune-liveness` in clock-sweep's
+// CLOCK_ARTIFACTS. A file/dir created via `writeFileSync`/`mkdirSync` gets its
 // mtime from the REAL OS clock, so under clock-sweep's future shift a fixture meant to read as
 // "just written" instead reads as `Date.now() - mtimeMs` days old. Every fixture below that needs
 // a path to read as FRESH re-stamps it explicitly from the injected clock — the same "stamp from

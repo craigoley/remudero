@@ -52,6 +52,7 @@ const mod = (await import(SWEEP_URL)) as {
     derive?: () => string[];
     ceiling?: number;
     recorded?: string[];
+    artifacts?: ReadonlyMap<string, string>;
     log?: (m: string) => void;
     write?: (m: string) => void;
   }) => number;
@@ -83,6 +84,13 @@ const {
 const failed = { failed: true, output: "" };
 const passed = { failed: false, output: "" };
 
+/** The shipped CLOCK_ARTIFACTS may be EMPTY (it is since W1-T6035 moved the file clock), so the
+ *  exclusion mechanics are exercised against this fixture list, never against whatever ships today. */
+const FIXTURE_ARTIFACTS: ReadonlyMap<string, string> = new Map([
+  ["fixture-mtime-reader", "compares a real child-process clock against the shifted parent clock, which no preload can move"],
+  ["fixture-browser-page", "drives a browser page whose own clock is unshifted, so server-rendered shifted times disagree with it"],
+]);
+
 test("a non-excluded suite that fails shifted IS reported — the list cannot swallow a real failure", () => {
   // Pinned at ceiling 0 (W1-T1128): this fixture's whole point is that the ONE real failure
   // cannot be swallowed, independent of whatever the real recorded ceiling happens to be today.
@@ -91,7 +99,7 @@ test("a non-excluded suite that fails shifted IS reported — the list cannot sw
       ["post-fix-reverification", failed],
       ["sweep", passed],
     ]),
-    CLOCK_ARTIFACTS,
+    FIXTURE_ARTIFACTS,
     0,
     SYNTHETIC_RECORDED,
   );
@@ -102,38 +110,54 @@ test("a non-excluded suite that fails shifted IS reported — the list cannot sw
 
 test("an excluded artifact that STILL fails is silent — that is the entry doing its job", () => {
   const { drifted, staleExclusions, ok } = classifySweep(
-    new Map([...CLOCK_ARTIFACTS.keys()].map((s) => [s, failed])),
+    new Map([...FIXTURE_ARTIFACTS.keys()].map((s) => [s, failed])),
+    FIXTURE_ARTIFACTS,
   );
-  assert.equal(ok, true, "the three known artifacts failing shifted is the expected steady state");
+  assert.equal(ok, true, "every listed artifact failing shifted is the expected steady state");
   assert.deepEqual(drifted, []);
   assert.deepEqual(staleExclusions, []);
 });
 
 test("an excluded artifact that becomes IMMUNE surfaces as a STALE entry, carrying its reason", () => {
-  // The rot check, kept GENERIC over whichever suites CLOCK_ARTIFACTS currently names (W1-T1104
-  // removed `emissions` — measured passing shifted — so this must not pin that literal name; the
-  // property is "the FIRST artifact going immune is reported stale", not which suite it is today).
-  const [immuneSuite, ...stillFailingSuites] = [...CLOCK_ARTIFACTS.keys()];
+  // The rot check, run over FIXTURE_ARTIFACTS rather than the shipped list, whose membership moves
+  // (W1-T1104 removed `emissions`; the list is empty since W1-T6035): the property is "an artifact
+  // going immune is reported stale", not which suite that is today.
+  const [immuneSuite, ...stillFailingSuites] = [...FIXTURE_ARTIFACTS.keys()];
   const results = new Map<string, { failed: boolean; output: string }>([[immuneSuite, passed]]);
   for (const s of stillFailingSuites) results.set(s, failed);
-  const { staleExclusions, drifted, ok } = classifySweep(results);
+  const { staleExclusions, drifted, ok } = classifySweep(results, FIXTURE_ARTIFACTS);
   assert.equal(ok, false, "a rotted exclusion must fail the sweep, not pass quietly");
   assert.deepEqual(drifted, [], "a stale exclusion is not a drift — they are different findings");
   assert.equal(staleExclusions.length, 1);
   assert.equal(staleExclusions[0].suite, immuneSuite);
   assert.equal(
     staleExclusions[0].reason,
-    CLOCK_ARTIFACTS.get(immuneSuite),
+    FIXTURE_ARTIFACTS.get(immuneSuite),
     "the report must carry WHY it was excluded, or nobody can judge whether removing it is right",
   );
 });
 
 test("every exclusion reason names a MECHANISM — 'flaky' is not a reason", () => {
-  assert.ok(CLOCK_ARTIFACTS.size > 0 && SPAWN_REACHING.size > 0, "a vacuous list would make this assertion meaningless");
-  for (const [suite, reason] of [...CLOCK_ARTIFACTS, ...SPAWN_REACHING]) {
+  // SPAWN_REACHING is the non-vacuous control; CLOCK_ARTIFACTS may legitimately be empty.
+  assert.ok(SPAWN_REACHING.size > 0, "a vacuous list would make this assertion meaningless");
+  for (const [suite, reason] of [...CLOCK_ARTIFACTS, ...SPAWN_REACHING, ...FIXTURE_ARTIFACTS]) {
     assert.ok(reason.length >= 40, `${suite}'s reason is too thin to be a mechanism: ${reason}`);
     assert.doesNotMatch(reason, /^\s*(flaky|todo|tbd|unstable)\b/i, `${suite} has a placeholder reason`);
   }
+});
+
+/** The listed artifacts whose suite file is gone. An entry for a missing suite is never RUN, so it can
+ *  never surface as stale: `serve.glance` sat in CLOCK_ARTIFACTS after its file was deleted. */
+function vanishedArtifacts(artifacts: ReadonlyMap<string, string>, testDir: string): string[] {
+  return [...artifacts.keys()].filter((suite) => !existsSync(join(testDir, `${suite}.test.ts`)));
+}
+
+test("every CLOCK_ARTIFACTS entry names a suite file that exists, so a deleted suite cannot hide as an exclusion", () => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  assert.deepEqual(vanishedArtifacts(CLOCK_ARTIFACTS, testDir), []);
+  // Positive control: the same check names a missing suite and passes a real one.
+  const probe = new Map([["clock-sweep", "a real suite file"], ["no-such-suite-anywhere", "a deleted suite"]]);
+  assert.deepEqual(vanishedArtifacts(probe, testDir), ["no-such-suite-anywhere"]);
 });
 
 // ── THE DRIFT CEILING (W1-T1128). `classifySweep` used to require `drifted.length === 0` --
@@ -238,15 +262,12 @@ test("the recorded ceiling carries the rule that it may fall and must never rise
 });
 
 test("a stale exclusion still fails regardless of the drift ceiling", () => {
-  // GENERIC over whichever suite CLOCK_ARTIFACTS currently names first (the same reason the
-  // "becomes IMMUNE" test above reads `[...CLOCK_ARTIFACTS.keys()]` rather than a literal name):
-  // W1-T1104 already removed `emissions` from the map once (measured passing shifted in CI), so a
-  // test pinned to that literal name would fail the moment the map's membership moves, for a
-  // reason that has nothing to do with the property under test here — a ceiling never forgiving a
-  // stale exclusion. A ceiling of 100 is deliberately far above any plausible drift count, so a
-  // pass here could ONLY come from the ceiling wrongly forgiving a stale exclusion.
-  const [anyArtifact] = CLOCK_ARTIFACTS.keys();
-  const { staleExclusions, drifted, ok } = classifySweep(new Map([[anyArtifact, passed]]), CLOCK_ARTIFACTS, 100);
+  // Over FIXTURE_ARTIFACTS for the same reason as the "becomes IMMUNE" test above: the shipped list's
+  // membership moves, and the property here is only that a ceiling never forgives a stale exclusion.
+  // A ceiling of 100 is far above any plausible drift count, so a pass here could ONLY come from the
+  // ceiling wrongly forgiving a stale exclusion.
+  const [anyArtifact] = FIXTURE_ARTIFACTS.keys();
+  const { staleExclusions, drifted, ok } = classifySweep(new Map([[anyArtifact, passed]]), FIXTURE_ARTIFACTS, 100);
   assert.equal(drifted.length, 0);
   assert.equal(staleExclusions.length, 1);
   assert.equal(ok, false, "a stale exclusion must fail even under a wildly generous ceiling");
@@ -485,7 +506,8 @@ test("main returns 0 and reports the immune count from what actually RAN", () =>
   const code = main({
     argv: [],
     derive: () => ["emissions", "learnings"],
-    run: (s) => ({ failed: CLOCK_ARTIFACTS.has(s) }), // artifacts fail as expected; others pass
+    run: (s) => ({ failed: FIXTURE_ARTIFACTS.has(s) }), // artifacts fail as expected; others pass
+    artifacts: FIXTURE_ARTIFACTS,
     log: (m) => lines.push(m),
     write: () => {},
   });
@@ -519,10 +541,11 @@ test("main returns 1 on drift and names the suite, the failing test, the fuse an
 
 test("main reports a STALE EXCLUSION when a listed clock artifact starts passing shifted", () => {
   const lines: string[] = [];
-  const artifact = [...CLOCK_ARTIFACTS.keys()][0];
+  const artifact = [...FIXTURE_ARTIFACTS.keys()][0];
   const code = main({
     argv: [],
     derive: () => [artifact],
+    artifacts: FIXTURE_ARTIFACTS,
     run: () => ({ failed: false }), // the artifact no longer fails -- its stated mechanism is gone
     log: (m) => lines.push(m),
     write: () => {},
