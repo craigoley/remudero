@@ -46,9 +46,13 @@ test("the path fallback keeps unrelated tests as concerns and explicit slugs tak
 });
 
 test("tasks without a shard path retain the existing sizing behavior", () => {
+  // A setup helper is the concern its suites accompany, so the span here is made of two suites alone:
+  // with no shard slug neither is the task's own falsifier and both count; with the slug supplied the
+  // matching suite is discounted and only the unrelated one remains.
+  const files = ["test/unrelated.test.ts", `test/${SLUG}.test.ts`];
   for (const sourcePath of [undefined, "plan/tasks.yaml"]) {
-    assert.equal(sizingViolation(fixture({ sourcePath }))?.severity, "block");
-    assert.equal(sizingViolation(fixture({ sourcePath }), { duplicateSlug: SLUG }), undefined);
+    assert.equal(sizingViolation(fixture({ sourcePath, files }))?.severity, "block");
+    assert.equal(sizingViolation(fixture({ sourcePath, files }), { duplicateSlug: SLUG }), undefined);
   }
   assert.equal(sizingViolation(fixture({ risk: "high", band_meaning: "span" })), undefined);
   assert.equal(sizingViolation(fixture({ files: ["src/lib/foo.ts", "src/lib/bar.ts", `test/${SLUG}.test.ts`] }))?.severity, "block");
