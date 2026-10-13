@@ -9,7 +9,7 @@
   risk: medium
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=52c087e49d9aed7a
+  # backlog gardener: band=2 evidence=37daaf119d233841
   attempts: 0
   files:
     - src/lib/review.ts
