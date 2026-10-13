@@ -2,9 +2,11 @@
  * Reservation-backed evals are default-off. The live command remains quiet-only
  * until a consumer validates the referenced receipts and owns the full-run boundary.
  */
-import { HEAVY_READY_ESCALATION_MS } from "./heavy-build-reservation.js";
-import { PAIRED_ATTEMPT_MAX_BUDGET_USD } from "./paired-trial.js";
-import { SKILL_EVAL_ARMS, SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_TRIALS_PER_ARM } from "./skill-eval.js";
+/** PRIMARY CONTROL: the v1 operator-approved contract, not a silent migration to future eval sizes.
+ * Conformance tests bind these values to the existing executor. Keep this offline planner free of
+ * worker/config/ledger imports; qualifying evidence must not initialize those production modules.
+ */
+export const RESERVED_EVAL_V1_POLICY = { readyEscalationMs: 60 * 60_000, attempts: 12, perAttemptMaxUsd: 15 } as const;
 
 /** PRIMARY CONTROL: only a fresh resource observation can price admission; tested at both boundary sides. */
 export const EVAL_CAPACITY_MAX_AGE_MS = 10_000;
@@ -109,8 +111,10 @@ function validBinding(b: ReservedEvalBinding): boolean {
     && /^[a-f0-9]{40}$/.test(b.sourceHead) && /^v?\d+\.\d+\.\d+$/.test(b.nodeVersion)
     && digest(b.lockSha256) && atom(b.host) && digest(b.commandSha256);
 }
+const BINDING_FIELDS: readonly (keyof ReservedEvalBinding)[] = ["proposalId", "draftSha256", "heldOutSetHash", "stackHash",
+  "sourceHead", "nodeVersion", "lockSha256", "host", "commandSha256"];
 const sameBinding = (a: ReservedEvalBinding, b: ReservedEvalBinding): boolean =>
-  (Object.keys(b) as Array<keyof ReservedEvalBinding>).every((key) => a[key] === b[key]) && validBinding(a);
+  BINDING_FIELDS.every((key) => a[key] === b[key]) && validBinding(a);
 const fresh = (at: number, now: number, age: number): boolean => integer(at) && at <= now && now - at <= age;
 
 /** Read no files, take no leases, change no fleet flags and spend nothing.
@@ -125,7 +129,7 @@ export function qualifyReservedSkillEval(input: ReservedEvalQualificationInput):
   if (input.mode !== "reservation-backed") return result("inert", "reservation-mode-disabled");
   const { ready, nowMs } = input;
   if (!integer(nowMs) || !digest(ready.requestId) || !integer(ready.readyAtMs)
-    || ready.expiresAtMs !== ready.readyAtMs + HEAVY_READY_ESCALATION_MS || !integer(ready.expiresAtMs))
+    || ready.expiresAtMs !== ready.readyAtMs + RESERVED_EVAL_V1_POLICY.readyEscalationMs || !integer(ready.expiresAtMs))
     return result("refused", "invalid-original-ready");
   const deadline = { readyDeadlineMs: ready.expiresAtMs };
   if (ready.terminal !== undefined) {
@@ -145,7 +149,7 @@ export function qualifyReservedSkillEval(input: ReservedEvalQualificationInput):
     || grant.admitByMs <= grant.approvedAtMs || grant.admitByMs > ready.expiresAtMs
     || !integer(grant.finishByMs) || grant.finishByMs <= grant.admitByMs || !integer(grant.minWorkers, 1)
     || !positive(grant.maxCostUsd) || !positive(grant.perAttemptBudgetUsd)
-    || grant.perAttemptBudgetUsd > PAIRED_ATTEMPT_MAX_BUDGET_USD)
+    || grant.perAttemptBudgetUsd > RESERVED_EVAL_V1_POLICY.perAttemptMaxUsd)
     return result("refused", "invalid-fixed-grant", deadline);
   const bounds = { ...deadline, admissionDeadlineMs: grant.admitByMs, finishDeadlineMs: grant.finishByMs };
   if (nowMs >= grant.admitByMs) return result("escalate", "fixed-admission-deadline-reached", bounds);
@@ -155,7 +159,7 @@ export function qualifyReservedSkillEval(input: ReservedEvalQualificationInput):
     || safeguards.wholeRunTerminationVerified !== true || safeguards.atomicGrantConsumptionVerified !== true || safeguards.ownLeaseReleaseVerified !== true)
     return result("refused", "runtime-safeguards-unverified", bounds);
   const calibration = input.calibration;
-  const attempts = SKILL_EVAL_HELD_OUT_TASKS * SKILL_EVAL_TRIALS_PER_ARM * SKILL_EVAL_ARMS.length;
+  const attempts = RESERVED_EVAL_V1_POLICY.attempts;
   if (!calibration || calibration.state !== "closed-native" || !digest(calibration.receiptSha256)
     || !sameBinding(calibration.binding, input.binding) || !fresh(calibration.observedAtMs, nowMs, EVAL_CALIBRATION_MAX_AGE_MS)
     || !integer(calibration.workers, 1) || calibration.workers < grant.minWorkers

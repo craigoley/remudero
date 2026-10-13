@@ -10,6 +10,10 @@ it is not a grant, a verified receipt, an acquired lease, or permission to spend
 The existing `rmd skill-eval --confirm-spend` remains quiet-only. No runtime flag,
 startup sidecar or live pilot is enabled by this change.
 
+The v1 contract freezes the approved READY60,
+12-attempt and per-attempt $15 backstop values, with an executor-conformance test;
+changing the executor's bounds must not silently migrate an older grant. The pure
+planner imports no worker, config or ledger implementation.
 The preflight keeps immutable READY + 60 minutes separate from the grant's fixed
 admission and finish deadlines. Retries retain that history, consumed/revoked grants
 refuse, and terminal READY history never reopens. A capacity wait includes its original

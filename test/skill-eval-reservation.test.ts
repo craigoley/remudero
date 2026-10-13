@@ -32,6 +32,16 @@ function fixture(): ReservedEvalQualificationInput {
   };
 }
 
+test("the offline v1 eval policy agrees with the operator-approved existing executor bounds", async () => {
+  const { RESERVED_EVAL_V1_POLICY } = await load();
+  const ready = await import("../src/lib/heavy-build-reservation.js");
+  const paired = await import("../src/lib/paired-trial.js");
+  const evals = await import("../src/lib/skill-eval.js");
+  assert.deepEqual(RESERVED_EVAL_V1_POLICY, { readyEscalationMs: ready.HEAVY_READY_ESCALATION_MS,
+    attempts: evals.SKILL_EVAL_HELD_OUT_TASKS * evals.SKILL_EVAL_TRIALS_PER_ARM * evals.SKILL_EVAL_ARMS.length,
+    perAttemptMaxUsd: paired.PAIRED_ATTEMPT_MAX_BUDGET_USD });
+});
+
 test("reservation-backed eval qualification is default-off and never dispatch permission", async () => {
   const { qualifyReservedSkillEval } = await load();
   for (const mode of [undefined, "quiet-only"] as const) {
