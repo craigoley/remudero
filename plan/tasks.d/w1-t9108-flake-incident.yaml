@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,13 @@
     CI runs: 38345195074, 38374203489, 38397485389, 38400190008.
     Retry outcomes: 4 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The filed scope declares one existing test file and requires a cause fix plus a regression test that forces the failing order, with unit test and grep proofs."
+      - "The rationale cites four distinct unrelated PR failures, four recoveries on retry, and specific CI runs with a stated evidence source."
+      - "The supplied scope requests no sensitive access, destructive action, policy change, or operator-only decision; the family track record reports seven merged tasks and zero declined."
+    judged_at: "2026-10-13T14:43:56.902Z"
+    pin: "be0fbf74c68f7540b0dfdd549beff3fee75c1643ff0341cf3a9c1acf4f00a811"
