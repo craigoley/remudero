@@ -557,7 +557,7 @@ import {
   shouldApplyDefault,
   defaultAnswerWindowMs,
   type EscalateDeps,
-  type EscalateTriageDeps,
+  type EscalateTriageSettings,
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
@@ -3284,7 +3284,7 @@ export function buildEscalationTriageRuntime(
   io: {
     readPolicy?: () => unknown;
     readRows?: (ledgerPath: string) => Record<string, unknown>[];
-    now?: () => number;
+    clock?: Clock;
     seenAt?: () => number | undefined;
     windowMs?: () => number;
     client?: () => Pick<DaemonClient, "submitFeedback" | "listFeedback">;
@@ -3292,11 +3292,11 @@ export function buildEscalationTriageRuntime(
     amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
     kick?: (e: Escalation) => void;
   } = {},
-): (deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageDeps {
+): (deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
   const readRows = io.readRows ?? ((path) => readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true }).rows);
-  const now = io.now ?? Date.now;
+  const clock = io.clock ?? systemClock;
   const client = io.client ?? (() => {
     const tokens = JSON.parse(readFileSync(serviceTokensPath(config.root), "utf8")) as { write?: unknown };
     if (typeof tokens.write !== "string" || !tokens.write) throw new Error("service write token unavailable");
@@ -3314,7 +3314,7 @@ export function buildEscalationTriageRuntime(
     const windowMs = (io.windowMs ?? (() => defaultAnswerWindowMs(root)))();
     if (!Number.isFinite(windowMs) || windowMs < 0 || (seen !== undefined && !Number.isFinite(seen)))
       throw new Error("unreadable default window");
-    return { seenAtMs: seen, nowMs: now(), windowMs };
+    return { seenAtMs: seen, nowMs: clock.now(), windowMs };
   };
   const feedbackId = (e: Escalation) => {
     const id = /\bfeedback#([^\s:]+)/.exec(e.summary)?.[1];
@@ -46786,7 +46786,7 @@ export async function sweepEscalationTriage(
     rows?: Record<string, unknown>[];
     issues?: IssueGateway;
     runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
-    now?: () => number;
+    clock?: Clock;
     relabel?: (url: string, label: string) => void;
   } = {},
 ): Promise<void> {
@@ -46795,7 +46795,7 @@ export async function sweepEscalationTriage(
     const history = io.rows ?? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows;
     const issues = io.issues ?? ghIssueGateway(owner, repo);
     const open = listRetirableEscalationIssues(issues);
-    const nowMs = (io.now ?? Date.now)();
+    const nowMs = (io.clock ?? systemClock).now();
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
     const deps = { issues, ledgerPath, runId };
     const cfg = runtime(deps);

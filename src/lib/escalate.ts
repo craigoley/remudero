@@ -912,12 +912,12 @@ export interface EscalateDeps<G extends AsyncIssueGateway = IssueGateway> {
   threadStorePath?: string;
   /** OPTIONAL (W1-T8868) — how this call triages its escalation. Absent is SHADOW mode: the would-be
    *  outcome is ledgered as `escalation.triaged` and the escalation is delivered exactly as before. */
-  triage?: EscalateTriageDeps;
+  triage?: EscalateTriageSettings;
 }
 
 /** W1-T8868 — the knobs {@link triageRoute} reads. Every field is optional; an absent `execute`
  *  entry means that action is not wired, and an auto-resolve for it is DELIVERED instead. */
-export interface EscalateTriageDeps {
+export interface EscalateTriageSettings {
   /** `shadow` (default) ledgers and still delivers; `act` follows the outcome. */
   mode?: EscalationTriageMode;
   /** The shared pass allowance; absence refuses execution. */
@@ -933,7 +933,7 @@ export interface EscalateTriageDeps {
   asyncExecutors?: boolean;
 }
 
-let productionTriage: ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageDeps) | undefined;
+let productionTriage: ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) | undefined;
 
 export function configureEscalationTriage(factory: typeof productionTriage): void {
   productionTriage = factory;
@@ -1444,7 +1444,7 @@ interface TriageRoute {
   step: string;
   firstComment?: string;
   extra?: Record<string, unknown>;
-  pending?: { action: TriageAction; effect: string; cfg: EscalateTriageDeps };
+  pending?: { action: TriageAction; effect: string; cfg: EscalateTriageSettings };
 }
 
 /** W1-T8868 — THE TRIAGE FUNNEL. Every escalation that opens an issue crosses this once: the outcome
@@ -1458,7 +1458,7 @@ function* triageRoute(
   deps: EscalateDeps<AsyncIssueGateway>,
   allowAsyncJudge = false,
 ): Steps<TriageRoute> {
-  let cfg: EscalateTriageDeps | undefined;
+  let cfg: EscalateTriageSettings | undefined;
   let mode: EscalationTriageMode = "shadow";
   let outcome: TriageOutcome;
   try {
