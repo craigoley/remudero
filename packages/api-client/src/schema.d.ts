@@ -3705,8 +3705,59 @@ export interface components {
         signal: string;
         confidence: number;
       })[];
-      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      recordVersion?: "operator-agent-records-v1";
+      /** W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are observations from the sole native ranking evaluation, never registered ledger history. Interpret detail freshness together with the envelope sources and stale flag. Unknown details stay explicit. */
+      records?: ({
+        proposalId: string;
+        detail: (AgentGeneratedRecommendation) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        durable: ({
+          state: "unregistered";
+        }) | ({
+          state: "registered";
+          source: "ledger";
+          createdAt: string;
+          status: "pending" | "accepted" | "rejected" | "expired";
+        });
+      })[];
+      /** Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0. Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine. */
+      coverage?: {
+        ranked: number;
+        published: number;
+        complete: number;
+        unavailable: number;
+        capped: number;
+      };
+      /** Why generation or publication was refused, including missing, malformed or over-budget sources. */
       reason?: string;
+    };
+    AgentGeneratedRecommendation: {
+      state: "reported";
+      kind: "generated-recommendation";
+      observationId: string;
+      repository: string;
+      instanceId: string;
+      proposalText: string;
+      reasoning: string;
+      observedAt: string;
+      /** The rank confidence is the existing heuristic, not a calibrated probability or an approval grant. */
+      scoreKind: "native-heuristic";
+      evidence: ({
+        key: string;
+        value: number;
+        unit: "count" | "tokens" | "tokens/run" | "ms" | "ratio";
+        source: string;
+        observedAt: string;
+        freshness: "fresh";
+        window: {
+          start: string;
+          end: string;
+        } | null;
+      })[];
+      /** Named unknowns, including source window, independent samples, causation, cost, savings and consent. */
+      unavailable: (string)[];
     };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
