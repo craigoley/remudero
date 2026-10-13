@@ -1029,15 +1029,29 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
  *  merged and been superseded by a fresh pass. Confirming the PR is STILL OPEN and not already
  *  queued to merge is the caller's job — a live GitHub read, never derivable from the ledger alone. */
 export function mostRecentApprovePr(
-  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown }[],
-): { branch: string; prUrl: string; prNumber?: number } | undefined {
-  let best: { branch: string; prUrl: string; prNumber?: number } | undefined;
+  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown; actor_pid?: unknown; host?: unknown }[],
+): ApprovePrCandidate | undefined {
+  let best: ApprovePrCandidate | undefined;
   for (const line of ledgerLines) {
     if (line.step !== "ratify.approved") continue;
     if (typeof line.branch !== "string" || typeof line.pr_url !== "string") continue;
-    best = { branch: line.branch, prUrl: line.pr_url, prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined };
+    best = {
+      branch: line.branch,
+      prUrl: line.pr_url,
+      prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined,
+      ...(typeof line.actor_pid === "number" ? { actorPid: line.actor_pid } : {}), // W1-T9161: appendLedger's own stamps
+      ...(typeof line.host === "string" ? { host: line.host } : {}),
+    };
   }
   return best;
+}
+
+export interface ApprovePrCandidate { // W1-T9161: the PR, and the approve process whose row named it
+  branch: string;
+  prUrl: string;
+  prNumber?: number;
+  actorPid?: number;
+  host?: string;
 }
 
 /** Parse a fragment's tasks WITHOUT requiring every `depends_on` to resolve inside it — {@link unmetOutsideDeps}
@@ -1302,10 +1316,10 @@ export function classifyProposal(
         `never deleted`,
     };
   }
-  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
-  // is now history, not a second request for the same decision. Never apply this to a different
-  // proposal kind or to an id the current plan does not hold.
-  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
   if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
@@ -1986,6 +2000,8 @@ export function lintDraftedFragment(
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
   pathExists: (path: string) => boolean = HARNESS_FACTS.moduleExists,
   readGrepProofFile: DraftRepoFacts["readGrepProofFile"] = HARNESS_FACTS.readGrepProofFile,
+  pathIsDirectory: (path: string) => boolean = (path) =>
+    fs.statSync(resolvePath(HARNESS_ROOT, path), { throwIfNoEntry: false })?.isDirectory() === true,
 ): DraftLintViolation[] {
   let tasks;
   try {
@@ -1995,10 +2011,21 @@ export function lintDraftedFragment(
   }
   const violations: DraftLintViolation[] = [];
   const opts = draftFilingLintOptions({ moduleExists: pathExists, readGrepProofFile }, knownRepos);
+  const directory = (path: string): boolean => path.endsWith("/") || pathIsDirectory(path);
+  const directoryGuidance = "; name the files the task changes, never a directory";
   for (const task of tasks) {
     violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
+    for (const path of task.files ?? []) {
+      if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
+        message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
+    for (const criterion of task.acceptance ?? []) {
+      const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
+      if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",
+        message: `${task.id} grep proof target ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
   }
   if (stampLine !== undefined) {
     violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
@@ -3044,12 +3071,12 @@ export interface RatifyGateway {
    *  {@link createRatificationBranch}. */
   findJoinablePr?(): { branch: string; prUrl: string; prNumber?: number } | undefined;
 
-  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s)
-   *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
-   *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
-   *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
+  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s) plus its folded
+   *  stamp as ONE NEW COMMIT on that still-open branch, never squashing or amending a prior approval's (design iii).
+   *  Returns the branch it was given; W1-T9161: `undefined` when git refused the push as a non-fast-forward, and
+   *  {@link approveProposal} then opens this proposal's own PR, never retrying the join. `prUrl` is that open PR,
+   *  whose body W1-T4706 rebuilds over the whole branch. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string | undefined;
 }
 
 export type ApproveResult =
@@ -3208,29 +3235,27 @@ export function approveProposal(
   // of its OWN to resume, and never for a skill draft (which carries a file, not a plan fragment, and
   // opens its own `chore(skill):`-titled PR) — resuming/skill-writing above always wins.
   const joinable = resumeBranch === undefined && !skillFile ? gateway.findJoinablePr?.() : undefined;
-  const joined = joinable !== undefined && gateway.joinRatificationBranch !== undefined;
 
-  let branch: string;
+  let branch: string | undefined;
+  let joinedPr: typeof joinable;
   if (adopted) {
     branch = resumeBranch as string;
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
-  } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
-  } else if (skillFile && gateway.writeSkillFile) {
-    branch = gateway.writeSkillFile(classification.proposalId, skillFile);
-  } else {
-    branch = gateway.createRatificationBranch(payload);
+  } else if (joinable !== undefined && gateway.joinRatificationBranch !== undefined) {
+    branch = gateway.joinRatificationBranch(joinable.branch, payload, joinable.prUrl); // W1-T9161: undefined = lost the push
+    joinedPr = branch === undefined ? undefined : joinable;
   }
+  branch ??= skillFile && gateway.writeSkillFile ? gateway.writeSkillFile(classification.proposalId, skillFile) : gateway.createRatificationBranch(payload);
 
   let prUrl: string;
   let prNumber: number | undefined;
   if (adopted) {
     prUrl = adopted.prUrl;
     prNumber = adopted.prNumber;
-  } else if (joined) {
-    prUrl = joinable.prUrl;
-    prNumber = joinable.prNumber;
+  } else if (joinedPr) {
+    prUrl = joinedPr.prUrl;
+    prNumber = joinedPr.prNumber;
   } else {
     try {
       prUrl = gateway.openPlanPr(branch, classification.proposalId);
@@ -3248,7 +3273,7 @@ export function approveProposal(
     pr_number: prNumber,
     branch,
     ...(skillFile ? { skill_file: approvedSkillRelPath(skillFile.name) } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   });
   return {
     ok: true,
@@ -3258,7 +3283,7 @@ export function approveProposal(
     prNumber,
     payload,
     ...(adopted ? { adopted: true } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   };
 }
 
@@ -3520,22 +3545,9 @@ export function assertRatificationDraftFileable(
   const facts = checkoutRepoFacts(worktreePath);
   const relinted = relintRatificationFragment(fragmentYaml, proposalId, facts);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
-    facts.moduleExists, facts.readGrepProofFile);
+    facts.moduleExists, facts.readGrepProofFile,
+    (path) => fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
-  const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
-  if ("plan" in parsed) {
-    const directory = (path: string): boolean => path.endsWith("/") ||
-      fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true;
-    for (const task of parsed.plan.tasks) {
-      for (const path of task.files ?? []) {
-        if (directory(path)) violations.push(`[draft-directory-files] ${task.id} files entry ${JSON.stringify(path)} is a directory`);
-      }
-      for (const criterion of task.acceptance ?? []) {
-        const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
-        if (path && directory(path)) violations.push(`[draft-directory-grep] ${task.id} grep proof target ${JSON.stringify(path)} is a directory`);
-      }
-    }
-  }
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
 }

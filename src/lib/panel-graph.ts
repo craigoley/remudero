@@ -1956,7 +1956,7 @@ function prepareInboxPass(
       draftSpawnedAt: (id) => inflight[id],
       fragmentMemo,
     });
-    const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1];
+    const taskId = /^(?:verify-human|machine-judge):([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1];
     const receipt = taskId && !releasedHumanTasks.has(taskId) ? archiveReleases.get(taskId) : undefined;
     return receipt && classification.state === "retired" && classification.retiredReason?.includes("was released to the fleet")
       ? { ...classification, retiredReason: `${classification.retiredReason}; retained ledger receipt: ${receipt}` }

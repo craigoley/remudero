@@ -114,6 +114,9 @@ interface CodexSpawnArgs {
   onSpawnError?: (error: NodeJS.ErrnoException) => void;
   streamObserver?: (event: { kind: "working" | "tool-executing" | "message"; tsMs: number; text?: string }) => void;
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
+  /** W1-T9245 — the caller's cancel, as `SpawnWorkerArgs.signal` is for Claude: aborting it (or passing it aborted) tears the
+   * process group down through `teardownOnce`, so an `end_round` abort stops the worker instead of letting it run on. */
+  signal?: AbortSignal;
 }
 
 /** W1-T6027: how a worker's process ended. `exit` carries a code (0 included) and `signal` the signal's name, each as the
@@ -5123,6 +5126,11 @@ async function spawnCodexWorkerInPrivateTemp(
   const prompt = CODEX_DOCTRINE_PRELUDE + (harnessCommits ? CODEX_HARNESS_COMMITS_PART : "") + args.prompt;
   process.stdin.write(`${prompt}\n`);
   process.stdin.end();
+  // W1-T9245: no timer and no bound — the abort acts when it fires; the listener goes when the spawn settles.
+  const signal = args.signal;
+  const onAbort = () => teardownOnce(contained.pid);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     if (outputLimit) throw outputLimit;
@@ -5190,6 +5198,7 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     toolLineage.finish(lineageEnd);
     if (timer) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
