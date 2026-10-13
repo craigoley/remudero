@@ -1502,6 +1502,54 @@ function* mergeDirectAfterPreflightSteps(
   }
 }
 
+/** W1-T9212 — the row a re-evaluated held plan PR writes: trigger, wait since the hold, arm outcome. */
+export const PLAN_PR_REEVALUATED_STEP = "sweep.plan_pr_reevaluated";
+
+/** W1-T9212 — what let a held plan PR be re-evaluated: its checks turned green, or GitHub settled `unknown`. */
+export type PlanPrReevaluationTrigger = "checks-green" | "mergeability-settled";
+
+export interface HeldPlanPr {
+  /** The FIRST `automerge.plan_pr_held` at this head: the wait is measured from here. */
+  heldAtMs: number;
+  trigger: PlanPrReevaluationTrigger;
+}
+
+/**
+ * W1-T9212 — IS THIS PLAN PR HELD AT ITS CURRENT HEAD, AND ON WHAT? PURE over ledger rows.
+ *
+ * A hold on `mergeable_state` `blocked` was a hold on required checks (a caller that now observes them
+ * green re-evaluates: `checks-green`); a hold on `unknown` was a hold on GitHub's computation
+ * (`mergeability-settled`). A conflicting or unreadable hold is neither, so it is not a held plan PR
+ * here. Rows naming another head are ignored; a row naming none (a sweep-lane row) is accepted.
+ */
+export function heldPlanPrFromLedger(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  pr: { prNumber: number; prUrl: string; headSha: string },
+): HeldPlanPr | undefined {
+  let heldAtMs: number | undefined;
+  let latestAt = -Infinity;
+  let latest: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.step !== "automerge.plan_pr_held" || typeof row.ts !== "string") continue;
+    if (row.pr_url !== pr.prUrl && row.pr_number !== pr.prNumber) continue;
+    const head = row.head_sha ?? row.prior_head_sha;
+    if (typeof head === "string" && head !== pr.headSha) continue;
+    const at = Date.parse(row.ts);
+    if (!Number.isFinite(at)) continue;
+    heldAtMs = heldAtMs === undefined ? at : Math.min(heldAtMs, at);
+    if (at >= latestAt) {
+      latestAt = at;
+      latest = row;
+    }
+  }
+  if (heldAtMs === undefined || latest === undefined) return undefined;
+  if (latest.remedy === "mergeability-unknown" || latest.mergeable_state === "unknown") {
+    return { heldAtMs, trigger: "mergeability-settled" };
+  }
+  if (latest.mergeable_state === "blocked") return { heldAtMs, trigger: "checks-green" };
+  return undefined;
+}
+
 /** BACKSTOP: re-read only while GitHub has not computed plan-PR mergeability. */
 export const PLAN_PR_UNKNOWN_MAX_REREADS = 3;
 

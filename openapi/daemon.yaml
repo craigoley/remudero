@@ -10779,6 +10779,63 @@ components:
           type: string
           description: A proposal id from the active registry; must be non-blank.
 
+    InstanceInboxProposal:
+      type: object
+      required: [repository, instance, proposalId, summary, snapshotKey, actions]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        proposalId: {type: string}
+        summary: {type: string, maxLength: 4000}
+        snapshotKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Identity of this active proposal. Reframe must echo it; a changed proposal is refused.
+        actions:
+          type: array
+          items:
+            type: object
+            required: [action, tier, path]
+            properties:
+              action: {type: string, enum: [reframe]}
+              tier: {type: string, enum: [low]}
+              path: {type: string}
+
+    InstanceInboxReframeRequest:
+      allOf:
+        - $ref: '#/components/schemas/InboxReframeRequest'
+        - type: object
+          required: [repository, instance, threadId, intentId, snapshotKey]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+            threadId:
+              type: string
+              description: Must identify the same proposal as proposalId.
+            intentId: {type: string, minLength: 8, maxLength: 128}
+            snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+
+    InstanceInboxReframeResult:
+      type: object
+      required: [repository, instance, proposalId, ok, delivery, draftInvalidated, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        proposalId: {type: string}
+        ok: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        draftInvalidated: {type: boolean, enum: [true]}
+        replayed: {type: boolean}
+        receipt:
+          type: object
+          required: [intentId, key, status, action, threadId]
+          properties:
+            intentId: {type: string}
+            key: {type: string}
+            status: {type: string, enum: [settled, unknown]}
+            action: {type: string, enum: [reframe]}
+            threadId: {type: string}
+
     InboxReframeRequest:
       type: object
       description: POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`).
@@ -16932,6 +16989,87 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/i/{instance}/inbox:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the selected instance's maintained Inbox.
+      description: Uses only that instance's plan, registry, ledger and classification. Missing or stale sources remain qualified; no core fallback.
+      security: [{bearerRead: []}]
+      responses:
+        '200':
+          description: Instance-qualified Inbox, with the ordinary Inbox section and pagination query contract.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InboxResult'
+                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+        '503': {description: Instance or maintained classification unavailable.}
+
+  /v1/i/{instance}/inbox/attention-census:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read only the selected instance's attention evidence.
+      security: [{bearerRead: []}]
+      responses:
+        '200':
+          description: Source-qualified attention evidence from this instance.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InboxAttentionCensusResult'
+                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+        '503': {description: Instance or maintained classification unavailable.}
+
+  /v1/i/{instance}/inbox/proposal:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read an active proposal and its reversible action contract.
+      security: [{bearerRead: []}]
+      parameters:
+        - {name: id, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Identity-checked proposal snapshot with only mounted, usable actions.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxProposal'}
+        '404': {description: Proposal absent from this instance's active registry.}
+        '409': {description: Requested repository or instance does not match the route.}
+        '503': {description: Instance proposal source unavailable.}
+
+  /v1/i/{instance}/inbox/reframe:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Record reversible feedback in the selected instance's own source.
+      description: >
+        Requires exact instance/repository identity, matching thread/proposal identity, the current
+        proposal snapshot and a durable intent. Revalidates under the registry lock. Invalidates
+        only that proposal's cached draft and preserves its history and security holds. Exact replay
+        returns its receipt; changed replay, stale proposals and old read-only daemons refuse.
+        An unknown delivery is never automatically retried. Approval and retirement are not offered.
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InstanceInboxReframeRequest'}
+      responses:
+        '200':
+          description: Feedback recorded and draft invalidated, or an exact receipt replay.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxReframeResult'}
+        '400': {description: Invalid feedback or mismatched thread/proposal identity.}
+        '404': {description: Proposal no longer active.}
+        '409': {description: Scope, snapshot or intent conflict; or instance read-only.}
+        '503': {description: Source or receipt store unavailable. Delivery may remain unknown.}
 
   /v1/inbox/reframe:
     post:

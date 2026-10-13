@@ -1,0 +1,27 @@
+- id: W1-T9282
+  title: "Expose failed human judgements as needs triage while preserving attention rank"
+  repo: remudero
+  depends_on: []
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved follow-up; issue #7708"
+  plan_refs: ["W1-T4742","W1-T4853"]
+  files: ["src/lib/fleet-lane.ts","src/lib/panel-graph.ts","src/lib/inbox-responder.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/a-failed-human-judge-is-visible-as-triage.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    buildAttentionCensus currently counts ready, needsPreparation and unknown. readVerifyHumanJudgements already preserves state: unclassified and a reason for judge_failed, while the persisted attention evidence narrows judges to decision/reason. The handoff identified this contract gap; the operator approved the direction on 2026-10-13.
+  design: |
+    Carry the existing judgement state and reason through both panel readers and persisted fleet-lane attention evidence. Add decisionReadiness.needsTriage and per-item judgement metadata to the census; ready, preparation, triage and unknown must account for the observed decision population without certifying operator demand. Preserve unavailable/partial source states and classify a failed judge as unclassified, never a successful human ruling. Keep the attention enum and ordering unchanged. Declare additive schema fields and regenerate the API client. Add fixtures for judge failure, stale dependency keys, a valid needs-operator ruling, and a partial source.
+  acceptance:
+    - claim: "failed and stale judgements remain distinguishable through the persisted census"
+      proof: "grep: test(\"a failed human judge is counted as triage without changing attention rank\" in test/a-failed-human-judge-is-visible-as-triage.test.ts"
+    - claim: "the readiness breakdown accounts for observed decisions without inventing verified demand"
+      proof: "grep: test(\"a triage count preserves partial source evidence and the decision denominator\" in test/a-failed-human-judge-is-visible-as-triage.test.ts"
+  falsifier: |
+    Remove the state/reason propagation or merge needsTriage into ready/unknown. The failed-judge and stale-key fixtures must fail while the valid human-ruling control stays visible.

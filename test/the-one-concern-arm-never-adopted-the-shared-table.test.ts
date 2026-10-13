@@ -187,7 +187,7 @@ test("W1-T2823 measured firing rate recorded over the real corpus, before and af
   for (const [, files] of JUDGED_COMMITS) if (!checkOneConcern(diffOf(files)).pass) after += 1;
 
   assert.equal(before, 36, "83.7% of 43 judged PRs — the rate that made the arm unreadable");
-  assert.equal(after, 19, "44.2% — the arm now fires on fewer than half");
+  assert.equal(after, 18, "41.9% — the helper and its suites now count as one concern");
   assert.ok(after < before, "the fix must be judged on movement, not on plausibility");
 });
 

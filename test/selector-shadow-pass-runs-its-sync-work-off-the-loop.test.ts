@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { GardenMintBudget } from "../src/lib/gardener.js";
 import * as shadow from "../src/lib/selector-shadow-gardener.js";
 import { ciLearningTaskIdMinter } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -194,11 +195,14 @@ test("W1-T5003: the asynchronous minter returns the reserved id and carries rese
   t.mock.method(process.stderr, "write", (line: unknown) => { warnings.push(line); return true; });
   const receipt = { step: "task_id.reserved", fields: { task_id: "W1-T9002" } };
   const log = (step: string, fields: Record<string, unknown>) => { rows.push({ step, fields }); };
+  // An explicit budget: the per-root learned one shrinks to ~3x the first mocked mint (~1ms), which a
+  // loaded runner overruns on the second mint, turning the refusal under test into a timeout.
+  const budget = new GardenMintBudget(() => 60_000);
   const mint = ciLearningTaskIdMinter("/fixture", log, async (file, args) => {
     assert.equal(file, process.execPath);
     assert.deepEqual(args.slice(-2), ["/fixture", "selector-shadow-garden-test"]);
     return { stdout: JSON.stringify({ id: "W1-T9002", rows: [{ say: "reservation handed off" }, receipt] }), stderr: "mint warning\n" };
-  });
+  }, { budget });
   assert.equal(await mint.async("selector-shadow-garden-test"), "W1-T9002");
   assert.deepEqual(rows, [receipt]);
   assert.deepEqual(said, ["reservation handed off"]);
@@ -206,7 +210,7 @@ test("W1-T5003: the asynchronous minter returns the reserved id and carries rese
   const failed = { step: "task_id.refused", fields: { reason: "remote unavailable" } };
   const refuse = ciLearningTaskIdMinter("/fixture", log, async () => ({
     stdout: JSON.stringify({ error: "remote unavailable", rows: [failed] }),
-  }));
+  }), { budget });
   await assert.rejects(refuse.async("selector-shadow-garden-test"), /remote unavailable/);
   assert.deepEqual(rows, [receipt, failed]);
 });

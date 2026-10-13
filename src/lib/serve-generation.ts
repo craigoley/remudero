@@ -29,6 +29,10 @@ export const GENERATION_MESSAGES = {
   shed: "rmd.shed",
   shed_done: "rmd.shed_done",
   restore: "rmd.restore",
+  shed_workers: "rmd.shed_workers",
+  shed_workers_done: "rmd.shed_workers_done",
+  restore_workers: "rmd.restore_workers",
+  restore_workers_done: "rmd.restore_workers_done",
 } as const;
 
 export interface GenerationMessage {
@@ -111,6 +115,48 @@ export function onShedRequest(
 export function onRestoreRequest(channel: GenerationChannel, restore: (reason: string) => void): void {
   channel.onMessage((message) => {
     if (message.type === GENERATION_MESSAGES.restore) restore(message.reason ?? "restore");
+  });
+}
+
+/** What a generation reports it dropped when it shed its worker threads. */
+export interface WorkerShedOutcome {
+  /** Rebuildable worker threads terminated. */
+  workers: number;
+  /** Their heaps as last read, when the generation could size them. */
+  heapBytes?: number;
+}
+
+/**
+ * Memory tier 2 (W1-T8873): tier 1 frees only the main heap, while the rebuildable worker threads (views, heavy
+ * views, plan reload, oracle, board, prewarm, repo-dashboard) hold most of the generation's resident bytes. A
+ * memory-deferred handoff asks the ACTIVE generation to terminate them. `shed` resolves once the threads have
+ * exited; the generation keeps answering from the bodies it already holds (the existing stale-while-revalidate
+ * degraded mode: each body carries its as-of). The reply carries resident bytes before and after so the supervisor
+ * can ledger what was freed. `restore` starts the threads again, and is idempotent.
+ */
+export function onShedWorkersRequest(
+  channel: GenerationChannel,
+  hooks: { shed: () => Promise<WorkerShedOutcome | void> | WorkerShedOutcome | void; restore: (reason: string) => Promise<void> | void },
+  rss: () => number = () => process.memoryUsage().rss,
+): void {
+  channel.onMessage((message) => {
+    if (message.type === GENERATION_MESSAGES.restore_workers) {
+      void Promise.resolve()
+        .then(() => hooks.restore(message.reason ?? "restore_workers"))
+        .then(
+          () => channel.send({ type: GENERATION_MESSAGES.restore_workers_done }),
+          (err: unknown) => channel.send({ type: GENERATION_MESSAGES.restore_workers_done, error: String((err as Error)?.message ?? err) }),
+        );
+      return;
+    }
+    if (message.type !== GENERATION_MESSAGES.shed_workers) return;
+    const beforeBytes = rss();
+    void Promise.resolve()
+      .then(() => hooks.shed())
+      .then(
+        (outcome) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: outcome?.workers ?? 0, heapBytes: outcome?.heapBytes }),
+        (err: unknown) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: 0, error: String((err as Error)?.message ?? err) }),
+      );
   });
 }
 

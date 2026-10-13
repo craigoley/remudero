@@ -1,0 +1,102 @@
+- id: W1-T9292
+  title: "A SUFFIXED DRAFT PLACEHOLDER IS MINTED, AND AN UNMINTED ID NEVER LANDS IN THE PLAN — rmd approve's materializer reads NEW-1 out of NEW-1A and rewrites nothing, so #11378 landed shards declaring NEW-1A and NEW-1B (W1-T9167 reserved, never used) and #11402 landed NEW-1a and NEW-1b with no id minted at all; lint-plan accepted all four"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # the rmd approve id-materialization path that writes plan ids, plus a new lint-plan block on added shards; src/lib/inbox.ts, src/run-task.ts, src/lib/task-linter.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: placeholder ids leaked into main from rmd approve ratification (#11378, #11402)"
+  plan_refs: [W1-T311, W1-T5660, W1-T4414, W1-T1113, W1-T7534, W1-T120]
+  files:
+    - src/lib/inbox.ts
+    - src/run-task.ts
+    - src/lib/task-linter.ts
+    - test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts
+  status: queued
+  priority: 1.5  # it corrupts the plan's id space: every leaked id is a task no reservation, ownership check or id-shaped reader can see
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on origin/main 289cac5b0 (symbols, not lines).
+    WHAT LANDED. Four shards on main declare ids that were never minted:
+      - #11378 (a17f2c15a, 15:03Z, "ratify adoption:symbol-no-caller:src/lib/mounts.ts:validateMounts", stamp
+        "-> NEW-1A, NEW-1B, NEW-2"): plan/tasks.d/NEW-1A-add-caller-for-validatemounts-in-worker-workflow.yaml and
+        plan/tasks.d/NEW-1B-ensure-symbol-no-caller-rule-passes-for-validatemounts.yaml. Only NEW-2 became
+        W1-T9168, whose depends_on still names NEW-1A and NEW-1B. W1-T9167 was reserved for the block and is used
+        by nothing. The plan gardener retired NEW-1A (#11382) and NEW-1B (#11405).
+      - #11402 (924a766ea, 19:13Z, "ratify verify-human-automate:W1-T5760", stamp "-> NEW-1a, NEW-1b"):
+        plan/tasks.d/NEW-1a-add-automatic-git-remote-detection-in-runner-module.yaml and
+        plan/tasks.d/NEW-1b-integrate-automatic-git-remote-detection-into-rmd-sweep-flow.yaml, both still
+        `status: queued`. They cannot dispatch today only because NEW-1a depends on W1-T60 and W1-T77, which carry
+        `retirement: closed`. NEW-1a and NEW-1A now differ only by letter case.
+    A census of every `- id:` in plan/tasks.yaml and plan/tasks.d on main finds exactly these four outside the
+    shape `[A-Z][A-Z0-9]*-T<digits>` plus an optional single letter (the shape HAND_WORKTREE_TASK_ID_RE in
+    src/lib/hand-worktree.ts already names; letter-suffixed ids such as W1-T12e and W1-T1B are real).
+    WHY, src/lib/inbox.ts:
+      - DRAFT_PLACEHOLDER_DECL_RE is `/^\s*(?:-\s*)?id:\s*["']?(NEW-\d+)/gm`. On `- id: NEW-1A` it captures
+        "NEW-1", so draftPlaceholderIds returns [NEW-1, NEW-2] for the #11378 fragment.
+      - substitutePlaceholderIds replaces `\bNEW-1\b`, which never matches inside "NEW-1A" (no word boundary
+        between "1" and "A"). Reproduced in-process: materializeDraftTaskIds over a NEW-1A/NEW-1B/NEW-2 fragment
+        with a reserveBlock starting at 9167 returns ok, ids [W1-T9167, W1-T9168], and a fragment still
+        declaring NEW-1A and NEW-1B: exactly what merged.
+      - For #11402 the fragment holds no `NEW-<digits>` declaration at all, so materializeDraftTaskIds takes its
+        `placeholders.length === 0` branch and returns `ok: true` with the fragment unchanged. Nothing checks that
+        no placeholder survives, so a success-shaped result carried two unminted ids to a PR.
+      - inboxDraftPrompt asks for "NEW-1, NEW-2, NEW-3, ..." but the drafter followed the plan's own
+        letter-suffixed ids. draftPlaceholderViolations (W1-T5660) checks titles for NEW-n, not declared ids.
+    WHY NO GATE STOPPED IT. lint-plan never checks an id's shape. The review's reservation-ownership check
+    (W1-T4414, src/lib/review.ts filedTaskIds) keeps only ids `parsePrefixedTaskId` accepts, so a NEW-1A
+    declaration is skipped rather than reported unreserved.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the plan/ trees of all 8 open PR heads (2026-10-13
+    19:26Z) for substitutePlaceholderIds, draftPlaceholderIds, placeholder with suffix, and NEW-1A/NEW-1a; the
+    only hits are the four leaked shards and W1-T9168's depends_on. W1-T1113 is a CLAUDE.md caveat about a
+    shell recipe truncating letter-suffixed W1 ids, and W1-T7534 (merged) is the filing-date scan's regex
+    missing a letter-suffixed W1 id; neither touches placeholders or lint-plan's id shape. W1-T5660 rejects
+    placeholder TITLES, not ids.
+    W1-T120 (merged, #819) shares src/run-task.ts and src/lib/task-linter.ts only as files: it made lint and
+    review resolve repoRoot from cwd and prove which file they read, and it has no id-shape rule.
+  design: |
+    1. EVERY DECLARED PLACEHOLDER IS MINTED. In src/lib/inbox.ts the declaration pattern captures the whole
+       placeholder token, `NEW-` followed by letters and digits (NEW-1, NEW-1A, NEW-1a, NEW-12b), so each
+       distinct declared token gets its own reserved id in declaration order. Substitution replaces whole
+       tokens only, so NEW-1 never rewrites part of NEW-1A or NEW-10, and NEW-1a and NEW-1A stay distinct.
+    2. NOTHING UNMINTED SURVIVES. After substitution, materializeDraftTaskIds checks the fragment and stamp: any
+       remaining `NEW-` token (a declaration or a dangling depends_on reference), or any declared `- id:` that is
+       not a minted id shape, returns `{ ok: false, reason }` naming each offending token. The zero-placeholder
+       path runs the same check, so a fragment with only unrecognised ids is refused instead of passing through.
+       The caller already treats `ok: false` as "write nothing, open no PR".
+    3. LINT-PLAN REFUSES AN UNMINTED ID ON AN ADDED SHARD. A task that the diff adds (lintPlanCommand's
+       `newTaskIds` under `--base`) and whose id is not `[A-Z][A-Z0-9]*-T<digits>` with an optional single letter
+       fails lint with a rule naming the id and the expected shape. Tasks already on the base are reported as a
+       WARN only, so the four shards above never redden main or an unrelated PR. Without `--base` the rule
+       WARNs for every unminted id. The shape is one exported constant, shared with the materializer's check.
+    4. THE FOUR SHARDS ON MAIN ARE NOT RENUMBERED BY THIS TASK. NEW-1A and NEW-1B are retired gravestones:
+       renumbering them changes nothing that dispatches and would rewrite W1-T9168's depends_on for no gain.
+       NEW-1a and NEW-1b are queued but depend on retired work (W1-T60, W1-T77), so nothing can dispatch them,
+       and the plan gardener's retire pass is their natural owner. The WARN in step 3 keeps all four visible. If
+       the operator wants W1-T5760's automation filed under real ids, that is a fresh `rmd approve` after this
+       task merges. W1-T9167 stays an unused reservation; `rmd next-task-id --audit` reports it, and reclaiming
+       it is an operator decision.
+    Tests go in test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts: drive
+    materializeDraftTaskIds with fake mint and reserveBlock deps over the #11378 fragment shape (NEW-1A,
+    NEW-1B, NEW-2 with NEW-1B depending on NEW-1A and NEW-2 on both) and the #11402 shape (NEW-1a, NEW-1b only),
+    and drive the lint over a git fixture whose base holds one unminted shard (NEW-1A) and whose head adds a NEW-9 shard.
+  acceptance:
+    - claim: "a fragment declaring NEW-1A, NEW-1B and NEW-2 reserves three ids and every declaration and depends_on reference is rewritten to them"
+      proof: 'grep: test("W1-T9292: every suffixed and plain draft placeholder is minted and rewritten" in test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts'
+    - claim: "a fragment whose only ids are NEW-1a and NEW-1b is minted, not passed through unchanged"
+      proof: 'grep: test("W1-T9292: a fragment declaring only suffixed placeholders is still minted" in test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts'
+    - claim: "materialization refuses when an unminted id or a NEW- token survives substitution"
+      proof: 'grep: test("W1-T9292: materialization refuses a fragment that still holds an unminted id" in test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts'
+    - claim: "lint-plan fails an added shard whose id is not a minted task id, and only warns for one already on the base"
+      proof: 'grep: test("W1-T9292: lint-plan fails an added unminted id and warns for one already on the base" in test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts"
+  falsifier: |
+    Leave DRAFT_PLACEHOLDER_DECL_RE capturing `NEW-\d+`: the #11378-shaped fragment still declares NEW-1A, and the
+    first test fails. Keep the zero-placeholder early return without the residue check: the NEW-1a/NEW-1b
+    fragment comes back unchanged with `ok: true`, and the second and third tests fail. Drop the lint rule: the
+    added NEW-9 shard lints clean, and the fourth test fails. Make the rule block every unminted id regardless
+    of base: the base's existing shard fails the lint, and the fourth test fails.
