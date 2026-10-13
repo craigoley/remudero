@@ -1,0 +1,85 @@
+- id: W1-T9067
+  title: "A LINT-DIRTY INBOX REDRAFT WALKS TO A MODEL THAT HAS NOT FAILED IT — draftProposalBatch's spawn drops runDraftRung's third argument, so W1-T4864's avoidModels never reaches the spawn: 68 of 73 inbox.draft_fellthrough rows on 2026-10-13 retried gpt-oss-120b after gpt-oss-120b"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the redraft's avoid list reaches the model choice; it spans the draft spawn wiring (run-task.ts) and the cash ladder and draft-routing choice (worker.ts, worker-provider.ts)
+  band_meaning: span
+  origin: "found 2026-10-13 diagnosing the W1-T8714 replay; operator standing direction: fix at root"
+  plan_refs: [W1-T4864, W1-T3570, W1-T8714, W1-T9039]
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced, in the core daemon's ledger (~/rmd-state2/state): the
+    11 rotations dated 2026-10-13 plus the live ledger.ndjson, deduplicated by ts, run, proposal and attempt.
+      - 73 `inbox.draft_fellthrough` rows between 00:16:41Z and 11:28:12Z (attempt 2: 37, attempt 3: 36). 68 read
+        from gpt-oss-120b to gpt-oss-120b. Control: the other 5 did change (4 gpt-oss-120b to gpt-5-nano, 1
+        gpt-5-nano to gpt-oss-120b), so the query tells a change from a repeat. Every row read is dated 2026-10-13,
+        so the window is covered. The union holds 1,623 fell-through rows in all.
+      - `runDraftRung`'s own comment says a spawn that ignored `avoidModels` shows up as from === to. It records
+        exactly that.
+    WHY, READ on origin/main 40169ce42 (symbols, not lines):
+      - `runDraftRung` (src/lib/inbox.ts, W1-T4864) builds `avoidModels` from each dirty draft's model and calls
+        `deps.spawn(proposal, prompt, { attempt, avoidModels })`. `DraftSpawnContext`'s doc says "a spawn that
+        resolves a ladder (run-task.ts) walks to the next candidate that is not in it".
+      - `draftProposalBatch` (src/run-task.ts), the only production caller for the CLI and the daemon, passes
+        `spawn: (proposal, prompt) => ...`. The third argument is dropped. `buildInboxDraftSpawnArgs` has no field
+        for it, and `SpawnWorkerArgs` (src/lib/worker.ts) carries none. src/run-task.ts, worker.ts and
+        worker-provider.ts contain no `avoidModels` at all.
+      - W1-T4864's `files:` held only src/lib/inbox.ts and its test, so the spawn wiring was out of its scope. Its
+        test drives `runDraftRung` with a fake spawn that honours the context, so it passes.
+      - The model is chosen in `spawnWorker`'s open-weight path: `selectOpenWeightModel` (worker-provider.ts) orders
+        the ladder, then the draft-routing choice (`chooseDraftDeployment`) picks from the model and its
+        alternatives, and `runOpenWeightWalkingLadder` walks from there. Nothing in that path knows which models
+        already failed this proposal.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 330 open origin heads for avoidModels and
+    draft_fellthrough, and src/ on every head for avoidModels in run-task.ts, worker.ts and worker-provider.ts.
+    Control: main's plan/ reads 1 draft_fellthrough hit (W1-T4864) and src/lib/inbox.ts reads 6 avoidModels hits.
+    The only head reading more in plan/ is PR #11312, whose W1-T9039 and W1-T9041 name avoidModels only as a term
+    they swept. No head wires it.
+  design: |
+    No new bound. The avoid list narrows the choice; it never empties it.
+    1. WIRE THE CONTEXT THROUGH. `draftProposalBatch`'s `spawn` takes the third `DraftSpawnContext` argument and
+       passes `ctx.avoidModels` to `buildInboxDraftSpawnArgs`, which sets a new optional `avoidModels` on
+       `SpawnWorkerArgs`. The escalation spawn is unchanged: it already moves to a different provider.
+    2. THE CHOICE HONOURS IT. In `spawnWorker`'s open-weight path, before the draft-routing choice, the candidate set
+       (`openWeight.model` and its `alternatives`) drops every avoided model, preserving order. The routing choice
+       and the walking ladder then run on what is left. If every candidate is avoided, the full set is kept and
+       `draft.routing.choice` records the reason `avoid-exhausted`, so a repeat is named, not silent. Whether the
+       filter lives in `selectOpenWeightModel` (as an option beside `only`) or in worker.ts is the builder's call.
+       Either way, the context-fit gate still applies first: avoidance never widens what a prompt can be sent to.
+    3. No change to `runDraftRung` or the `inbox.draft_fellthrough` row. Its `from`/`to` pair is the evidence the
+       fix works.
+    Tests go in a new file, test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive `draftProposalBatch`'s spawn closure, or `buildInboxDraftSpawnArgs`,
+    with a recording raw spawn and a context that names a model. Drive the open-weight selection with a ladder
+    fixture of two ready candidates.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts"
+    - claim: "the inbox draft spawn passes the models a proposal's dirty drafts came from to the worker spawn"
+      proof: 'grep: test("W1-T9067: the draft spawn passes avoidModels to the worker" in test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts'
+    - claim: "a fell-through draft's retry uses a model other than the one that failed"
+      proof: 'grep: test("W1-T9067: a fell-through draft retries on a different model" in test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts'
+    - claim: "when every candidate is avoided the draft still runs and the routing row names it"
+      proof: 'grep: test("W1-T9067: an exhausted avoid list keeps the ladder and names it" in test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts'
+    - claim: "the draft spawn wiring carries the avoid list"
+      proof: "grep: avoidModels in src/run-task.ts"
+  falsifier: |
+    Keep `spawn: (proposal, prompt) => ...` and the first test's recorded spawn args carry no `avoidModels`. Wire it
+    but leave the open-weight choice unaware, and a context naming gpt-oss-120b over a ladder of gpt-oss-120b and
+    gpt-5-nano still selects gpt-oss-120b, which is the from === to row in 68 of 73 fell-through rows today. Filter
+    to empty without the fallback, and the exhausted case throws instead of drafting.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger with no numeric pass mark:
+    `inbox.draft_fellthrough` rows grouped by whether `from` equals `to`. Healthy shape: from === to only where the
+    routing row says `avoid-exhausted`.
