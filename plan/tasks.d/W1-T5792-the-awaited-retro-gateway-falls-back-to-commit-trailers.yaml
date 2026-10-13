@@ -10,8 +10,8 @@
   origin: "operator session 2026-10-05: W1-T5649 (#9216) follow-up"
   plan_refs: [W1-T5649, W1-T2387, W1-T3104]
   files: [src/run-task.ts, test/the-awaited-retro-gateway-falls-back-to-commit-trailers.test.ts]
-  status: queued
-  priority: 3
+  status: blocked
+  retirement: closed  # satisfied by main: #9751 (9a3ec4525) routes the awaited retro gateway through buildBatchedGithub with buildCommitTrailerIndex; run-W1-T5792-1791539568631 changed only its test, which passes 2/2 on d3a775a7a and fails once the index is removed (issue #10301)
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main f0452a82 and #9216 (W1-T5649, open). The awaited gateway's
