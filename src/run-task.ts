@@ -52341,14 +52341,12 @@ export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => voi
   ledger();
 }
 
-type ApproveCommandDeps = NonNullable<Parameters<typeof approveCommandRun>[1]>;
-
 /**
  * `rmd approve`. W1-T9252: whatever the run ledgered for the proposals it named (approved, filed, refused) is
  * also mirrored onto each proposal's thread, once the run ends — the ledger rows stay the record, and the
  * mirror is keyed on them, so the daemon's live tail and boot backfill add nothing a second time.
  */
-export async function approveCommand(rest: string[], deps: ApproveCommandDeps = {}): Promise<number> {
+export async function approveCommand(rest: string[], deps: NonNullable<Parameters<typeof approveCommandRun>[1]> = {}): Promise<number> {
   const startedAt = (deps.clock ?? systemClock).now();
   const code = await approveCommandRun(rest, deps);
   const ids = rest.filter((token) => !token.startsWith("--") && !namesATask(token));

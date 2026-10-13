@@ -87,7 +87,7 @@ const storedEvents = (fx: Fx, proposalId: string): ThreadMessage[] => {
   assert.equal(read.status, "ok");
   return read.status === "ok" ? read.messages.filter((m) => m.extra?.event) : [];
 };
-const ledgerRows = (fx: Fx): Array<Record<string, unknown>> => readFileSync(fx.ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+const rowsWritten = (fx: Fx): Array<Record<string, unknown>> => readFileSync(fx.ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
 
 const HUMAN = "verify-human:W1-T900";
 const JUDGE = "machine-judge:W1-T900";
@@ -117,7 +117,7 @@ test("W1-T9252: a release appears on every open ask thread for the task", async 
   const plan = { byId: new Map([["W1-T900", { id: "W1-T900", verify: "human", status: "queued" }]]) } as never;
   const out = approveParkedTask("W1-T900", {
     plan, ledgerPath: fx.ledgerPath, runId: "APPROVE-W1-T900", ledgerLines: [],
-    recordThreadRow: (row) => void recordRowThreadEvents(ledgerRows(fx).find((line) => line.step === row.step) ?? row, fx.proposals, { threadStorePath: fx.threadStorePath }),
+    recordThreadRow: (row) => void recordRowThreadEvents(rowsWritten(fx).find((line) => line.step === row.step) ?? row, fx.proposals, { threadStorePath: fx.threadStorePath }),
   });
   assert.equal(out.released, true);
   for (const id of [HUMAN, JUDGE]) {
@@ -165,7 +165,7 @@ test("W1-T9252: a retried verb and a re-run backfill write each event once", asy
     { ts: iso(500), run_id: "PANEL-1", task_id: HUMAN, step: "panel.proposal_declined", origin: "tok", reason: "Not needed." },
   ]);
   const store = { threadStorePath: fx.threadStorePath };
-  for (const row of ledgerRows(fx)) {
+  for (const row of rowsWritten(fx)) {
     assert.equal(recordRowThreadEvents(row, fx.proposals, store), 1);
     assert.equal(recordRowThreadEvents(row, fx.proposals, store), 0, "the retried verb writes nothing new");
   }
@@ -278,7 +278,7 @@ test("W1-T9252: a thread reply reaches the daemon as reframe direction", async (
   appendThreadReplyOnce(inboxThreadIdentity("ruling:P4"), "Make the first option the cheap one.", "reply-direction-1", store);
   assert.equal(await answerThread(inboxThreadId("ruling:P4"), deps), "edit", "a reply it cannot place as decline or restore is direction");
   assert.deepEqual(reframed, [["ruling:P4", "Make the first option the cheap one."]]);
-  assert.ok(ledgerRows(fx).some((row) => row.step === "panel.proposal_reframe_requested" && row.feedback === "Make the first option the cheap one."));
+  assert.ok(rowsWritten(fx).some((row) => row.step === "panel.proposal_reframe_requested" && row.feedback === "Make the first option the cheap one."));
   const stored = readThread(inboxThreadId("ruling:P4"), store);
   assert.equal(stored.status === "ok" ? stored.messages.at(-1)?.extra?.did?.action : undefined, "edit");
 
