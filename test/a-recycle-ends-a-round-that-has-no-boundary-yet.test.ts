@@ -157,7 +157,7 @@ test("recycle-yield: the dispatch spawn wires the recycle reader and checkpoints
     return true;
   });
   assert.equal(signal?.aborted, true, "ending the round aborts the worker's stream");
-  assert.match(commits[0], /^wip: yield at container recycle\n/);
+  assert.match(commits[0], /^chore\(checkpoint\): yield at container recycle\n/);
   assert.match(commits[0], /Remudero-Task: W1-T8038/);
 });
 

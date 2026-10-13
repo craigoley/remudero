@@ -21,8 +21,7 @@
  * ── THE SHIFT VALUE ─────────────────────────────────────────────────────────────────────────────
  * ONE shift, +400 days. A larger shift strictly dominates a smaller one for detection — anything a
  * +30d sweep catches, +400d also catches — so a second shorter shift buys no signal and doubles the
- * cost. The theoretical price of a large shift is flagging a fixture with a legitimate multi-year
- * expiry; measured across all 42 candidates, that produced ZERO false flags, so it is not paid here.
+ * cost. The theoretical price, a false flag on a legitimate multi-year expiry, was measured at zero.
  *
  * ── WHAT IT RUNS, AND WHAT IT MUST NEVER RUN ────────────────────────────────────────────────────
  * It runs ONE FILE PER INVOCATION over a derived candidate list. It never passes a glob to
@@ -31,7 +30,7 @@
  * real money, ghost branches and PRs. A shifted clock does not make a paid spawn cheaper.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMainModule } from "./lib/argv.mjs";
@@ -82,11 +81,6 @@ export const SPAWN_REACHING = new Map([
  */
 export const CLOCK_ARTIFACTS = new Map([
   ["prune-liveness", "compares a real FILESYSTEM MTIME against the shifted clock — mtimes are not shiftable, so a just-created directory reads as 400 days old. Its fixture is already derived; there is no literal to convert"],
-  // W1-T1104: `emissions` REMOVED — measured PASSING at +400d by the sweep running in CI, which is
-  // the only environment whose verdict this gate acts on. Its stated mechanism ("reads the REAL
-  // on-disk ledger through a Date.now()-derived window cutoff") no longer holds there.
-  //
-  // A dev container fails it at +400d AND unshifted, which says nothing about the clock: the control is the UNSHIFTED run (absolute `--import`, a bare path resolves as a package). Re-excluding it needs a mechanism measured where the gate runs.
   ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
 ]);
 
@@ -160,17 +154,10 @@ export const DRIFT_CEILING = DRIFT_BASELINE.driftCeiling;
  * ceiling, however generous, because it is a silently SHRINKING exclusion list, not a suite that
  * merely hasn't been fixed yet.
  *
- * W1-T3276 -- AND NEITHER IS *NEW* DRIFT. The ceiling forgave by COUNT alone, so a brand-new time
- * bomb was invisible whenever an old one had been repaired. MEASURED 2026-09-09 against this very
- * function: 10 recorded suites plus one new bomb is 11, at the ceiling, `ok: true` -- with the new
- * suite sitting IN the drifted list, unread. Eleven ENTIRELY NEW suites is also `ok: true`, a set
- * sharing not one member with the population the ceiling was captured from. That is how
- * `clock-sweep` reported SUCCESS on 2026-09-07 over the tree carrying the fixture which took `main`
- * red two days later (W1-T3270).
- *
- * So a drifting suite whose NAME is not in `driftingSuitesAtCapture` is a regression at ANY count,
- * exactly as a stale exclusion already is. The ceiling keeps forgiving the RECORDED backlog -- that
- * is what W1-T1128 fixed and this does not undo -- but it can no longer forgive a stranger.
+ * W1-T3276 -- AND NEITHER IS *NEW* DRIFT: the ceiling forgave by COUNT alone, so a new bomb hid
+ * behind a repaired one (`clock-sweep` reported SUCCESS on 2026-09-07 over the fixture that took
+ * `main` red two days later, W1-T3270). A drifting suite whose NAME is not in
+ * `driftingSuitesAtCapture` is a regression at ANY count; the ceiling forgives only the RECORDED backlog.
  *
  * @param results Map<suite, {failed: boolean}>
  */
@@ -251,6 +238,123 @@ export function firstFailureDetail(output) {
   return out.join("\n").trimEnd();
 }
 
+/** W1-T5102: `i/n` as `{i, n}` with integers 1 <= i <= n <= 64, else null. */
+export function parseShard(spec) {
+  const m = /^(\d+)\/(\d+)$/.exec(String(spec ?? ""));
+  if (!m) return null;
+  const i = Number(m[1]);
+  const n = Number(m[2]);
+  return i >= 1 && i <= n && n <= 64 ? { i, n } : null;
+}
+
+/** W1-T5102: shard i of n takes name-sorted positions k with k % n === i - 1, never the git-history order. */
+export function shardSlice(suites, i, n) {
+  return [...suites].sort().filter((_, k) => k % n === i - 1);
+}
+
+const BROWSER_RE = /chromium\.launch\(|browser-absence/;
+
+function readSuiteText(suite) {
+  const path = join(TEST_DIR, `${suite}.test.ts`);
+  return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
+/** W1-T5102: the suites that launch a browser, which no sweep job installs. */
+export function browserSuites(suites, read = readSuiteText) {
+  return suites.filter((s) => BROWSER_RE.test(read(s)));
+}
+
+/** The report row for one drifting suite: its fuse bound, failing titles and first TAP detail. */
+export function describeDrift(row, run = runSuite) {
+  const output = row.output ?? "";
+  return { suite: row.suite, fuse: bisectFuse(row.suite, run), titles: failingTitles(output), detail: firstFailureDetail(output) };
+}
+
+/** The population header a single sweep, a shard and the W1-T5102 merge all print first. */
+export function headerLines(candidates, runnable) {
+  return [
+    `clock-sweep — shift +${SWEEP_SHIFT_DAYS}d`,
+    `  candidates derived : ${candidates.length}`,
+    `  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((s) => candidates.includes(s)).join(", ") || "none in candidate set"}]`,
+    `  will run           : ${runnable.length}`,
+  ];
+}
+
+/** The report a single sweep and the W1-T5102 merge both print, as log lines. Pure. */
+export function renderReport({ drift, newDrift, staleExclusions, unreached, browsers = [], ceiling, ok, runnable }) {
+  const out = [""];
+  if (unreached.length) {
+    out.push(`UNREACHED — ${unreached.length} suite(s) not run inside the ${SWEEP_BUDGET_MS / 60000}-minute budget (oldest-touched last): ${unreached.slice(0, 10).join(", ")}${unreached.length > 10 ? ` + ${unreached.length - 10} more` : ""}`);
+    out.push("");
+  }
+  // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
+  // the failing test, the fuse, and what to do — never just "the shifted run failed". Printed
+  // whenever there IS drift, even a run that stays under the ceiling and therefore still exits
+  // 0 — a ratchet that hides its own number is not actionable (W1-T1128 design iv).
+  if (drift.length) {
+    out.push(`WALL-CLOCK DRIFT — ${drift.length} suite(s) pass today and FAIL in the future.`);
+    out.push(`This is the shape that took main red on 2026-08-02 and blocked every open PR at once.`);
+    for (const d of drift) {
+      const fuse = d.fuse;
+      out.push(`\n  test/${d.suite}.test.ts`);
+      out.push(fuse === 0 ? "    fails by      : +0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)" : `    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
+      for (const t of d.titles) out.push(`    failing test  : ${t}`);
+      out.push(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
+      out.push(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
+      if (d.detail) {
+        out.push(`    detail        :`);
+        for (const line of d.detail.split("\n")) out.push(`      ${line}`);
+      }
+    }
+    // A RATCHET, not absolute cleanliness (W1-T1128): the verdict compares against the recorded
+    // ceiling, and each of the three relations gets its own line so an operator can tell "still
+    // broken, unchanged", "just got worse" and "just got better -- lower the ceiling" apart.
+    // W1-T3276 -- NEW DRIFT LEADS, because "12 suites drifted" is not actionable and "one NEW
+    // suite drifted" is. A run that stays under the ceiling still fails when this list is non-empty.
+    if (newDrift.length) {
+      out.push(`\nNEW DRIFT — ${newDrift.length} suite(s) NOT in scripts/clock-sweep-baseline.json's recorded set:`);
+      for (const d of newDrift) out.push(`  test/${d.suite}.test.ts`);
+      out.push(`A suite that STARTED drifting is a regression at any count, and is never forgiven by the`);
+      out.push(`ceiling -- the ceiling exists to forgive the recorded backlog, not a stranger. Fix it, or`);
+      out.push(`record it deliberately in driftingSuitesAtCapture and say why in the same PR.`);
+    }
+    if (drift.length > ceiling) {
+      out.push(`\nOVER CEILING — ${drift.length} drifting suite(s) exceeds the recorded ceiling of ${ceiling}.`);
+      out.push(`This is a REGRESSION against scripts/clock-sweep-baseline.json: fix the new drift, or if a`);
+      out.push(`bump is a deliberate, reviewed decision, raise driftCeiling there and say why.`);
+    } else if (drift.length < ceiling) {
+      out.push(`\nBELOW CEILING — ${drift.length} drifting suite(s) is under the recorded ceiling of ${ceiling}.`);
+      out.push(`Drift genuinely improved; lower driftCeiling in scripts/clock-sweep-baseline.json to lock it in.`);
+    } else {
+      out.push(`\nAT CEILING — ${drift.length} drifting suite(s) matches the recorded ceiling of ${ceiling} exactly.`);
+    }
+  }
+  if (staleExclusions.length) {
+    out.push(`\nSTALE EXCLUSIONS — ${staleExclusions.length} suite(s) listed as clock artifacts now PASS shifted.`);
+    out.push(`Their stated mechanism no longer holds; remove them from CLOCK_ARTIFACTS in scripts/clock-sweep.mjs.`);
+    out.push(`A stale exclusion is never forgiven by the drift ceiling -- it always fails the sweep.`);
+    for (const s of staleExclusions) out.push(`  test/${s.suite}.test.ts — was excluded because: ${s.reason}`);
+  }
+  if (browsers.length) {
+    out.push(`\nBROWSER SUITES IN THE POPULATION — ${browsers.length} suite(s) launch a browser, and no sweep job installs one:`);
+    for (const s of browsers) out.push(`  test/${s}.test.ts`);
+    out.push(`Add \`npx playwright install chromium\` (no --with-deps, W1-T1027) to the shard job in clock-sweep.yml.`);
+  }
+  if (ok) {
+    // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` (negative under
+    // `--only`); drifting suites within the ceiling are not "immune" either (W1-T1128).
+    const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
+    const immune = runnable.length - artifactsRun - drift.length;
+    const notes = [];
+    if (artifactsRun) notes.push(`${artifactsRun} known artifact(s) still failing as expected`);
+    if (drift.length) notes.push(`${drift.length} drifting suite(s) within the ceiling (see above)`);
+    out.push(`\nPASS — ${immune} suite(s) immune at +${SWEEP_SHIFT_DAYS}d` + (notes.length ? `; ${notes.join("; ")}.` : "."));
+  }
+  return out;
+}
+
+const writeJsonFile = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+
 // Every collaborator injected LAST with a real default, so the CLI call stays `main()` while a
 // test can exercise the list / pass / drift / stale-exclusion paths without spawning anything.
 // Returns the exit code rather than calling process.exit, so assertions read a value.
@@ -264,6 +368,8 @@ export function main({
   recorded = DRIFT_BASELINE.driftingSuitesAtCapture ?? [],
   touchedAt = readTouchedAt,
   now = Date.now,
+  readSuite = readSuiteText,
+  writeJson = writeJsonFile,
   log = console.log,
   write = (s) => process.stdout.write(s),
 } = {}) {
@@ -273,15 +379,28 @@ export function main({
   // even an explicit `--only mounts-wiring` cannot reach a spawn.
   const onlyIdx = argv.indexOf("--only");
   const only = onlyIdx !== -1 ? argv[onlyIdx + 1] : undefined;
+  const shardIdx = argv.indexOf("--shard");
+  const shard = shardIdx === -1 ? { i: 1, n: 1 } : parseShard(argv[shardIdx + 1]);
+  const outIdx = argv.indexOf("--results-out");
+  const resultsOut = outIdx === -1 ? undefined : argv[outIdx + 1];
+  if (!shard) {
+    log(`clock-sweep: --shard wants i/n with integers 1 <= i <= n <= 64, got ${JSON.stringify(argv[shardIdx + 1] ?? "")}`);
+    return 2;
+  }
+  // A slice classified against the GLOBAL ceiling would be wrong, so a sharded sweep must hand its raw results to the merge.
+  if ((outIdx !== -1 && !resultsOut) || (shard.n > 1 && !resultsOut && !listOnly)) {
+    log(`clock-sweep: --shard ${shard.i}/${shard.n} needs --results-out <path>; only scripts/clock-sweep-aggregate.mjs classifies a shard`);
+    return 2;
+  }
   const candidates = only ? [only] : derive();
   const runnable = runnableCandidates(candidates);
+  const sharded = shard.n > 1 || resultsOut !== undefined;
+  const slice = sharded ? shardSlice(runnable, shard.i, shard.n) : runnable;
 
-  log(`clock-sweep — shift +${SWEEP_SHIFT_DAYS}d`);
-  log(`  candidates derived : ${candidates.length}`);
-  log(`  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((s) => candidates.includes(s)).join(", ") || "none in candidate set"}]`);
-  log(`  will run           : ${runnable.length}`);
+  for (const line of headerLines(candidates, runnable)) log(line);
+  if (sharded) log(`  shard ${shard.i}/${shard.n}          : ${slice.length} suites`);
   if (listOnly) {
-    for (const s of runnable) log(`    ${CLOCK_ARTIFACTS.has(s) ? "artifact" : "        "}  ${s}`);
+    for (const s of slice) log(`    ${CLOCK_ARTIFACTS.has(s) ? "artifact" : "        "}  ${s}`);
     return 0;
   }
 
@@ -294,7 +413,7 @@ export function main({
     touched = new Map();
   }
   log(`  order: ${order}`);
-  const ordered = orderNewestFirst(runnable, touched);
+  const ordered = orderNewestFirst(slice, touched);
 
   // PER-SUITE PROGRESS, written as it goes. The full sweep runs for tens of minutes; a job that
   // prints nothing until the end is indistinguishable from a stalled one (and `tee`'s block
@@ -308,82 +427,28 @@ export function main({
     results.set(suite, r);
     done++;
     const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
-    write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
+    write(`  [${String(done).padStart(3)}/${slice.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
-  const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
   const unreached = ordered.slice(done);
-  const ok = classified && unreached.length === 0;
 
-  log("");
-  if (unreached.length) {
-    log(`UNREACHED — ${unreached.length} suite(s) not run inside the ${SWEEP_BUDGET_MS / 60000}-minute budget (oldest-touched last): ${unreached.slice(0, 10).join(", ")}${unreached.length > 10 ? ` + ${unreached.length - 10} more` : ""}`);
-    log("");
+  if (sharded) {
+    const drift = [...results].filter(([s, r]) => r.failed && !CLOCK_ARTIFACTS.has(s)).map(([suite, r]) => describeDrift({ suite, ...r }, run));
+    writeJson(resultsOut, {
+      version: 1, shard: shard.i, of: shard.n, candidates: candidates.length, runnable: runnable.length, order,
+      elapsedMs: now() - started, ran: [...results.keys()], unreached,
+      results: [...results].map(([suite, r]) => ({ suite, failed: r.failed })), drift,
+    });
+    if (unreached.length) log(`\nUNREACHED — ${unreached.length} suite(s) not run inside the ${SWEEP_BUDGET_MS / 60000}-minute budget: ${unreached.slice(0, 10).join(", ")}${unreached.length > 10 ? ` + ${unreached.length - 10} more` : ""}`);
+    log(`\nshard ${shard.i}/${shard.n} wrote ${resultsOut}: ${results.size} run, ${drift.length} failing; the merge classifies them.`);
+    return unreached.length ? 1 : 0;
   }
-  // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
-  // the failing test, the fuse, and what to do — never just "the shifted run failed". Printed
-  // whenever there IS drift, even a run that stays under the ceiling and therefore still exits
-  // 0 — a ratchet that hides its own number is not actionable (W1-T1128 design iv).
-  if (drifted.length) {
-    log(`WALL-CLOCK DRIFT — ${drifted.length} suite(s) pass today and FAIL in the future.`);
-    log(`This is the shape that took main red on 2026-08-02 and blocked every open PR at once.`);
-    for (const d of drifted) {
-      const fuse = bisectFuse(d.suite, run);
-      log(`\n  test/${d.suite}.test.ts`);
-      log(fuse === 0 ? "    fails by      : +0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)" : `    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
-      for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
-      log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
-      log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
-      const detail = firstFailureDetail(d.output);
-      if (detail) {
-        log(`    detail        :`);
-        for (const line of detail.split("\n")) log(`      ${line}`);
-      }
-    }
-    // A RATCHET, not absolute cleanliness (W1-T1128): the verdict compares against the recorded
-    // ceiling, and each of the three relations gets its own line so an operator can tell "still
-    // broken, unchanged", "just got worse" and "just got better -- lower the ceiling" apart.
-    // W1-T3276 -- NEW DRIFT LEADS, because "12 suites drifted" is not actionable and "one NEW
-    // suite drifted" is. A run that stays under the ceiling still fails when this list is non-empty.
-    if (newDrift.length) {
-      log(`\nNEW DRIFT — ${newDrift.length} suite(s) NOT in scripts/clock-sweep-baseline.json's recorded set:`);
-      for (const d of newDrift) log(`  test/${d.suite}.test.ts`);
-      log(`A suite that STARTED drifting is a regression at any count, and is never forgiven by the`);
-      log(`ceiling -- the ceiling exists to forgive the recorded backlog, not a stranger. Fix it, or`);
-      log(`record it deliberately in driftingSuitesAtCapture and say why in the same PR.`);
-    }
-    if (drifted.length > ceiling) {
-      log(`\nOVER CEILING — ${drifted.length} drifting suite(s) exceeds the recorded ceiling of ${ceiling}.`);
-      log(`This is a REGRESSION against scripts/clock-sweep-baseline.json: fix the new drift, or if a`);
-      log(`bump is a deliberate, reviewed decision, raise driftCeiling there and say why.`);
-    } else if (drifted.length < ceiling) {
-      log(`\nBELOW CEILING — ${drifted.length} drifting suite(s) is under the recorded ceiling of ${ceiling}.`);
-      log(`Drift genuinely improved; lower driftCeiling in scripts/clock-sweep-baseline.json to lock it in.`);
-    } else {
-      log(`\nAT CEILING — ${drifted.length} drifting suite(s) matches the recorded ceiling of ${ceiling} exactly.`);
-    }
-  }
-  if (staleExclusions.length) {
-    log(`\nSTALE EXCLUSIONS — ${staleExclusions.length} suite(s) listed as clock artifacts now PASS shifted.`);
-    log(`Their stated mechanism no longer holds; remove them from CLOCK_ARTIFACTS in scripts/clock-sweep.mjs.`);
-    log(`A stale exclusion is never forgiven by the drift ceiling -- it always fails the sweep.`);
-    for (const s of staleExclusions) log(`  test/${s.suite}.test.ts — was excluded because: ${s.reason}`);
-  }
-  if (ok) {
-    // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` — that goes
-    // NEGATIVE under `--only`, and a summary line that prints "-2 suites immune" is worse than
-    // none. `drifted.length` is ALSO subtracted here (W1-T1128): under the ceiling ratchet, `ok`
-    // no longer implies zero drift, and a suite that just failed shifted is not "immune" merely
-    // because the run stayed under the ceiling -- that would misreport the very thing the WALL-
-    // CLOCK DRIFT section above just named.
-    const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
-    const immune = runnable.length - artifactsRun - drifted.length;
-    const notes = [];
-    if (artifactsRun) notes.push(`${artifactsRun} known artifact(s) still failing as expected`);
-    if (drifted.length) notes.push(`${drifted.length} drifting suite(s) within the ceiling (see above)`);
-    log(`\nPASS — ${immune} suite(s) immune at +${SWEEP_SHIFT_DAYS}d` + (notes.length ? `; ${notes.join("; ")}.` : "."));
-    return 0;
-  }
-  return 1;
+
+  const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
+  const browsers = browserSuites(runnable, readSuite);
+  const ok = classified && unreached.length === 0 && browsers.length === 0;
+  const drift = drifted.map((d) => describeDrift(d, run));
+  for (const line of renderReport({ drift, newDrift, staleExclusions, unreached, browsers, ceiling, ok, runnable })) log(line);
+  return ok ? 0 : 1;
 }
 
 if (isMainModule(import.meta.url)) process.exit(main());

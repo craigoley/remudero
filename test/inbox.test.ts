@@ -47,6 +47,7 @@ import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/pla
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -173,6 +174,7 @@ test("classifyProposal: a {ready, dep-unmet, evidence-drifted, deferred-with-tri
   };
 
   const ctx = baseCtx({
+    clock: fixedClock(Date.parse("2026-10-12T20:30:00-04:00")),
     grepAnchorTrue: (a) => a.pattern === anchorTrue.pattern,
     openProposalIds: new Set(["P-READY", "P-DEP-UNMET", "P-EVIDENCE-DRIFTED", "P-DEFERRED"]),
   });
@@ -182,7 +184,11 @@ test("classifyProposal: a {ready, dep-unmet, evidence-drifted, deferred-with-tri
   const readyResults = results.filter((r) => r.state === "ready");
   assert.equal(readyResults.length, 1, "exactly one READY");
   assert.equal(readyResults[0].proposalId, "P-READY");
-  assert.deepEqual(readyResults[0].draft, drafts["P-READY"]);
+  assert.deepEqual(readyResults[0].draft, {
+    ...drafts["P-READY"],
+    stampLine: "- P-READY (plan) — RATIFIED 2026-10-13 -> W1-T900.",
+  });
+  assert.equal(drafts["P-READY"].stampLine, "- P-READY (plan) — RATIFIED 2026-07-20 -> W1-T900.");
   assert.deepEqual(readyResults[0].reasons, []);
 
   const depUnmetResult = results.find((r) => r.proposalId === "P-DEP-UNMET")!;
@@ -908,6 +914,7 @@ const VALID_DRAFT_TEXT = [
   "  type: implement",
   "  verify: auto",
   "  risk: high",
+  "  band_meaning: span",
   "  files: [src/lib/x.ts, test/x.test.ts]",
   "  origin: feedback#P1",
   "  acceptance:",
@@ -1065,7 +1072,7 @@ const SIZING_DIRTY_DRAFT = [
 test("lintDraftedFragment: a risk:medium two-subsystem task is a BLOCK sizing violation; a clean task is empty; unparseable ⇒ draft-parse", () => {
   const dirty = lintDraftedFragment("- id: W1-T901\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/inbox.ts, src/lib/retro.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1");
   assert.ok(dirty.some((v) => v.check === "sizing" && v.severity === "block"), "medium-risk multi-subsystem ⇒ Rule-19 sizing block");
-  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  files: [src/lib/x.ts, test/x.test.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1"), []);
+  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  band_meaning: span\n  files: [src/lib/x.ts, test/x.test.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1"), []);
   const parse = lintDraftedFragment("this: is: not: valid: yaml: [", "P1");
   assert.equal(parse[0]?.check, "draft-parse");
 });

@@ -535,11 +535,20 @@ function lostFingerprint(keys: string[]): string {
   return createHash("sha1").update([...keys].sort().join("\n")).digest("hex").slice(0, 16);
 }
 
-function history(db: ReadModelDb): Array<{ atMs: number; outcome: string; healed: number; lostFp: string | null }> {
+function history(db: ReadModelDb): Array<{ atMs: number; t0: number; t1: number; outcome: string; healed: number; lostFp: string | null }> {
   const exists = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'consistency_run'").get();
   if (!exists) return [];
-  return db.prepare("SELECT at_ms, outcome, healed, lost_fp FROM consistency_run ORDER BY id").all()
-    .map((row) => ({ atMs: Number(row.at_ms), outcome: String(row.outcome), healed: Number(row.healed), lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+  return db.prepare("SELECT at_ms, t0, t1, outcome, healed, lost_fp FROM consistency_run ORDER BY id").all()
+    .map((row) => ({ atMs: Number(row.at_ms), t0: Number(row.t0), t1: Number(row.t1), outcome: String(row.outcome), healed: Number(row.healed),
+      lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+}
+
+/** A heal RECURS when the projector lost rows again: an earlier heal (within {@link ORACLE_RECURRENCE_MS}) covered an
+ *  overlapping window, or this window holds rows written after that heal. A rolling slice reaching an older gap for the
+ *  first time is neither — #10884 logged 33 "recurrences" as backward slices each healed their own part of one gap. */
+export function healRecurs(past: readonly { atMs: number; t0: number; t1: number; healed: number }[], window: OracleWindow, started: number): boolean {
+  return past.some((row) => row.healed > 0 && row.atMs >= started - ORACLE_RECURRENCE_MS
+    && ((row.t0 <= window.t1 && window.t0 <= row.t1) || window.t1 > row.atMs));
 }
 
 /** The schedule hook's two tiers: hourly after an agreement, sooner while the last run found anything. */
@@ -700,7 +709,7 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
     outcome = "healed";
     const after = compare();
     if (projectionDrift(after) > 0) reasons.push(`${projectionDrift(after)} projection mismatch(es) survived a rebuild of the window`);
-    else if (past.some((row) => row.healed > 0 && row.atMs >= started - ORACLE_RECURRENCE_MS)) reasons.push("the projection drifted again within 24 h of an earlier self-heal");
+    else if (healRecurs(past, window, started)) reasons.push("the projection drifted again within 24 h of an earlier self-heal");
   }
   if (reasons.length > 0) outcome = "escalated";
   const sample = [...c.missing, ...c.ledgerLost, ...c.factMissing].slice(0, SAMPLE_LIMIT).map((key) => c.lines.get(key) ?? `seen ${key}`)

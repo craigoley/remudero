@@ -1,0 +1,76 @@
+- id: W1-T8864
+  title: "NO GARDENER RE-CHECKS AN OPEN ISSUE, SO 53 SIT OPEN WHILE THE FLEET CLOSES 92% OF ITS OWN — the escalation reconciler lists only needs-human/fleet-notice issues and drops every one without a plan-task or PR referent (22 of 30 per pass), and ~23 hand-filed observation issues are never read at all: a registered issue-revalidation garden re-checks every open issue against current evidence and closes, converts or refreshes it, shadow-first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — re-judging open issues against current evidence; each producer's own close-on-recovery is W1-T8866's
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: make sure a revalidation gardener works, using the open-issue backlog as its test case; a risk judge decides what needs the operator"
+  plan_refs: [W1-T3167, W1-T4677, W1-T4802, W1-T4738]
+  files: [src/lib/issue-revalidation-garden.ts, src/lib/garden-registry.ts, src/run-task.ts, plan/policy.yaml, test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; ledger 10-10 23:10Z to 10-12 23:10Z (48 .gz archives plus the live file).
+    OBSERVED:
+    - `REGISTERED_GARDEN_NAMES` (src/lib/garden-registry.ts) has 17 gardens; none revalidates issues.
+    - `runEscalationReconcile` (src/lib/sweep.ts) runs every ~7.7 min.
+      - It lists only `RETIRABLE_ESCALATION_LABELS` (needs-human, fleet-notice).
+      - It closes only when a referent is MERGED or CLOSED.
+      - Its latest summary: issues_seen 30, evaluated 8, closed 0, dropped no_referent 20 and no_task_trailer 2.
+    - `runStaleEscalationRejudge` (W1-T3167, sweep.ts) has NO production caller (only its test) and 0 `escalation.rejudged`
+      rows in 48 h. It can only demote, never close.
+    - GitHub (read 2026-10-12 22:11Z): 53 open issues.
+      - 24 are pre-escalation hand-filed observations dated 09-13 to 10-08.
+      - 4 gardener-liveness issues whose own body says the overseer healed it.
+      - 3 READ-MODEL issues, while 378 of 380 consistency runs in 24 h agree.
+      - 10 GRILLs, 4 of them "triage claimed ALREADY_DECIDED citing a file that does not exist".
+      - 5 "proof already passes at the merge base".
+    - Meanwhile 420 needs-human issues closed since 10-05, 92 of the latest 100 by the fleet, median 1.5 h open. The loop
+      works for task and PR referents; the residue is everything else.
+  design: |
+    The garden's entry point is `runIssueRevalidationGarden` (src/lib/issue-revalidation-garden.ts), registered in garden-registry.ts.
+    A registered garden `issue-revalidation` (gardener.ts framework). Cadence hourly with `gardenPacingDue` backoff. ONE
+    paced REST list of ALL open issues per pass (no label filter) plus `listComments` only for candidates.
+    1. CLASSIFY each issue:
+       - task/PR referent: reuse `buildEscalationReconcileCandidates`' derivation;
+       - known producer class (gardener-liveness, READ-MODEL-*, MEMORY-CAPACITY-*, main-repair-*, LIVE-EDITS, TRIAGE-*,
+         clock-sweep:*);
+       - hand-filed.
+    2. PROBE "is the condition still true?" against CURRENT evidence, per class:
+       - liveness: the overseer's `judgeHealth` on recent rows;
+       - READ-MODEL: the last N `read_model.consistency` rows for that instance;
+       - clock-sweep: the suite's latest sweep result;
+       - task/PR: the reconciler's referent state;
+       - hand-filed: a bounded judge (reuse `buildStaleEscalationRejudgePrompt`'s shape) given the issue text plus a
+         current-main evidence pack (git grep of the files and symbols it names, recent ledger rows of the steps it
+         names).
+       The judge returns one of: resolved (with a citation), still-true, convert-to-task, or unknown.
+    3. VERDICTS:
+       - resolved + positive evidence: close with a citation comment;
+       - convert-to-task: draft a plan shard through the normal machine-filing path (machine-filing judge plus lint-plan),
+         then close with the PR link once the filing merges;
+       - still-true: a dated refresh comment at most weekly;
+       - unknown or an indeterminate read: KEEP, never close.
+    4. GUARDRAILS:
+       - Ship in SHADOW (policy `issueRevalidation.mode: shadow`). Each verdict is ledgered as
+         `issue_revalidation.verdict`, with no GitHub writes, until the operator flips it to `act`.
+       - Never close MANUAL capacity decisions or open GRILLs (comment-refresh only).
+       - Never close an issue where an operator comment is newer than the last bot comment (the operator check in
+         escalation-answers.ts).
+       - Cap closes at 5 per pass. Every close is reversible (reopen), carries the evidence, and writes a ledger row.
+    5. TEST CASE: the shadow ledger over the current 53 open issues is the acceptance evidence for flipping to act. The
+       review reads the shadow verdict table.
+  acceptance:
+    - claim: "the garden lists every open issue, classifies it, probes current evidence, and in shadow mode ledgers a resolved/still-true/convert/unknown verdict without writing to GitHub; in act mode it closes only positively-evidenced, non-MANUAL, non-GRILL issues with no newer operator comment, at most five per pass"
+      proof: 'grep: test("W1-T8864: the issue revalidation garden re-judges every open issue" in test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts'
+    - claim: "the garden is registered and scheduled"
+      proof: 'grep: runIssueRevalidationGarden( in src/lib/garden-registry.ts'
+  falsifier: |
+    Restore the reconciler's referent-only candidate set inside the garden: the fixture's hand-filed and producer-class
+    issues get no verdict, and the test fails. Let shadow mode call closeWithComment: the shadow case records a GitHub
+    write, and the test fails.

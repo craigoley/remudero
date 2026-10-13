@@ -1,0 +1,77 @@
+- id: W1-T5420
+  title: "Run the remaining inline knowledge gardener off the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-03 approved follow-up; read-only core startup investigation"
+  plan_refs: [W1-T5114, W1-T5361, W1-T5285]
+  files: [src/lib/garden-registry.ts, src/run-task.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts, test/knowledge-garden-off-loop.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED at dde31b951bbb682c42a28dd3bb5652142ac98cf2, rechecked at filing
+    base 398290d65c774da523f8cbf2e9153b128e55be76: production daemonCommand still
+    supplies knowledgeGardener directly. runDaemon calls startKnowledgeGardener before
+    its main loop; that starter delegates to startGarden, whose first tick immediately
+    calls the synchronous runGarden. The existing registry has no knowledge entry or
+    construction case. Its own pacing fixture explicitly asserts that knowledge is not
+    registered. Thus the off-loop mechanism shipped for W1-T5114 does not cover this lane.
+    Production core was judged down at 03:24 UTC: its last sweep was 02:34:30, roughly
+    fifty minutes old against the existing thirty-minute liveness bound. Its startup log
+    showed a knowledge-garden workspace checkout and subsequent synchronous work.
+    It recovered without intervention: sweeps resumed at 03:30 and reviews posted at
+    03:29-03:30. INFERRED: inline knowledge work contributed to delayed admission; the
+    observations do not attribute the entire delay or claim that the container crashed.
+    W1-T5114 is already implemented in PR #8367. Open PR #8833/W1-T5361 handles the
+    machine-filing judge, still leaves knowledgeGardener inline, and is not this repair.
+    W1-T5285 concerns the separate branch-reap lane. Do not rebuild the registry or retire
+    these records as a substitute for closing the observed production wiring gap.
+  design: |
+    Add knowledge to the existing registered-garden construction and mount the self-target
+    production lane through offLoopGarden. Reuse knowledgeGardenWorkspace, the same spec,
+    state directory, actor attribution and review/landing ports. Remove the production inline
+    knowledgeGardener wiring; a compatibility library port may remain for existing fixtures.
+    Preserve the existing shared spawn budget, no-overlap behavior, cheap due checks, stop
+    handling, single-writer/lease protection and knowledge review/scorecard semantics.
+    The child must use the same production registry as the garden CLI; wrapping synchronous
+    work in a promise or setImmediate is not an off-loop implementation.
+    Add a production-wiring fixture naming knowledge explicitly, rather than inferring
+    coverage from every currently registered entry. Exercise a real owned child with slow
+    work while a parent timer advances, and verify original failure and settlement receipts.
+    Observe the existing garden.pass timing and first-admission receipts after normal source
+    adoption; report confounders and missing evidence rather than imposing a new hard ceiling.
+    No new framework, approval step, timer policy, credential change, routing change, forced
+    recycle or automatic restart. W1-T5361 shares paths: re-sweep its actual head before build,
+    incorporate its landed wiring if present, and do not duplicate its machine-judge work.
+  acceptance:
+    - claim: "production knowledge gardening uses the same off-loop registry as its CLI"
+      proof: 'grep: knowledge garden production wiring uses the off-loop registry in test/knowledge-garden-off-loop.test.ts'
+    - claim: "a slow knowledge garden child cannot block the parent daemon timer"
+      proof: 'grep: knowledge garden slow child leaves the parent timer responsive in test/knowledge-garden-off-loop.test.ts'
+    - claim: "knowledge review receipts and one-pass-at-a-time behavior survive child execution"
+      proof: 'grep: knowledge garden child preserves review receipts and no overlap in test/knowledge-garden-off-loop.test.ts'
+    - claim: "production wiring cannot silently exclude knowledge while registry-wide tests pass"
+      proof: 'grep: knowledge garden is explicitly covered by production wiring in test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts'
+  falsifier: |
+    Restore inline production knowledgeGardener: the explicit wiring fixture must fail.
+    Replace the asynchronous child with synchronous runGarden: the owned child/timer control
+    must fail. Drop review receipts or permit overlapping passes: their separate controls fail.
+  note: |
+    Atomically reserved in /home/craigoleyagent/rmd-mint on
+    codex/knowledge-off-loop-plan-1790998779903; refs/rmd-id/W1-T5420 is held.
+    The scope-time read found W1-T5114 implementation #8367 among 7,110 closed PRs with
+    #8791 as an independent credit control. Fourteen actual open heads were compared with
+    current main using changed-file controls. #8833 overlaps registry/wiring/test paths but
+    excludes knowledge; #8829 changes daemon ticking, not knowledge construction.
+    Sizing was measured at medium first: lint-plan counted five concern stems including
+    the daemon call-site surface. The band records that shared production-wiring span;
+    splitting one missing registry lane into disconnected fixes would lose its falsifier.
+    This regrade adds no authority or approval requirement and weakens no runtime gate.
+    This is one plan shard only, not an implementation or a claim of deployed improvement.
+    Primary reference: https://nodejs.org/download/release/v22.22.3/docs/api/child_process.html

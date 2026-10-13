@@ -1,0 +1,63 @@
+- id: W1-T8825
+  title: "AN INBOX ITEM NAMES WHO SENT IT AND WHEN — the inbox view serves no sender and no time on any item, so the console titles every row with an internal proposal id and cannot sort, group or show an inbox at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # spans the served view and the producer name table (Rule 19); additive read fields only
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review (\"it was supposed to feel like an e-mail inbox\"); mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
+  plan_refs: [W1-T4087, W1-T4088, W1-T4086]
+  files: [src/lib/panel-graph.ts, src/lib/inbox-owner.ts, test/an-inbox-item-names-who-sent-it-and-when.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 22:05Z on the live console (GET /v1/inbox?section=needsYou): every item is headed by its proposal
+    id ("machine-judge:W1-T5418", "verify-human:W3-T7"), and nothing says who raised it or when. The operator asked for an
+    inbox that works like email; the console cannot draw a From column, a received time or a thread per sender because
+    core never serves them.
+    VERIFIED on origin/main e0dde45ac: `inboxLanes` (src/lib/panel-graph.ts ~2156-2217) builds each ready / drafting /
+    notReady / declined item from `proposalId`, `summary`, `plain`, `stampLine`, `draftedTasks`, `reasons`, `trigger`,
+    `resolution` and `lane`; `Proposal` (src/lib/inbox.ts ~75) carries no creation time at all. The producer is known but
+    unserved: `inboxKind` (src/lib/inbox-owner.ts ~28) names the kind, and for a `machine-judge:` item the filer family is
+    the record's `judgementFamily` (src/lib/machine-filing-judge.ts ~67), which the judge's own summary already prints as
+    "was filed by the ci-friction gardener".
+    The inbox view's data deliberately carries no clock so unchanged pages keep their ETags (src/lib/inbox-view.ts ~142),
+    so every time served here must be a STORED instant, never "now".
+  design: |
+    PINNED CONTRACT (the console files against exactly these names; do not rename):
+      every item in `data.items[]` of `GET /v1/views/inbox?section=<needsYou|ready|drafting|notReady|declined|fleet>`
+      (and the same item objects in `GET /v1/inbox`'s lanes) gains:
+        from:           { "kind": string, "name": string }
+        receivedAt:     string | null   (RFC 3339 UTC)
+        lastActivityAt: string | null   (RFC 3339 UTC, never earlier than receivedAt)
+        groupKey:       string
+    1. `from.kind` is the producer id: for `machine-judge:<task>` the record's `judgementFamily` (e.g. "ci-friction",
+       "fix-lane", "flow-blocker"); otherwise `inboxKind(proposalId)` (e.g. "verify-human", "guard-retirement", the retro's
+       standing-debt kind). `from.name` is a fixed display table in src/lib/inbox-owner.ts: "CI-friction gardener",
+       "Fix-lane gardener", "Flow-blocker gardener", "Verify-human judge", "Guard review", "Retro", ...; an unknown kind
+       falls back to the kind itself with its first letter capitalised, never to a proposal id.
+    2. `receivedAt` comes from a recorded source, never a model: a machine-judge item's `risk_ruling.judged_at`; otherwise
+       the first time the inbox classified the proposal id, persisted once in a first-seen store under the state dir
+       (written by the slow lane on first sight, never rewritten, rotation-proof). `null` only when neither exists.
+    3. `lastActivityAt` is the latest stored instant among receivedAt, the proposal's reframe/decline/restore rows and its
+       inbox thread's newest message. It changes only when one of those happens, so an idle inbox keeps its ETags.
+    4. `groupKey` = `from.kind`: the console groups a sender's items into one thread with it.
+    5. Purely additive: no existing field changes, and the plain message, lanes and counts are untouched.
+  acceptance:
+    - claim: "a machine-judge item names its filer family as the sender and the ruling's judged_at as receivedAt"
+      proof: 'grep: test("W1-T8825: a machine-judge item names its filer family and its ruling time" in test/an-inbox-item-names-who-sent-it-and-when.test.ts'
+    - claim: "any other item names its kind's display name and the first time the inbox saw it, stable across recomputes"
+      proof: 'grep: test("W1-T8825: an item keeps the received time the inbox first recorded for it" in test/an-inbox-item-names-who-sent-it-and-when.test.ts'
+    - claim: "lastActivityAt moves with a thread reply and stays put on an idle recompute, so the view keeps its ETag"
+      proof: 'grep: test("W1-T8825: lastActivityAt moves only when the item does" in test/an-inbox-item-names-who-sent-it-and-when.test.ts'
+    - claim: "an unknown kind never shows a proposal id as the sender"
+      proof: 'grep: test("W1-T8825: an unknown kind is named, never shown as an id" in test/an-inbox-item-names-who-sent-it-and-when.test.ts'
+  falsifier: |
+    Build the inbox lanes for a fixture holding `machine-judge:W1-T5418` (record family ci-friction, judged_at
+    2026-10-03T00:00:00Z) and `verify-human:W3-T7`. At origin/main neither item has `from` or `receivedAt`; with the change
+    the first reads {kind:"ci-friction", name:"CI-friction gardener"} and the ruling's time, the second "Verify-human judge"
+    and its first-seen time, and recomputing with no activity returns byte-identical items.

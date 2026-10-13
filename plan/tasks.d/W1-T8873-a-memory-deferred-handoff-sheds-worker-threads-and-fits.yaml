@@ -1,0 +1,48 @@
+- id: W1-T8873
+  title: "SERVE SITS ON STALE CODE FOR 15 HOURS BECAUSE ITS HANDOFF NEVER FITS AND ITS SHED FREES NOTHING — since 2026-10-12 07:13Z the supervisor deferred the handoff for memory 660 times (8.7 h on 7269757b, then 6.9 h and counting on 8139a0d1), each needing ~4.9-5.0 GB free against 3.3-4.4 GB, while serve.handoff_shed GCs only the ~0.38 GB main heap and leaves the ~2.6 GB held by worker threads: a deferred handoff sheds the active generation's rebuildable worker threads, so the new generation fits without more memory"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — what the active generation gives up so a memory-deferred handoff fits; limits and reserves are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: no VM resize; optimize and right-size what we have"
+  plan_refs: [W1-T8311]
+  files: [src/lib/serve-supervisor.ts, src/lib/serve-generation.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; ledger 10-10 23:00Z to 10-12 23:08Z (deduplicated).
+    OBSERVED:
+    - 660 `serve.handoff_deferred` reason memory since 10-12 07:13Z; serve moved only through the 15:56Z restart.
+    - `serve.handoff_shed`: beforeBytes 3,583 MB → afterBytes 3,583 MB. `shedActive` ("Tier 1: the active generation
+      drops its rebuildable caches") reaches the main heap (~0.38 GB).
+    - Worker heaps early-max vs steady p50 (MB): views 1443/377, heavy views 1648/1186, plan reload 465/61, oracle 683/84,
+      board 642/322; prewarm ~220 and repo-dashboard ~300 early only.
+    - The serve cgroup's memory.peak (5.91 GB) equals its MemoryHigh, and its swap hit the 1 GB swap.max, so the cold-start
+      peak is censored.
+    - Steady RSS p50 3.79 GB.
+    INFERRED: shedding or terminating the rebuildable worker threads frees ~2.0-2.3 GB, enough for the new generation's
+    ~5 GB need.
+    OWNERSHIP: W1-T8311 (merged) added the memory-deferral and candidate-peak logic. No shard sheds worker threads or
+    stages view workers.
+  design: |
+    1. TIER 2 SHED: when a handoff is deferred for memory, the next attempt sends a `shed_workers` message.
+       - The active generation terminates its rebuildable worker threads (views, heavy views, plan reload, oracle, board,
+         prewarm, repo-dashboard). It keeps serving cached view bodies in the EXISTING degraded mode (stale-while-
+         revalidate: bodies carry their as-of, nothing invents data) and reports the freed bytes.
+       - The supervisor re-measures free memory and proceeds if the candidate peak now fits.
+       - If it still does not fit, the workers restart and the deferral continues as today.
+    2. STAGED BOOT (the new generation): start view workers one at a time, each after the previous one's first build, so
+       the boot peak is the maximum of the workers rather than their sum.
+    3. Bounded: tier 2 runs at most once per handoff attempt and never more than once per 15 min. It is ledgered
+       (`serve.handoff_shed` with tier, freed bytes and duration of degraded mode). No limit, reserve or MemoryHigh changes.
+  acceptance:
+    - claim: "a memory-deferred handoff sheds the active generation's rebuildable worker threads, measures the freed bytes, and proceeds when the candidate now fits, while cached views keep answering in degraded mode and a still-short attempt restores the workers"
+      proof: 'grep: test("W1-T8873: a memory-deferred handoff sheds worker threads and fits" in test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts'
+  falsifier: |
+    Keep only the tier-1 main-heap shed: the fixture's freed bytes stay below the candidate need, the handoff is deferred
+    again, and the test fails.

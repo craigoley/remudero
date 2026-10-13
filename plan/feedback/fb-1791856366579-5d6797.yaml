@@ -1,0 +1,53 @@
+id: fb-1791856366579-5d6797
+ts: 2026-10-13T01:52:46.584Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+  OPERATOR RULED 2026-10-13: "Measure, then design". DEPENDS ON the task drafted
+  from submission key nanoclaw-2026-10-13/github-credential-measurement. Do not
+  build before that task merges. This is a DESIGN task: verify: human, risk:
+  high, because it touches credentials. Nothing changes the 2026-09-22 ruling
+  until the operator rules on this design.
+
+
+  CONTEXT (OBSERVED at origin/main efd226b50): src/lib/secret-boundary.ts
+  already swaps a model sentinel for the real token at a loopback boundary, and
+  answers git through a credential-helper socket with scoped tokens
+  (mintScopedToken). GH_TOKEN, which gh uses, is the one credential still held
+  by value (src/lib/env.ts:31; secretBoundaryEnv at secret-boundary.ts:252-264).
+  The worker egress proxy (src/lib/worker.ts:7305) is CONNECT-only, so it cannot
+  read or filter a request. W1-T2914 is blocked on exactly this path.
+
+
+  ASK, a design doc that:
+
+  1. Extends the W1-T2699 boundary to GitHub's API the way it covers the model:
+  the worker env carries a GitHub sentinel instead of GH_TOKEN, and the daemon
+  substitutes a scoped token only for declared routes.
+
+  2. Refuses at the boundary, and ledgers value-free as boundary.request, any
+  worker request that would set the remudero-review commit status, approve a PR
+  or merge one.
+
+  3. States how gh's API traffic reaches the boundary: an API base-URL override
+  if gh supports one (verify against the pinned gh version), or a
+  TLS-terminating proxy with a worker-trusted CA. Give the cost of each.
+
+  4. Uses the measurement's numbers to list what breaks, and gives the rollback.
+
+  5. Says whether it closes W1-T2914's open path, and if not, why not.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/github-api-boundary
+thread_id: null

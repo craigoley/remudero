@@ -1,0 +1,66 @@
+- id: W1-T8828
+  title: "A RATIFICATION STAMP IS COMPOSED BY THE HARNESS, NOT WRITTEN BY THE MODEL — stampLineViolations only checks a model-written stamp, so models invent dates (2023-10-10T00:00:00Z) and, far more often, write free prose that fails the \"- <proposalId> (\" opening: 24 of 36 operator Not-ready items are held on that alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # changes how the draft rung builds the stamp and updates two suites that pin today's stamp (Rule 19); the lint stays as the guard
+  band_meaning: span
+  origin: "operator session 2026-10-12: console inbox review (W1-T7739's stamp reads 2023-10-10T00:00:00Z); amended 2026-10-13 from the inbox clearance brief (24 Not-ready items held on the stamp)"
+  plan_refs: [W1-T4864, W1-T4048]
+  files: [src/lib/inbox.ts, test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts, test/a-ratification-draft-is-refused-before-it-reaches-ci.test.ts, test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 22:05Z in the console inbox: the drafted stamp for machine-judge:W1-T7739 reads
+    "(2023-10-10T00:00:00Z) -> NEW-1, NEW-2" and machine-judge:W1-T5418's "(2026-10-03T12:34:56Z)": dates the drafting model
+    made up, shown to the operator as the item's metadata.
+    AMENDED 2026-10-13 (operator-approved inbox follow-ups): the core host's state/inbox-classification.json (generated
+    2026-10-13T01:29Z) holds 36 operator-owned not_ready items; 24 carry a lint_clean reason "stamp: the STAMP line must
+    open with \"- <proposalId> (\"", and for 19 of them it is the ONLY reason. The model writes prose instead of the
+    format — e.g. verify-human:W1-T147 "ratified verify-human:W1-T147 -> NEW-1, NEW-2", verify-human:W1-T204
+    "verify-human:W1-T204 — ROUTED TO OPERATOR 2026-09-09 (no plan edit; ...", machine-judge:W1-T5585 "Ratified after
+    lint-plan fix: NEW-1 criterion 3 proof rescoped ..." (21 of 24 lack the leading "- "). A tighter date check (this
+    task's original design) cannot clear these: the model is the wrong author for a fixed-format line.
+    VERIFIED on origin/main: the STAMP is the model's text (`parseDraftedCandidate`, src/lib/inbox.ts ~1648);
+    `stampLineViolations` (~1127) checks it; `classifyProposal` (~1332) holds a draft not_ready on any draft-stamp block;
+    the stamp is written into MASTER-PLAN.md verbatim and shown by `rmd inbox`, so the operator approves it as shown.
+  design: |
+    1. `composeStampLine(proposalId, label, fragmentIds, clock)` builds the canonical stamp
+       "- <proposalId> (<label>) — RATIFIED <YYYY-MM-DD> -> <ids>." from the proposal id, the drafting clock's UTC date
+       (an injected clock, defaulting to the system clock) and the fragment's own task ids. The harness, not the model,
+       writes it.
+    2. The label is the model's one-line summary only: taken from the model's STAMP text (its parenthetical when it has
+       one, else its prose), with every date, time, task id, proposal id, "ratified"/"RATIFIED" and "->" list removed and
+       the result bounded to one short line; empty falls back to the proposal's kind. No date or id the model wrote
+       survives into the stamp.
+    3. The draft rung replaces the model's stamp with the composed one before `lintDraftedFragment`; `stampLineViolations`
+       stays as the guard (a composed stamp always passes it). `rmd inbox` and the console show the composed stamp, so the
+       operator still approves exactly what lands in MASTER-PLAN.md.
+    4. The draft prompt asks only for the one-line summary (the STAMP marker stays, its content is the summary), so a
+       model is never asked to format the line.
+    5. Stranded drafts heal without a redraft: `classifyProposal` re-composes the stamp of a STORED draft from its
+       fragment's ids before linting, so a draft held not_ready only on a draft-stamp block becomes ready on the next pass
+       (the 19 live ones); drafts with other violations keep their other reasons and redraft as today.
+    6. NEW-<n> placeholder ids stay legal inside the stamp (they are the fragment's ids); the console shows
+       `draftedTasks[].title` instead of the stamp, which a console task covers.
+  acceptance:
+    - claim: "the harness composes the stamp from the proposal id, the drafting clock's date and the fragment's ids"
+      proof: 'grep: test("W1-T8828: the harness composes the stamp from the proposal, the clock and the fragment" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "a model stamp written as free prose still yields a lint-clean draft"
+      proof: 'grep: test("W1-T8828: a prose stamp from the model yields a clean draft" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "no date, time or task id the model wrote survives into the stamp's label"
+      proof: 'grep: test("W1-T8828: no date or id the model wrote survives into the stamp" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "a stored draft held only on its stamp is ready on the next pass without a redraft"
+      proof: 'grep: test("W1-T8828: a stored draft held only on its stamp becomes ready without a redraft" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+    - claim: "the draft prompt asks the model only for the one-line summary"
+      proof: 'grep: test("W1-T8828: the draft prompt asks only for the summary" in test/a-ratification-stamp-carries-no-date-the-model-invented.test.ts'
+  falsifier: |
+    Classify verify-human:W1-T147 with a stored draft whose fragment holds NEW-1 and NEW-2 and whose STAMP is the live
+    "ratified verify-human:W1-T147 -> NEW-1, NEW-2", the clock at 2026-10-13. At origin/main it is not_ready with
+    "stamp: the STAMP line must open with"; with the change it is ready and its stamp reads
+    "- verify-human:W1-T147 (<summary>) — RATIFIED 2026-10-13 -> NEW-1, NEW-2.". The W1-T7739 stamp
+    "(2023-10-10T00:00:00Z) -> NEW-1, NEW-2" composes to a stamp carrying 2026-10-13 and no 2023 date.

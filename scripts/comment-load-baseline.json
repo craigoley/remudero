@@ -149,10 +149,10 @@
   "src/lib/ledger.ts": 1000,
   "src/lib/live-write-guard.ts": 131,
   "src/lib/log-rotation.ts": 50,
+  "src/lib/main-health-rung.ts": 500,
   "src/lib/managed-repos.ts": 20,
   "src/lib/measurement-cadence.ts": 750,
   "src/lib/model-gate.ts": 16,
-  "src/lib/main-health-rung.ts": 500,
   "src/lib/mount-recommender.ts": 195,
   "src/lib/mounts.ts": 259,
   "src/lib/notify.ts": 123,
@@ -166,7 +166,7 @@
   "src/lib/operator-sync.ts": 98,
   "src/lib/ops.ts": 176,
   "src/lib/orientation.ts": 38,
-  "src/lib/panel-graph.ts": 539,
+  "src/lib/panel-graph.ts": 552,
   "src/lib/panel-skill-run.ts": 127,
   "src/lib/panel-skills.ts": 44,
   "src/lib/plan-coherence.ts": 70,
@@ -235,6 +235,6 @@
   "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 18500,
+  "src/run-task.ts": 18250,
   "src/spike.ts": 18
 }

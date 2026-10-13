@@ -1,0 +1,114 @@
+- id: W1-T8771
+  title: "A RUNNABLE TASK THE DISJOINT PACK PASSES OVER IS NAMED IN A ROW — on 2026-10-12 P1 W1-T8502 passed every eligibility gate in each of 10 selection passes from 17:51Z to 20:11Z, yet `packDisjointFirst` left it out of every pool because it shares src/lib/daemon.ts with P1 W1-T8503, and P1.2 W1-T7729 took a lane at 17:51Z; no row named W1-T8502 or why"
+  repo: remudero
+  depends_on: [W1-T8502]  # same function (packDisjointFirst) and the same chooseRefill call; this reports on the pack W1-T8502's `inFlight` input shapes
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the pack names the runnable tasks it passes over; what it returns is unchanged
+  band_meaning: blast-radius
+  origin: "operator direction 2026-10-12 (\"fix root causes\"): diagnosis of why the fleet stopped considering W1-T8502 after 16:35Z"
+  plan_refs: [W1-T8502, W1-T8514, W1-T476, W1-T2286, W1-T1205, W1-T4025, W1-T8676, W1-T8714, W1-T8715]
+  files:
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    READ on origin/main 0694c7992, against the core ledger union (rotations plus the live file) on host remudero.
+    Symbols, not lines.
+    THE CASE. W1-T8502 (P1; files src/lib/drain.ts, src/lib/daemon.ts) failed error_codex at 13:17:56Z. From 14:34Z to
+    17:27Z every pass skipped it as `run-branch-already-pushed`. The leftover branch was deleted at about 17:38Z. After
+    that, the union holds 10 `dispatch.lifetime_pressure` rows for it (17:51:15Z, 17:55:36Z, 18:09:40Z, 18:17:35Z,
+    18:41:44Z, 19:03:43Z, 19:46:05Z, 19:46:34Z, 20:06:32Z, 20:11:11Z). Each is within 30 s of a `dispatch.lane_refilled`,
+    `dispatch.lane_refill_held` or `dispatch.concurrent_set` row, so it is one selection pass. It holds no skip, filter
+    or `dispatch.serialized` row for the task. The live ledger alone shows nothing after 16:35Z, because its per-step
+    retention kept none of these rows. Read the union.
+    WHY THE ROW PROVES IT WAS ELIGIBLE. `isDispatchEligible` (src/lib/drain.ts) fires `onLifetimeCapExceeded`, and the
+    daemon writes `dispatch.lifetime_pressure` there, AFTER the merged, continued-this-pass, verify, blocked,
+    `isIndependentFailureBlocked` (the W1-T7533 latch), unmet-deps, precondition, indeterminate and circuit-breaker
+    arms. Each of those returns before the row is written. Since W1-T4025 the lifetime arm does not gate. Every arm after
+    it writes a row: `dispatch.skipped` for open-pr and run-branch-already-pushed, and `dispatch.stood_down`. None
+    appeared, so the predicate returned true on every pass. `routeAdaptiveLifetimePressure` and the judged-automate
+    proposal (W1-T8595, refused at approve for a missing band_meaning, which W1-T8714 fixes) only append rows and stage
+    a proposal. They never touch eligibility. So no task is stranded waiting for a proposal, and no release arm is needed.
+    WHAT DROPPED IT. The pack, not a gate. `runnableCandidates` runs `packDisjointFirst(eligible, limit, observedByTask)`.
+    Each slot takes the earliest remaining candidate disjoint from those already collected, so an earlier candidate that
+    overlaps a collected one is passed over for a later one. The pack calls no callback, and `dispatch.serialized`
+    names only pool members (the tick path's `partition.serialized`; `chooseRefill`'s `decide` drops `fits.serialized`).
+      - 17:51:17Z refill (in flight: W1-T8575 on sweep.ts and ledger.ts, W1-T8198 on run-task.ts). P1.2 W1-T7729
+        took the lane, although W1-T8502 is P1 and its declared files overlap neither in-flight lane. W1-T8503 (P1;
+        run-task.ts and daemon.ts) started on the next refill at 17:55:49Z. That is consistent with W1-T8503 heading
+        the pool and being serialized behind W1-T8198, while the pack passed W1-T8502 over because it shares daemon.ts
+        with W1-T8503. INFERRED: the pool's contents are written nowhere, and that gap is what this task closes.
+      - 17:55Z to 18:50Z and 19:04Z to 19:44Z, W1-T8503 was in flight holding daemon.ts. The refills, the 18:17:37Z
+        `lane_refill_held` ("no disjoint runnable task within the lane budget"), and the 19:03:59Z and 20:11:36Z
+        `concurrent_set` [W1-T8503, W1-T5424, W1-T8711] all left W1-T8502 out with no row.
+    WHAT IS ALREADY FILED, AND WHAT IS LEFT:
+      - W1-T8502 makes the refill pack see the in-flight lanes, and logs `dispatch.serialized` for a POOL member an
+        in-flight lane blocks. After it, a task that overlaps an in-flight lane is never a pool member, so it gets no
+        row. The tick path is unchanged by design.
+      - W1-T8514 reserves a passed-over task's files against a STRICTLY lower-priority candidate, and names the
+        deferred lower-priority task in `dispatch.deferred_for_priority`. It writes nothing when nothing lower-priority
+        is deferred: at 17:51Z P1.2 W1-T7729 shares no file with W1-T8502. A same-tier pass-over, as at 19:03Z, keeps
+        today's behaviour there.
+      - W1-T8676 (a restored checkpoint outlives its run's worker error, and the latch re-offers) covers 14:34Z to
+        16:35Z, the run-branch skips. W1-T8714 covers the lost band_meaning proposal. W1-T8715 covers the 13:22Z
+        independent-failure ruling. None of them covers a runnable task left out of the pool.
+    Doctrine: a ledger line must carry the reason from the decision that produced its outcome. The pack decided who was
+    left out, and it says nothing.
+  design: |
+    1. THE OBSERVATION, IN src/lib/drain.ts. Add optional `onPassedOver?: (task: Task, detail: PassedOverDetail) =>
+       void` to `NextRunnableOpts`, and export `PassedOverDetail` = `{ passedFor: string[]; holders: { task: string;
+       paths: string[] }[] }`. `runnableCandidates` hands it to `packDisjointFirst`. When the pack has filled its slots,
+       a candidate is PASSED OVER when it is not collected and some collected candidate comes after it in `eligible`
+       order. Candidates after the last collected one are queued behind the cut, not passed over, and get no call. For
+       each passed-over task, fire the callback once per pack:
+         - `passedFor` holds the collected ids that come after it.
+         - `holders` holds each collected task, and each W1-T8502 `inFlight` task, that it overlaps, with the paths.
+           Compute overlap with the pairwise `partitionByFileOverlap([holder, task], observedByTask)` call
+           `isDisjointFromEvery` already uses, and read the paths from its `serialized` entry. Never compare globs a
+           second time.
+       Wrap each call in try/catch, as `observeOpenSibling` does. The pack's return value, its order and the
+       `pickIndex = 0` fallback are byte-identical with or without the callback. If W1-T8514 has landed, a candidate its
+       reservation deferred is already named by `dispatch.deferred_for_priority`, so it gets no `onPassedOver` call.
+    2. THE ROW, IN src/lib/daemon.ts. Wire `onPassedOver` into the tick path's `dispatchOpts`, which `chooseRefill`'s
+       `decide` spreads into its own `runnableCandidates` call. Log `dispatch.passed_over` with `task`, `priority`,
+       `site` ("tick" or "lane-refill"), `passed_for` and `holders`. DEDUPE BY STATE: keep a per-`runDaemon` map from
+       task id to a key built from the sorted holder ids and paths. Log only when the key differs from the stored one.
+       Delete a task's entry when a pack collects it, or when it is absent from the plan, so the map stays bounded by
+       the plan. A restart logs each current state once more. `passed_for` changes every pass, so it is not part of the
+       key. Use no timer, count or cap.
+    3. runDrainLanes (src/lib/drain.ts) wires the same callback to its own `log`, with the same dedupe, site "drain".
+    4. UNCHANGED: `isDispatchEligible`, `dispatchOrder`, what the pack returns, `partitionByFileOverlap` and the overlap
+       admission in dispatch-overlap.ts, the tick and refill `dispatch.serialized` rows, W1-T8502's `inFlight`
+       placement, W1-T8514's reservation, and status-board.ts's `runnableCandidates` call, which passes no callback.
+    Tests go in the new file test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts, with `test(`
+    titles exactly as in the proofs below. Use injected plans. Drive the daemon tick and refill through the harness the
+    existing refill tests use (for example test/a-freed-lane-refills-while-its-sibling-runs.test.ts). Use no live
+    ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts"
+    - claim: "a P1 the pack passes over for overlap with an earlier P1 is named with its holder and paths, and a later disjoint task still takes the slot"
+      proof: 'grep: test("W1-T8771: the pack names a P1 it passes over with its holder and paths" in test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts'
+    - claim: "the pack returns the same tasks in the same order with and without the callback, and a task queued behind the cut is not named"
+      proof: 'grep: test("W1-T8771: the pack result is unchanged and a task behind the cut is not named" in test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts'
+    - claim: "the daemon writes one dispatch.passed_over row per task and state on the tick and refill paths, and a second row when the holder changes"
+      proof: 'grep: test("W1-T8771: the daemon logs dispatch\.passed_over once per state on tick and refill" in test/a-runnable-task-the-disjoint-pack-passes-over-is-named-in-a-row.test.ts'
+    - claim: "the daemon writes the named row"
+      proof: 'grep: "dispatch\.passed_over" in src/lib/daemon.ts'
+  falsifier: |
+    The queue in dispatch order is [P1 X (a.ts, b.ts), P1 Y (b.ts), P2 Z (c.ts)] with two lanes. Today the pack is
+    [X, Z]: Y is passed over for b.ts and nothing names it. With the fix, a `dispatch.passed_over` row names Y with
+    holder X, paths [b.ts] and passed_for [Z]. Remove the callback from `packDisjointFirst`, and the first test sees no
+    row. Name every uncollected candidate, and the second test sees a row for a task behind the cut. Drop the dedupe
+    key, and the third test sees one row per pass instead of one per state.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: for each `dispatch.lane_refilled`
+    and `dispatch.concurrent_set` row, check that every runnable task of equal or higher priority that the pass did not
+    start has a `dispatch.passed_over` row or a `dispatch.serialized` row in its current state. A W1-T8502-shaped
+    pass-over, a P1 left out while a P1.2 starts, then reads from the ledger instead of being reconstructed by hand.

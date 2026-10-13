@@ -909,9 +909,9 @@ sweep:
       origin: "proposal"
       min: 0
       max: 100
-    # OBSERVED 2026-10-09: serve's cold start peaks at 7.5 GB; a cold start begins from nothing resident.
+    # OBSERVED 2026-10-11: serve cold-start peak 5,707 MiB; 6,144 MiB leaves 437 MiB margin.
     serveColdStartReserveMib:
-      value: 7680
+      value: 6144
       origin: "proposal"
       min: 0
       max: 16384
@@ -1625,6 +1625,15 @@ githubEventWake:
 #       verdict: notify
 #       note: "the class the operator is watching, once measured"
 armCalibrationBands: []
+
+# W1-T2761's row, ON by the operator's 2026-10-13 ruling. Claude implement workers now receive
+# CLAUDE.md's rule headlines (about 9.6k chars) as the `rule_headlines` prompt part; Codex workers
+# already read AGENTS.md. While this row was absent, the wipe test's `rules` factor (which masks
+# only this part) compared two identical empty parts; it now measures the headlines' effect.
+workerRuleHeadlines:
+  enabled:
+    value: true
+    origin: "net-new"
 
 # W1-T4050 — RISK LEVELS ARE RUNTIME POLICY, not a source literal. OPERATOR'S WORDS: "I don't
 # want strictness, I want risk levels and rules that can be configured in the console."

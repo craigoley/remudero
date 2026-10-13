@@ -31,7 +31,7 @@ import {
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
   assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
   refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
-  type ImportClosureRead, type RefreshArm, type RefreshClearance,
+  type ImportClosureRead, type RefreshArm, type RefreshClearance, type RefreshHistorySource,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
@@ -41,6 +41,7 @@ import {
   armOutcomeReason,
   decideArmReprobeFromFacts,
   armFailureAction,
+  armFailureIsRateLimited,
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
@@ -2610,6 +2611,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
       // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
       const folded = sweepArmAttemptOutcome(outcome, attemptError);
+      // W1-T8620: a refused direct merge hands GitHub's refusal text to the armed-idle branch.
+      if (folded === "direct-merge-failed" && attemptError !== undefined) return { outcome: folded, error: attemptError };
       return typeof folded === "object" ? { ...folded, error: attemptError } : folded;
     },
 
@@ -4721,7 +4724,7 @@ export async function refreshStaleRollupAfterRefusal(
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
   const base = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
-  if (pr.mergeableState !== "blocked" || pr.mergeable !== true) {
+  if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
   const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
@@ -4772,6 +4775,175 @@ export async function refreshStaleRollupAfterRefusal(
   appendLine(deps.ledgerPath, { ...base, step: STALE_ROLLUP_REFRESHED_STEP, outcome,
     ...(newHead === undefined ? {} : { new_head_sha: newHead }), superseded_failures: supersededFailures });
   return `stale-rollup refresh: ${outcome}`;
+}
+
+/** W1-T6404's own precondition: only a head GitHub reports blocked AND mergeable is refreshed. */
+export function staleRollupRefreshApplies(pr: Pick<OpenPrView, "mergeable" | "mergeableState">): boolean {
+  return pr.mergeableState === "blocked" && pr.mergeable === true;
+}
+
+/** W1-T8620 — the one job re-run a stale required check earns per (head sha, stale run id). The row
+ *  is written BEFORE the POST; a later row of the same step with `outcome: "deferred"` voids it. */
+export const STALE_CHECK_RERUN_STEP = "automerge.stale_check_rerun";
+/** W1-T8620 — the one escalation a refused green merge earns per (head sha, GitHub's refusal text). */
+export const MERGE_REFUSAL_ESCALATED_STEP = "automerge.merge_refusal_escalated";
+
+export type StaleCheckShape = "superseded" | "gate-older-than-inputs";
+export type MergeRefusalClass =
+  | { kind: "stale-check"; check: string; shape: StaleCheckShape; staleRunId?: number; outrankedByRunId?: number;
+      jobId?: string; reason: string }
+  | { kind: "real-red" | "transient" | "other"; check?: string; reason: string };
+
+const REQUIRED_CHECK_REFUSAL = /Required status check ["']([^"']+)["'] is/i;
+const rollupEntryState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+const rollupEntryName = (c: RollupCheckEntry) => c.name ?? c.context ?? "";
+
+/** W1-T8620 — PURE: why GitHub refused a green armed merge. `stale-check` when the check its text
+ *  names is red only by a stale verdict: a superseded failed run whose newest run passed (W1-T4908),
+ *  a newest run CANCELLED, or a failed ci-gate that concluded before the newest of the checks it
+ *  gates (`required`, ci-gate's REQUIRED list) while every one of them is green (#11096).
+ *  `real-red` when that check's newest run failed or is still running; `transient` for a rate-limit
+ *  or transport refusal; `other` for anything else, including an unreadable rollup. */
+export function classifyMergeRefusal(
+  error: string | undefined,
+  rollup: readonly RollupCheckEntry[] | undefined,
+  required: readonly string[] = [],
+): MergeRefusalClass {
+  const text = error?.trim() ?? "";
+  if (text === "") return { kind: "other", reason: "GitHub's refusal carried no text" };
+  const check = text.match(REQUIRED_CHECK_REFUSAL)?.[1];
+  if (check === undefined) {
+    if (armFailureIsRateLimited(text) || armFailureAction(text) === "transient") {
+      return { kind: "transient", reason: `transient refusal: ${text}` };
+    }
+    return { kind: "other", reason: `refusal names no required check: ${text}` };
+  }
+  if (!rollup) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup is unreadable` };
+  const { latest, superseded } = classifyRollupSupersession(rollup);
+  const newest = latest.find((c) => rollupEntryName(c) === check);
+  if (!newest) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup carries no run of it` };
+  const state = rollupEntryState(newest);
+  const jobOf = (c: RollupCheckEntry) => c.jobId ?? checkJobId(c);
+  if (state === "CANCELLED") {
+    return { kind: "stale-check", check, shape: "superseded", staleRunId: rollupRunId(newest), jobId: jobOf(newest),
+      reason: `"${check}"'s newest run ${rollupRunId(newest) ?? "?"} was cancelled` };
+  }
+  if (REQUIRED_CHECK_OK.has(state)) {
+    const stale = superseded.filter((s) => rollupEntryName(s.entry) === check && !s.pendingRerun).at(-1);
+    if (!stale) return { kind: "other", check, reason: `"${check}"'s newest run passed and no superseded red of it remains` };
+    const staleRunId = rollupRunId(stale.entry);
+    const outrankedByRunId = rollupRunId(stale.supersededBy);
+    return { kind: "stale-check", check, shape: "superseded", staleRunId, outrankedByRunId, jobId: jobOf(stale.entry),
+      reason: `"${check}" run ${staleRunId ?? "?"} failed, superseded by passing run ${outrankedByRunId ?? "?"}` };
+  }
+  if (!REQUIRED_CHECK_FAIL.has(state)) return { kind: "real-red", check, reason: `"${check}"'s newest run is still running` };
+  if (check === CI_GATE_CHECK_NAME) {
+    const gated = required.filter((name) => name !== CI_GATE_CHECK_NAME);
+    if (gated.length === 0) return { kind: "other", check, reason: "ci-gate's newest run failed and its REQUIRED list is unreadable" };
+    const inputs = gated.map((name) => latest.find((c) => rollupEntryName(c) === name));
+    const present = inputs.filter((c): c is RollupCheckEntry => c !== undefined);
+    const allGreen = present.length === gated.length && present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+    const lastInput = present.reduce<RollupCheckEntry | undefined>((acc, c) =>
+      acc === undefined || (c.completedAt ?? "") > (acc.completedAt ?? "") ? c : acc, undefined);
+    if (allGreen && newest.completedAt && lastInput?.completedAt && lastInput.completedAt > newest.completedAt) {
+      const staleRunId = rollupRunId(newest);
+      const outrankedByRunId = rollupRunId(lastInput);
+      return { kind: "stale-check", check, shape: "gate-older-than-inputs", staleRunId, outrankedByRunId, jobId: jobOf(newest),
+        reason: `run ${staleRunId ?? "?"} concluded before its gated ${rollupEntryName(lastInput)} run ${outrankedByRunId ?? "?"}` };
+    }
+  }
+  return { kind: "real-red", check, reason: `"${check}"'s newest run failed` };
+}
+
+const staleCheckRerunKey = (headSha: string, runId: unknown, jobId: unknown, check: unknown) =>
+  `${headSha}@${String(runId ?? jobId ?? check)}`;
+
+/** W1-T8620 — every (head, stale run id) whose one job re-run the ledger has spent, less deferrals. */
+export function staleCheckRerunKeysFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.step !== STALE_CHECK_RERUN_STEP || typeof l.head_sha !== "string") continue;
+    const key = staleCheckRerunKey(l.head_sha, l.stale_run_id, l.job_id, l.check_name);
+    if (l.outcome === "deferred") out.delete(key);
+    else out.add(key);
+  }
+  return out;
+}
+
+/** W1-T8620 — act on a refused green armed merge by its classified reason. A stale check is re-run
+ *  once per (head, run id), never re-merged blind; a real red and a transient refusal are left to the
+ *  next pass; anything else escalates once per (head, refusal text). W1-T6404's refresh still answers
+ *  a refusal with no text, or one naming no check at a head GitHub reports blocked. */
+export async function actOnMergeRefusal(
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "repushAbsent" | "readCiGateRollup" | "readCiGateRequired"
+    | "requeueCheck" | "escalate" | "appendLine">,
+  pr: OpenPrView,
+  error: string | undefined,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): Promise<string> {
+  const refusal = error?.trim() ?? "";
+  if (refusal === "") return refreshStaleRollupAfterRefusal(deps, pr, ledgerLines);
+  const appendLine = deps.appendLine ?? appendLedger;
+  const base = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+  let rollup: RollupCheckEntry[] | undefined;
+  let rollupError: string | undefined;
+  if (REQUIRED_CHECK_REFUSAL.test(refusal) && deps.readCiGateRollup) {
+    try {
+      rollup = await deps.readCiGateRollup(pr);
+    } catch (e) {
+      const reason = String((e as Error)?.message ?? e);
+      rollupError = reason; // carried into the escalation an unreadable rollup earns
+    }
+  }
+  const verdict = classifyMergeRefusal(refusal, rollup, deps.readCiGateRequired?.() ?? []);
+  const escalateOnce = async (why: string): Promise<string> => {
+    const done = ledgerLines.some((l) => l.step === MERGE_REFUSAL_ESCALATED_STEP && l.pr_number === pr.prNumber &&
+      l.head_sha === pr.headSha && l.refusal === refusal);
+    if (done) return `${why}; already escalated at this head`;
+    const reason = `GitHub refused a green armed merge of #${pr.prNumber} at ${pr.headSha.slice(0, 7)}: ${refusal} — ${why}`;
+    try {
+      await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...base, step: MERGE_REFUSAL_ESCALATED_STEP, kind: verdict.kind, refusal, escalated: false,
+        error: String((e as Error)?.message ?? e) });
+      return `${verdict.kind}: ${why}; escalation failed`;
+    }
+    appendLine(deps.ledgerPath, { ...base, step: MERGE_REFUSAL_ESCALATED_STEP, kind: verdict.kind, refusal, escalated: true, reason });
+    return `${verdict.kind}: ${why} — escalated`;
+  };
+  switch (verdict.kind) {
+    case "transient":
+      return `transient — the next pass retries (${refusal})`;
+    case "real-red":
+      return `real-red ${verdict.check}: ${verdict.reason} — re-runs nothing; the next pass's disposition owns it`;
+    case "stale-check": {
+      const label = `stale-check ${verdict.check} (${verdict.reason})`;
+      const key = staleCheckRerunKey(pr.headSha, verdict.staleRunId, verdict.jobId, verdict.check);
+      if (staleCheckRerunKeysFromLedger(ledgerLines).has(key)) {
+        return escalateOnce(`${label} — refused again after its one job re-run`);
+      }
+      const row = { ...base, step: STALE_CHECK_RERUN_STEP, check_name: verdict.check, shape: verdict.shape,
+        stale_run_id: verdict.staleRunId ?? null, outranked_by_run_id: verdict.outrankedByRunId ?? null,
+        job_id: verdict.jobId ?? null, refusal };
+      appendLine(deps.ledgerPath, row);
+      let outcome: JobRequeueOutcome;
+      try {
+        outcome = jobRequeueOutcome(deps.requeueCheck
+          ? await deps.requeueCheck(pr, { name: verdict.check, ...(verdict.jobId === undefined ? {} : { jobId: verdict.jobId }) })
+          : false);
+      } catch (e) {
+        outcome = { kind: "failed", error: String((e as Error)?.message ?? e) };
+      }
+      if (outcome.kind === "deferred") {
+        appendLine(deps.ledgerPath, { ...row, outcome: "deferred", deferral: outcome.refusal, error: outcome.error });
+        return `${label} — job re-run deferred (${outcome.refusal})`;
+      }
+      return `${label} — job re-run ${outcome.kind === "dispatched" ? "requested" : `failed${outcome.error ? `: ${outcome.error}` : ""}`}`;
+    }
+    default:
+      if (verdict.check === undefined && staleRollupRefreshApplies(pr)) return refreshStaleRollupAfterRefusal(deps, pr, ledgerLines);
+      return escalateOnce(rollupError === undefined ? verdict.reason : `${verdict.reason} (${rollupError})`);
+  }
 }
 
 /** W1-T5956 — does a re-arm after an ejection spend the bound? Not while Actions reads degraded or
@@ -8267,6 +8439,7 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
   stoodDown: Map<string, string>;
   refreshed: Set<string>;
   reproducedBeforeGreen: Set<string>;
+  mainRepairPrUrls: Set<string>;
 } {
   const stoodDown = new Map<string, string>();
   const refreshed = new Set<string>();
@@ -8280,8 +8453,26 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
     if (line.step === BASE_RED_REFRESH_STEP || line.step === BASE_FIXED_REFRESH_STEP) refreshed.add(key);
     if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
-  return { stoodDown, refreshed, reproducedBeforeGreen };
+  return { stoodDown, refreshed, reproducedBeforeGreen, mainRepairPrUrls: mainRepairPrUrlsFromLedger(lines) };
 }
+
+function mainRepairPrUrlsFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  return new Set(lines.flatMap((line) => (line.step === "main.repair.fix_opened" && typeof line.pr_url === "string" ? [line.pr_url] : [])));
+}
+
+/** W1-T8575 — main's own repair: a `main-repair-<sha12>` task (fix, revert and ratchet-record PRs
+ *  alike) or a PR a `main.repair.fix_opened` row names. Its red is never main's to wait out. */
+export function isMainRepairPr(pr: Pick<OpenPrView, "taskId" | "prUrl">, ledgerLines: readonly Record<string, unknown>[]): boolean {
+  return isMainRepairPrIn(pr, mainRepairPrUrlsFromLedger(ledgerLines));
+}
+
+function isMainRepairPrIn(pr: Pick<OpenPrView, "taskId" | "prUrl">, repairPrUrls: ReadonlySet<string>): boolean {
+  return pr.taskId?.startsWith("main-repair-") === true || repairPrUrls.has(pr.prUrl);
+}
+
+/** W1-T8575 — required checks that judge only the PR's own body, title or proofs (each re-runs on
+ *  `edited`). Main's red cannot reach them, so absence from main's run never makes them base red. */
+export const PR_BODY_SCOPED_CHECKS: readonly string[] = ["proof-discrimination", "acceptance-author-gate", "commitlint"];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
 
@@ -8294,11 +8485,13 @@ export function decideBaseRed(
   history: ReturnType<typeof baseRedHistoryFromLedger>,
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
+  // W1-T8575: the PR that repairs main is never held until main is green.
+  if (isMainRepairPrIn(pr, history.mainRepairPrUrls)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
   if (main?.state === "red" && main.observedChecks !== undefined) {
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
-    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    const absent = names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
@@ -8306,7 +8499,7 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (recorded !== undefined && names.includes(recorded) && !PR_BODY_SCOPED_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -14386,6 +14579,7 @@ export async function runSweep(
     const fixedFiles = fields.blocker === "own-red"
       ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
+      readRefreshHistory(pr);
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
       const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
@@ -14712,12 +14906,45 @@ export async function runSweep(
   // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
+  const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  const oldestRefreshRow = new Map<string, number>();
+  for (const row of ledgerLines) {
+    if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
+    const at = Date.parse(String(row.ts));
+    if (Number.isFinite(at)) oldestRefreshRow.set(row.step, Math.min(at, oldestRefreshRow.get(row.step) ?? Infinity));
+  }
+  const refreshHistory = new Map<number, { source: RefreshHistorySource; unread: string[] }>();
+  // W1-T8533: retention is capped; only a live span covering the PR's whole life proves absence.
+  const readRefreshHistory = (pr: OpenPrView): { source: RefreshHistorySource; unread: string[] } => {
+    const cached = refreshHistory.get(pr.prNumber);
+    if (cached !== undefined) return cached;
+    const created = Date.parse(pr.createdAt ?? "");
+    if (Number.isFinite(created) && refreshSteps.every(step => (oldestRefreshRow.get(step) ?? Infinity) <= created)) {
+      const history = { source: "live" as const, unread: [] };
+      refreshHistory.set(pr.prNumber, history);
+      return history;
+    }
+    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
+    const rows = parseLedger(union.matches.join("\n"));
+    const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
+    refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
+    for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
+      if (!refusedClearances.has(key)) refusedClearances.set(key, evidence);
+    }
+    for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
+    const unread = [...union.unread, ...(union.unclassified ?? [])];
+    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    refreshHistory.set(pr.prNumber, history);
+    return history;
+  };
   /** W1-T8396 — may merging main clear this head's red? Main's delta since the head's merge base, each
    *  failing test's import closure, the refresh history and a trial merge decide; one row records it.
    *  A refusal already recorded for this head and main is reused, never re-read or re-probed. */
   const assessRefresh = async (
     pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
   ): Promise<RefreshClearance> => {
+    const history = readRefreshHistory(pr);
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
@@ -14738,10 +14965,12 @@ export async function runSweep(
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
       reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
-      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles),
+      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
+        : history.source === "unreadable" ? undefined : false,
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
-      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles }, clearance) });
+      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },
+        clearance, history.source, history.unread) });
     if (!clearance.refresh) refusedClearances.set(memo, clearance.evidence);
     return clearance;
   };
@@ -16692,7 +16921,8 @@ export async function runSweep(
                   : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";
                 const stillIdle = !["direct-merged", "head-unavailable", "ledger-refused", "hold-refused",
                   "draft-refused", "stack-parent-refused"].includes(armOutcomeName ?? "unknown");
-                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown" });
+                const idleError = typeof armResult === "object" && armResult !== null ? armResult.error : undefined;
+                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown", ...(idleError === undefined ? {} : { error: idleError }) });
               }
               // W1-T6595: a held plan PR's row names the hold, never an arm that was not attempted.
               if (armOutcomeName === "plan-pr-held") {
@@ -16715,7 +16945,9 @@ export async function runSweep(
                 }
               }
               if (armedIdleDue && armOutcomeName === "direct-merge-failed") {
-                standDownReason = `arm outcome: ${armOutcomeName}; ${await refreshStaleRollupAfterRefusal(deps, pr, ledgerLines)}`;
+                // W1-T8620: classify GitHub's refusal first; W1-T6404's fresh sha is never a stale check's first answer.
+                const refusalText = typeof armResult === "object" && armResult !== null ? armResult.error : undefined;
+                standDownReason = `arm outcome: ${armOutcomeName}; ${await actOnMergeRefusal(deps, pr, refusalText, ledgerLines)}`;
               }
               break;
             }
@@ -17097,7 +17329,11 @@ export async function runSweep(
               }
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
               // then spend this pass's ONE update-branch press once main is green; never a fix.
-              const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              let baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              if (baseRed.kind === "refresh") {
+                readRefreshHistory(pr);
+                baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              }
               if (baseRed.kind !== "own") {
                 baseRedStandDownPrs.add(pr.prNumber);
                 acted = false;
@@ -17108,6 +17344,14 @@ export async function runSweep(
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (readRefreshHistory(pr).source === "unreadable") {
+                    const clearance = await assessRefresh(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
+                      baseReproductionFiles(pr.ciFailures ?? []), mainSha);
+                    if (!clearance.refresh) {
+                      standDownReason = `base red refresh refused: ${clearance.evidence} — ${clearance.reason}`;
+                      break;
+                    }
+                  }
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
                   try {
@@ -17351,6 +17595,7 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
                 // reproduced — a head BEHIND that main still takes it once before any fix round.
                 const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
+                if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) readRefreshHistory(pr);
                 const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
                 // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
                 // fixed it" — refresh only on evidence the merge can clear it; a refusal is the PR's own red.

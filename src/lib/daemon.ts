@@ -45,7 +45,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DAEMON_SELF_COMMIT_SCOPE, DAEMON_SELF_PATH_PREFIXES, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -110,7 +110,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
-import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, isEnvironmentalBlock } from "./status.js";
+import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -133,11 +133,15 @@ import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
+  chargeRestartGap,
   idleLaneCauseForStep,
+  idleLaneStateChanged,
+  lastIdleLaneRecord,
   newIdleLaneAccount,
   rollIdleLaneWindow,
   summarizeIdleLaneAccount,
   type IdleLaneCause,
+  type IdleLaneHold,
 } from "./idle-lane-accounting.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
@@ -238,26 +242,103 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
   return { totalMs, samples };
 }
 
+export interface RestartBoundaryContext { waitingOn: string; runId: string }
+export type RestartBoundary = (context?: RestartBoundaryContext) => Extract<DaemonFreshness, { stale: true }> | undefined;
+type RestartEstimate = { ms: number | undefined; samples: number };
+export type RestartWorkHistory = { yieldCost: RestartEstimate; remaining: ReadonlyMap<string, RestartEstimate> };
+export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
+export function restartWorkHistory(rawLines: readonly string[], nowMs: number): RestartWorkHistory {
+  const since = nowMs - RESTART_HISTORY_WINDOW_MS;
+  const rows: Array<{ row: Record<string, unknown>; at: number }> = [];
+  for (const raw of new Set(rawLines)) {
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn row is not a duration */ continue; }
+    if (!row || typeof row.ts !== "string" || typeof row.run_id !== "string") continue;
+    const at = Date.parse(row.ts);
+    if (Number.isFinite(at) && at >= since && at <= nowMs) rows.push({ row, at });
+  }
+  rows.sort((a, b) => a.at - b.at);
+  const yields = new Map<string, { at: number; run: string }>();
+  const phases = new Map<string, Map<string, number>>();
+  const gaps: number[] = [];
+  const durations = new Map<string, number[]>();
+  for (const { row, at } of rows) {
+    const run = row.run_id as string;
+    const task = typeof row.task_id === "string" ? row.task_id : undefined;
+    if (row.step === "run.start" && task) {
+      const yielded = yields.get(task);
+      if (yielded && yielded.run !== run) {
+        yields.delete(task);
+        if (at > yielded.at) gaps.push(at - yielded.at);
+      }
+    }
+    if (row.step === "verdict" && row.reason === "freshness_yield" && task) yields.set(task, { at, run });
+    const phase = row.step === "run.phase" ? row.waiting_on
+      : row.step === "recon.done" ? "implementing"
+      : row.step === "implement.done" ? "preopen_gate"
+      : row.step === "implement.unfinished" ? "checkpointed"
+      : row.step === "fallback_push.cause" ? "pushing" : undefined;
+    if (typeof phase === "string") {
+      const observed = phases.get(run) ?? new Map<string, number>();
+      if (!observed.has(phase)) observed.set(phase, at);
+      phases.set(run, observed);
+    }
+    if (row.step === "pr.opened") {
+      for (const [phase, startedAt] of phases.get(run) ?? []) {
+        if (at <= startedAt) continue;
+        const samples = durations.get(phase) ?? [];
+        samples.push(at - startedAt);
+        durations.set(phase, samples);
+      }
+      phases.delete(run);
+    }
+    if (row.step === "verdict") phases.delete(run);
+  }
+  const estimate = (values: number[]): RestartEstimate => {
+    values.sort((a, b) => a - b);
+    const middle = Math.floor(values.length / 2);
+    return { ms: values.length === 0 ? undefined : values.length % 2 ? values[middle]
+      : (values[middle - 1] + values[middle]) / 2, samples: values.length };
+  };
+  return { yieldCost: estimate(gaps), remaining: new Map([...durations].map(([phase, values]) => [phase, estimate(values)])) };
+}
+
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
- *  restore, which consumed nothing (W1-T7806). A `run.freshness_handoff` row is a receipt too (W1-T7747). */
+ *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
+ *  a `run.freshness_handoff` row is a receipt too (W1-T7747). W1-T8676: an `implement.checkpoint_kept` row,
+ *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
+ *  the exact receipt that verdict consumed. */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
+  const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
+    typeof branch === "string" && branch.startsWith(`run-${taskId}-`) && /^run-.+-[0-9]+$/.test(branch) &&
+    typeof headSha === "string" && /^[a-f0-9]{40}$/.test(headSha);
   for (const raw of rawLines) {
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* malformed rows establish no ownership */ continue; }
     if (!row || typeof row.task_id !== "string") continue;
+    if (row.step === "implement.checkpoint_dropped") {
+      const prior = pending.get(row.task_id);
+      if (prior && row.source_branch === prior.branch && row.head_sha === prior.headSha) pending.delete(row.task_id);
+      continue;
+    }
+    if (row.step === "implement.checkpoint_kept") {
+      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha) });
+      continue;
+    }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
     if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
     pending.delete(row.task_id);
-    if (receipt && typeof row.branch === "string" && row.branch.startsWith(`run-${row.task_id}-`) &&
-        /^run-.+-[0-9]+$/.test(row.branch) && typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha)) {
-      pending.set(row.task_id, { branch: row.branch, headSha: row.head_sha });
+    if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
+      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
     }
   }
   return pending;
@@ -1027,6 +1108,8 @@ export interface DaemonDeps {
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
    *  ABSENT = today's behaviour exactly, an empty released set. */
   readLedgerLines?: () => readonly string[];
+  /** Complete archive union for the boot-time restart estimates; an unreadable union disables holdouts. */
+  readRestartHistory?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
@@ -1131,6 +1214,9 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
+  /** W1-T8676: every latch release the status projection derives (`independentFailureLatch`), by task id. Each
+   *  selection pass ledgers the unrecorded ones, and a `provider_recovered` one lifts this process's own hold. */
+  independentBlockReleases?: () => ReadonlyMap<string, IndependentBlockRelease>;
   categorizedRefusalRejoinFor?: (taskId: string) => {
     sourceRunId: string; refusedContractRevision: string; contractRevision: string; receiptRecorded: boolean;
   } | undefined;
@@ -1144,7 +1230,7 @@ export interface DaemonDeps {
   /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
    *  the dispatch phase's restart latch, read by the run at each worker boundary. */
   runOne: (taskId: string, options?: {
-    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    restartAtWorkerBoundary: RestartBoundary;
   }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
@@ -3090,11 +3176,34 @@ export async function runDaemon(
   const idleLaneClock = clockFromDateFn(deps.now);
   let idleLaneAccount = newIdleLaneAccount(idleLaneClock.now());
   let idleLaneTickCause: IdleLaneCause | undefined;
+  let idleLaneTickHold: IdleLaneHold | undefined;
   let idleLaneDispatchable = 0;
+  // W1-T8235: the lanes this daemon fills — the figure the refill path sizes its pool by.
+  const idleLaneCapacity = Math.max(1, opts.laneCount ?? 1);
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
   const noteLog: typeof emitLog = (step, fields) => {
-    idleLaneTickCause = idleLaneCauseForStep(step, fields) ?? idleLaneTickCause;
+    const cause = idleLaneCauseForStep(step, fields);
+    if (cause !== undefined) {
+      idleLaneTickCause = cause;
+      idleLaneTickHold = cause === "pause" || cause === "operator_pause" || cause === "recycle_drain"
+        ? pauseHoldRecord(fields) : undefined;
+    }
     livenessPulse?.note(step);
+  };
+  // W1-T8235: the hold behind a pause-type cause as the PAUSE flag recorded it. The flag carries a setter pid and a
+  // session id; it records no actor yet (W1-T7839 adds verified actor evidence), so none is invented here.
+  const pauseHoldRecord = (fields: Record<string, unknown> | undefined): IdleLaneHold => {
+    const detail = fields?.detail ?? fields?.reason;
+    const owner = deps.checkPauseHold?.()?.owner;
+    return {
+      ...(typeof detail === "string" ? { reason: detail } : owner?.reason !== undefined ? { reason: owner.reason } : {}),
+      ...(owner ? { pid: owner.pid } : {}),
+      ...(owner?.sessionId !== undefined ? { session_id: owner.sessionId } : {}),
+    };
+  };
+  const resetIdleLaneTick = (): void => {
+    idleLaneTickCause = undefined;
+    idleLaneTickHold = undefined;
   };
   const log: typeof emitLog = (step, fields) => {
     noteLog(step, fields);
@@ -3111,17 +3220,37 @@ export async function runDaemon(
   // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
   // is refreshed only on ticks that ran selection; a tick that never reached selection (a pause) reuses the
   // last known count rather than guessing. One `lane.idle_summary` row per window.
-  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number): void => {
+  // W1-T8235: `busyLanes` is the lanes IN FLIGHT, not the tick's admitted count, and the sample is taken at every lane
+  // change too (a lane frees, a refill starts, a refill is held or parked), not once per dispatching tick.
+  // `closeWindow: false` (a lane-change sample, taken inside the pool's refill decision) accounts and reports the change
+  // but leaves the hourly summary to the tick-level sample: a refusing sink there is contained as a phase fault, whereas
+  // inside a lane decision it would be a pool fault, and a failed emit (the account is rolled after it) would repeat.
+  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number, closeWindow = true): void => {
     if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
     const atMs = idleLaneClock.now();
+    const before = idleLaneAccount.state;
     idleLaneAccount = accountIdleLaneMinutes(idleLaneAccount, {
       atMs,
       busyLanes,
       dispatchable: idleLaneDispatchable,
       cause: idleLaneTickCause,
       selectionRan,
+      capacity: idleLaneCapacity,
+      ...(idleLaneTickHold ? { hold: idleLaneTickHold } : {}),
     });
-    if (atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
+    // W1-T8235: one row when the (cause, idle slots, hold) triple changes, never one per tick.
+    const after = idleLaneAccount.state;
+    if (idleLaneStateChanged(before, after)) {
+      emitLog("lane.idle_changed", {
+        at_ms: atMs,
+        cause: after.cause,
+        idle_slots: after.idleSlots,
+        capacity: idleLaneCapacity,
+        dispatchable: after.dispatchable,
+        hold: after.hold,
+      });
+    }
+    if (closeWindow && atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
       emitLog("lane.idle_summary", { ...summarizeIdleLaneAccount(idleLaneAccount, atMs) });
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     }
@@ -3305,8 +3434,36 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
+  // sample ends it), at the idle slots that record left.
+  idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
   const runLengths = dispatchRunHistory(bootLedgerLines);
+  let restartHistoryLines: readonly string[] = bootLedgerLines;
+  try { restartHistoryLines = deps.readRestartHistory?.() ?? bootLedgerLines; }
+  catch (error) {
+    restartHistoryLines = [];
+    log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
+  }
+  const restartHistory = restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now());
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
+  // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
+  // pass's run-branch guard reads it. A failed read keeps the entry it had.
+  const refreshResumableHandoff = (taskId: string, report: typeof emitLog): void => {
+    if (!deps.readLedgerLines) return;
+    let rows: readonly string[];
+    try {
+      rows = deps.readLedgerLines();
+    } catch (error) {
+      report("daemon.handoff_receipt_refresh_failed", { task_id: taskId, error: String((error as Error)?.message ?? error) });
+      return;
+    }
+    const needle = JSON.stringify(taskId);
+    const receipt = pendingWorkerBoundaryHandoffs(rows.filter((raw) => raw.includes(needle))).get(taskId);
+    if (receipt) resumableHandoffs.set(taskId, receipt);
+    else resumableHandoffs.delete(taskId);
+  };
+  // W1-T8676: the blocking runs whose release this process already ledgered, beside the projection's receipt.
+  const ledgeredIndependentBlockReleases = new Set<string>();
   for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
     log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
   }
@@ -3688,6 +3845,7 @@ export async function runDaemon(
     | { kind: "continue" }
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
+    refreshResumableHandoff(task.id, report);
     if (result.verdict === "task_already_merged") {
       // This verdict is a positive merge observation by run-task, even though the run opened no PR.
       // Refresh before the next selection and retain a local hold if the daemon's projection lags.
@@ -4358,7 +4516,7 @@ export async function runDaemon(
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
-    idleLaneTickCause = undefined;
+    resetIdleLaneTick();
     spendGatesOpen = false;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
@@ -5189,6 +5347,18 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    // W1-T8676: every release the latch projects leaves its row, once per blocking run.
+    const independentBlockReleasesThisPass = deps.independentBlockReleases?.() ?? new Map<string, IndependentBlockRelease>();
+    for (const [taskId, release] of independentBlockReleasesThisPass) {
+      if (release.receiptRecorded || ledgeredIndependentBlockReleases.has(release.blockingRunId)) continue;
+      ledgeredIndependentBlockReleases.add(release.blockingRunId);
+      log(INDEPENDENT_BLOCK_RELEASED_STEP, {
+        task_id: taskId, blocking_run_id: release.blockingRunId, blocked_at: release.blockedAt, evidence: release.evidence,
+        evidence_at: release.recoveredAt ?? release.mergedAt ?? null, latch_count: release.latchCount, backoff_ms: release.backoffMs,
+        ...(release.mergedTaskId ? { merged_task_id: release.mergedTaskId } : {}),
+        ...(release.provider ? { provider: release.provider, recovered_task_id: release.recoveredTaskId, recovered_step: release.recoveredStep } : {}),
+      });
+    }
     let terminalPreDispatchRefusalRevisions: ReadonlyMap<string, string> = new Map();
     try {
       terminalPreDispatchRefusalRevisions = deps.readTerminalPreDispatchRefusalRevisions?.() ?? terminalPreDispatchRefusalRevisions;
@@ -5306,6 +5476,8 @@ export async function runDaemon(
       onLifetimePressure: (t) => lifetimePressureTasks.set(t.id, t),
       isIndependentFailureBlocked: (taskId) => {
         if (deps.categorizedRefusalRejoinFor?.(taskId)) independentFailureBlocksThisRun.delete(taskId);
+        // W1-T8676: a worker-error hold defers to the ledger's provider release, so this process cannot outlast it.
+        if (independentBlockReleasesThisPass.get(taskId)?.evidence === "provider_recovered") independentFailureBlocksThisRun.delete(taskId);
         const environmentalAt = environmentalBlocksThisRun.get(taskId);
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
@@ -5763,6 +5935,8 @@ export async function runDaemon(
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map<string, number>();
     const restartHoldouts = new Set<string>();
+    const holdoutDeadlines = new Map<string, number>();
+    const yieldAsked = new Set<string>();
     const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
     const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
@@ -5789,8 +5963,11 @@ export async function runDaemon(
       // Deferred: a throwing decision reaches the pool's fault outcome, never strands an owned sibling.
       for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
     };
+    // W1-T8235: a lane change is a sample. The hold that emptied the slot is whichever step this lane's decision wrote.
+    const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true, undefined, false);
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
+      resetIdleLaneTick();
       restartHoldouts.delete(finished.id);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
@@ -5811,6 +5988,7 @@ export async function runDaemon(
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        sampleLaneChange();
         governorParked.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
@@ -5839,6 +6017,7 @@ export async function runDaemon(
       if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
         if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
           phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+        sampleLaneChange();
         governorParked.set(lane, reason);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
@@ -5859,8 +6038,13 @@ export async function runDaemon(
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
               ...[...refillProposals].map((proposal) => proposal.id)]),
+            // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
+            inFlight: [...inFlightTasks, ...refillProposals],
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
+          const poolIds = new Set(pool.map((t) => t.id));
+          for (const d of fits.serialized) if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
           next = fits.dispatch.find((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
           if (next) nextSnapshot = snapshot;
         };
@@ -5885,6 +6069,7 @@ export async function runDaemon(
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
               ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
             });
+            sampleLaneChange();
             return undefined;
           }
           // A promised refill still crosses the pool's handoff before it actually starts. No
@@ -5984,6 +6169,7 @@ export async function runDaemon(
             ? "file overlap at start" : undefined);
         if (reason !== undefined) {
           log("dispatch.lane_refill_held", { lane, finished_task: refill?.finishedTaskId, reason });
+          sampleLaneChange();
           return false;
         }
       }
@@ -5998,6 +6184,7 @@ export async function runDaemon(
           const fields = { task: task.id, lane, ...newBuildReservationPayload(beforeReceipt) };
           log("dispatch.new_build_held", fields);
           if (isRefill) log("dispatch.lane_refill_held", { ...fields, finished_task: refill!.finishedTaskId });
+          if (isRefill) sampleLaneChange();
           return false;
         }
         log("dispatch.harness_commit_retry", {
@@ -6019,6 +6206,7 @@ export async function runDaemon(
         const fields = { task: task.id, lane, ...newBuildReservationPayload(reservation) };
         log("dispatch.new_build_held", fields);
         if (isRefill) log("dispatch.lane_refill_held", { ...fields, finished_task: refill!.finishedTaskId });
+        if (isRefill) sampleLaneChange();
         return false;
       }
       preparedStartTimes.set(task.id, startedAtMs);
@@ -6043,6 +6231,8 @@ export async function runDaemon(
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts] } : {}) });
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null });
+      // The first wave is sampled once, by the tick (below): a refill is the lane change.
+      if (isRefill) sampleLaneChange();
     };
     const poolControl: LanePoolControl = {};
     // Only these named phase boundaries are contained. Other logging keeps its existing contract.
@@ -6050,8 +6240,37 @@ export async function runDaemon(
     const admittedWork = runLanePool(admitted, (id) => {
       const startedAtMs = preparedStartTimes.get(id)!;
       // Preserve the current worker-boundary handoff; a reservation never preempts it.
-      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+      return deps.runOne(id, { restartAtWorkerBoundary: (context) => {
         if (!inFlightFreshness) return undefined;
+        const phase = context?.waitingOn ?? "unknown";
+        const remaining = restartHistory.remaining.get(phase);
+        const yieldCost = restartHistory.yieldCost;
+        const nowMs = daemonClock.now();
+        const selfScoped = inFlightFreshness.changes?.some((change) =>
+          DAEMON_SELF_COMMIT_SCOPE.test(change.subject ?? "") ||
+          change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix))));
+        const deadline = holdoutDeadlines.get(id);
+        const reason = selfScoped ? "self_scoped_change"
+          : yieldAsked.has(id) ? "already_asked"
+          : deadline !== undefined && nowMs >= deadline ? "estimate_elapsed"
+          : remaining?.ms === undefined || yieldCost.ms === undefined ? "no_history"
+          : remaining.ms >= yieldCost.ms ? "yield_is_cheaper" : "finish_is_cheaper";
+        const hold = reason === "finish_is_cheaper";
+        if (hold && deadline === undefined) holdoutDeadlines.set(id, nowMs + remaining!.ms!);
+        log(hold ? "daemon.restart_holdout" : "daemon.restart_yield_asked", {
+          task_id: id, run_id: context?.runId ?? null, phase, reason,
+          remaining_ms: remaining?.ms ?? null, remaining_samples: remaining?.samples ?? 0,
+          yield_cost_ms: yieldCost.ms ?? null, yield_samples: yieldCost.samples,
+          deadline_ms: holdoutDeadlines.get(id) ?? null,
+          old_sha: inFlightFreshness.oldSha, new_sha: inFlightFreshness.newSha,
+        });
+        if (hold) {
+          refillClosed ??= "stale code";
+          restartHoldouts.add(id);
+          wakeParkedLanes();
+          return undefined;
+        }
+        yieldAsked.add(id);
         restartHoldouts.delete(id);
         if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
         wakeParkedLanes();
@@ -6070,7 +6289,7 @@ export async function runDaemon(
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }
         phase = "dispatch.sample_idle_lane";
-        sampleIdleLane(admitted.length, true, dispatchSet.length);
+        sampleIdleLane(lanes.inFlight, true, dispatchSet.length);
         phase = "dispatch.repository_maintenance";
         scheduleRepositoryMaintenance(true, () => lanes.inFlight);
       } catch (reason) {
@@ -6104,7 +6323,7 @@ export async function runDaemon(
     }
     // Lanes are back to empty here; whatever holds them empty from now on is named by the next tick's sample,
     // and an interval nothing names is reported as unknown rather than absorbed.
-    idleLaneTickCause = undefined;
+    resetIdleLaneTick();
     try { sampleIdleLane(0, false); }
     catch (reason) { phaseFaults.push({ phase: "dispatch.sample_idle_lane", reason: reason }); }
 

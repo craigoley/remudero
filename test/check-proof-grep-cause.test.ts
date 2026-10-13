@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const CLI = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
+const CLI = fileURLToPath(new URL("../src/check-proof-main.ts", import.meta.url));
 
 // ── W1-T1224: `grepZeroHitCauseLine`'s wiring inside `checkProofCommand` — line-seam, case-only ──
 // and matched, exercised through the REAL command against a REAL `grep` child process, never a
@@ -29,7 +29,7 @@ function markerFixture(content: string): string {
 /** Run the public command from the fixture checkout and capture its process result. */
 function runCheckProof(argv: string[], cwd: string): { code: number; out: string } {
   const result = spawnSync(process.execPath,
-    ["--import", import.meta.resolve("tsx"), CLI, "--repo-root", cwd, "check-proof", ...argv],
+    ["--import", import.meta.resolve("tsx"), CLI, ...argv],
     { cwd, encoding: "utf8", timeout: 60_000 });
   assert.ifError(result.error);
   assert.equal(result.signal, null, result.stderr);

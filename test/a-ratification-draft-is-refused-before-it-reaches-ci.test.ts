@@ -12,6 +12,7 @@ import {
   type ReadinessContext,
 } from "../src/lib/inbox.js";
 import { loadPlanFromYaml, parseTasksFromYaml, type Plan } from "../src/lib/plan.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 // A RATIFICATION DRAFT CI IS CERTAIN TO REFUSE MUST NOT READ AS READY. Observed 2026-09-23: one
 // `rmd approve` batch opened 15 ratify PRs and every one was red. Ten carried a whole-file proof
@@ -45,6 +46,7 @@ const SHARED_PROOF_FRAGMENT = `
   type: implement
   verify: auto
   risk: high
+  band_meaning: span
   status: queued
   attempts: 0
   origin: architect
@@ -67,6 +69,7 @@ const GOOD_STAMP = "- proof-debt:W1-T4048 (repair the proof debt) — RATIFIED 2
 
 function ctx(): ReadinessContext {
   return {
+    clock: fixedClock(Date.parse("2026-10-13T00:30:00Z")),
     plan: BASE_PLAN as Plan,
     isMerged: (t) => t.status === "merged",
     grepAnchorTrue: () => true,
@@ -112,19 +115,23 @@ test("a stamp that names another proposal or other tasks is refused, and a stamp
   assert.equal(stampLineViolations(proposal.id, "- proof-debt:W1-T4048 (no task list) — RATIFIED 2026-09-23.", ["NEW-1"]).length, 1);
 });
 
-test("classifyProposal holds a draft with a misnamed stamp NOT-READY, naming the stamp", () => {
+test("classifyProposal repairs a misnamed stamp before checking draft readiness", () => {
   const good = classify(DISTINCT_PROOF_FRAGMENT, GOOD_STAMP);
   assert.equal(good.state, "ready", JSON.stringify(good.reasons));
 
   const bad = classify(DISTINCT_PROOF_FRAGMENT, "- P44 (proof-debt: repair) — RATIFIED 2026-09-15 -> NEW-1.");
-  assert.equal(bad.state, "not_ready");
-  assert.ok(bad.reasons.some((r) => r.predicate === "lint_clean" && /stamp: the STAMP line must open with/.test(r.detail)), JSON.stringify(bad.reasons));
+  assert.equal(bad.state, "ready", JSON.stringify(bad.reasons));
+  assert.equal(bad.draft?.stampLine, "- proof-debt:W1-T4048 (proof-debt: repair) — RATIFIED 2026-10-13 -> NEW-1.");
+  const unclean = classify(SHARED_PROOF_FRAGMENT, "- P44 (repair) — RATIFIED 2026-09-15 -> NEW-1.");
+  assert.equal(unclean.state, "not_ready");
+  assert.ok(unclean.reasons.some((r) => r.predicate === "lint_clean" && /shared-proof/.test(r.detail)));
+  assert.ok(unclean.reasons.every((r) => !r.detail.includes("stamp:")));
 });
 
-test("the draft prompt spells the stamp with the proposal's own id and keeps the process name out of task titles", () => {
+test("the draft prompt requests a summary and keeps the process name out of task titles", () => {
   const prompt = inboxDraftPrompt(proposal, "- id: W1-T1\n", "RUN-1");
-  assert.ok(prompt.includes("`- proof-debt:W1-T4048 (<one-line summary>) — RATIFIED <YYYY-MM-DD> -> <task ids>.`"));
-  assert.ok(prompt.includes("never another P-number"));
+  assert.ok(prompt.includes("STAMP: <the one-line summary>"));
+  assert.ok(prompt.includes("The harness supplies the proposal id, UTC date and fragment task ids"));
   assert.ok(prompt.includes('"RATIFICATION CANDIDATE" and "§7/P25" above name this PROCESS: never put them in a task title.'));
   assert.ok(!prompt.includes("- P## (...)"), "the old P-number template taught the model to invent a P-number");
 });

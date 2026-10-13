@@ -1,0 +1,92 @@
+- id: W1-T8921
+  title: Browser teardown corpus is bound to tracked tests and refuses unavailable source evidence
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: "operator#2026-10-13-separate-governed-corpus-repair. Amended 2026-10-13 on operator direction (\"Fix 11201 and keep going\"): the two unit-test proofs, stale at #11201's head 21efadde6, are repointed at changed lines"
+  plan_refs: [W1-T5857, W1-T8801, W1-T2732]
+  rationale: |
+    W8801 exact045eb76e5e/actual51ae52d1b6 native jUQFKD completed FAILED:
+    census and28static PASS,1565tests/1564pass/1fail/zero skips. The failed browser
+    teardown title's recursive grep reported a disappearing test/.tmp-w1-t1053-audit
+    directory. proof-queue-audit creates and removes such fixture directories under
+    test/. The exact title passes alone and in both complete125-file serial and
+    actual-native-three-worker comparisons on unchanged51ae. Those comparisons
+    instead fail six original SDK auth cases. The original native browser failure's
+    root cause remains UNKNOWN, not a certified baseline flake or a gate waiver.
+    The operator explicitly authorized a SEPARATE governed corpus repair, not an
+    undeclared auth-task edit or an unchanged failing native retry.
+    At actual main111ec54700 and BOTH complete OPEN heads11193/11194, the browser
+    guard still recursively greps the live test tree. Its real title positive control
+    and five committed launch-text files are observed per head; all actual subject
+    blobs were read. The100PRwindow11073..11192 and exact merged trailer OR runbranch
+    credit show W5857 shipped10328, but it fixes assertion-discrimination's different
+    listTestFiles walker, not this guard. W8917/W8918 concern consumer-repo census
+    inputs, not browser-source discovery. No new open-head corpus-reader diff exists.
+    The two concerns are stable corpus membership and refusing unavailable real
+    source evidence; the declared three-file span is explicit, not hidden by a rename.
+    AMENDMENT 2026-10-13, READ on origin/main 6bd844ddb and #11201's head 21efadde6. The build
+    (#11201) is red on proof-discrimination alone: both unit-test proofs pass at the head AND at
+    the merge base 7b8bbbfcf, so `rmd check-proof --base` grades them executed_stale (exit 5),
+    reproduced locally at 21efadde6. W1-T3098's buildBaseProofDir copies a PR's ADDED test/**
+    files into the base worktree, so a new test that exercises only the new helper passes at base.
+    CORRECTION, same day: this amendment first said no build could pass those two proofs. That
+    was wrong. The build's own fix round (277b273e4, 02:49Z) made both discriminate by exercising
+    the modified, non-copied guard suite. At 277b273e4, `rmd check-proof --base 7b8bbbfcf`
+    reads both "discriminates" (exit 0). Restoring them here is refused by lint-plan's
+    proof-unit-test-unresolvable rule until their titles exist on main, so the grep proofs
+    below stay. They also discriminate at 277b273e4. Both were repointed at lines only the change adds, each checked with the gate's own command at
+    21efadde6 against 7b8bbbfcf: the reader's `git ls-files -z -- test` corpus boundary in the new
+    helper (exit 0, the file is absent at base), and the existing guard's delegation to the
+    composed default in test/serve-browser-teardown.test.ts (1 hit at head, 0 at base). The two
+    unit tests stay in the suite and keep running in CI as behaviour coverage. Claims, design,
+    files and the third proof are unchanged.
+  design: |
+    1. Extract a small test-only trackedBrowserTestSources reader into
+       test/lib/browser-test-corpus.ts. Enumerate Git-tracked test/*.test.ts recursively
+       with a NUL-delimited git ls-files listing, then read the actual working-tree
+       bytes. Include newly tracked nested suites and changed bytes. Do not walk
+       untracked fixture directories, use a fixed allowlist, or read stale HEAD bytes
+       instead of the source under test. Exclude only the existing guard's own path
+       from launch-text selection. Keep corpus floor and all teardown assertions.
+    2. Empty or unreadable Git corpus, missing/unreadable tracked file, NUL-containing
+       source or unavailable repository must visibly refuse, never count as healthy
+       empty evidence. Do not catch arbitrary errors as a successful empty array,
+       silently suppress stderr, skip real browser tests, alter their launch/close
+       contracts, or widen any baseline. Real unknowns remain unknown.
+    3. In a disposable Git fixture outside the live test tree, test real default Git
+       enumeration and reads with nonempty browser controls, a tracked nested suite,
+       changed working-tree content and untracked transient-directory creation/removal.
+       Test deterministic missing and unreadable real-source failures and a tracked
+       browser teardown regression. Inject narrow read/transport failures only where
+       needed for deterministic error arms; real-default tests remain mandatory.
+       Include empty/failed listing and filenames needing NUL-safe parsing.
+    4. Retain the original guard's real zero-match nested-run timing test unchanged.
+       Prove load-bearing deletion: restoring recursive transient-tree scanning must
+       fail the new corpus-boundary test, and swallowing a tracked-source read error
+       must fail the unavailable-evidence test; restoration must pass both. Commit
+       before measurement, verify paths/tsx/tmp preload, use shipped host admission,
+       then one native per distinct committed tree. Attribute every new native failed
+       title on THAT run's actual unchanged pinned base with complete TAP; no retries
+       of unchanged failing source into unexplained green.
+    5. Only after this separate source actually normally merges may W8801 inherit it
+       through normal rebase and justify distinct validation. Preserve all original
+       failed receipts and unknown attribution. No changes to SDK/production auth,
+       admission SHADOW behavior, owner/admin override, public core, trusted PR flow,
+       services, live policy/config, scheduler, infrastructure, credentials or schedules.
+  acceptance:
+    - claim: The real reader includes tracked nested browser suites without traversing transient fixtures
+      proof: 'grep: "ls-files", "-z", "--", "test" in test/lib/browser-test-corpus.ts'
+    - claim: Unavailable real source refuses without hiding a tracked browser regression
+      proof: 'grep: assertTrackedBrowserTeardown(REPO_ROOT); in test/serve-browser-teardown.test.ts'
+    - claim: Browser-source discovery has an explicit tracked test-corpus reader
+      proof: 'grep: function trackedBrowserTestSources in test/lib/browser-test-corpus.ts'
+  files: [test/serve-browser-teardown.test.ts, test/lib/browser-test-corpus.ts, test/browser-test-corpus.test.ts]
+  status: merged
+  attempts: 0

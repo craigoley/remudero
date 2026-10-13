@@ -16,6 +16,7 @@ import {
   type RatificationPayload,
 } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { changedFilesBlockDrift } from "../src/lib/plan-pr-emitter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand } from "../src/run-task.js";
@@ -299,7 +300,8 @@ async function driveJoin(patch: GhShimRoute): Promise<Drive & { priorBranch: str
   return { ...d, priorBranch };
 }
 
-test("a joined ratify PR's body is rebuilt over both proposals' shards and stamps, and PATCHed onto that PR", async () => {
+test("a joined ratify PR's body is rebuilt over both proposals' shards and stamps, and PATCHed onto that PR", async (t) => {
+  t.mock.method(systemClock, "date", fixedClock(Date.parse("2026-10-12T20:30:00-04:00")).date);
   const d = await driveJoin({ when: "-X PATCH", stdout: "{}" });
   const steps = JSON.stringify(d.ledger.map((l) => l.step));
   assert.ok(d.ledger.some((l) => l.step === "approve.joined" && l.branch === d.priorBranch), `the approval joined the open PR; steps=${steps}`);
@@ -311,7 +313,7 @@ test("a joined ratify PR's body is rebuilt over both proposals' shards and stamp
   assert.equal(diff.filter((p) => p.startsWith("plan/tasks.d/")).length, 2, `both proposals' shards are on the branch; diff=${JSON.stringify(diff)}`);
   assert.deepEqual(changedFilesBlockDrift(patches[0], diff), { missing: [], extra: [] }, "Changed files names both proposals' shards");
   assert.ok(patches[0].includes(PRIOR_STAMP), "the first approve's stamp is kept");
-  assert.match(patches[0], /^- P-JOIN \(Index the zorble registry for the join fixture\) — RATIFIED 2026-09-28 -> W1-T\d+\.$/m, "the joining stamp is added, materialized");
+  assert.match(patches[0], /^- P-JOIN \(Index the zorble registry for the join fixture\) — RATIFIED 2026-10-13 -> W1-T51\.$/m, "the joining stamp uses the harness's UTC date and materialized id");
   assert.match(patches[0], /W1-T50 is filed as a well-formed plan task shard/, "the first proposal's filing criterion survives the join");
   assert.ok(d.ledger.some((l) => l.step === "approve.join_body_refreshed" && l.pr_url === PRIOR_PR_URL), `the refresh is ledgered; steps=${steps}`);
 });

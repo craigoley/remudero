@@ -244,7 +244,7 @@ test("the default checks really run on a materialized commit: an unreserved id a
       "fake-lint.mjs": "process.exit(0);\n",
       "scripts/task-id-existence-check.mjs": "console.error('task-id-existence: FAILED -- W9-T1 is not reserved');\nprocess.exit(1);\n",
       "test/every-shard-on-main-is-lintable.test.ts": "import { test } from 'node:test';\ntest('census', () => {});\n",
-      "src/run-task.ts": "process.exit(process.argv[3].includes('already-on-main') ? 5 : 0);\n",
+      "src/check-proof-main.ts": "process.exit(process.argv[2].includes('already-on-main') ? 5 : 0);\n",
     },
     "w5348-real",
   );

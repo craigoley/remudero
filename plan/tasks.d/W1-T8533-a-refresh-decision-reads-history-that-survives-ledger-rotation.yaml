@@ -8,14 +8,14 @@
   budget_usd: 8.00
   risk: high  # Rule 19: one concern — every row a refresh decision reads outlives the PR it gates; it spans the rotation's retained set and the sweep's history read
   band_meaning: span
-  origin: "operator approval 2026-10-12 (\"Go\")"
+  origin: "operator approval 2026-10-12 (\"Go\"). Amended 2026-10-12 on operator direction (\"continue with follow-ups, fix at the root\"): the refresh.clearance proof main already satisfies is replaced"
   plan_refs: [W1-T8396, W1-T6405, W1-T4351, W1-T4935, W1-T3471, W1-T244, W1-T1262, W1-T1201]
   files:
     - src/lib/ledger.ts
     - src/lib/sweep.ts
     - src/lib/base-reproduction.ts
     - test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
@@ -64,10 +64,24 @@
     for this: `contradictoryPrior` (W1-T4935) reads a per-PR, step-filtered union with `resolveLedgerUnion`, and
     `readArmLedgerUnion` (W1-T3471) notes "a live miss is not enough to call a verdict absent". Both read the union only on
     the rare path.
+    AMENDMENT 2026-10-12, READ on origin/main 639ed54a8. MAIN NOW RETAINS `refresh.clearance`, TWICE. #11049 (5ec079f75,
+    14:05:49Z) and #11097 (939dee0ad, 14:32:42Z) each added `"refresh.clearance"` to `DECISION_RELEVANT_LEDGER_STEPS`, both
+    citing `refusedRefreshClearancesFromLedger`, after this task was filed (#11089, 13:31:40Z). So the filed proof
+    `grep: "refresh\.clearance" in src/lib/ledger.ts` matches at every merge base, and `rmd check-proof --base origin/main`
+    reports it `executed_stale` (exit 5). All three builds were dispatched after 14:05Z (run-W1-T8533-1791815680124,
+    -1791818151153, -1791822945025), and the newest was refused at PR open: `openPullRequestChecked: W1-T8533 proof did
+    not pass against merge base (grep: "refresh\.clearance" in src/lib/ledger.ts) … executed_stale`. No build can pass
+    that proof, because a worker may not edit its own task's proof (Rule 15). Every other filed proof still misses at
+    origin/main: the `sweep\.base_fixed\.refresh` grep exits 1 at base, and the unit-test and test-title proofs name a
+    file that does not exist yet. The remaining work is `sweep.base_fixed.refresh`'s retention, the per-PR union
+    fallback, the named unreadable history and the census. The stale criterion is replaced by one on the history field's
+    type, which only design 3 adds.
   design: |
-    1. RETAIN WHAT THE REFRESH DECISIONS READ. Add `"sweep.base_fixed.refresh"` and `"refresh.clearance"` to
-       `DECISION_RELEVANT_LEDGER_STEPS` as literal string entries, each with a comment that names its reader, like the
-       neighbouring `"sweep.base_red.refresh"` entry.
+    1. RETAIN WHAT THE REFRESH DECISIONS READ (amended 2026-10-12, see the AMENDMENT paragraph). Add
+       `"sweep.base_fixed.refresh"` to `DECISION_RELEVANT_LEDGER_STEPS` as a literal string entry, with a comment that
+       names its reader, like the neighbouring `"sweep.base_red.refresh"` entry. `"refresh.clearance"` is already
+       retained on main, and listed twice. Remove the second copy so the set lists it once. If W1-T8621 has removed it
+       first, leave the one that remains.
     2. A LIVE MISS IS NOT ABSENCE FOR A PR OLDER THAN THE LIVE WINDOW. In `runSweep`, before an arm acts on "no prior
        refresh" for PR N, decide whether the live file can vouch for N's whole life. It can when, for every refresh step
        the decision reads, the oldest live row of that step is no newer than `pr.createdAt` (OpenPrView, W1-T1201). When it
@@ -81,6 +95,8 @@
        `refresh.clearance` row carries `history: "unreadable"` with the unread sources. The decision falls back to the
        evidence W1-T8396 already has, which needs no history: the main-delta pre-filter and the trial-merge probe. It never
        refreshes on the bare absence of a record. A history that was read records `history: "live"` or `history: "union"`.
+       The field's type is exported from src/lib/base-reproduction.ts on one line, written exactly as
+       `export type RefreshHistorySource = "live" | "union" | "unreadable";`, and `refreshClearanceFields` takes it.
     4. CENSUS. In the new test file, scan src/lib/sweep.ts, src/run-task.ts and src/lib/base-reproduction.ts for every
        `.step === X` and `.step !== X`, where X is a string literal or an identifier that resolves to an
        `export const X = "<step>"` anywhere under src/. Keep each resolved step whose value contains `refresh`, and assert
@@ -106,14 +122,15 @@
       proof: 'grep: test("W1-T8533: an unreadable refresh history is named and never read as no prior refresh" in test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts'
     - claim: "the base-fixed refresh step is retained"
       proof: 'grep: "sweep\.base_fixed\.refresh" in src/lib/ledger.ts'
-    - claim: "the refresh clearance step is retained"
-      proof: 'grep: "refresh\.clearance" in src/lib/ledger.ts'
+    - claim: "a refresh clearance row names where its history came from, including an unreadable history"
+      proof: 'grep: export type RefreshHistorySource = "live" | "union" | "unreadable" in src/lib/base-reproduction.ts'
   falsifier: |
     Remove `"sweep.base_fixed.refresh"` from `DECISION_RELEVANT_LEDGER_STEPS`. The census reds by name, and in the rotation
     test the refresh row is archived and the sweep refreshes the same red a second time, as #10190 and #10787 would have
     after a rotation. Restrict the census to string literals, as test/ledger-rotation.test.ts does today, and its positive
     control fails, because none of the four reads is a literal on main. Drop the union fallback, and the old-PR test sees a
     second refresh. Treat an unreadable union as "no prior refresh", and the last test sees a refresh with no history row.
+    Write the unreadable case as a bare `undefined` with no `RefreshHistorySource` type, and the history-field grep reads 0.
   note: |
     EFFECT, measured after merge from the core ledger with no numeric pass mark: per PR, count same-red refreshes (the
     same checks and test files) that follow an earlier one, before and after W1-T8396 plus this task. Healthy shape: no

@@ -1,0 +1,45 @@
+- id: W1-T7741
+  title: "A CENSUS COUNT A COMMIT GROWS IS FIRST REFUSED AFTER A HEAVY ADMISSION WAIT — census-precheck runs at pre-push and as the author gate's first step, never at commit, so an operator gate waited for host-memory admission twice only to fail a 22-second census check before any test ran"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — where the cheap census check runs first; the census itself is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-10 retro, finding 2"
+  plan_refs: [W1-T3224, W1-T5663, W1-T7727]
+  files: [hooks/pre-commit, test/the-pre-commit-hook-refuses-what-pre-push-would.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REFILED 2026-10-12 from its only surviving copy: the original filing commit lived only in ~/rmd-work/core, which a
+    janitor pass removed on 2026-10-11 (W1-T8861 fixes that). Ownership rechecked on main d616a6794: still unowned.
+    READ 2026-10-10 at origin/main 8d58dc58b. hooks/pre-commit checks only staged conflict markers and (when a staged
+    .ts/.mjs adds `mkdtempSync(`) scripts/mkdtemp-callsite-check.mjs. scripts/census-precheck.mjs runs in hooks/pre-push
+    (`--base origin/main`) and as the first step of scripts/preflight-author.mjs.
+    OBSERVED (W1-T7727, 2026-10-10):
+    - Gate v1 failed census-precheck in 23 s (six counts grew).
+    - Gate v2 failed it in 22.6 s (house-layout: one `.remudero/` literal in a new ENV_REGISTRY description).
+    - Each run first waited for a host-memory admission that only the test step needs; one wait was lost to a session
+      restart.
+    - The same check run alone took seconds and needed no admission.
+    OWNERSHIP: W1-T3224 and W1-T5663 shaped census-precheck. No shard moves it to commit time.
+  design: |
+    In hooks/pre-commit, when any staged path is under src/, scripts/ or test/, run
+    `node scripts/census-precheck.mjs --base "$(git merge-base HEAD origin/main)"`.
+    - Exit 1 refuses the commit with census-precheck's own lines.
+    - Exit 2 ("could not measure") warns and allows, as pre-push does.
+    - census-precheck also spawns bounded TAP suite children for the admitted census suites (hooks/pre-push, W1-T5663).
+      If those children dominate, run only the COUNT half at commit and leave the suites to pre-push; say which in the hook.
+    - Measure its wall time on a cold and a warm tree. If the cold run exceeds 30 s, gate it to commits that stage a
+      .ts/.mjs file under src/ or test/ and say so in the hook comment.
+    - Nothing else in the hook changes.
+  acceptance:
+    - claim: "a commit that grows a census count is refused at commit time, naming the count"
+      proof: 'grep: test("W1-T7741: a commit that grows a census count is refused at commit" in test/the-pre-commit-hook-refuses-what-pre-push-would.test.ts'
+  falsifier: |
+    Delete the census-precheck call from hooks/pre-commit: the fixture commit that adds a `.remudero/` literal to a second
+    src file is accepted, and the test fails.
