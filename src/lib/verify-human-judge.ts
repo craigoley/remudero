@@ -51,8 +51,11 @@ export interface ShardUnderJudgement {
   title: string;
   rationale: string;
   acceptance: readonly string[];
-  /** Days since the shard was filed. */
-  ageDays: number;
+  /** Days since the shard was filed; `null` when no filing date could be read (#7911), never a
+   *  0 that reads as "filed today". */
+  ageDays: number | null;
+  /** Why `ageDays` is `null`, in words the operator reads; absent when the age was measured. */
+  ageUnknownReason?: string;
   /** Whether every `depends_on` is merged — a shard blocked on unmerged work rarely needs a person YET. */
   depsAllMerged: boolean;
   /** Whether anything in `src/` cites this id — evidence the work landed under another shard. */
@@ -130,6 +133,12 @@ export function shardsNeedingJudgement(
   return shards.filter((s) => !isSettled(s, priorVerdicts));
 }
 
+/** `<n> days<suffix>`, or an unknown age stated as unknown with its reason — never as a number. */
+export function filingAgeText(shard: ShardUnderJudgement, suffix: string): string {
+  if (shard.ageDays !== null) return `${shard.ageDays} days${suffix}`;
+  return `an unknown number of days${suffix} (filing age unknown: ${shard.ageUnknownReason ?? "no filing date was read"})`;
+}
+
 /** Render the judge's prompt. NOT the escalation judge's prompt reused: that one reasons about an
  *  issue with options and a recommendation, and a parked shard has none of those — a prompt
  *  describing fields that do not exist invites a confident answer about nothing. */
@@ -138,7 +147,7 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
   return [
     `You are the VERIFY-HUMAN JUDGE (W1-T3188). ONE task in this repo's plan was filed`,
     `\`verify: human\` — meaning a person, not a machine, was supposed to verify it. It has been`,
-    `sitting for ${shard.ageDays} days. Decide whether it STILL needs that person.`,
+    `sitting for ${filingAgeText(shard, "")}. Decide whether it STILL needs that person.`,
     ``,
     `WHAT YOU ARE DECIDING, and it is narrow: whether this shard needs the operator, can enter the`,
     `self-improvement flow, or should stay in the visible backlog for now. You are NOT deciding`,
@@ -160,7 +169,7 @@ export function buildVerifyHumanJudgePrompt(shard: ShardUnderJudgement): string 
     `DOUBT, SAY needs_operator.`,
     ``,
     `TASK: ${shard.id}`,
-    `AGE: ${shard.ageDays} days since filing`,
+    `AGE: ${filingAgeText(shard, " since filing")}`,
     `DEPENDENCIES ALL MERGED: ${shard.depsAllMerged ? "yes" : "no"}`,
     `ITS ID IS CITED IN src/: ${shard.citedInSrc ? "yes — the work may already have landed" : "no"}`,
     ``,
@@ -289,7 +298,7 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
   return {
     id: verifyHumanProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${shard.ageDays} days ago and a judge reads it as ` +
+      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
       `still needing you:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
@@ -307,7 +316,7 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
   return {
     id: verifyHumanAutomationProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${shard.ageDays} days ago and a judge reads it as ` +
+      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
       `safe to enter the self-improvement flow:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
