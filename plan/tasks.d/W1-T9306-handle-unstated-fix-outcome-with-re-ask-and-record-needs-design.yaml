@@ -1,0 +1,23 @@
+- id: W1-T9306
+  title: Handle unstated FIX_OUTCOME with re‑ask and record NEEDS_DESIGN
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  origin: "W1-T7739"
+  rationale: >-
+    From the 2026-10-13 proposal on machine-judge:W1-T7739, ratified via rmd approve:
+  
+    Spans fix-outcome, prompt-render, and run-task concerns
+  files:
+    - src/lib/fix-outcome.ts
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - test/an-unstated-fix-outcome-is-asked-once-then-needs-design.test.ts
+  acceptance:
+    - claim: A fix worker receiving an unparseable FIX_OUTCOME line re‑asks once and then records NEEDS_DESIGN with the last 20 lines of the report as the reason
+      proof: "grep: test(\"W1-T7739: an unstated outcome is re-asked once then recorded NEEDS_DESIGN\" in test/an-unstated-fix-outcome-is-asked-once-then-needs-design.test.ts"
+    - claim: The new fix‑outcome handler is invoked by run‑task
+      proof: "grep: handleFixOutcome( in src/run-task.ts"
