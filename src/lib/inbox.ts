@@ -3882,9 +3882,11 @@ export function approveBatchCommitMessage(payloads: readonly RatificationPayload
  *  reading `NEW-1` out of `NEW-1A` minted nothing for it (#11378). Case is part of the token: NEW-1a ≠ NEW-1A. */
 const DRAFT_PLACEHOLDER_TOKEN = "NEW-[A-Za-z0-9]+";
 const DRAFT_PLACEHOLDER_DECL_RE = new RegExp(`^\\s*(?:-\\s*)?id:\\s*["']?(${DRAFT_PLACEHOLDER_TOKEN})(?![A-Za-z0-9])`, "gm");
-/** Any placeholder token in free text, delimited the same way {@link substitutePlaceholderIds} delimits one. */
-const DRAFT_PLACEHOLDER_ANY_RE = new RegExp(`\\b${DRAFT_PLACEHOLDER_TOKEN}(?![A-Za-z0-9])`, "g");
-const DRAFT_PLACEHOLDER_EXACT_RE = new RegExp(`^${DRAFT_PLACEHOLDER_TOKEN}$`);
+/** A placeholder token anywhere in text (a depends_on entry, a stamp line), delimited the same way {@link
+ *  substitutePlaceholderIds} delimits one: never inside a longer word (RENEW-1) or a longer token (NEW-1A holds no NEW-1). */
+export const DRAFT_PLACEHOLDER_IN_TEXT_RE = new RegExp(`\\b${DRAFT_PLACEHOLDER_TOKEN}(?![A-Za-z0-9])`);
+const placeholderTokensIn = (text: string): string[] =>
+  [...text.matchAll(new RegExp(DRAFT_PLACEHOLDER_IN_TEXT_RE.source, "g"))].map((m) => m[0]);
 
 /** A fragment's placeholder ids in first-DECLARATION order (the `- id:` key, never a stray `depends_on`). Empty means
  *  nothing to materialize, never an error. */
@@ -3923,6 +3925,8 @@ function unmintedDraftResidue(fragmentYaml: string, stampLine: string, pending: 
   try {
     records = parseYaml(fragmentYaml);
   } catch (e) {
+    // A parse failure is itself the residue: what an unparseable fragment declares cannot be known, so it is refused
+    // naming the parse error, never read as an empty fragment with nothing to mint.
     return [`the fragment does not parse as YAML (${String((e as Error)?.message ?? e).split("\n")[0]})`];
   }
   if (records !== null && records !== undefined && !Array.isArray(records)) return ["the fragment is not a YAML list of tasks"];
@@ -3932,13 +3936,10 @@ function unmintedDraftResidue(fragmentYaml: string, stampLine: string, pending: 
     const declared = String(id ?? "");
     if (!MINTED_TASK_ID_RE.test(declared) && !pending.has(declared)) out.add(`id ${JSON.stringify(declared)}`);
     for (const dep of Array.isArray(deps) ? deps : deps === undefined || deps === null ? [] : [deps]) {
-      const ref = String(dep);
-      if (DRAFT_PLACEHOLDER_EXACT_RE.test(ref) && !pending.has(ref)) out.add(`depends_on ${ref}`);
+      for (const ref of placeholderTokensIn(String(dep))) if (!pending.has(ref)) out.add(`depends_on ${ref}`);
     }
   }
-  for (const m of stampLine.matchAll(DRAFT_PLACEHOLDER_ANY_RE)) {
-    if (!pending.has(m[0])) out.add(`stamp ${m[0]}`);
-  }
+  for (const token of placeholderTokensIn(stampLine)) if (!pending.has(token)) out.add(`stamp ${token}`);
   return [...out];
 }
 

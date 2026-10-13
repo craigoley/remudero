@@ -17,7 +17,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { materializeDraftTaskIds, type DraftTaskIdMintDeps } from "../src/lib/inbox.js";
+import { DRAFT_PLACEHOLDER_IN_TEXT_RE, materializeDraftTaskIds, type DraftTaskIdMintDeps } from "../src/lib/inbox.js";
+import { MINTED_TASK_ID_RE } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
@@ -186,6 +187,18 @@ test("W1-T9292: materialization refuses a fragment that still holds an unminted 
     never,
   );
   assert.equal(minted.ok, true, JSON.stringify(minted));
+});
+
+test("W1-T9292: the placeholder and minted-id shapes accept what they name and refuse what they do not", () => {
+  assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("-> NEW-1A, W1-T5"), true);
+  assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("depends_on: [NEW-1b]"), true);
+  assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("-> W1-T9167, RENEW-1"), false);
+  assert.equal(MINTED_TASK_ID_RE.test("W1-T9167"), true);
+  assert.equal(MINTED_TASK_ID_RE.test("W1-T12e"), true);
+  assert.equal(MINTED_TASK_ID_RE.test("CONSOLE-T42"), true);
+  assert.equal(MINTED_TASK_ID_RE.test("NEW-1A"), false);
+  assert.equal(MINTED_TASK_ID_RE.test("W1-T12ab"), false);
+  assert.equal(MINTED_TASK_ID_RE.test("W1-Tundefined"), false);
 });
 
 // ── lint-plan ────────────────────────────────────────────────────────────────────────────────
