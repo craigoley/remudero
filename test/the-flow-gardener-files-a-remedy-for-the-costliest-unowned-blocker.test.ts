@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { fixedClock } from "../src/lib/clock.js";
-import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-gardener.js";
+import { FIX_LANE_LADDER } from "../src/lib/fix-lane-gardener.js";
+import { ADMISSION_FLOW_LADDER, FLOW_LADDER, flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-gardener.js";
 import { ciFrictionRecordVerdict } from "../src/lib/ci-friction-gardener.js";
 import { gardenSchedule, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import type { GardenerDeps } from "../src/lib/gardener.js";
@@ -113,7 +114,7 @@ test("W1-T5538: the top cause is filed once and a debited remedy reopens one run
   assert.match(text, /owner NONE/);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1);
   assert.equal(scorecard.total_pr_hours, inv.priced.reduce((n, p) => n + p.hours, 0));
-  const receipt = { step: "flow.scorecard", pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next };
+  const receipt = { step: `${f.spec.name}.scorecard`, pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next };
   const held = fixture(root, [...records, receipt]).spec.inventory();
   assert.equal(held.next!.price.key, "escalated:plan-only red", "a filing receipt holds the cause until main sees it");
   const remedy = { id: "W1-T9001", origin: actions[0]!.origin, files: ["src/lib/sweep.ts"], status: "queued", retired: false, mergedAt: iso(-2) };
@@ -125,6 +126,29 @@ test("W1-T5538: the top cause is filed once and a debited remedy reopens one run
   const invalid = fixture(root, records, { mintTaskId: () => "W1-T9002", draftShard: () => malformedProof });
   assert.throws(() => invalid.spec.apply(workspace(root), { actions: invalid.spec.candidates(invalid.spec.inventory(), () => 0), acting: ["draft"] }, {}), /failed lint/);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1, "admission failure writes nothing");
+});
+
+test("flow-remedy holds a cause on the receipt its own pass logs, a filing closed unmerged releases it, and a GraphQL fleet merge clears", () => {
+  for (const kind of [FLOW_LADDER, ADMISSION_FLOW_LADDER, FIX_LANE_LADDER]) {
+    assert.equal(kind.receiptStep, `${kind.name}.scorecard`, `${kind.prefix}: a pass logs only \`<spec name>.scorecard\` (gardener.ts)`);
+  }
+  const records = [row(1, -4), row(1, -2), row(2, -2), row(2, 0), row(3, -1, "escalated", "plan-only red"), row(3, 0, "escalated", "plan-only red")];
+  const f = fixture("/unused", records);
+  assert.equal(f.spec.name, FLOW_LADDER.name);
+  const inv = f.spec.inventory();
+  const scorecard = f.spec.scorecard(inv, { actions: f.spec.candidates(inv, () => 0), acting: ["draft" as const] });
+  const receipt = { step: `${f.spec.name}.scorecard`, pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next, ts: iso(0) };
+  const nextKey = (extra: LedgerRecord[]) => fixture("/unused", [...records, receipt, ...extra]).spec.inventory().next!.price.key;
+  assert.equal(nextKey([]), "escalated:plan-only red", "an open filing holds its cause");
+  assert.equal(nextKey([{ step: "pr.terminal", pr_number: 900, state: "merged", ts: iso(0) }]), "escalated:plan-only red",
+    "a merged filing holds its cause until main shows the task");
+  assert.equal(nextKey([{ step: "pr.terminal", pr_number: 900, state: "closed", ts: iso(0) }]), inv.next!.price.key,
+    "a filing closed unmerged releases its cause");
+  const outcome = (mergedBy: string) => fixture("/unused", records, { prOutcomes: () => new Map([[3, { state: "merged" as const, at: iso(0), mergedBy }]]) })
+    .spec.inventory().episodes.find(e => e.pr === 3)!.outcome;
+  assert.equal(outcome("remudero-fleet"), "cleared", "GraphQL's mergedBy spells the fleet App without [bot]");
+  assert.equal(outcome("remudero-fleet[bot]"), "cleared");
+  assert.equal(outcome("cao825"), "failed");
 });
 
 test("W1-T5538: the flow gardener is registered and builds", async (t) => {
