@@ -75,6 +75,9 @@ test("owned kernel contract binds one fresh lease and refuses unknown population
   });
   const { createOwnedRunCgroup, joinOwnedRunCgroupSelf } = await import('../src/lib/owned-run-cgroup.js');
   const memory = await import('../src/lib/host-memory-ledger.js');
+  real.writeFileSync(procFile, '0::/not-an-isolated-service\n');
+  assert.throws(() => createOwnedRunCgroup({ enabled: true, parent }), /own isolated user-service parent/);
+  real.writeFileSync(procFile, `0::${group}\n`);
   const empty = createOwnedRunCgroup({ enabled: true, parent })!;
   assert.equal(empty.read().state, 'empty-unqualified');assert.equal(empty.settleCapacity().released, false);
   assert.equal(empty.close(), true);assert.equal(empty.read().state, 'unknown');
@@ -93,7 +96,15 @@ test("owned kernel contract binds one fresh lease and refuses unknown population
   real.writeFileSync(join(leaf, 'cgroup.events'), 'not-a-population-measurement\n');
   assert.equal(scope.read().state, 'unknown');assert.equal(scope.settleCapacity().released, false);
   real.writeFileSync(join(leaf, 'cgroup.events'), 'populated 1\n');scope.cancel();
-  assert.equal(scope.read().state, 'gone');assert.equal(scope.settleCapacity().released, true);
+  assert.equal(scope.read().state, 'gone');
+  const published = Object.getOwnPropertyDescriptor(lease, 'published')!;
+  Object.defineProperty(lease, 'published', { value: false, configurable: true });
+  assert.deepEqual(scope.settleCapacity(), { released: false, reason: 'original-owned-capacity-unavailable' });
+  Object.defineProperty(lease, 'published', published);
+  const missingRelease = t.mock.method(lease, 'releaseOccupancy', () => {});
+  assert.deepEqual(scope.settleCapacity(), { released: false, reason: 'canonical-capacity-release-unverified' });
+  assert.equal(scope.close(), false, 'unverified release retains the original handle');missingRelease.mock.restore();
+  assert.equal(scope.settleCapacity().released, true);
   assert.equal(scope.settleCapacity().released, true, 'idempotent original settlement');
   assert.equal(memory.readMemoryLedger()?.entries.some(e => e.id === unrelated.id), true);
   assert.equal(scope.close(), true);

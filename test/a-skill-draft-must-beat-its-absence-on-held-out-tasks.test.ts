@@ -89,6 +89,15 @@ const LIFTS = (_task: string, arm: string, trial: number): CorpusProofOutcome =>
 /** With-skill passes, without-skill fails. */
 const WITH_ONLY = (_task: string, arm: string): CorpusProofOutcome => (arm === "with-skill" ? "pass" : "fail");
 
+test("a malformed fixed eval control preserves the refusal reason and dispatches nothing", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), fleet = fakeFleet(LIFTS);
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 0 } });
+  assert.ok(run.state === "refused" && run.reason === "invalid-run-control" && run.dispatched === 0);
+  assert.ok(run.state === "refused" && run.detail.includes("invalid fixed eval deadline/shutdown reserve"));
+  assert.equal(fleet.built.length, 0);assert.equal(fleet.requests.length, 0);
+});
+
 test("a cancelled skill eval launches no further attempts and never certifies capacity release", async () => {
   const { runSkillEval } = await skillEval(), selection = await selected(), source = new AbortController();
   const fleet = fakeFleet(LIFTS, request => { assert.ok(request.signal);source.abort();return {}; });
