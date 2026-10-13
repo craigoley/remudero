@@ -53,3 +53,8 @@ export function assertBrowserTeardownSources(sources: readonly BrowserTestSource
       `${f}: closing the resolved handle is the leak -- it is still undefined when teardown fires on a zero-match filter`);
   }
 }
+
+/** The real guard's composed default: discovery and assertions cannot be tested as separate promises. */
+export function assertTrackedBrowserTeardown(root: string): void {
+  assertBrowserTeardownSources(trackedBrowserTestSources(root));
+}

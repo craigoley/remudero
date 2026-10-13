@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
-import { assertBrowserTeardownSources, trackedBrowserTestSources } from "./lib/browser-test-corpus.js";
+import { assertBrowserTeardownSources, assertTrackedBrowserTeardown, trackedBrowserTestSources } from "./lib/browser-test-corpus.js";
 
 const LAUNCH = ["chromium", "launch"].join(".") + "(";
 const validSource = () => [
@@ -33,7 +33,7 @@ test("browser teardown corpus reads tracked nested tests without traversing tran
   mkdirSync(transient);
   writeFileSync(join(transient, "not-a-real-suite.test.ts"), `broken ${LAUNCH}{});`);
   assert.deepEqual(trackedBrowserTestSources(repo.dir).map(s => s.path), ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"]);
-  assertBrowserTeardownSources(trackedBrowserTestSources(repo.dir));
+  assertTrackedBrowserTeardown(repo.dir);
   // Removing an untracked fixture after enumeration must not affect any real source read.
   const afterListing = trackedBrowserTestSources(repo.dir, root => {
     const files = realList(root);
@@ -56,7 +56,10 @@ test("browser teardown corpus reads tracked nested tests without traversing tran
 test("browser teardown corpus refuses unavailable tracked sources without hiding a real regression", (t) => {
   const repo = fixture(t), path = "test/a.test.ts", absolute = join(repo.dir, path);
   rmSync(absolute);
-  assert.throws(() => trackedBrowserTestSources(repo.dir), { code: "ENOENT" });
+  assert.throws(() => assertTrackedBrowserTeardown(repo.dir), { code: "ENOENT" });
+  mkdirSync(absolute);
+  assert.throws(() => assertTrackedBrowserTeardown(repo.dir), { code: "EISDIR" });
+  rmSync(absolute, { recursive: true });
   writeFileSync(absolute, validSource());
   const denied = Object.assign(new Error("tracked source denied"), { code: "EACCES" });
   assert.throws(() => trackedBrowserTestSources(repo.dir, realList, file => {
@@ -65,7 +68,7 @@ test("browser teardown corpus refuses unavailable tracked sources without hiding
   }), error => error === denied);
   const broken = validSource().replace("const launched = await browserPromise;", "const launched = browser;");
   writeFileSync(absolute, broken);
-  assert.throws(() => assertBrowserTeardownSources(trackedBrowserTestSources(repo.dir)), /test\/a.test.ts: teardown must await/);
+  assert.throws(() => assertTrackedBrowserTeardown(repo.dir), /test\/a.test.ts: teardown must await/);
 });
 
 test("browser teardown corpus refuses empty failed malformed and binary evidence", (t) => {

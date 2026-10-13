@@ -17,14 +17,14 @@ import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { assertBrowserTeardownSources, trackedBrowserTestSources } from "./lib/browser-test-corpus.js";
+import { assertTrackedBrowserTeardown } from "./lib/browser-test-corpus.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test("every browser-launching test file awaits the launch PROMISE in teardown, never the resolved handle", () => {
   // W1-T4563 retired the daemon's in-process console with the eleven suites that drove it in a
   // browser, and W1-T4566 deleted dashboard-loads; three remain (the corpus control this floor exists for).
-  assertBrowserTeardownSources(trackedBrowserTestSources(REPO_ROOT));
+  assertTrackedBrowserTeardown(REPO_ROOT);
 });
 
 /** Env for a nested `node --test`, with the parent runner's own marker REMOVED.
