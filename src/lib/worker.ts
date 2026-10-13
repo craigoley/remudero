@@ -1,6 +1,7 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
+import { unavailableWorkerInitSummary, workerInitSummaryFromMessage, type WorkerInitSummary } from "./worker-init-summary.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
@@ -241,6 +242,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Bounded observational SDK init names; raw auth/configuration envelopes are never retained. */
+  initSummary?: WorkerInitSummary;
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
   provider?: WorkerProviderId;
   sessionId: string;
@@ -569,6 +572,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  sdk_init_summary: WorkerInitSummary;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
   worker_exit_code?: number;
@@ -622,6 +626,7 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
     ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
@@ -3702,6 +3707,7 @@ export async function collectWorkerResult(
   // WorkerResult.servedModel}. `undefined` until a genuine value is observed, so a stream carrying none falls through to the
   // explicit-unknown branch below, never a guess (W1-T2572).
   let servedModel: string | undefined;
+  let initSummary: WorkerInitSummary | undefined;
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
@@ -3711,6 +3717,8 @@ export async function collectWorkerResult(
       observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
+        // First init wins: later system/status events cannot erase the original inventory or make unknown become empty.
+        initSummary ??= workerInitSummaryFromMessage(raw);
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
         // fixture-driven unit test exercises, so "detected in a test" and "detected live" can never drift apart (MASTER-PLAN
         // 8B, W1-T36).
@@ -3899,6 +3907,7 @@ export async function collectWorkerResult(
     tokens,
     modelUsage,
     compactionEvents,
+    initSummary: initSummary ?? unavailableWorkerInitSummary(),
     compactionFailures,
     compactionConfigured: opts.compactionConfigured ?? false,
     qualitySuspect: isQualitySuspect(compactionEvents),

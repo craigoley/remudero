@@ -1,0 +1,61 @@
+- id: W1-T9086
+  title: "A BOOTING DAEMON ADOPTS ITS LIVE RUN CHILDREN BEFORE THE BOOT GATE, AND A RESTART NO LONGER WAITS FOR THEM — on 2026-10-12/13 latched holdouts cost 176 lane-min, exit lag 118 and the boot gate 321, because a restart drains every run in its own process and a boot idles lanes until its first full pass"
+  repo: remudero
+  depends_on: [W1-T9085]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — a restart that leaves run children running and a boot that takes them back
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T147, W1-T5723, W1-T5720, W1-T7806, W1-T8139, W1-T8198, W1-T8927, W1-T9069, W1-T9072, W1-T9085]
+  files: [src/lib/daemon.ts, src/lib/run-child.ts, src/run-task.ts, test/a-booting-daemon-adopts-its-live-run-children.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision A.5 and A.6. MEASURED 2026-10-12 12:00Z to 10-13 11:45Z (~/Remudero-notes/flow-remeasure-2026-10-13b,
+    idle-out.txt): restart idle 1,008 lane-min (23.6% of capacity; 31.7% after W1-T8927 merged), by phase boot_gate 321,
+    review_drain 186, latched_holdout 176, latched_exit_lag 118, post_gate 105. 2026-10-13 03:06-10:37Z: 9 boots, 12
+    freed lanes refused, one lane idle 57 min behind a holdout.
+    PRECEDENT: W1-T5723's measurement-cadence child is adopted after a boot (`measurementCadenceChildRunner`: adopted,
+    restarted, discarded) but only on the first iteration after the gate and with pid-only liveness.
+    READ on origin/main 5f8d3f178: `sweepOrphanWorkers` (src/lib/worker-containment.ts) kills a worker group whose run
+    is not active per `orphanSweepRunActive` (src/run-task.ts), and `sweepInflightLocksWithReceipts` reaps a stale lock
+    at boot, so without adoption a new daemon would kill a live child's worker.
+    OVERLAP: lint-plan reports W1-T147 (the overnight chaos drill) as sharing src/lib/daemon.ts and src/run-task.ts.
+    That is the whole-file surface only: W1-T147 injects faults and checks recovery rows; this task adopts run
+    children at boot. The ruling W1-T7806 and W1-T8171 recorded applies.
+  design: |
+    1. In the boot path, before the boot gate (W1-T5720), `adoptRunChildren(...)` lists this instance's run directories
+       and classifies each (`classifyRunDir`):
+       - live: adopt into the lane pool as an occupied lane. `runLanePool` accepts pre-occupied lanes that count against
+         the lane count and the WIP bound and settle from the status watch.
+       - terminal: settle once, idempotent by run id: a settle row already in the ledger for that run id is not repeated.
+       - lost, or dead (another container generation): `run_child.lost` with the reason, then the crashed-run path.
+       Ledger `run_child.adopted` {run_id, task_id, pid, engine_sha, age_ms} per child; the boot census already exists
+       (the contract task).
+    2. `orphanSweepRunActive` and the boot lock sweep treat an adopted child's run id as active.
+    3. Under mode on (and later auto), a freshness restart neither latches dispatch for nor asks a yield of a child run:
+       `restartAtWorkerBoundary` is not consulted for it and refill stays open until the exit. The daemon exits once its
+       own in-process work drains (`drainBeforeRestart`: reviews and detached sweep actions). Ledger
+       `daemon.freshness_exit` with `children_left_running`.
+    4. The boot gate never holds an adopted lane. New dispatch on freed lanes no longer waits for the gate either once
+       W1-T9072 (dispatch is not held behind the boot cadence gate, filed 2026-10-13) lands; this task adds nothing there.
+    5. An image recycle still ends the container's children: the recycle yield (`externalWaitRecycle`, the recycle pause
+       file) reaches a child exactly as it reaches runTask today, and the checkpoint path is unchanged.
+  acceptance:
+    - claim: "a boot adopts a live child before the boot gate opens, its lane counts as occupied, and it settles from its status"
+      proof: 'grep: test("W1-T9086: a boot adopts a live child before the boot gate" in test/a-booting-daemon-adopts-its-live-run-children.test.ts'
+    - claim: "a terminal child settles once across two boots and a lost one goes through the crashed-run path"
+      proof: 'grep: test("W1-T9086: a terminal child settles once and a lost one takes the crash path" in test/a-booting-daemon-adopts-its-live-run-children.test.ts'
+    - claim: "a freshness restart under mode on exits without waiting on child lanes, with refill open until the exit"
+      proof: 'grep: test("W1-T9086: a restart under mode on exits without waiting on child lanes" in test/a-booting-daemon-adopts-its-live-run-children.test.ts'
+    - claim: "the orphan sweep leaves an adopted child's worker group alone"
+      proof: 'grep: test("W1-T9086: the orphan sweep leaves an adopted child worker alone" in test/a-booting-daemon-adopts-its-live-run-children.test.ts'
+    - claim: "the boot path adopts run children"
+      proof: 'grep: adoptRunChildren( in src/lib/daemon.ts'
+  falsifier: |
+    Skip adoption: the fourth test's orphan sweep kills the live child's worker group. Latch for child lanes as for
+    in-process ones: the third test's restart waits for the child.

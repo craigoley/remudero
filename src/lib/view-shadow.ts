@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewDefinition, type ViewSource } from "./views.js";
+import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -897,6 +897,8 @@ export interface ShadowRequest {
   key: string;
   requests: number;
   legacy?: ShadowLegacy;
+  /** The heavy unit's matched inputs, returned to the one fast-lane comparator without changing its sample count. */
+  paired?: { body: ViewBody; legacy: ShadowLegacy };
 }
 
 /** Legacy bodies serve's main thread already knows how to compute, rendered for a sampled request. */

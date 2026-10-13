@@ -1,0 +1,73 @@
+- id: W1-T9070
+  title: "A RUN'S SPEC, STATUS, RESULT AND IDENTITY LIVE IN FILES ANOTHER PROCESS CAN READ — ADR 0007 moves each build run into a child process that outlives the daemon, a pipe dies with the daemon, and today no per-run status or pid file exists at all (the inflight lock even records the daemon's pid)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the on-disk contract between the daemon and a run child; its only caller here is a boot census
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T5723, W1-T7093, W1-T206, W1-T5514]
+  files: [src/lib/run-child-contract.ts, src/run-task.ts, test/a-run-child-contract-round-trips-through-files.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Chain head of ADR 0007 decision A (docs/adr/0007-build-runs-outlive-the-daemon.md, A.2 and A.4).
+    READ on origin/main 5f8d3f178:
+    - A build run executes inside the daemon: `DaemonDeps.runOne` (src/lib/daemon.ts) is wired in `daemonCommand`
+      (src/run-task.ts) to `runTask`. Its result reaches the lane pool as an in-memory `RunResult`, and the settle loop
+      classifies a rejection by in-process error identity: `TaskAdmissionError` (instanceof),
+      `transientGhDispatchFailure`, `isSpawnInfraBlocked` (duck-typed `reasonClass`), `ghLaneReadFailure`,
+      `laneDeliveryFailure`.
+    - No per-run status or pid file exists. `state/inflight/<taskId>.lock` (src/lib/inflight-lock.ts) records
+      `process.pid`, which is the daemon's; `state/runs/<runId>.tail` is a worker sensor.
+    - The only adopted child today is W1-T5723's measurement-cadence child: one state file, liveness by
+      `process.kill(pid, 0)` alone (`measurementCadenceChildAlive`), which a reused pid defeats.
+    - The identity primitives already exist: src/lib/host-memory-ledger.ts treats a process as (pid, start time),
+      reading field 22 of /proc/<pid>/stat (`parseProcStat`, zombies flagged) and a `ContainerGeneration`;
+      src/lib/fs-race-safe.ts `isHolderStale` guards pid reuse for locks.
+    - The ledger needs nothing new: `appendLedger` is one writeSync on an O_APPEND descriptor (W1-T206) and rotation
+      is serialized with a seal-and-drain re-append (W1-T5514).
+  design: |
+    1. New src/lib/run-child-contract.ts, pure plus fs, with no spawn site using it in this task:
+       - `RunChildSpec`: schema {major, minor}, taskId, runId, instance, engine {sourceHash, sha}, planSnapshotPath,
+         reservationId, and the serializable runTask options the daemon passes today (planPath, owner, allowStale,
+         skipGitSync, handOffAtPrOpen, pairedTrialHost).
+       - `RunChildStatus`: schema, runId, identity {pid, startTicks, containerGeneration}, engineSha, entryKind
+         (bundle | tsx), phase (the restart-boundary phase names in use today), heartbeatAt, state (starting | running
+         | done | failed | aborted), and either `result` (RunResult) or `failure`.
+       - `RunChildFailure`, a closed union: task_admission, transient_gh_dispatch, spawn_infra_blocked, gh_lane_read,
+         lane_delivery, contract_mismatch, aborted, unknown; each with reasonClass and a bounded message.
+    2. `runDir(stateRoot, runId)` = `<state>/runs/<runId>/`. writeSpec / readSpec; writeStatus through `writeAtomic`
+       (src/lib/fs-race-safe.ts) and readStatus. A torn or unparseable file reads as `unreadable`, never as a state.
+    3. `childIdentity(pid)` reads start ticks through host-memory-ledger's /proc reader and the container generation.
+       `classifyRunDir(dir, probe)` returns live | terminal | lost | dead | unreadable:
+       - live: identity matches and the state is not terminal;
+       - terminal: state done, failed or aborted;
+       - lost: the identity no longer matches (gone, or a reused pid) and the state is not terminal;
+       - dead: the status names another container generation;
+       - unreadable: never live and never a success; the caller decides, and the reason is carried.
+    4. `toRunChildFailure(error)` / `fromRunChildFailure(failure)` preserve exactly what the settle loop's predicates read,
+       so a deserialized failure classifies as the original did. An unknown class maps to `unknown`, which settles as a
+       lost run, never a success.
+    5. Schema evolution: a reader refuses an unknown major with `contract_mismatch` and ignores unknown minor fields.
+    6. The only caller in this task: the daemon's boot (its wiring in src/run-task.ts) calls `censusRunDirs(stateRoot)` and
+       ledgers `run_child.boot_census` {live, terminal, lost, dead, unreadable} once per boot. It reads all zeros until
+       run children exist, and is the positive control the adoption task builds on. No spawn site uses the contract here.
+  acceptance:
+    - claim: "a spec and a status written by one process read back identically in another process"
+      proof: 'grep: test("W1-T9070: a spec and status round-trip through the run directory" in test/a-run-child-contract-round-trips-through-files.test.ts'
+    - claim: "a reused pid with a different start time classifies as lost, never live"
+      proof: 'grep: test("W1-T9070: a reused pid is lost, never live" in test/a-run-child-contract-round-trips-through-files.test.ts'
+    - claim: "every settle-loop error class survives serialization and an unknown class settles as lost"
+      proof: 'grep: test("W1-T9070: every settle-loop error class round-trips and an unknown one is lost" in test/a-run-child-contract-round-trips-through-files.test.ts'
+    - claim: "an unknown spec major is refused as contract_mismatch and an unknown minor field is ignored"
+      proof: 'grep: test("W1-T9070: an unknown contract major is refused as contract_mismatch" in test/a-run-child-contract-round-trips-through-files.test.ts'
+    - claim: "the daemon boot ledgers a census of run directories through the contract"
+      proof: 'grep: censusRunDirs( in src/run-task.ts'
+  falsifier: |
+    Identify a child by pid alone, as `measurementCadenceChildAlive` does: the second test's reused pid reads live.
+    Serialize a failure as a message string: the third test's `TaskAdmissionError` no longer classifies as one.

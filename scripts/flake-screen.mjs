@@ -12,7 +12,8 @@
 // HOW MANY RUNS: no constant. The screen spends the time the pull request already waits for its
 // slowest required lane: the coverage makespan the committed ledgers predict, from the packer the
 // coverage shards use. A fast file repeats hundreds of times, a slow one a few, each at least once.
-// That window opened when the JOB did (ci.yml stamps RMD_JOB_STARTED_MS), so whatever shard 1 ran
+// That window opened when the JOB did (the admission step's started_ms output, handed in as
+// RMD_JOB_STARTED_MS; never GITHUB_ENV, which a suite replaying that step rewrites), so whatever shard 1 ran
 // first — the ~14-minute guard mutation on a ci.yml diff — is paid out of it. Measured from the
 // screen's own start, the two summed past the 35-minute cap and cancelled #11308's shard 1.
 // HOW MUCH LOAD: twice availableParallelism() copies at once. MEASURED on a 10-core Mac at #10660's

@@ -11,7 +11,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
-import { replayBandMeaningRefusals } from "./inbox-replay.js";
+import { replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -59,6 +59,9 @@ export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   /** W1-T9065: origin/main's sha now, so a repeated unrecorded failure waits for main to move. */
   originMainSha?: () => string | Promise<string>;
   isPidAlive?: (pid: number) => boolean;
+  /** W1-T9041: names a band-replay proposal no re-draft could clear (`escalateReplayStranded`); absent, the replay
+   *  still writes its row, undelivered. */
+  escalateReplayStranded?: (stranded: ReplayStranded) => void;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -348,10 +351,12 @@ function* releasedHandoffs(deps: FleetLaneDeps<number | Promise<number>>, store:
 
 function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
-  // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace.
+  // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace. W1-T9041:
+  // each pass also re-lints its open entries' cached drafts, re-offering what a lint change cleared.
   replayBandMeaningRefusals({
     stateDir: deps.stateDir, ledgerPath: deps.ledgerPath, clock: deps.clock,
     classificationStates: () => readClassificationSnapshot(deps.stateDir)?.states,
+    escalate: deps.escalateReplayStranded,
   });
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
