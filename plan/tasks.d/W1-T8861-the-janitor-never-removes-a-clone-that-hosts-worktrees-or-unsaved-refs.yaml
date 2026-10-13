@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: the janitor must keep things clean but never remove what we want kept or kill work in progress"
   plan_refs: [W1-T4770, W1-T5634, W1-T5707]
   files: [deploy/rmd-host-cleanup.sh, test/the-janitor-never-removes-a-clone-that-hosts-worktrees-or-unsaved-refs.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

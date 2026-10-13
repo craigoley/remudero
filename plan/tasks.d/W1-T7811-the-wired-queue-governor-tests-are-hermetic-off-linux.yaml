@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: five queue-governor tests red on a clean Mac checkout while CI is green; approved 2026-10-10"
   plan_refs: [W1-T321, W1-T4465, W1-T7243]
   files: [src/run-task.ts, test/queue-governor.test.ts, test/the-lane-budget-follows-the-queue-governor-admission.test.ts, test/the-queue-governor-admits-a-draining-queue.test.ts, test/the-wired-queue-governor-tests-are-hermetic-off-linux.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
