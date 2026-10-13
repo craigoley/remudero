@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 // #7588: test/mint-open-pr-surface-is-rest.test.ts gives a fixture a synthetic https://github.com/o/r.git origin,
 // and scripts/task-id-existence-check.mjs runs `git ls-remote` against it. Under a PTY with normal prompting, a
@@ -46,5 +47,5 @@ test("a git read from a test process that is asked for credentials fails at once
     );
   });
   assert.match(stderr, /terminal prompts disabled/, "git refused to prompt rather than failing for some other reason");
-  assert.ok(Date.now() - started < 20_000, "and it answered before the bound, so nothing waited on a terminal");
+  assertWallClockBound(Date.now() - started, 20_000, "git answered before the bound, so nothing waited on a terminal");
 });
