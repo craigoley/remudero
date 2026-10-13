@@ -15,9 +15,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
+import * as inbox from "../src/lib/inbox.js";
 import {
   anchorFingerprint,
-  checkoutRepoFacts,
   classifyProposal,
   lintDraftedFragment,
   proposalsNeedingDraft,
@@ -166,7 +166,7 @@ test("W1-T9039: the draft lint blocks a grep proof that already matches", () => 
   assert.deepEqual(lintDraftedFragment(NOT_YET_TRUE, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile), [],
     "control: a grep for text the change adds is not already true");
   // The production facts read the same checkout, and an absent file is no opinion.
-  const checkout = checkoutRepoFacts(ROOT);
+  const checkout = inbox.checkoutRepoFacts(ROOT);
   assert.deepEqual(lintDraftedFragment(ALREADY_TRUE, PROPOSAL_ID, undefined, KNOWN, checkout.moduleExists, checkout.readGrepProofFile), violations);
   assert.equal(checkout.readGrepProofFile("src/lib/absent.ts"), undefined);
   // The redraft carries guidance for the new check, so the drafter can act on it.
