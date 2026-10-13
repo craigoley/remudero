@@ -235,6 +235,30 @@ test("a live ledger skipped during harvest cannot prove a promised report is abs
   }
 });
 
+test("an unreadable archive listing is a transient harvest rather than a missing promise", async t => {
+  for (const failedListing of [1, 2]) {
+    const args = fixture(t), opened: string[] = [];
+    const archive = "ledger.2026-10-12T11-00-00-000Z.ndjson.gz";
+    writeFileSync(join(args.dir, archive), gzipSync(line(reportRow)));
+    let listings = 0;
+    const result = await recoverPromisedFollowUpReports(observation, { ...args, prCreatedAt: firstRun,
+      io: { existsSync, readdirSync: dir => {
+        if (++listings === failedListing) throw new Error("EACCES: cannot list ledger rotations");
+        return readdirSync(dir);
+      }, createReadStream: (path, options) => {
+        opened.push(basename(path)); return createReadStream(path, options);
+      } },
+    });
+    assert.equal(result.state, "unknown", "an unlisted archive may hold the promised report");
+    if (result.state === "unknown") assert.equal(result.cause, "promise-harvest-incomplete");
+    assert.deepEqual(opened, failedListing === 1 ? [] : ["ledger.ndjson"], "no archive was observed in the failed listing");
+    const verdict = judgeReview(criteria, { ...evidence, promisedFollowUpObservation: result });
+    assert.equal(verdict.state, "pending");
+    assert.equal(verdict.criteria.at(-1)?.loadError, undefined);
+    assert.match(verdict.summary, /promise-harvest-incomplete/);
+  }
+});
+
 test("a damaged selected rotation cannot prove that a promised report is absent", async t => {
   for (const contents of [
     "not gzip",

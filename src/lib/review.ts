@@ -4954,6 +4954,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
         ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
         onLiveRead: () => { liveRead = true; },
+        onUnreadDirectory: (_path, error) => { throw error; },
         onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
       }, args.io)) {
         if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
