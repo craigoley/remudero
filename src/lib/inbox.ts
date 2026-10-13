@@ -98,6 +98,21 @@ export interface Proposal {
   /** W1-T4338: present only on a skill-workshop draft. Approval writes this file on its own branch instead of filing
    *  a task fragment, so the path and body come from the staged draft, never a re-parse of `summary`. */
   skillFile?: SkillFilePayload;
+  skillFileStagedAt?: string;
+  skillEval?: SkillEvalRecord;
+}
+
+export interface SkillEvalRecord {
+  draftSha256: string;
+  heldOutSetHash: string;
+  taskIds: string[];
+  verdict: "pass" | "refuse";
+  reason: string;
+  detail: string;
+  delta: number | null;
+  measurableTasks: number;
+  totalCostUsd: number;
+  evaluatedAt: string;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────

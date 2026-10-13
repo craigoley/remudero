@@ -18,6 +18,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { systemClock, type Clock } from "./clock.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import type { Task } from "./plan.js";
 import {
@@ -412,7 +413,15 @@ export interface StageSkillDraftResult {
   backfilled?: boolean;
   /** The staged entry's Procedure named fewer behavioral steps, so this call replaced it. */
   refreshed?: boolean;
+  /** The entry already carried its file but no staged-at stamp; this call stamped it and changed nothing else. */
+  stamped?: boolean;
   reason?: string;
+}
+
+/** A `skillFileStagedAt` stamp as epoch ms, or null: an absent or unparseable stamp is no stamp at all. */
+export function skillFileStagedAtMs(value: string | undefined): number | null {
+  const ms = Date.parse(value ?? "");
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
@@ -429,6 +438,12 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
  * writes under `.claude/skills/`: that write happens only once `rmd approve` ratifies the staged
  * proposal into a plan PR (design clause iii). Idempotent by `draft.candidateHash` — a re-run
  * staging the same candidate is reported `alreadyStaged`, never duplicated (W1-T470).
+ *
+ * THE HELD-OUT STAMP. Every write of `skillFile` (a new stage, a refresh, a backfill) sets
+ * `skillFileStagedAt` to `clock`'s now, and an entry carrying a file but no stamp is stamped. The
+ * drafter mines EVERY merged run in the retro window, not only the runs it cites, so no list of task
+ * ids can say what it saw; time can. `rmd skill-eval` holds out only tasks merged after this stamp.
+ * Stamping late is conservative: a later stamp excludes a superset of tasks.
  */
 export function stageSkillDraft(
   registryPath: string,
@@ -436,6 +451,7 @@ export function stageSkillDraft(
   allowlist: WorkerAllowlist,
   reachability: { reachable: boolean; reason: string },
   opts: UpdateProposalRegistryOpts = {},
+  clock: Pick<Clock, "iso"> = systemClock,
 ): StageSkillDraftResult {
   const scan = scanSkillDraft(draft, allowlist);
   if (!scan.ok) {
@@ -446,6 +462,7 @@ export function stageSkillDraft(
   let alreadyStaged = false;
   let backfilled = false;
   let refreshed = false;
+  let stamped = false;
   updateProposalRegistry(
     registryPath,
     (current) => {
@@ -453,8 +470,10 @@ export function stageSkillDraft(
       alreadyStaged = false;
       backfilled = false;
       refreshed = false;
+      stamped = false;
       const existing = current.findIndex((p) => p.id === id);
       const skillFile = { name: draft.name, markdown: draft.markdown };
+      const skillFileStagedAt = clock.iso();
       if (existing >= 0) {
         alreadyStaged = true;
         const stored = current[existing].skillFile;
@@ -464,15 +483,20 @@ export function stageSkillDraft(
         const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
         if (stored && skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length) {
           refreshed = true;
-          return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
+          return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
         }
-        if (stored) return null; // already staged with its file — never a duplicate write
+        if (stored && skillFileStagedAtMs(current[existing].skillFileStagedAt) !== null) return null; // already staged with its file — never a duplicate write
+        if (stored) {
+          // Staged before the stamp existed: stamp it now, the conservative (later) instant.
+          stamped = true;
+          return current.map((p, i) => (i === existing ? { ...p, skillFileStagedAt } : p));
+        }
         // Staged before W1-T4338: give it the file approval now writes, or it can only ever be declined.
         backfilled = true;
-        return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
+        return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
       }
       staged = true;
-      return [...current, { id, summary: skillDraftSummary(draft, reachability), evidenceAnchors: [], skillFile }];
+      return [...current, { id, summary: skillDraftSummary(draft, reachability), evidenceAnchors: [], skillFile, skillFileStagedAt }];
     },
     opts,
   );
@@ -482,13 +506,16 @@ export function stageSkillDraft(
     alreadyStaged,
     ...(backfilled ? { backfilled: true } : {}),
     ...(refreshed ? { refreshed: true } : {}),
+    ...(stamped ? { stamped: true } : {}),
     reason: backfilled
       ? "already staged; skill file backfilled"
       : refreshed
         ? "already staged; procedure refreshed with more steps"
-        : alreadyStaged
-          ? "already staged"
-          : undefined,
+        : stamped
+          ? "already staged; staged-at stamp added"
+          : alreadyStaged
+            ? "already staged"
+            : undefined,
   };
 }
 

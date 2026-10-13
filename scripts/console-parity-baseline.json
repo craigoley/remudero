@@ -80,6 +80,7 @@
     "run-task",
     "serve",
     "serve-plist",
+    "skill-eval",
     "sweep",
     "sync",
     "triage",

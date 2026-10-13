@@ -149,7 +149,7 @@ const BASELINE_COMMAND_NAMES = [
   "reframe",
   "risk-judge-eval",
   "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
-  "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "triage-outcomes", "up",
+  "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
 ].sort();
@@ -181,6 +181,7 @@ const BASELINE_COMMAND_NAMES = [
 // 2026-10-11: `live-edits` — one rung of the live-checkout edit ladder, run by the host watchdog — joins the registry.
 // 2026-10-11: `host-alert` — the host watchdog's own alarms, tiered and spooled for the daemon — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
+// `skill-eval` — a staged skill draft attempted with and without it on held-out merged tasks — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
   // literal rides with it: two PRs each adding a verb raise the same number from the same base, git
