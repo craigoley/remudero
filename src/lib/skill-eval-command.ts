@@ -75,6 +75,8 @@ export interface SkillEvalCommandInput {
   readLedger?: (stateDir: string, onUnread: (path: string) => void) => AsyncIterable<Record<string, unknown>>;
   /** Absent: each item's proofs through the reviewer's own executor. */
   grade?: PairedGrader;
+  /** Default OFF. No production configuration manufactures a deadline or cancellation grant. */
+  control?: SkillEvalRunInput["control"];
   clock?: Clock;
   print?: (line: string) => void;
 }
@@ -197,7 +199,7 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
   }
 
   const run = await runSkillEval({
-    selection, draftMarkdown: skillFile.markdown, argv, grade: input.grade, stack: input.stack(), idle: await input.readIdle(),
+    selection, draftMarkdown: skillFile.markdown, argv, grade: input.grade, control: input.control, stack: input.stack(), idle: await input.readIdle(),
     dispatcherFor: (item) => {
       const part = parts.get(item.taskId)!;
       return input.dispatcherFor(taskById.get(item.taskId)!, item, (request) => (request.arm === "with-skill" ? part.with : part.without));
@@ -209,6 +211,10 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
   if (run.state === "refused") {
     print(`skill-eval: refused ${proposalId}: ${run.reason}: ${run.detail}`);
     return 2;
+  }
+  if (run.state === "cancelled") {
+    print(`skill-eval: cancelled ${proposalId}: ${run.detail}; capacity retained, whole-tree termination unverified`);
+    return 2; // Never record a partial run as a judged proposal, including cancellation during grading/cleanup.
   }
   const { verdict } = run;
   // inbox.ts declares SkillEvalRecord structurally, never importing skill-eval.ts: the drafter imports inbox.ts.
