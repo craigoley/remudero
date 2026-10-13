@@ -3604,17 +3604,13 @@ const FAST_GATE_RUNNER_FILES: Readonly<Record<NonNullable<FastGateStep["runner"]
 /**
  * W1-T8920 — is `repoRoot` a repository OTHER than the harness's own? The marker is the
  * `package.json` "name": a string that is not {@link HARNESS_PACKAGE_NAME}, in a tree that also lacks
- * `scripts/list-rule-suites.mjs`. A nameless or unparseable package is treated as the harness (the
+ * `scripts/list-rule-suites.mjs`. A nameless package is treated as the harness (the
  * step table's strict reading, unchanged), so only a repo that positively names itself something
  * else gets the consumer treatment.
  */
 function isConsumerRepo(repoRoot: string, packageJsonText?: string): boolean {
-  let name: unknown;
-  try {
-    name = (JSON.parse(packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8")) as { name?: unknown }).name;
-  } catch {
-    return false;
-  }
+  // Unparseable text never reaches here: {@link fastGateScriptNames} has already thrown on it.
+  const { name } = JSON.parse(packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8")) as { name?: unknown };
   if (typeof name !== "string" || name === HARNESS_PACKAGE_NAME) return false;
   return !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES["rule-checks"]));
 }

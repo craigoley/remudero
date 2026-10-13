@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FAST_GATE_STEPS, runPreflightFast, type PreflightSpawn } from "../src/lib/ci-parity.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
+import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { defaultRunGate, preopenGateCommand, runPreopenGate } from "../src/lib/preopen-gate.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
