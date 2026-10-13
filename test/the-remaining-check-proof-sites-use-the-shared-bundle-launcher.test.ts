@@ -37,7 +37,7 @@ const PROOF = "unit test: some claim";
 const BASE = "0123456789abcdef0123456789abcdef01234567";
 const OUT_ENV = "RMD_FIXTURE_OUT";
 
-interface Record { marker: string; args: string[]; execArgv: string[]; cwd: string }
+interface ChildRecord { marker: string; args: string[]; execArgv: string[]; cwd: string }
 interface BuildModule {
   OUT_DIR: string;
   buildChildEntries(opts: { root: string; entries: { name: string; source: string }[] }): Promise<unknown>;
@@ -123,7 +123,7 @@ const SITES: readonly [string, Site][] = [
   ["run-task runPreflightProofs", preflightSite],
 ];
 
-async function runSite(site: Site, variant: Variant): Promise<{ rec: Record; ctx: ReturnType<Site> }> {
+async function runSite(site: Site, variant: Variant): Promise<{ rec: ChildRecord; ctx: ReturnType<Site> }> {
   const root = await fixtureTree(variant);
   const outDir = mkdtempSync(join(tmpdir(), "rmd-remaining-out-"));
   const outFile = join(outDir, "records.ndjson");
@@ -134,7 +134,7 @@ async function runSite(site: Site, variant: Variant): Promise<{ rec: Record; ctx
     const ctx = site(root, outFile);
     const lines = readFileSync(outFile, "utf8").split("\n").filter((l) => l !== "");
     assert.equal(lines.length, 1, "the check-proof child ran exactly once");
-    return { rec: JSON.parse(lines[0]!) as Record, ctx };
+    return { rec: JSON.parse(lines[0]!) as ChildRecord, ctx };
   } finally {
     if (prior === undefined) delete process.env[OUT_ENV]; else process.env[OUT_ENV] = prior;
     rmSync(root, { recursive: true, force: true });
