@@ -1,0 +1,54 @@
+- id: W1-T9031
+  title: "A QUIET DAEMON WAKES FOR AN ENGINE CHANGE ON A LEARNED BACK-OFF, NOT ON EVERY CORE MERGE — the remudero-site daemon has admitted zero work since 2026-10-10 (37 tasks already merged, 1 verify-not-auto), yet deploy/idle-starved-probe.sh wakes a full Node daemon on every engine revision change: 94, 77, 99 and 48 engine wakes on 10-10..10-13 (to 10:46Z), each a ~70 s daemon boot that finds nothing and re-enters idle_starved"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # the idle-starved probe, the entrypoint supervisor loop and their boot tests
+  band_meaning: span
+  origin: "operator session 2026-10-13 (agree, go: site-fleet health check): measured on the Azure host, read-only"
+  plan_refs: [W1-T4601, W1-T4598, W1-T7729, W1-T8775]
+  files: [deploy/idle-starved-probe.sh, deploy/entrypoint.sh, test/a-quiet-daemon-wakes-for-an-engine-change-on-a-learned-backoff.test.ts, test/entrypoint-boot.test.ts]
+  status: queued
+  priority: 1.5 # operator-2026-10-13: ~100 empty full-daemon boots/day for the site instance on a memory-tight host
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the Azure host (site state root /home/craigoleyagent/rmd-site-state, read-only):
+      - Site ledger since 2026-10-10: daemon.boot 109 / 92 / 112 / 52 per day (10-10 .. 10-13 to 10:46Z);
+        daemon.idle_starved.engine_wake 94 / 77 / 99 / 48 with reason engine_revision_changed;
+        daemon.idle_starved.enter 106 / 88 / 109 / 50. Zero dispatch.claim, run.start or pr.opened rows in the window.
+      - Every wake is empty: daemon.idle_reasons reports already-merged 37 (PORTAL-T1..T39) and verify-not-auto 1
+        (PORTAL-T9), nothing else. remudero-site has 0 open PRs.
+      - Each wake is a full Node daemon boot: boot -> idle_starved.enter took p50 69 s, p90 84 s, max 112 s (n=81
+        on the live ledger) — roughly 2 hours a day of daemon boot (tsx load of the whole run-task graph) on a host
+        whose core container is already pinned at memory.high.
+    WHY: #8958 (2026-10-03, "wake quiet daemons when engine changes") made deploy/idle-starved-probe.sh
+    call engine_wake engine_revision_changed whenever the daemon engine checkout's HEAD moved since empty admission —
+    correct in intent (new engine code can admit work an older engine refused), but core merges land ~100 times a
+    day, and every one wakes every quiet instance whether or not the new engine would admit anything.
+  design: |
+    1. KEEP THE INTENT, LEARN THE CADENCE. An engine revision change still wakes the daemon, but the wake is deferred
+       on a back-off learned from this instance's own history: each consecutive engine wake that ended in
+       idle_starved.enter with zero admitted work (no dispatch.claim between the boot and re-entry) lengthens the
+       next engine-wake deferral; an engine wake that admits work resets it. No fixed cap or constant schedule
+       (operator rule: no hard thresholds) — the deferral is derived from the observed run of empty wakes, and the
+       pending engine change is remembered so it is honoured at the next boundary, never dropped.
+    2. TARGET CHANGES STILL WAKE AT ONCE. A change to the target repo itself (an open PR appears, target main moves,
+       a new plan record) wakes immediately exactly as today; only the engine_revision_changed reason is deferred.
+       engine_baseline_unavailable / engine_head_unavailable (uncertainty) still wake at once.
+    3. EVIDENCE. Each deferred engine change writes daemon.idle_starved.engine_deferred {engine_head_sha, deferral_s,
+       empty_wake_run} so the back-off is visible, and the eventual wake carries the deferral it served.
+    NOT IN SCOPE: making a boot cheaper (W1-T7729's precompiled entries, W1-T8775..W1-T8778) — complementary.
+  acceptance:
+    - claim: "consecutive empty engine wakes lengthen the next engine-wake deferral, learned from the instance's own ledger"
+      proof: 'grep: test("W1-T9031: consecutive empty engine wakes defer the next engine wake" in test/a-quiet-daemon-wakes-for-an-engine-change-on-a-learned-backoff.test.ts'
+    - claim: "a target-repo change still wakes the daemon at once during an engine deferral"
+      proof: 'grep: test("W1-T9031: a target change wakes at once during an engine deferral" in test/a-quiet-daemon-wakes-for-an-engine-change-on-a-learned-backoff.test.ts'
+    - claim: "an engine wake that admits work resets the back-off"
+      proof: 'grep: test("W1-T9031: an engine wake that admits work resets the deferral" in test/a-quiet-daemon-wakes-for-an-engine-change-on-a-learned-backoff.test.ts'
+  falsifier: |
+    Wake on every engine change (today's behaviour) and the first test goes red: two prior empty engine wakes in the
+    fixture ledger still produce an immediate engine_wake. Defer target changes too and the second goes red. Never
+    reset and the third goes red after a fixture wake that admitted a task.
