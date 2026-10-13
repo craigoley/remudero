@@ -413,11 +413,11 @@ test("W1-T8868: feedback_reply and its observation use the daemon client built f
     assert.match(String(await settings.observe!(grill, "feedback_reply", effect)), /feedback#7 is answered by feedback#9/);
     assert.equal(await settings.observe!(grill, "plan_amendment_pr", "x"), undefined, "a proposed amendment is not yet a resolved block");
     // A referent that does not match the task id is refused before any write.
-    await assert.rejects(settings.execute!.feedback_reply!({ ...grill, taskId: "TRIAGE-8" }), /feedback referent is unreadable/);
+    await assert.rejects(Promise.resolve().then(() => settings.execute!.feedback_reply!({ ...grill, taskId: "TRIAGE-8" })), /feedback referent is unreadable/);
     assert.equal(submitted.length, 1);
     // An unavailable service token cannot build the client.
     writeFileSync(join(root, "state", "service-tokens.json"), JSON.stringify({ write: "" }));
-    await assert.rejects(settings.execute!.feedback_reply!(grill), /service write token unavailable/);
+    await assert.rejects(Promise.resolve().then(() => settings.execute!.feedback_reply!(grill)), /service write token unavailable/);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -488,9 +488,9 @@ test("W1-T8868: plan_amendment_pr over the real sweep effects holds the task and
     { root, config: { root, claudeBin: "/bin/true" } as Config, owner: "o", repo: "r" },
     { readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1 },
   )({ issues: gateway(), ledgerPath: lp, runId: "RUN-T8868" });
-  await assert.rejects(settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TK" }), /amendment not opened: (no_shard|error)/);
+  await assert.rejects(Promise.resolve().then(() => settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TK" })), /amendment not opened: (no_shard|error)/);
   assert.ok(rows(lp).some((r) => r.step === "sweep.refusal_amendment.hold_failed" && r.task_id === "W1-TK" && r.run_id === "RUN-T8868"));
-  await assert.rejects(settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TD" }), /amendment not opened: task_closed/);
+  await assert.rejects(Promise.resolve().then(() => settings.execute!.plan_amendment_pr!({ ...staleProof(), taskId: "W1-TD" })), /amendment not opened: task_closed/);
 });
 
 // ── the daemon-loop rejudge sweep ────────────────────────────────────────────────────────────
