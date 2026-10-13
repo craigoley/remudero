@@ -1136,6 +1136,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -55601,6 +55602,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "inspect",
+    syntax: "rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>",
+    summary: "Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.",
+    detail: "Explicit read-only entry point for ledger-grep and skill effectiveness only. Requires an existing absolute --state-dir; never provisions HOME config or state. Runs before CLI invocation logging, temp cleanup, credential refresh and source freshness. Unknown verbs, lifecycle writes and unsupported flags are refused before dispatch. Reads the complete archive-plus-live union and refuses incomplete history. Ordinary command behavior is unchanged.",
+  },
+  {
     name: "progress-watchdog",
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
@@ -56665,6 +56672,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
+  ["inspect", (rest) => readOnlyInspectionCommand(rest)],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
@@ -56866,6 +56874,15 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "inspect") {
+    if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
+      console.log(commandHelp(commandSpec("inspect")));
+      await flushThenExit(0);
+      return;
+    }
+    await flushThenExit(readOnlyInspectionCommand(inspectionArgv.slice(1)));
+    return;
+  }
   // Local inspection bypasses invocation logging, housekeeping, credentials and self-sync.
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
     await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));

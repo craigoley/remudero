@@ -35,6 +35,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
@@ -333,6 +334,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd inspect`
+
+Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
+
+```
+rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>
+```
+
+Explicit read-only entry point for ledger-grep and skill effectiveness only. Requires an existing absolute --state-dir; never provisions HOME config or state. Runs before CLI invocation logging, temp cleanup, credential refresh and source freshness. Unknown verbs, lifecycle writes and unsupported flags are refused before dispatch. Reads the complete archive-plus-live union and refuses incomplete history. Ordinary command behavior is unchanged.
 
 ### `rmd progress-watchdog`
 
