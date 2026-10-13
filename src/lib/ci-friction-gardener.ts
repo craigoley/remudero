@@ -616,6 +616,26 @@ export type CiFrictionGit = (args: string[]) => string;
  *  a full-history walk per shard took about a minute each on this repo (measured 2026-10-02). */
 export const CI_FRICTION_HISTORY_SINCE = "--since=60.days";
 
+/**
+ * When each of `ids` merged on `refName`: the OLDEST commit whose body carries an anchored `Remudero-Task: <id>` line
+ * (`trailerTaskIds`). A GitHub squash body puts that line mid-body, where git's `%(trailers)` never looks — read that
+ * way, main credited 38 ids against 1,541 body lines from 2026-09-25 to 2026-10-13, so a merged remedy stayed
+ * unmerged and its effect was never measured. ONE `git log`, bounded by an id-scoped `--grep`, not by age: a remedy's
+ * credit must not expire while its cause is still priced.
+ */
+export function bodyCreditedMergeTimes(git: CiFrictionGit, refName: string, ids: readonly string[]): Map<string, string> {
+  const wanted = new Set(ids.filter(id => /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(id)));
+  const merges = new Map<string, string>();
+  if (wanted.size === 0) return merges;
+  const grep = `--grep=^Remudero-Task:[[:space:]]*(${[...wanted].join("|")})[[:space:]]*$`;
+  for (const record of git(["log", refName, "-E", grep, "--format=%x1e%cI%x1f%B"]).split("\x1e")) {
+    const [at, body] = record.split("\x1f");
+    // `git log` lists newest first, so overwriting keeps the oldest crediting commit.
+    if (at?.trim() && body !== undefined) for (const id of trailerTaskIds(body)) if (wanted.has(id)) merges.set(id, at.trim());
+  }
+  return merges;
+}
+
 /** `path -> commit time` from one `git log --name-only` walk; `pick` keeps the oldest or newest. */
 export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<string, string> {
   const out = new Map<string, string>();
@@ -634,7 +654,7 @@ export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<s
 }
 
 /** Read every task whose `origin:` names a ci-friction cause from `refName`, and when each one's build
- *  merged: the commit carrying its `Remudero-Task:` trailer, else the commit that set it `merged`. */
+ *  merged: the commit whose body carries its `Remudero-Task:` line, else the commit that set it `merged`. */
 export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, refName = "origin/main", onUnreadable: (path: string, reason: string) => void = () => {}): CiFrictionRemedyTask[] {
   let listed = "";
   try {
@@ -644,11 +664,6 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     if ((e as { status?: number }).status !== 1) throw e;
   }
   const paths = listed.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => l.replace(`${refName}:`, ""));
-  const merges = new Map<string, string>();
-  for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE, "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
-    const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map((value) => value.trim()).filter(Boolean)) if (at) merges.set(id, at);
-  }
   // Source registration needs a delivery on main's first-parent history. A feature commit's
   // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
   const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
@@ -678,9 +693,13 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      const mergedAt = merges.get(task.id);
-      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(mergedAt ? { mergedAt } : {}) });
+      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path });
     }
+  }
+  const merges = bodyCreditedMergeTimes(git, refName, tasks.map(task => task.id));
+  for (const task of tasks) {
+    const mergedAt = merges.get(task.id);
+    if (mergedAt) task.mergedAt = mergedAt;
   }
   const fallbackPaths = [...new Set(tasks.filter(task => task.status === "merged" && !task.mergedAt && task.path).map(task => task.path!))];
   if (fallbackPaths.length > 0) {
