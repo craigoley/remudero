@@ -204,6 +204,8 @@ test("W1-T4917: the real deploy-run is not the install-separation no-op", (t) =>
   // Copy the actual CLI source so its direct-invocation guard sees its real filename.
   cpSync("src", join(f.daemon, "src"), { recursive: true });
   symlinkSync(resolve("scripts"), join(f.daemon, "scripts"), "dir");
+  // src/run-task.ts imports the workspace api-client by relative path (../packages/api-client/src/client.js).
+  symlinkSync(resolve("packages"), join(f.daemon, "packages"), "dir");
   mkdirSync(join(f.daemon, "plan"));
   cpSync("plan/policy.yaml", join(f.daemon, "plan", "policy.yaml"));
   cpSync("bin/rmd", join(f.daemon, "bin", "rmd"));
