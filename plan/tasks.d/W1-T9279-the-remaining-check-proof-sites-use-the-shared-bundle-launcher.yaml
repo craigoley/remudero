@@ -1,0 +1,60 @@
+- id: W1-T9279
+  title: The three remaining check-proof spawn sites use the shared bundle launcher
+  repo: remudero
+  depends_on:
+    - W1-T8775
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  origin: "operator follow-up 2026-10-13: ADR 0006 first bullet remains unreported in PR #11255 review after W1-T9001 merged"
+  plan_refs:
+    - W1-T8775
+  files:
+    - src/lib/pr-open.ts
+    - src/run-task.ts
+    - test/the-remaining-check-proof-sites-use-the-shared-bundle-launcher.test.ts
+  status: queued
+  priority: 0.9
+  attempts: 0
+  rationale: |
+    W1-T9001 merged in #11419 at 17:09Z. PR #11255's review on head d86bfb8a5b5a now reports
+    "unmet: promised follow-ups reported for harvest" using review code b4217da643b4.
+    W1-T8775 switches the plan-PR preflight site and explicitly excludes pr-open.ts. ADR 0006's first
+    follow-up promises the check-proof spawn sites, while three callers still launch through
+    checkProofChildArgv: src/lib/pr-open.ts:52 and src/run-task.ts:15028 and :29868 at main 3eb5e1a4c6c9.
+    This task reports that remaining scope for harvest through plan_refs: [W1-T8775]. It depends on
+    the shared launcher and integrity checks already being supplied by W1-T8775; it does not amend
+    that fleet-owned task, broaden its current PR, or introduce a second currency implementation.
+
+    PROMISE IDENTITY (ADR 0006 first bullet, W1-T8775): switch the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) to the bundle when `childEntryIsCurrent` holds, with tsx as the fallback;
+    The remaining scope is exactly the two run-task sites and the pr-open site identified above.
+  design: |
+    1. Convert exactly the three remaining sites in pr-open.ts and run-task.ts to childEntryArgv
+       for check-proof-main (src/check-proof-main.ts), using each site's actual harness/child tree.
+       Preserve proof, --base, --repo, caller arguments, cwd, environment, timeout and return behavior.
+       Preserve pr-open's injected non-Node launcher seam and consumer repositories without rmd/tsx.
+    2. Use W1-T8775's childEntryArgv and its existing currency/integrity judgment. A vouched current
+       bundle runs under plain Node. Missing, stale, corrupt, escaped or unavailable bundles use the
+       existing source launcher with the fallback reason. Do not fork a source hash or bundle guard.
+    3. Exercise all three real caller boundaries with owned fixtures: a current bundle executes its
+       marker and exact caller arguments; absent, changed-source and corrupt bundles take the source
+       path. Validate semantic loader flags rather than substrings in temporary paths or proof text.
+    4. Keep this filing separate from #11255's whole-argv "tsx" assertion defect. Do not change the
+       shared launcher, build recipe, plan-PR emitter, or proof-discrimination script here. No runtime
+       restart, deployment, task rerun or measured memory-benefit claim is part of this task.
+  acceptance:
+    - claim: all three remaining caller boundaries execute the current bundle with their original proof arguments and context
+      proof: 'grep: test("each remaining check-proof spawn site uses the current bundle" in test/the-remaining-check-proof-sites-use-the-shared-bundle-launcher.test.ts'
+    - claim: all three boundaries preserve the source fallback when no bundle can be vouched for
+      proof: 'grep: test("each remaining check-proof spawn site preserves the source fallback" in test/the-remaining-check-proof-sites-use-the-shared-bundle-launcher.test.ts'
+    - claim: pr-open preserves its injected launcher and the harness root for a consumer repository
+      proof: 'grep: test("the remaining proof launcher preserves consumer and injected contexts" in test/the-remaining-check-proof-sites-use-the-shared-bundle-launcher.test.ts'
+  falsifier: |
+    Restore checkProofChildArgv at each converted site independently: that site's current-bundle
+    execution test must fail. Force bundle launch on missing, stale or corrupt fixtures: the fallback
+    test must fail. Drop or change --base/--repo/proof arguments or choose the consumer root instead
+    of the harness/explicit child root: the context test must fail.
