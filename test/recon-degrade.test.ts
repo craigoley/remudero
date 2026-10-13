@@ -88,7 +88,7 @@ const cleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
 /** A real, throwaway BARE "origin" + a real clone at `repoDir` (mirrors run-task.test.ts's
  *  own `followupGitFixture`) — `worktreeAdd`'s `git fetch`/`git worktree add` and the run's
  *  later `git push origin HEAD` all run for real, entirely offline. */
-function gitFixture(root: string): { repoDir: string } {
+function gitFixture(root: string, seedFiles: Record<string, string> = {}): { repoDir: string } {
   const originGit = mkdtempSync(join(tmpdir(), "runtask-recon-degrade-origin-"));
   execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", originGit]);
   const seed = mkdtempSync(join(tmpdir(), "runtask-recon-degrade-seed-"));
@@ -96,6 +96,7 @@ function gitFixture(root: string): { repoDir: string } {
   execFileSync("git", ["-C", seed, "config", "user.email", "recon-degrade-test@example.invalid"]);
   execFileSync("git", ["-C", seed, "config", "user.name", "recon-degrade-test"]);
   writeFileSync(join(seed, "README.md"), "seed\n");
+  for (const [name, text] of Object.entries(seedFiles)) writeFileSync(join(seed, name), text);
   execFileSync("git", ["-C", seed, "add", "-A"]);
   execFileSync("git", ["-C", seed, "commit", "-q", "-m", "seed"]);
   execFileSync("git", ["-C", seed, "push", "-q", "origin", "main"]);
@@ -153,6 +154,9 @@ async function runFixture(
   // file, which need a task record carrying acceptance criteria AND need to assert on the exact
   // path the prompt names. Defaulted, so every test above is untouched.
   planText: string = FIXTURE_PLAN,
+  // Files committed to the fixture repo, so they reach the worktree the run cuts from it.
+  seedFiles: Record<string, string> = {},
+  workerRuleHeadlinesEnabled?: boolean,
 ): Promise<{
   res: Awaited<ReturnType<typeof runTask>>;
   ledger: Array<Record<string, unknown>>;
@@ -163,7 +167,7 @@ async function runFixture(
   writeFileSync(planPath, planText);
   const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
 
-  gitFixture(root);
+  gitFixture(root, seedFiles);
 
   const FIXED_TS = 1785100000000;
   const branch = `run-T-RECON-DEGRADE-${FIXED_TS}`;
@@ -183,6 +187,7 @@ async function runFixture(
         spawn,
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
+        ...(workerRuleHeadlinesEnabled === undefined ? {} : { workerRuleHeadlinesEnabled }),
       }),
     );
     const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
@@ -607,6 +612,45 @@ test("W1-T501: no worker prompt text carries an orchestrator absolute path", asy
   // POSITIVE CONTROL on that sweep: the pointer really is present, so the zero above is a real
   // absence rather than a prompt that simply never mentioned the record.
   assert.match(prompt, /YOUR TASK'S OWN RECORD IS AT /, "the record bullet is still emitted");
+});
+
+/** The implement prompt of one real dispatch with rule headlines on, and the folder the plan lives in. */
+async function headlinesOnImplementPrompt(
+  t: import("node:test").TestContext,
+  seedFiles: Record<string, string>,
+): Promise<{ prompt: string; planDir: string }> {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: "REPORT\nOBSERVED: a thing\n" });
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+  };
+  const { planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE, seedFiles, true);
+  assert.equal(spawnCalls.length, 2, "the fixture reached a real implement spawn");
+  return { prompt: String(spawnCalls[1].prompt), planDir: dirname(planPath) };
+}
+
+function assertNoLineNames(prompt: string, dir: string): void {
+  for (const line of prompt.split("\n")) {
+    assert.ok(!line.includes(`${dir}/`), `no prompt line may carry an orchestrator-rooted absolute path: ${JSON.stringify(line.slice(0, 100))}`);
+  }
+}
+
+test("W1-T501: the rule headline part reads the worktree's own CLAUDE.md and names it relative to the worktree", async (t) => {
+  // The worktree is cut under the plan's folder here, so an absolute CLAUDE.md path trips the sweep. A read that is
+  // relative to the process cwd instead finds the remudero checkout's own CLAUDE.md, which lacks the fixture headline.
+  const claudeMd = "# Fixture rules\n\n- **A FIXTURE-ONLY HEADLINE** a body the index never carries.\n";
+  const { prompt, planDir } = await headlinesOnImplementPrompt(t, { "CLAUDE.md": claudeMd });
+  assert.ok(prompt.includes("A FIXTURE-ONLY HEADLINE"), "the index is read from the worktree's own CLAUDE.md");
+  assert.equal(prompt.includes("a body the index never carries"), false, "headlines only");
+  assert.match(prompt, /from CLAUDE\.md in your own worktree/, "the pointer names the file relative to the worktree");
+  assertNoLineNames(prompt, planDir);
+});
+
+test("W1-T501: a worktree with no CLAUDE.md degrades to a line naming it relative to the worktree", async (t) => {
+  const { prompt, planDir } = await headlinesOnImplementPrompt(t, {});
+  assert.match(prompt, /unavailable — could not read rule source CLAUDE\.md\)/, "degraded, never silent");
+  assertNoLineNames(prompt, planDir);
 });
 
 test("W1-T501: the acceptance criteria still render beside the record line", () => {
