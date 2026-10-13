@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (\"Go with all\"): diagnose why W1-T8502 (P1) was not re-dispatched and file the defect"
   plan_refs: [W1-T8502, W1-T8503, W1-T8535, W1-T7533, W1-T7837, W1-T7806, W1-T7747, W1-T534, W1-T4025, W1-T5805, W1-T8621, W1-T147, W1-T298]
   files: [src/lib/daemon.ts, src/lib/status.ts, src/run-task.ts, src/lib/ledger.ts, test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

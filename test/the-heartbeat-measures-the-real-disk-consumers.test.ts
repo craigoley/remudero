@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
 // live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
@@ -72,6 +73,7 @@ case "$*" in
 esac`);
     stub("du", `
 p="\${@: -1}"
+[ "$p" = "\${SLOW_DU:-}" ] && sleep "\${SLOW_DU_S:-10}"
 case "$p" in
   /var/lib/docker) exit 1 ;;
   "$FIXTURE/docker data")
@@ -280,4 +282,43 @@ test("a measuring beat walks when the consumers' disks moved by more than their 
   const stale = walked({ RMD_CONSUMER_BACKSTOP_S: "3600" },
     `walk_used_kb=${used}\nwalk_epoch=${now - 7200}\nprev_used_kb=${used}\nnoise_kb=0\n`);
   assert.equal(stale.beat.consumer_walk_state, "walked", "the backstop walks a quiet disk eventually");
+});
+
+// #9643: on 2026-10-06 one `du -sk /mnt/rmd` ran 11-16 min in disk-wait, and the beat — with the
+// liveness it publishes — waited on it. A slow du here stands in for that walk: it sleeps, then
+// answers its normal size, so only a budget that really cut it can turn it into unknown.
+function budgeted(overrides: Record<string, string>): { beat: Record<string, string>; walks: string[]; elapsedMs: number } {
+  let walks: string[] = [];
+  const started = Date.now();
+  const beat = measure(overrides, {
+    inspect: (dir) => { walks = readFileSync(join(dir, "ionice.log"), "utf8").split("\n").filter(Boolean); },
+  });
+  return { beat, walks, elapsedMs: Date.now() - started };
+}
+
+test("a consumer walk stops at its time budget and publishes the cut consumer and every later walk unknown, never 0", () => {
+  const { beat, walks, elapsedMs } = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" });
+  assertWallClockBound(elapsedMs, 8_000, `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s`);
+  assert.ok(walks.at(-1)?.endsWith(" du -sk /var/lib/containerd"), "positive control: the slow walk started, and no walk started after it");
+  assert.equal(beat.consumer_containerd_kb, "unknown", "a walk cut off by the budget is unknown, never 0");
+  assert.equal(beat.consumer_worktrees_kb, "42000", "walks finished inside the budget keep their sizes");
+  assert.equal(beat.consumer_docker_kb, "27000000");
+  assert.equal(beat.consumer_rmd_kb, "61000000", "a statfs read is not a walk, so a spent budget does not cost it");
+  for (const name of ["rmd_tmp", "scratch", "coverage", "transcripts", "npm_cache"])
+    assert.equal(beat[`consumer_${name}_kb`], "unknown", `${name} was reached after the budget was spent`);
+  assert.equal(beat.consumer_walk_state, "budget_exhausted", "a bounded walk must not read as a complete one");
+  assert.equal(beat.consumer_walk_budget_exhausted, "containerd,rmd_tmp,scratch,coverage,transcripts,npm_cache");
+});
+
+test("a walk that finishes inside its budget is unchanged, and a malformed budget falls back to the default", () => {
+  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
+  assert.equal(slow.consumer_containerd_kb, "27200000", "a slow walk that ends in time is measured, not cut");
+  assert.equal(slow.consumer_npm_cache_kb, "10");
+  assert.equal(slow.consumer_walk_state, "walked");
+  assert.equal(slow.consumer_walk_budget_exhausted, undefined, "a complete walk names nothing as cut");
+  for (const budget of ["junk", "0", ""]) {
+    const beat = measure({ RMD_CONSUMER_WALK_BUDGET_S: budget });
+    assert.equal(beat.consumer_walk_state, "walked", `budget ${JSON.stringify(budget)}`);
+    assert.equal(beat.consumer_npm_cache_kb, "10", `budget ${JSON.stringify(budget)} must not spend the walk at once`);
+  }
 });
