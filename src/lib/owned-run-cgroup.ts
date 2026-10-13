@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmdirSync, statfsSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readSync, realpathSync, rmdirSync, statfsSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedMemoryRunBinding, readMemoryLedger, type MemoryReservationHandle } from "./host-memory-ledger.js";
 import { readPidNamespace, testSlotHasAncestor, testSlotProcessFacts } from "./test-slot.js";
@@ -20,11 +20,16 @@ export interface OwnedRunCgroup {
   close(): boolean;
 }
 
-function verifyCgroup(path: string, identity?: Pick<OwnedRunCgroupIdentity, "dev" | "ino">): void {
-  const st = lstatSync(path);
-  if (process.platform !== "linux" || !st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid?.() || (st.mode & 0o022) !== 0 ||
-      realpathSync(path) !== resolve(path) || statfsSync(path).type !== 0x63677270 ||
+function verifyCgroupDescriptor(path: string, fd: number, identity?: Pick<OwnedRunCgroupIdentity, "dev" | "ino">): void {
+  const st = fstatSync(fd), pinned = `/proc/self/fd/${fd}`;
+  if (process.platform !== "linux" || !st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o022) !== 0 ||
+      realpathSync(pinned) !== resolve(path) || statfsSync(pinned).type !== 0x63677270 ||
       (identity && (st.dev !== identity.dev || st.ino !== identity.ino))) throw new Error("owned cgroup identity/backend unavailable");
+}
+function openCgroupDescriptor(path: string, expected = path, identity?: Pick<OwnedRunCgroupIdentity, "dev" | "ino">): number {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { verifyCgroupDescriptor(expected, fd, identity);return fd; }
+  catch (error) { closeSync(fd);throw error; }
 }
 function readControl(path: string): string {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -49,13 +54,13 @@ function writeControl(path: string, value: string): void {
 
 /** Child bootstrap ONLY: joins itself BEFORE dependency install, SDK spawn, probes or graders.
  * Never migrates a named foreign PID, or the creating daemon/supervisor into the kill boundary.
- * Single-account cooperative backend, not authentication against another writer of that account. */
+ * Single-account cooperative backend, not authentication against another writer of that account.
+ * SHIPS-UNWIRED: child bootstrap wiring awaits the separately qualified production producer. */
 export function joinOwnedRunCgroupSelf(identity: OwnedRunCgroupIdentity): void {
   const owner = testSlotProcessFacts(identity.ownerPid);
   if (!/\/rmd-eval-[a-f0-9-]{36}$/.test(identity.path) || identity.ownerPid === process.pid || !owner || owner.start !== identity.ownerStart ||
       identity.namespace !== readPidNamespace() || !testSlotHasAncestor(identity.ownerPid)) throw new Error("cgroup join requires a genuine child in the creating namespace");
-  verifyCgroup(identity.path, identity);
-  const dir = openSync(identity.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const dir = openCgroupDescriptor(identity.path, identity.path, identity);
   try {
     const st = fstatSync(dir);
     if (st.dev !== identity.dev || st.ino !== identity.ino) throw new Error("cgroup join identity changed");
@@ -65,29 +70,36 @@ export function joinOwnedRunCgroupSelf(identity: OwnedRunCgroupIdentity): void {
 
 /** Default OFF. Creates only a unique EMPTY leaf under an explicitly delegated existing parent.
  * No default root, privilege elevation, fleet migration, controller tuning or adoption of an old scope.
- * This primitive is NOT a timer, native full-EVAL profile, grant or automated dispatch authority. */
+ * This primitive is NOT a timer, native full-EVAL profile, grant or automated dispatch authority.
+ * SHIPS-UNWIRED: authorized production producer and full native admission remain separate follow-ups. */
 export function createOwnedRunCgroup(opts: { enabled?: boolean; parent?: string }): OwnedRunCgroup | undefined {
   if (opts.enabled !== true) return undefined;
-  if (!opts.parent || opts.parent === "/sys/fs/cgroup") throw new Error("explicit delegated cgroup parent required");
-  verifyCgroup(opts.parent);
-  const current = /^0::(\/[^\n]+\/rmd-heavy-run-[a-f0-9-]{36}\.service)$/m.exec(readControl("/proc/self/cgroup"));
-  if (!current || resolve(opts.parent) !== `/sys/fs/cgroup${current[1]}`) {
-    throw new Error("whole-run scope requires its own isolated user-service parent, never a fleet or sibling cgroup");
-  }
-  const ownerStart = testSlotProcessFacts(process.pid)?.start, namespace = readPidNamespace();
-  if (!ownerStart || !namespace) throw new Error("cgroup owner identity unavailable");
-  const path = join(opts.parent, `rmd-eval-${randomUUID()}`);
-  mkdirSync(path, { mode: 0o700 }); // Exclusive private leaf, independent of an operator's permissive umask.
-  verifyCgroup(path);
-  const st = lstatSync(path), identity: OwnedRunCgroupIdentity = Object.freeze({ path, dev: st.dev, ino: st.ino, ownerPid: process.pid, ownerStart, namespace });
-  const dir = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const parent = opts.parent;
+  if (!parent || parent === "/sys/fs/cgroup") throw new Error("explicit delegated cgroup parent required");
+  const parentDir = openCgroupDescriptor(parent);
+  let dir: number;
+  let identity: OwnedRunCgroupIdentity;
+  let ownerStart: string, namespace: string, path: string, leaf: string;
+  try {
+    const current = /^0::(\/[^\n]+\/rmd-heavy-run-[a-f0-9-]{36}\.service)$/m.exec(readControl("/proc/self/cgroup"));
+    if (!current || resolve(parent) !== `/sys/fs/cgroup${current[1]}`) {
+      throw new Error("whole-run scope requires its own isolated user-service parent, never a fleet or sibling cgroup");
+    }
+    const birth = testSlotProcessFacts(process.pid)?.start, ns = readPidNamespace();
+    if (!birth || !ns) throw new Error("cgroup owner identity unavailable");
+    ownerStart = birth;namespace = ns;leaf = `rmd-eval-${randomUUID()}`;path = join(parent, leaf);
+    const pinnedLeaf = `/proc/self/fd/${parentDir}/${leaf}`;
+    mkdirSync(pinnedLeaf, { mode: 0o700 }); // Exclusive private leaf in the already-open parent.
+    dir = openCgroupDescriptor(pinnedLeaf, path);
+    const st = fstatSync(dir);
+    identity = Object.freeze({ path, dev: st.dev, ino: st.ino, ownerPid: process.pid, ownerStart, namespace });
+  } catch (error) { closeSync(parentDir);throw error; }
   let observedPopulated = false, closed = false;
   let capacity: MemoryReservationHandle | undefined, capacityReleased = false;
   const assertOwner = (): void => {
     if (closed || identity.ownerPid !== process.pid || testSlotProcessFacts(process.pid)?.start !== ownerStart || readPidNamespace() !== namespace) throw new Error("cgroup owner unavailable");
-    verifyCgroup(path, identity);
-    const actual = fstatSync(dir);
-    if (actual.dev !== identity.dev || actual.ino !== identity.ino) throw new Error("cgroup descriptor identity changed");
+    verifyCgroupDescriptor(path, dir, identity);
+    verifyCgroupDescriptor(parent, parentDir);
   };
   const read = (): OwnedRunCgroupReading => {
     try {
@@ -135,7 +147,7 @@ export function createOwnedRunCgroup(opts: { enabled?: boolean; parent?: string 
       const state = read().state;
       if (state !== "gone" && state !== "empty-unqualified") return false;
       if (capacity && !capacityReleased) return false;
-      assertOwner();rmdirSync(path);closeSync(dir);closed = true;return true;
+      assertOwner();rmdirSync(`/proc/self/fd/${parentDir}/${leaf}`);closeSync(dir);closeSync(parentDir);closed = true;return true;
     },
   };
 }
