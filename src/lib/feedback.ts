@@ -133,6 +133,16 @@ export interface FeedbackEntry {
 export interface DecisionSummaryOption {
   label: string;
   consequence: string;
+  /** Optional (W1-T8826): which inbox verb this choice performs; escalation and triage omit it. */
+  intent?: OptionIntent;
+}
+
+/** What an inbox option does (W1-T8826): the route it maps onto is attached at serve time. */
+export const OPTION_INTENTS = ["approve", "decline", "reframe", "reply", "keep"] as const;
+export type OptionIntent = (typeof OPTION_INTENTS)[number];
+
+export function isOptionIntent(x: unknown): x is OptionIntent {
+  return typeof x === "string" && (OPTION_INTENTS as readonly string[]).includes(x);
 }
 
 /** A machine-written, plain-language decision card. `options` is 2-3 labelled choices — for an
@@ -161,6 +171,7 @@ function isBoundedString(x: unknown, maxLen: number): x is string {
 function isValidDecisionSummaryOptionShape(x: unknown): x is DecisionSummaryOption {
   if (typeof x !== "object" || x === null) return false;
   const o = x as Record<string, unknown>;
+  if (o.intent !== undefined && !isOptionIntent(o.intent)) return false;
   return isBoundedString(o.label, 80) && isBoundedString(o.consequence, 240) && !(o.consequence as string).includes("\n");
 }
 
@@ -183,6 +194,7 @@ export function validateDecisionSummary(x: unknown): DecisionSummary | null {
   const options = (o.options as DecisionSummaryOption[]).map((opt) => ({
     label: opt.label.trim(),
     consequence: opt.consequence.trim(),
+    ...(opt.intent === undefined ? {} : { intent: opt.intent }),
   }));
   const card: DecisionSummary = { headline, what_happened: (o.what_happened as string).trim(), decision, options };
   if (isBoundedString(o.if_nothing_happens, 300) && !(o.if_nothing_happens as string).includes("\n")) {
