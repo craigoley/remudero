@@ -196,7 +196,7 @@ export function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDeb
     const written: string[] = [];
     const existing: string[] = [];
     try {
-      mkdirSync(dir, { recursive: true });
+      if (o.entries.length > 0) mkdirSync(dir, { recursive: true });
       for (const e of o.entries) {
         try {
           write(join(dir, `${e.id}.yaml`), e.text);

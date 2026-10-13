@@ -60,7 +60,8 @@ interface Hosted { id: number; lane: "main" | "pr"; runId: number; headSha: stri
 type Pull = { number: number; state: "open" | "closed"; merged_at: string | null; head: { sha: string } };
 
 /** GitHub as the sweep reads it: two artifact lists, the PR a commit belongs to, and the zips. */
-function fakeGithub(hosted: Hosted[], pulls: Record<string, Pull[]> = {}, opts: { listThrows?: boolean } = {}) {
+function fakeGithub(hosted: Hosted[], pulls: Record<string, Pull[]> = {},
+  opts: { listThrows?: boolean; zipThrows?: Set<number>; pullsThrow?: Set<string> } = {}) {
   const calls: string[] = [];
   const nameOf = (lane: Hosted["lane"]) => (lane === "main" ? FOLD_DEBT_MAIN_ARTIFACT : FOLD_DEBT_PR_ARTIFACT);
   return {
@@ -77,19 +78,22 @@ function fakeGithub(hosted: Hosted[], pulls: Record<string, Pull[]> = {}, opts: 
       }
       const sha = Object.keys(pulls).concat(hosted.map((h) => h.headSha)).find((s) => args[1] === pullsForCommitRestArgs(OWNER, REPO, s)[1]);
       assert.ok(sha !== undefined, `an unexpected read: ${args[1]}`);
+      if (opts.pullsThrow?.has(sha)) throw new Error("pulls 502");
       return pulls[sha] ?? [];
     },
     readZip: (args: string[]) => {
       calls.push(String(args[1]));
       const h = hosted.find((x) => args[1] === mutationVerdictArtifactZipRestArgs(OWNER, REPO, x.id)[1]);
       assert.ok(h, `an unlisted artifact was downloaded: ${args[1]}`);
+      if (opts.zipThrows?.has(h.id)) throw new Error("zip 500");
       return h.zip;
     },
   };
 }
 
 /** The daemon: the real effect built the way it builds it, over a checkout, then real `runSweep` passes. */
-function daemon(gh: ReturnType<typeof fakeGithub>, ledger: Array<Record<string, unknown>>, opts: { land?: boolean } = {}) {
+function daemon(gh: ReturnType<typeof fakeGithub>, ledger: Array<Record<string, unknown>>,
+  opts: { land?: false | ((root: string) => { landed: boolean; error?: string }) } = {}) {
   const root = gitRepo({ kind: "w1-t7853-checkout" }).dir;
   const landed: string[] = [];
   const logs: Array<{ step: string; fields: Record<string, unknown> }> = [];
@@ -105,7 +109,7 @@ function daemon(gh: ReturnType<typeof fakeGithub>, ledger: Array<Record<string, 
     repoRoot: root,
     ghJsonImpl: gh.readJson,
     ghBufferImpl: gh.readZip,
-    ...(opts.land === false ? {} : { landFeedbackImpl: (r: string) => { landed.push(r); return { landed: true, files: [] }; } }),
+    ...(opts.land === false ? {} : { landFeedbackImpl: (r: string) => { landed.push(r); return opts.land ? opts.land(r) : { landed: true }; } }),
   });
   const pass = (surface?: "light" | "full") =>
     runSweep([], {
@@ -291,4 +295,35 @@ test("W1-T7853: the shared zip reader returns every member it can read", () => {
   const members = zipTextMembers(artifactZip({ "a.yaml": "a", "b.yaml": "b" }));
   assert.deepEqual(members.map((m) => [m.name, m.text]).sort(), [["a.yaml", "a"], ["b.yaml", "b"]]);
   assert.throws(() => zipTextMembers(Buffer.from("not a zip")), /not a zip/);
+});
+
+test("W1-T7853: every failed lookup, read, unzip, write and land is named, and only a transient one is retried", async () => {
+  const [a, b, c] = [entry(46001), entry(46002), entry(46003)];
+  const hosted: Hosted[] = [
+    { id: 61, lane: "pr", runId: 1001, headSha: "q1", zip: artifactZip({ [`${a.id}.yaml`]: a.text }) },
+    { id: 62, lane: "main", runId: 1002, headSha: "n2", zip: artifactZip({ [`${b.id}.yaml`]: b.text }) },
+    { id: 63, lane: "main", runId: 1003, headSha: "n3", zip: Buffer.from("not a zip") },
+    { id: 64, lane: "main", runId: 1004, headSha: "n4", zip: artifactZip({ "fold-debt-CLAUDE-md-46004.yaml": "id: [unclosed\n" }) },
+    { id: 65, lane: "main", runId: 1005, headSha: "n5", zip: artifactZip({ [`${c.id}.yaml`]: c.text }) },
+  ];
+  const gh = fakeGithub(hosted, { q1: [{ number: 9101, state: "closed", merged_at: "2026-10-13T03:00:00Z", head: { sha: "q1" } }] },
+    { zipThrows: new Set([62]), pullsThrow: new Set(["q1"]) });
+  const ledger: Array<Record<string, unknown>> = [];
+  const d = daemon(gh, ledger, { land: () => { throw new Error("push refused"); } });
+  writeFileSync(join(d.root, "plan"), "a file where the inbox directory belongs");
+  await d.pass();
+  const errors = d.logs.filter((l) => l.step === "sweep.fold_debt_pull.error").map((l) => [l.fields.phase, l.fields.workflow_run_id]);
+  assert.deepEqual(errors, [["artifact", "1002"], ["write", "1005"], ["artifact", "1001"]],
+    "a failed download, a failed write and a failed merge lookup are each named");
+  const refused = rows(ledger, FOLD_DEBT_INGESTED_STEP).map((r) => [r.workflow_run_id, (r.refused as Array<{ reason: string }>).map((x) => x.reason.split(":")[0])]);
+  assert.deepEqual(refused, [["1003", ["unzip"]], ["1004", ["unparseable"]]], "a bad zip and a bad entry are read once and refused");
+
+  // The transient ones are read again: the inbox is a directory now, the lookup and the download answer.
+  const retry = fakeGithub(hosted, gh.pulls);
+  const again = daemon(retry, ledger, { land: () => { throw new Error("push refused"); } });
+  await again.pass();
+  assert.deepEqual(again.inbox(), [`${b.id}.yaml`, `${c.id}.yaml`, `${a.id}.yaml`].sort(), "every transient failure is retried and filed");
+  assert.ok(!retry.calls.some((x) => x.includes("/artifacts/63/") || x.includes("/artifacts/64/")), "a refused artifact is never downloaded again");
+  const landed = rows(ledger, FOLD_DEBT_INGESTED_STEP).filter((r) => (r.written as string[]).length > 0);
+  assert.ok(landed.length > 0 && landed.every((r) => r.landed === false && r.land_error === "push refused"), "a land that throws is recorded, not raised");
 });
