@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.86
   status: queued
@@ -20,3 +20,14 @@
     The ledger step already_satisfied.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files list names only a single new test file (test/scout-already-satisfied-refused.test.ts). Nothing in the description or files touches secrets, credentials, auth, permissions, deletion, merge/deploy/infrastructure policy, or irreversible actions."
+      - "The task asks for a root-cause fix to a recurring ledger step (2 rows over 7 days), not a policy or priority decision that only the operator can make. The acceptance criterion is a grep check for a named test, and the task's PR still passes CI and review."
+      - "The rationale says the rows name no file, so the code that writes this step must be located first. That makes the real touched scope uncertain, since the declared list contains only the test file. This is a mild concern, but CI and review cover it."
+      - "The scout family has no track record (0 merged, 0 declined), and no actual change view was supplied. I weigh these as mild uncertainty, not as evidence of danger."
+    judged_at: "2026-10-13T19:08:39.395Z"
+    pin: "85882536bb81728e26a55db35a01cb0a0d06238c3030a0fe2183bfb7a3dc2e1e"
