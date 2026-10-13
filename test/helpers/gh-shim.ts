@@ -39,6 +39,9 @@ export interface GhShimRoute {
   delaySeconds?: number;
   /** Optional completion marker written after the delay, before the child exits. */
   doneFile?: string;
+  /** W1-T6107: write `content` byte for byte to `path` (its directory created) before exiting, the
+   *  file a real `gh run download` would leave, so a step can be driven down its success branch. */
+  writes?: { path: string; content: string };
 }
 
 export interface GhShim {
@@ -75,6 +78,12 @@ function verbatim(file: string, text: string, redirect: string): string {
   return `cat ${shQuote(file)}${redirect}; printf '\\n'${redirect}`;
 }
 
+/** Stage `writes.content` beside the shim and return the shell step that copies it to `writes.path`. */
+function writeStep(staged: string, writes: { path: string; content: string }): string {
+  writeFileSync(staged, writes.content);
+  return `mkdir -p ${shQuote(dirname(writes.path))} && cat ${shQuote(staged)} > ${shQuote(writes.path)}`;
+}
+
 function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: string): string {
   const dir = dirname(callsPath);
   const cases = routes
@@ -89,6 +98,7 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
       const body = [
         r.delaySeconds !== undefined ? `sleep ${r.delaySeconds}` : "",
         doneFile !== undefined ? `: > '${doneFile}'` : "",
+        r.writes !== undefined ? writeStep(join(dir, `route-${i}.write`), r.writes) : "",
         r.stderr !== undefined ? verbatim(join(dir, `route-${i}.err`), r.stderr, " 1>&2") : "",
         r.stdout !== undefined ? verbatim(join(dir, `route-${i}.out`), r.stdout, "") : "",
         r.stdoutEnv !== undefined ? `printf '%s\\n' "\${${r.stdoutEnv}}"` : "",

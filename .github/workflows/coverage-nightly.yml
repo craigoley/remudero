@@ -179,6 +179,30 @@ jobs:
             coverage-nightly-artifact/coverage-nightly-summary.json
           retention-days: 14
           if-no-files-found: error
+      # W1-T6107: the test impact map ci.yml's coverage shards hand their shadow selector, built from the
+      # same compact shards (compaction keeps each report's suite; a ci.yml PR shard's premapped upload
+      # does not). Shadow evidence: an install or builder failure is reported and never fails this job.
+      - name: Build the test impact map from the compact shards (W1-T6107, shadow evidence)
+        run: |
+          if npm ci && node --import tsx scripts/coverage-merge-ratchet.mjs --impact-map test-impact-map.json \
+            --sha "$GITHUB_SHA" --shard-count 8 \
+            coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
+            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
+            coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
+            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw; then
+            echo "- W1-T6107: built the test impact map for ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f test-impact-map.json
+            echo "::warning::W1-T6107: the impact-map build failed; no map is uploaded and PR shadow selection falls back."
+            echo "- W1-T6107: the impact-map build FAILED; no map uploaded (shadow evidence only; the floor verdict is unaffected)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the test impact map
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-impact-map
+          path: test-impact-map.json
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Coverage ratchet (main's absolute floor)
         id: ratchet
         run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json

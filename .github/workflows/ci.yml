@@ -1496,6 +1496,28 @@ jobs:
             rm -f coverage/ledger-snapshot.manifest
             echo "W1-T4071: no CI ledger snapshot resolved; the committed instrumented ledger is weighed."
           fi
+      - name: Fetch the newest nightly test impact map for the shadow selector (W1-T6107)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CLASS: ${{ steps.classify.outputs.class }}
+        run: |
+          MAP_DIR="${RUNNER_TEMP}/impact-map"
+          rm -rf "$MAP_DIR" && mkdir -p "$MAP_DIR"
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ] || [ "$CLASS" != "SOURCE" ]; then
+            echo "W1-T6107: no impact map is fetched for a ${GITHUB_EVENT_NAME} ${CLASS} diff (the shadow selector runs on SOURCE pull requests)."
+            exit 0
+          fi
+          RUNS="$(gh run list --workflow coverage-nightly.yml --branch main --status completed --limit 5 \
+            --json databaseId --jq '.[].databaseId' 2>/dev/null || true)"
+          for RUN in $RUNS; do
+            if gh run download "$RUN" -n test-impact-map -D "$MAP_DIR" 2>/dev/null && [ -s "$MAP_DIR/test-impact-map.json" ]; then
+              echo "W1-T6107: the shadow selector reads coverage-nightly run ${RUN}'s impact map."
+              exit 0
+            fi
+          done
+          rm -f "$MAP_DIR/test-impact-map.json"
+          echo "W1-T6107: no coverage-nightly impact map could be fetched; the shadow selector records no impact arm."
       - name: Test with coverage (spec output to the CI log, lcov to a file — src/** only, test/** excluded from the ratio)
         # W1-T220 defect 1: a `spec` reporter to stdout runs alongside the `lcov` reporter pair.
         # With `--test-reporter=lcov` alone, a failing run's CI log carried zero test output — just
@@ -1621,8 +1643,12 @@ jobs:
           # each file that really failed above, whether each selection had it. It runs after the
           # full suite, never changes what ran, and never changes this step's verdict.
           git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
+          IMPACT_FLAGS=()
+          if [ -s "${RUNNER_TEMP}/impact-map/test-impact-map.json" ]; then
+            IMPACT_FLAGS=(--impact-map "${RUNNER_TEMP}/impact-map/test-impact-map.json" --base "$(git rev-parse HEAD^1)")
+          fi
           node --import tsx scripts/select-affected-suites.mjs --changed-files changed-files.txt \
-            --diff "${RUNNER_TEMP}/affected.diff" --failed-from "${RUNNER_TEMP}/coverage-test-output.log" \
+            --diff "${RUNNER_TEMP}/affected.diff" --failed-from "${RUNNER_TEMP}/coverage-test-output.log" "${IMPACT_FLAGS[@]}" \
             || echo "W1-T4404: the shadow selector itself failed; nothing depends on it."
           if [ "$TEST_EXIT" -ne 0 ]; then
             echo "coverage-ratchet: the instrumented suite exited ${TEST_EXIT}. W1-T3207 makes this the surviving test harness; lcov/raw coverage are still checked before the shard fails."
