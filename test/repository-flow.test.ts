@@ -39,7 +39,7 @@ test("repository flow consumes canonical caller-owned fix receipts without inven
     () => { throw new Error("joining caller metadata must not write a live ledger"); },
     `fixture-worker-${round}`, {}, { prUrl: url, roundId: round },
   ).joinFields();
-  const first = { ts: iso(now - 1000), step: "fix.dispatch", head_sha: "b".repeat(40), ...emitted(pr(1).url, "one") };
+  const first: Record<string, unknown> = { ts: iso(now - 1000), step: "fix.dispatch", head_sha: "b".repeat(40), ...emitted(pr(1).url, "one") };
   const second = { ...first, ...emitted(pr(1).url, "two"), head_sha: "c".repeat(64) };
   assert.equal(first.repair_pr_url, pr(1).url);
   assert.equal(first.repair_round_id, "one");
