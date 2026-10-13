@@ -2212,7 +2212,7 @@ function inboxProvenance(inboxRoot: string, proposals: ReadonlyArray<{ id: strin
     const messages = threads.status === "ok" ? (threads.threads.get(inboxThreadId(id)) ?? []) : [];
     const lastActivityAt = latestInstant([
       ...(rowAt.get(id) ?? []),
-      ...messages.map((m) => (Number.isFinite(m.ts) ? new Date(m.ts).toISOString() : null)),
+      ...messages.map((m) => (Number.isFinite(m.ts) ? fixedClock(m.ts).iso() : null)),
     ]);
     out[id] = {
       ...(task ? { family: judgementFamily(task) } : {}),
