@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: follow-up found while building W1-T6083 (PR #9760)"
   plan_refs: [W1-T6083, W1-T4404, W1-T4406, W1-T6088, W1-T5940, W1-T5923, W1-T5705]
-  files: [.github/workflows/coverage-nightly.yml, .github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts]
+  files: [.github/workflows/coverage-nightly.yml, .github/workflows/ci.yml, test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts, test/helpers/gh-shim.ts, test/helpers/gh-shim.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -58,7 +58,9 @@
     the same `gh run list` / `gh run download` pattern the narrowed-floor read already uses (the
     workflow holds `actions: read`), and records the map's path. The shadow selector call then passes
     `--impact-map <path> --base <the PR base sha>`; with no map it passes neither flag and prints why.
-    Live selection, required checks and every other event's behavior do not change. THE COSTLY
+    Live selection, required checks and every other event's behavior do not change. The shared gh
+    shim (test/helpers/gh-shim.ts) gains a route that writes a file, so the fetch step's real shell body
+    can be exercised with a downloaded map; no hand-rolled gh shim (the fixture-copy census refuses one). THE COSTLY
     CANDIDATE (also building per-shard maps in ci.yml's shards before premapping and merging them on
     main pushes) waits until the shadow record shows the arm is worth a fresher map than one a day.
   acceptance:
