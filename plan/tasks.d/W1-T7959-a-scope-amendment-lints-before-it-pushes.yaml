@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-11: #10842 (scope-amendment/W1-T6018-10833) stranded with its implementation PR #10833"
   plan_refs: [W1-T5534, W1-T6465, W1-T5405, W1-T2503, W1-T6018]
   files: [src/lib/proof-amendment.ts, test/a-scope-amendment-lints-before-it-pushes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

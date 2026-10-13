@@ -13,7 +13,7 @@
   files:
     - scripts/test-with-retry.mjs
     - test/a-coverage-recovery-never-greens-a-failing-run.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -604,10 +604,12 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
     const pathFiltered = selection.path_filtered_names as string[];
     const selected = selection.selected_names as string[];
     const omitted = selection.budget_omitted_names as string[];
+    const withheld = selection.withheld_names as string[];
+    assert.ok(Array.isArray(withheld), "the implement path always randomizes, so its row names what it withheld");
     assert.deepEqual([...eligible, ...pathFiltered].sort(), [...treeImplementNames].sort(),
       "every approved implement skill in the tree is either eligible or path-filtered");
-    assert.deepEqual([...selected, ...omitted].sort(), [...eligible].sort(),
-      "every eligible skill is either selected or budget-omitted, never both");
+    assert.deepEqual([...selected, ...omitted, ...withheld].sort(), [...eligible].sort(),
+      "every eligible skill is exactly one of selected, budget-omitted or withheld");
     assert.equal(selection.zero_selection, selected.length === 0);
     assert.equal(ledger.some((row) => row.step === "skills.injected"), true,
       "an approved selected skill still reaches the compatibility injection event");

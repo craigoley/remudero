@@ -1,0 +1,68 @@
+id: fb-1791856366581-f83cc1
+ts: 2026-10-13T01:52:46.585Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+  OPERATOR RULED 2026-10-13: "Per-instance repo smoke". Extend the pre-cutover
+  smoke so each instance's throwaway container exercises that instance's own
+  repo before recycling onto a new image. No new credentials.
+
+
+  WHAT NANOCLAW DOES (OBSERVED): CI applies every extension against each core
+  change with a real build and tests, so the core author owns the breakage
+  (scripts/test-registry-skills.ts; .github/workflows/registry-skills.yml).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - One image (remudero:latest) serves core, site and console
+  (.remudero/daemon-instances.yaml).
+
+  - No workflow under .github/workflows checks out remudero-site or
+  remudero-console.
+
+  - deploy/recycle-container.sh section 5.5 (W1-T5017) runs one real worker
+  query with a trivial prompt per instance (workerSmokeMain, a containment
+  verdict). It never touches the instance's own repo.
+
+  - The cost is on record: plan/feedback/fb-1790036267432-9a0ffc.yaml. The
+  console daemon's rmd review aborted when its image ran from /app outside a Git
+  checkout, and that reached production.
+
+
+  ASK: in the same throwaway container and the same phase, after the worker
+  smoke, run a bounded repo-contract probe against the instance's mounted
+  repository, from the container's real working directory:
+
+  - load its plan (loadPlan);
+
+  - resolve its layout (resolveRepoLayout);
+
+  - parse its policy;
+
+  - run lint-plan offline;
+
+  - resolve owner and repo the way rmd review does.
+
+  Any failure refuses the image exactly as a failed worker smoke does (pause
+  off, old container still serving, exit 1) and prints the failing contract.
+  Ledger one row per contract.
+
+
+  FALSIFIER: run the probe from /app with no Git checkout (the fb-1790036267432
+  shape). It must refuse.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/per-instance-repo-smoke
+thread_id: null

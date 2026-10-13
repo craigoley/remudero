@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (follow-up pattern): diagnosis of the 2026-10-12T08:28:15Z dispatch.lane_refilled row"
   plan_refs: [W1-T476, W1-T4416, W1-T5083, W1-T5805, W1-T2286]
   files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-lane-refill-packs-its-pool-disjoint-from-the-lanes-already-in-flight.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

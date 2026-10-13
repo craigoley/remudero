@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "nod
 import { basename, join, relative } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
-import { ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
+import { bodyCreditedMergeTimes, ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, CI_FRICTION_ESCALATE_RUNG, type CiFrictionRemedyTask, type OwnerSearch, type RemedyEffect } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
 import { slug } from "./feedback-docket.js";
@@ -196,11 +196,6 @@ export function readLadderPlan(repoRoot: string, kind: LadderKind): CiFrictionPl
   let listed = "";
   try { listed = git(["grep", "-l", "-E", `^[[:space:]]*origin:[[:space:]]*[\"']?${kind.prefix}:`, "origin/main", "--", shards]); }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error; }
-  const merges = new Map<string, string>();
-  for (const line of git(["log", "origin/main", "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
-    const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map(s => s.trim()).filter(Boolean)) if (at) merges.set(id, at);
-  }
   const tasks: CiFrictionRemedyTask[] = [];
   const unreadable: string[] = [];
   for (const path of listed.trim().split("\n").filter(Boolean).map(p => p.replace("origin/main:", ""))) {
@@ -208,12 +203,17 @@ export function readLadderPlan(repoRoot: string, kind: LadderKind): CiFrictionPl
       for (const task of loadPlanFromYaml(git(["show", `origin/main:${path}`]), path).tasks) {
         if (!task.origin || !parseOrigin(kind, task.origin)) continue;
         tasks.push({ id: task.id, origin: task.origin, status: task.status, retired: task.retirement !== undefined,
-          files: [...(task.files ?? [])], path, mergedAt: merges.get(task.id) });
+          files: [...(task.files ?? [])], path });
       }
     } catch (error) {
       const reason = `${path}: ${String(error)}`;
       unreadable.push(reason);
     }
+  }
+  const merges = bodyCreditedMergeTimes(git, "origin/main", tasks.map(task => task.id));
+  for (const task of tasks) {
+    const mergedAt = merges.get(task.id);
+    if (mergedAt) task.mergedAt = mergedAt;
   }
   return { tasks, degraded, unreadable };
 }

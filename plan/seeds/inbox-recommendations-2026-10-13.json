@@ -1,0 +1,539 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-13T01:34:03+00:00",
+  "note": "Operator-session recommendations (2026-10-13), imported once by W1-T8950 for proposals still present; action enum matches W1-T8826 intents.",
+  "recommendations": {
+    "machine-judge:W1-T6088": {
+      "action": "decline",
+      "why": "Moot while the merge queue is off: ruleset 24525891 is disabled (operator ruling 10-09: not until proven). Re-file when the queue returns.",
+      "evidence": [
+        "gh api rulesets: 24525891 disabled"
+      ],
+      "obsolete": true,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6175": {
+      "action": "decline",
+      "why": "Dependabot PRs awaiting review: core has 0 open Dependabot PRs now; console's split CodeQL pair was merged as one (#2064) with a Dependabot group.",
+      "evidence": [
+        "gh pr list --author app/dependabot → 0",
+        "console #2064"
+      ],
+      "obsolete": true,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W1-T2635": {
+      "action": "decline",
+      "why": "Duplicate: its twin machine-judge:W1-T2635 is already declined; the #3305-era tombstone ruling is stale.",
+      "evidence": [
+        "machine-judge:W1-T2635 declined"
+      ],
+      "obsolete": true,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "craigoley/remudero/standing-debt:3": {
+      "action": "decline",
+      "why": "The record itself says the repeats do not show a missing idempotency key; 56 cycles with no evidence.",
+      "evidence": [
+        "plain.whatHappened"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "guard-retirement:isolation": {
+      "action": "approve",
+      "why": "Approving only records that you reviewed an 18-cycle zero-fire streak; the guard stays in place.",
+      "evidence": [
+        "plain options: Approve keeps the guard"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T5334": {
+      "action": "decline",
+      "why": "'Worker changed nothing' rounds are largely the console census refusals (W1-T8918) and lost fix pushes (W1-T8833) found 10-12; re-measure after those land.",
+      "evidence": [
+        "W1-T8918 (#11191), W1-T8833 (#11175)"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T5585": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7358": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7395": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7447": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7450": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7476": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7505": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T7531": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "machine-judge:W1-T8350": {
+      "action": "decline",
+      "why": "A 24 h gardener CI slowdown on 10-11/12 coincided with host load (serve restart, load 7–12); transient. The flow-regression gardener re-files if it persists.",
+      "evidence": [
+        "host load 10-12",
+        "W1-T8198 cut restart churn"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "group": "waits-on-W1-T204"
+    },
+    "machine-judge:W1-T8447": {
+      "action": "decline",
+      "why": "Nine filings (one per shard) are one root cause. #9018 closed 10-12: shard-1 cost fell 4127→2560 PR-min and is now spread across shards; #10880 (shard cancellations) and #10894/#10918 (judged runs) landed 10-11; each filing's fix is judged unproven.",
+      "evidence": [
+        "#9018 closed 10-12",
+        "#10880",
+        "#10894",
+        "#10918"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Declined as one family: re-measure all shards after #10880/#10894; file one cross-shard task if the cost stays high.",
+      "group": "coverage-shard cost family"
+    },
+    "craigoley/remudero/standing-debt:4": {
+      "action": "reframe",
+      "why": "58 cycles old with no fresh count; the fix may be moot.",
+      "evidence": [
+        "plain.whatHappened"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Request evidence: count retro runs in the last 7 days that shipped without a per-run dispatch key; approve the fix only if that count is above zero."
+    },
+    "craigoley/remudero/standing-debt:5": {
+      "action": "reframe",
+      "why": "Blocks three runs across two tasks for 53 cycles; the reviewer wants scope and evidence.",
+      "evidence": [
+        "plain.whatHappened"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Ask for the evidence and a clear scope first: name the two tasks and three runs, the exact ownership check that blocks them, and the smallest change that unblocks them."
+    },
+    "machine-judge:W1-T5309": {
+      "action": "reframe",
+      "why": "Costliest single open cause (1407.5 PR-min); the draft lacks a mechanism.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Name the mechanism: coverage-ratchet reds are mostly diff-coverage BLOCKED on new uncovered lines; fix rounds may already edit test/ (admitFixTests), so require the round to add the covering test, proven by a fixture PR whose uncovered line is covered in one round."
+    },
+    "machine-judge:W1-T5984": {
+      "action": "keep",
+      "why": "Waits on W1-T204; decide W1-T204 first. Its message is misleading (see list).",
+      "evidence": [
+        "dep-unmet: W1-T204"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "group": "waits-on-W1-T204"
+    },
+    "machine-judge:W1-T6021": {
+      "action": "keep",
+      "why": "Waits on W1-T204; decide W1-T204 first.",
+      "evidence": [
+        "dep-unmet: W1-T204"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "group": "waits-on-W1-T204"
+    },
+    "machine-judge:W1-T6107": {
+      "action": "reframe",
+      "why": "Still needed: #9760 merged buildImpactMap (10-07) but no workflow passes --impact-map, so main never builds the map.",
+      "evidence": [
+        "#9760 merged",
+        "git grep impact-map .github/workflows → none"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Approve: main's CI builds and publishes the test impact map the shadow arm reads; no change to which suites run."
+    },
+    "machine-judge:W1-T6372": {
+      "action": "reframe",
+      "why": "Report-only task (no behaviour change), so the high-risk hold costs nothing to lift.",
+      "evidence": [
+        "task origin: report-only per operator"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Approve as report-only: produce the report; no change to github-transport.ts or deny-floor.sh."
+    },
+    "machine-judge:W1-T7155": {
+      "action": "keep",
+      "why": "Waits on W1-T204 and the stamp bug.",
+      "evidence": [
+        "dep-unmet: W1-T204"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "group": "waits-on-W1-T204"
+    },
+    "machine-judge:W1-T7271": {
+      "action": "reframe",
+      "why": "Flake incident ('real spawn' red on 3 PRs that don't touch it); the draft adds an unexplained source change.",
+      "evidence": [
+        "plain",
+        "shard w1-t7271-flake-incident"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Revise: make the fix test-only (stabilise the 'real spawn' test); drop the unexplained source change unless the draft shows it is the cause."
+    },
+    "machine-judge:W1-T7736": {
+      "action": "reframe",
+      "why": "This is the rehearsal your 10-09 ruling asked for before re-enabling the merge queue.",
+      "evidence": [
+        "memory merge-queue-not-until-proven",
+        "ruleset 24525891 disabled"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Approve the test run only: rehearse on a scratch target; main's ruleset 24525891 stays disabled until the rehearsal's merge groups finish green."
+    },
+    "machine-judge:W1-T7739": {
+      "action": "reframe",
+      "why": "Largest cost in the inbox (341.79 PR-hours, fix-outcome:unstated); the draft names no remedy.",
+      "evidence": [
+        "task title",
+        "plain"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Remedy: a fix worker must end with FIXED, NOT_FIXED or NEEDS_DESIGN; an unstated outcome gets one re-ask, then is recorded as NEEDS_DESIGN with the transcript tail. Proof: a unit test that an unstated report yields exactly one re-ask and then a stated outcome row."
+    },
+    "verify-human:W1-T204": {
+      "action": "reframe",
+      "why": "Pick 'Path-scoped protection'. Unblocks 7 drafts that depend on it.",
+      "evidence": [
+        "7 drafts dep-unmet on W1-T204"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Path-scoped protection: a ruleset requiring the operator only for .github/workflows/**, plan/policy.yaml and the gate configuration; autonomous merges elsewhere keep no human reviewer. No blanket required reviews."
+    },
+    "verify-human:W1-T216": {
+      "action": "reframe",
+      "why": "The audit's biggest claimed risk is still only inferred after 49 days; dependencies are complete.",
+      "evidence": [
+        "plain.whatHappened"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Run the check: on a disposable repo, a worker posts the required review on a throwaway change; record whether auto-merge fires."
+    },
+    "verify-human:W1-T5717": {
+      "action": "reframe",
+      "why": "Still true: `decisions-status --check` reports DECISIONS.md is missing a status.",
+      "evidence": [
+        "node --import tsx scripts/decisions-status.mjs --check (10-13)"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed",
+      "text": "Approve: add Status: lines to the two 2026-10-02 Sol 6.1 entries (#8650, #8671); keep the CI check."
+    },
+    "machine-judge:W1-T5378": {
+      "action": "decline",
+      "why": "Generic 'ci' cause (232.5 PR-min); the fix is not shown to stop repeat rounds.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T5418": {
+      "action": "decline",
+      "why": "Low cost (183.5 PR-min) and the fix is unproven; the gardener re-files if the cost grows.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6048": {
+      "action": "decline",
+      "why": "Small (4.78 PR-hours) and stale since ~10-05; today's fixes target plan-only reds.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6053": {
+      "action": "decline",
+      "why": "Small (1.75 PR-hours); clearing a review hold without safeguards is not worth the risk.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6057": {
+      "action": "decline",
+      "why": "Small (1.61 PR-hours), stale.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6166": {
+      "action": "decline",
+      "why": "Low cost (130.5 PR-min), unproven, and it touches review policy.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T6170": {
+      "action": "decline",
+      "why": "Small (2.14 PR-hours); its draft fails to parse and its message is empty.",
+      "evidence": [
+        "yaml-parse failure"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T7446": {
+      "action": "keep",
+      "why": "Blocked by the stamp bug; revisit after it is fixed.",
+      "evidence": [
+        "stamp-prefix"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T7698": {
+      "action": "decline",
+      "why": "Small (4.65 PR-hours); task-id-existence reds on plan-only PRs have not recurred in today's filings.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W1-T12e": {
+      "action": "decline",
+      "why": "Commissioning-era drill; the fleet has run on Azure since September and W1-T147 covers the overnight drill. Your call if you still want it.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W1-T147": {
+      "action": "keep",
+      "why": "A real drill that needs you; schedule it after the memory cut (W1-T7728/W1-T8775) lands, so the host is calmer.",
+      "evidence": [
+        "plain"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W2-T2": {
+      "action": "decline",
+      "why": "Campaign to provision the gate stack across your other repos; not before the console and core gates are stable.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W3-T4": {
+      "action": "decline",
+      "why": "Later-wave Tauri iOS spike; not in current scope.",
+      "evidence": [
+        "task title"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W3-T7": {
+      "action": "decline",
+      "why": "Later-wave design-review skill whose dependencies (W3-T2, W1-T44) are unmerged; declining is retained and reversible.",
+      "evidence": [
+        "plain"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T2259": {
+      "action": "keep",
+      "why": "Already declined; nothing to do.",
+      "evidence": [],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "machine-judge:W1-T2635": {
+      "action": "keep",
+      "why": "Already declined; nothing to do.",
+      "evidence": [],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    },
+    "verify-human:W1-T3887": {
+      "action": "keep",
+      "why": "Already declined; its task is done.",
+      "evidence": [
+        "task status done"
+      ],
+      "obsolete": false,
+      "generatedAt": "2026-10-13T01:34:03+00:00",
+      "source": "operator-session-seed"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+// @source-text-subject: this census classifies actual git call sites in shipped source.
 /**
  * W1-T6121 — RUN-TASK'S GIT CALLS INTO A WORKER WORKTREE GO THROUGH THE LEAF.
  *
@@ -155,6 +156,7 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
   const text = readFileSync(SOURCE, "utf8");
   const { raw, leaf, declared } = sitesByDeclaration(text);
+  const proofSites = sitesByDeclaration(readFileSync(fileURLToPath(new URL("../src/lib/check-proof.ts", import.meta.url)), "utf8"));
 
   it("the census sees the file: a positive control on its own pattern", () => {
     const total = [...raw.values()].reduce((a, b) => a + b, 0);
@@ -176,6 +178,7 @@ describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS
   it("every function that addresses a worker or reviewer tree calls the leaf and spawns no raw git", () => {
     const failures: string[] = [];
     for (const name of CONVERTED) {
+      const { raw, leaf, declared } = ["buildBaseProofDir", "removeBaseProofWorktree"].includes(name) ? proofSites : sitesByDeclaration(text);
       if (!declared.has(name)) failures.push(`${name}: not found`);
       else if (!leaf.has(name)) failures.push(`${name}: does not call the hardened leaf`);
       else if (raw.has(name)) failures.push(`${name}: still holds ${raw.get(name)} raw git site(s)`);

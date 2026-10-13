@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (\"Go ahead with the filing\")"
   plan_refs: [W1-T6404, W1-T5492, W1-T1223, W1-T5920, W1-T4908, W1-T1052, W1-T1079, W1-T8575, W1-T7747, W1-T7735]
   files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
