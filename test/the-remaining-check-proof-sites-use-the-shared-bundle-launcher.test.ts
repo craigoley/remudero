@@ -5,6 +5,7 @@
 // run-task's proofRepairRoundRefusalInWorktree and runPreflightProofs) against a fixture tree whose check-proof
 // entry records the node loader flags it ran under, its arguments and its cwd. No assertion reads the argv text.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,24 +13,9 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { defaultProofRunner, checkProofLaunchArgv } from "../src/lib/pr-open.js";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { proofRepairRoundRefusalInWorktree, runPreflightProofs } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-// run-task's two sites are the REAL callers under test, but this suite must not become one more direct
-// importer of src/run-task.ts: scripts/affected-reach-baseline.json (W1-T5702) is a shrink-only ceiling on
-// those, and it cannot be raised. The module is therefore loaded at run time by a computed specifier.
-const RUN_TASK_FILE = ["run-task", "ts"].join(".");
-interface RunTaskSites {
-  proofRepairRoundRefusalInWorktree(input: {
-    worktreePath: string; roundStartSha: string | undefined; stageable: readonly string[]; proofs: readonly string[];
-    childRoot?: string;
-  }): unknown;
-  runPreflightProofs(repo: string, deps: Record<string, unknown>): { ok: boolean; steps: unknown };
-}
-const { proofRepairRoundRefusalInWorktree, runPreflightProofs } = (await import(
-  pathToFileURL(join(REPO_ROOT, "src", RUN_TASK_FILE)).href
-)) as RunTaskSites;
 const NAME = "check-proof-main";
 const SOURCE = "src/check-proof-main.ts";
 const MARK = "FIXTURE-BUNDLE-MARK";
@@ -72,16 +58,22 @@ async function fixtureTree(variant: Variant): Promise<string> {
   return root;
 }
 
-/** A shared-fixture git tree whose HEAD is one test-file commit past origin/main, for the proof-repair round. */
-function proofRoundTree(): { dir: string; start: string } {
-  const repo = gitRepo({ kind: "remaining-proof-round" });
-  const start = repo.git("rev-parse", "HEAD");
-  repo.git("update-ref", "refs/remotes/origin/main", start);
-  mkdirSync(join(repo.dir, "test"));
-  writeFileSync(join(repo.dir, "test", "x.test.ts"), "// x\n");
-  repo.git("add", ".");
-  repo.git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "test edit");
-  return { dir: repo.dir, start };
+/** A git repository whose HEAD is one test-file commit past origin/main, for the proof-repair round. */
+function gitWorktree(): { dir: string; start: string } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-remaining-proof-wt-"));
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], {
+      cwd: dir, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+    }).trim();
+  git("init", "-q");
+  writeFileSync(join(dir, "a.txt"), "a\n");
+  git("add", "."); git("commit", "-q", "-m", "base");
+  const start = git("rev-parse", "HEAD");
+  git("update-ref", "refs/remotes/origin/main", start);
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "x.test.ts"), "// x\n");
+  git("add", "."); git("commit", "-q", "-m", "test edit");
+  return { dir, start };
 }
 
 type Site = (root: string, outFile: string) => { cwd: string; baseSha?: string };
@@ -96,7 +88,7 @@ const prOpenSite: Site = (root) => {
 
 /** run-task's proof-repair gate: the real spawn in the round's worktree, with an explicit child root. */
 const proofRepairSite: Site = (root) => {
-  const { dir, start } = proofRoundTree();
+  const { dir, start } = gitWorktree();
   const refusal = proofRepairRoundRefusalInWorktree({
     worktreePath: dir, roundStartSha: start, stageable: ["test/x.test.ts"], proofs: [PROOF], childRoot: root,
   });
@@ -110,7 +102,7 @@ const preflightSite: Site = (root) => {
   const out = runPreflightProofs(repo, {
     childRoot: root,
     spawn: defaultPreflightSpawn,
-    git: (args: string[]) => (args[0] === "log" ? "body" : args[0] === "merge-base" ? `${BASE}\n` : "headsha\n"),
+    git: (args) => (args[0] === "log" ? "body" : args[0] === "merge-base" ? `${BASE}\n` : "headsha\n"),
     resolveCriteria: () => [{ proof: PROOF }],
   });
   assert.equal(out.ok, true, JSON.stringify(out.steps));
