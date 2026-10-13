@@ -165,7 +165,31 @@ test("W1-T8514: a priority reservation releases on the measured backfill bound",
     { ids: ["C", "W"], released: ["holder_outran_history"] });
 });
 
-test("W1-T8514: a priority deferral logs dispatch.deferred_for_priority with the waiting task and paths", { timeout: 5_000 }, async () => {
+test("W1-T8514: a released priority reservation logs dispatch.priority_reservation_released and starts the backfill", { timeout: 5_000 }, async () => {
+  // C measured 1 minute; the holder A measured 30 and has run milliseconds, so C finishes strictly before W could start.
+  const history = (): string[] => {
+    const end = Date.now();
+    return [["C", 1], ["A", 30]].flatMap(([taskId, minutes]) => [
+      JSON.stringify({ step: "run.start", run_id: `h-${taskId}`, task_id: taskId, ts: new Date(end - Number(minutes) * 60_000).toISOString() }),
+      JSON.stringify({ step: "verdict", run_id: `h-${taskId}`, task_id: taskId, ts: new Date(end).toISOString(), verdict: "merged" }),
+    ]);
+  };
+  const W = task("W", ["src/x.ts", "src/y.ts"], 1, ["B"]);
+  const C = task("C", ["src/y.ts"], 2, ["B"]);
+  const h = refillHarness([W, C], history);
+  try {
+    await h.ready;
+    await h.freeLane();
+    assert.deepEqual(h.started, ["A", "B", "C"], "the released backfill takes the freed lane");
+    const rows = h.rows.filter((r) => r.step === "dispatch.priority_reservation_released");
+    assert.ok(rows.length > 0, "a release row is written");
+    assert.deepEqual(rows[0].extra, { task: "C", waiting_task: "W", reason: "finishes_before_waiting_start" });
+  } finally {
+    await h.finish();
+  }
+});
+
+test("W1-T8514: a priority deferral logs dispatch.deferred_for_priority with the waiting task and paths",{ timeout: 5_000 }, async () => {
   const W = task("W", ["src/x.ts", "src/y.ts"], 1, ["B"]);
   const C = task("C", ["src/y.ts"], 2, ["B"]);
   const h = refillHarness([W, C], longRunHistory);
