@@ -529,6 +529,21 @@ jobs:
           path: ${{ runner.temp }}/test-duration
           retention-days: 1
           if-no-files-found: ignore
+      - name: Collect the fold debt main's ceiling gate filed (W1-T7853)
+        if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/fold-debt"
+          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
+      - name: Upload the fold debt main's ceiling gate filed (W1-T7853)
+        if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-md-fold-debt-main
+          path: ${{ runner.temp }}/fold-debt
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Generate the console plan-index artifact (W1-T4432)
         if: ${{ matrix.shard == '1' }}
         run: node scripts/generate-plan-index.mjs --out plan/plan-index.json
@@ -1103,6 +1118,23 @@ jobs:
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then export BASE_SHA="$GATE_BASE"; fi
           npm run --silent claude-md-budget-ratchet
+
+      - name: Collect the fold debt this run filed (W1-T7853)
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/fold-debt"
+          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
+
+      - name: Upload the fold debt this run filed (W1-T7853)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-md-fold-debt
+          path: ${{ runner.temp }}/fold-debt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: jscpd-gate (duplication ceiling)
         id: jscpd-gate
