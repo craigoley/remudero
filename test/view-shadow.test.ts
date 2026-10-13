@@ -419,6 +419,7 @@ test("worker generation binding qualifies first status build and preserves captu
   assert.equal(prepared?.paired?.legacy.qualificationGeneration, generation);
   assert.equal(ticker.shadow(prepared!), true);
   const current = () => Object.values(JSON.parse(readFileSync(path, "utf8")) as Record<string, ViewShadowState>).find((s) => s.qualificationGeneration === generation)!;
+  assert.ok(current(), "the native comparator persists a receipt for the declared producer generation");
   assert.equal(current().samples, 1);
   const missing = { ...prepared!, paired: { ...prepared!.paired!, qualificationGeneration: undefined } };
   ticker.shadow(missing);
