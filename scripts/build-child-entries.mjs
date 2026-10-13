@@ -9,22 +9,31 @@
 //   node scripts/build-child-entries.mjs [--root <dir>]          build; exit 1 loudly on any failure
 //   node scripts/build-child-entries.mjs [--root <dir>] --check  exit 0 iff every bundle is current
 //
-// No spawn site runs a bundle yet. That switch is a follow-up task filed in the ADR.
+// W1-T8775: the check-proof spawn site in src/lib/plan-pr-emitter.ts runs a bundle through
+// src/lib/child-entry-argv.ts when childEntryIsCurrent holds, and tsx otherwise.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The child entries this build emits. W1-T7728's narrow check-proof entry joins when it lands. */
-export const CHILD_ENTRIES = Object.freeze([{ name: "run-task", source: "src/run-task.ts" }]);
+/** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. */
+export const CHILD_ENTRIES = Object.freeze([
+  { name: "run-task", source: "src/run-task.ts" },
+  { name: "check-proof-main", source: "src/check-proof-main.ts" },
+]);
 /** Output directory, relative to the tree root. It lies under the gitignored `dist/`. */
 export const OUT_DIR = "dist/child-entries";
 export const MANIFEST_NAME = "manifest.json";
 /** Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. */
-export const RECIPE_VERSION = 1;
-/** Inputs besides `src/` that change what a bundle contains. A missing file hashes as absent. */
-export const HASHED_ROOT_FILES = Object.freeze(["package-lock.json", "package.json", "tsconfig.json"]);
+export const RECIPE_VERSION = 2;
+/** The manifest layout this file writes and the only one {@link childEntryIsCurrent} accepts (2: per-entry `sha256`). */
+export const MANIFEST_SCHEMA = 2;
+/**
+ * Inputs besides `src/` that change what a bundle contains. A missing file hashes as absent. This script is one:
+ * src/lib/child-entry-argv.ts imports it, so a bundle carries its own copy of this validation.
+ */
+export const HASHED_ROOT_FILES = Object.freeze(["package-lock.json", "package.json", "scripts/build-child-entries.mjs", "tsconfig.json"]);
 
 const SELF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -117,6 +126,9 @@ function bundleBanner(bundleDir, entryPath) {
   ].join("\n");
 }
 
+/** SHA-256 of a bundle's bytes: a source hash says what a bundle was built FROM, never what the file now holds. */
+export const payloadDigest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 function writeAtomic(path, text) {
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, text);
@@ -151,13 +163,13 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
       define: { "import.meta.url": "__rmd_module_url" },
       plugins: [moduleUrlPlugin(bundleDir)],
     });
-    const bytes = existsSync(outfile) ? statSync(outfile).size : 0;
-    if (bytes === 0) throw new Error(`child entry ${entry.name}: esbuild reported success but wrote no bundle at ${outfile}`);
-    built.push({ name: entry.name, source: entry.source, bundle, bytes });
+    const payload = existsSync(outfile) ? readFileSync(outfile) : Buffer.alloc(0);
+    if (payload.length === 0) throw new Error(`child entry ${entry.name}: esbuild reported success but wrote no bundle at ${outfile}`);
+    built.push({ name: entry.name, source: entry.source, bundle, bytes: payload.length, sha256: payloadDigest(payload) });
   }
   const hashAfter = sourceHash(root, esbuild.version);
   if (hashAfter !== hashBefore) throw new Error("src/ changed while the child entries were being built; rerun the build");
-  const manifest = { schema: 1, sourceHash: hashBefore, recipe: RECIPE_VERSION, esbuild: esbuild.version, entries: built };
+  const manifest = { schema: MANIFEST_SCHEMA, sourceHash: hashBefore, recipe: RECIPE_VERSION, esbuild: esbuild.version, entries: built };
   writeAtomic(join(bundleDir, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
@@ -165,27 +177,69 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
 /** The manifest at `<root>/<outDir>`, or null when there is none or it cannot be parsed. */
 export function readChildEntryManifest(root = SELF_ROOT, outDir = OUT_DIR) {
   const path = join(resolve(root, outDir), MANIFEST_NAME);
-  if (!existsSync(path)) return null;
   try {
+    // lstat first: opening a FIFO or device named manifest.json could block or misread.
+    if (!lstatSync(path).isFile()) throw new Error("not a regular file");
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
+    if (err?.code === "ENOENT") return null;
     process.stderr.write(`build-child-entries: unreadable manifest at ${path}: ${err.message}\n`);
     return null;
   }
 }
 
+const ENTRY_NAME = /^[a-z0-9][a-z0-9-]*$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const notCurrent = (reason) => ({ current: false, reason });
+
+/** A repo-relative source path: no absolute prefix, no empty, `.` or `..` segment, no backslash or NUL. */
+const isSafeRelativePath = (p) =>
+  typeof p === "string" && p.length > 0 && p.length < 256 && !isAbsolute(p) && !p.includes("\\") && !p.includes("\0") &&
+  p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+
 /**
- * Whether a bundle for `name` exists AND was built from the source now in `root`. Any doubt reads
- * as not current, so a caller falls back to tsx. A bundle is never assumed current.
+ * Whether a bundle for `name` exists, is the file the manifest vouches for, AND was built from the source
+ * now in `root`. Any doubt reads as not current, so a caller falls back to tsx: a bundle is never assumed
+ * current, and this never throws. The checks run cheapest first, and no bundle is opened before `lstat`
+ * says it is a regular file, so a FIFO or device cannot block the caller.
+ *
+ * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
+ * manifest passes. The store is instance-owned, which is the boundary this relies on.
  */
 export function childEntryIsCurrent(root, name, { outDir = OUT_DIR } = {}) {
-  root = resolve(root);
+  try {
+    return judgeChildEntry(resolve(root), name, outDir);
+  } catch (err) {
+    return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
+  }
+}
+
+function judgeChildEntry(root, name, outDir) {
+  if (typeof name !== "string" || !ENTRY_NAME.test(name)) return notCurrent("entry-name-invalid");
   const manifest = readChildEntryManifest(root, outDir);
-  if (!manifest) return { current: false, reason: "no-manifest" };
-  const entry = manifest.entries?.find((e) => e.name === name);
-  if (!entry) return { current: false, reason: "entry-not-built" };
-  const bundle = join(resolve(root, outDir), entry.bundle);
-  if (!existsSync(bundle)) return { current: false, reason: "bundle-missing" };
+  if (!manifest) return notCurrent("no-manifest");
+  if (typeof manifest !== "object" || Array.isArray(manifest)) return notCurrent("manifest-invalid");
+  if (manifest.schema !== MANIFEST_SCHEMA || manifest.recipe !== RECIPE_VERSION) return notCurrent("manifest-unsupported");
+  if (!Array.isArray(manifest.entries) || !SHA256_HEX.test(String(manifest.sourceHash))) return notCurrent("manifest-invalid");
+  const entry = manifest.entries.find((e) => e && typeof e === "object" && e.name === name);
+  if (!entry) return notCurrent("entry-not-built");
+  const declared = CHILD_ENTRIES.find((e) => e.name === name);
+  if (!isSafeRelativePath(entry.source) || (declared && declared.source !== entry.source)) return notCurrent("entry-source-invalid");
+  if (entry.bundle !== `${name}.mjs`) return notCurrent("bundle-name-invalid");
+  if (!Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !SHA256_HEX.test(String(entry.sha256))) return notCurrent("entry-metadata-invalid");
+  const dir = resolve(root, outDir);
+  const bundle = join(dir, entry.bundle);
+  let st;
+  try {
+    st = lstatSync(bundle);
+  } catch (err) {
+    if (err?.code === "ENOENT") return notCurrent("bundle-missing");
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) return notCurrent("bundle-not-regular-file");
+  if (realpathSync(bundle) !== join(realpathSync(dir), basename(bundle))) return notCurrent("bundle-path-escapes");
+  if (st.size !== entry.bytes) return notCurrent("bundle-size-mismatch");
+  if (payloadDigest(readFileSync(bundle)) !== entry.sha256) return notCurrent("bundle-digest-mismatch");
   const now = sourceHash(root);
   if (manifest.sourceHash !== now) return { current: false, reason: "source-changed", built: manifest.sourceHash, now };
   return { current: true, reason: "source-hash-match", bundle };

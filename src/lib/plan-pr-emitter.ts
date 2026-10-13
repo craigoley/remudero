@@ -1,4 +1,5 @@
-import { CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv } from "./check-proof.js";
+import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
+import { childEntryArgv } from "./child-entry-argv.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
  * `rmd approve`). Two flows once reinvented commit and PR-body hygiene independently and both tripped the
@@ -617,25 +618,39 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budg
 
 const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
 
+/** Where the check-proof child's launch kind goes: the caller's log hook, or one stderr line when it passed none. */
+export type CheckProofChildLog = (step: string, extra?: Record<string, unknown>) => void;
+const CHECK_PROOF_CHILD_NAME = "check-proof-main";
+const stderrChildLog: CheckProofChildLog = (step, extra) => {
+  process.stderr.write(`${step} ${Object.entries(extra ?? {}).map(([k, v]) => `${k}=${String(v)}`).join(" ")}\n`);
+};
+/** (W1-T8775) The check-proof child's node argv for `cwd`: the precompiled bundle when it is current, tsx otherwise. Logs which, and why. */
+function checkProofLaunchArgv(cwd: string, proof: string, log: CheckProofChildLog = stderrChildLog): string[] {
+  const launch = childEntryArgv(cwd, CHECK_PROOF_CHILD_NAME, CHECK_PROOF_CHILD_ENTRY, [proof, "--base", "origin/main"]);
+  log("plan_pr.check_proof_child", { kind: launch.kind, reason: launch.reason });
+  return launch.argv;
+}
+
 /** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited, budgeted. */
 const defaultPreflightChecks = {
   lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
     taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
   shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
-  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv(proof, "origin/main", cwd), budgetMs)),
+  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog): ProofCheckStatus =>
+    proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log), budgetMs)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
-export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number };
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number; log?: CheckProofChildLog };
 const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
     taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
   shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
-  checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
-    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv(proof, "origin/main", cwd), budgetMs)),
+  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log), budgetMs)),
 };
-export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number; log?: CheckProofChildLog };
 
 const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
 const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -816,7 +831,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
   };
   read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
   read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log)));
   read("pr-title", () => prTitleReading(input.title));
   read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
@@ -841,7 +856,7 @@ export async function planPrPreflightAsync(
   };
   await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
   await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log)));
   await read("pr-title", () => prTitleReading(input.title));
   await read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
