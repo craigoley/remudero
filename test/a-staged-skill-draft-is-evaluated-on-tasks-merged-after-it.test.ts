@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import { UNIT_TEST_DISCRIMINATES_NOTE, type CorpusProofOutcome, type ReplayIdleSignal } from "../src/lib/golden-corpus.js";
-import { loadProposalRegistry, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
+import { loadProposalRegistry, updateProposalRegistry, type Proposal, type SkillEvalRecord } from "../src/lib/inbox.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
 import type { LedgerLine } from "../src/lib/ledger.js";
 import type { PairedGrader } from "../src/lib/paired-trial.js";
@@ -260,6 +260,35 @@ test("skill-eval refuses an unstamped draft and names the workshop pass that sta
   assert.equal(row!.reason, "not-stamped");
   assert.match(String(row!.detail), /skill workshop's next pass stamp/);
   assert.deepEqual(fx.dispatched, []);
+});
+
+/** An eval already recorded on the proposal, by default a pass for the fixture's own draft text. */
+const recordedEval = (over: Partial<SkillEvalRecord> = {}): SkillEvalRecord => ({ draftSha256: sha256(draftMarkdown()),
+  heldOutSetHash: "h", taskIds: Object.keys(AFTER), verdict: "pass", reason: "held-out-benefit", detail: "d", delta: 1,
+  measurableTasks: 3, totalCostUsd: 15, evaluatedAt: "2026-10-12T00:00:00.000Z", ...over });
+
+test("skill-eval refuses to re-judge a text that already carries a recorded verdict", async () => {
+  const { skillEvalCommand } = await command();
+  for (const prior of [recordedEval(), recordedEval({ verdict: "refuse", reason: "no-benefit" })]) {
+    const fx = fixture({ proposal: { skillEval: prior } });
+    assert.equal(await skillEvalCommand(CONFIRM, fx.deps), 2);
+    const [row] = refusals(fx);
+    assert.equal(row!.reason, "already-judged");
+    assert.match(String(row!.detail), new RegExp(`already judged ${prior.verdict} \\(${prior.reason}\\).*launder`));
+    assert.deepEqual(fx.dispatched, []);
+    assert.deepEqual(fx.proposal()!.skillEval, prior, "the first verdict stands");
+  }
+});
+
+test("an unmeasured eval of the same text or a verdict on an earlier text does not block a new eval", async () => {
+  const { skillEvalCommand } = await command();
+  for (const prior of [recordedEval({ verdict: "refuse", reason: "too-few-measurable-tasks", measurableTasks: 0 }),
+    recordedEval({ draftSha256: sha256("an earlier text of the draft") })]) {
+    const fx = fixture({ proposal: { skillEval: prior } });
+    assert.equal(await skillEvalCommand(CONFIRM, fx.deps), 0);
+    assert.deepEqual(refusals(fx), []);
+    assert.equal(fx.proposal()!.skillEval!.evaluatedAt, iso(NOW_MS), "this run's verdict is recorded in place of the prior one");
+  }
 });
 
 test("a draft with no applies-to refuses as not injectable before the ledger is read", async () => {
