@@ -144,11 +144,8 @@ The parts of the decision:
   tree that ran the build) benefit. Everything else falls back to tsx, which
   is today's behaviour, so this step costs nothing in correctness.
 - Follow-up tasks this record files:
-  - the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) run the
-    bundle when `childEntryIsCurrent` holds, with tsx as the fallback. Done
-    for the plan-PR preflight (W1-T8775, see the update below); the three
-    other sites (`src/run-task.ts` twice, `src/lib/pr-open.ts`) are filed in
-    that task's typed follow-ups, not promised here;
+  - switch the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) to
+    the bundle when `childEntryIsCurrent` holds, with tsx as the fallback;
   - a hash-addressed bundle store shared by all worktrees at one source hash.
     It would be built once per main revision by the daemon, with the tree
     root passed in rather than taken from the bundle's location;
@@ -157,16 +154,3 @@ The parts of the decision:
     that starts them is bundled;
   - switch the garden and preflight children once their verbs are shown to
     start no self-URL worker.
-
-Update (W1-T8775): the first follow-up is done for the plan-PR preflight.
-`src/lib/child-entry-argv.ts` returns the bundle argv when
-`childEntryIsCurrent` holds and the tsx argv, with the reason, otherwise.
-`check-proof-main` joined `CHILD_ENTRIES`, and the manifest is schema 2 with
-a SHA-256 digest per entry. A source hash names what a bundle was built from,
-not what the file now holds, so `childEntryIsCurrent` also checks the entry's
-name and source, the `<name>.mjs` filename, a canonical regular-file path,
-size and digest. A digest is integrity, not authenticity: the store is
-instance-owned. The remaining `checkProofChildArgv` call sites stay on tsx:
-`src/run-task.ts` (two, around lines 15028 and 29868) and
-`src/lib/pr-open.ts:52`. Switching them is the open part of the first
-follow-up above, and is reported as a typed follow-up on W1-T8775.
