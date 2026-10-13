@@ -142,11 +142,11 @@ test("implementPromptParts feeds the SAME five named context parts renderImpleme
   // `ruleHeadlinesPart` argument), right after `doctrine` per design (ii)'s stable-prefix order.
   // W1-T3101: `skills` joins it on the SAME terms — empty here, and placed beside
   // `matched_learnings` because both are injected knowledge spending one budget. W1-T3880:
-  // `capability_context` joins LAST, just ahead of `task_body` — a RECORD of capability grants
+  // `capability_context` precedes `admitted_outside_files` and `task_body` — a RECORD of capability grants
   // used/refused earlier in the run, not injected knowledge. This list is the manifest's
   // contract, so a new part MUST be added here or the fingerprint stops describing what the
   // worker received; W1-T2761's edit above set that precedent.
-  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "skills", "capability_context", "task_body"]);
+  assert.deepEqual(names, ["doctrine", "rule_headlines", "task_claims", "recon", "operator_notes", "matched_learnings", "skills", "capability_context", "admitted_outside_files", "task_body"]);
 
   const manifest = buildPromptManifest(parts);
   assert.equal(manifest.find((r) => r.name === "recon")?.present, true);
