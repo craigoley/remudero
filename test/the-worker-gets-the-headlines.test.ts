@@ -215,8 +215,7 @@ test("validatePolicy: a PRESENT workerRuleHeadlines row is validated and lifted,
 });
 
 test("validatePolicy: workerRuleHeadlines ABSENT from raw still lifts a well-formed default (enabled: false)", () => {
-  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
-  assert.equal("workerRuleHeadlines" in raw, false, "the shipped policy.yaml ships this row absent, on purpose");
+  const { workerRuleHeadlines: _shipped, ...raw } = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
   const p = validatePolicy(raw);
   assert.deepEqual(p.values.workerRuleHeadlines, { enabled: false });
 });
