@@ -578,7 +578,7 @@ test("rmd approve becomes a pinned operator ruling that no ledger rotation can s
   writeFileSync(join(root, "plan", "tasks.yaml"), readFileSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"), "utf8"));
   rmSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"));
   try {
-    assert.equal(await approveCommand(["W1-T9110"], { config: { root } as never, clock: CLOCK }), 0);
+    assert.equal(await approveCommand(["W1-T9110"], { config: { root } as never, clock: CLOCK, planPath: join(root, "plan", "tasks.yaml") }), 0);
     assert.deepEqual([...readOperatorReleases(state)], ["W1-T9110"], "the operator's bit is kept outside the ledger");
     // Monolith records are never rewritten, so file the shard where the judge can pin it.
     writeFileSync(join(root, "plan", "tasks.d", "W1-T9110-x.yaml"), readFileSync(join(root, "plan", "tasks.yaml"), "utf8"));
