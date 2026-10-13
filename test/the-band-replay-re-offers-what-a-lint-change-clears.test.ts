@@ -269,6 +269,16 @@ test("W1-T9041: an unchanged not-ready draft escalates once by name", () => {
   assert.equal(delivered.length, 1, "delivered once per proposal per violation set");
   assert.ok(f.drafts()[SAME], "and never re-drafted while nothing changed");
 
+  // A guidance change re-drafts it once more; the same violation set back is not a second escalation.
+  const newGuidance = () => ["guidance after a relint.ts change"];
+  assert.deepEqual(f.pass(600, { escalate, guidance: newGuidance }).reoffered, [{ proposalId: SAME, reason: "guidance changed" }]);
+  f.cacheDraft(SAME);
+  f.append({ ts: at(610), task_id: SAME, step: "inbox.drafted", proposal_id: SAME, lint_clean: false, unresolved_violations: stuck.map((v) => v.message) });
+  const again = f.pass(620, { escalate, guidance: newGuidance });
+  assert.deepEqual(again.recorded, [{ proposalId: SAME, outcome: "redraft_not_ready" }]);
+  assert.deepEqual(again.escalated, []);
+  assert.equal(delivered.length, 1, "one escalation per proposal per violation set, across re-drafts");
+
   // ABSENT THE DEP, THE ROW IS STILL WRITTEN — once.
   const bare = fixture({ [SAME]: notReady(["[sizing] the old sizing message"]) });
   bare.cacheDraft(SAME);
