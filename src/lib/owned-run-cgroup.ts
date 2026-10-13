@@ -73,7 +73,7 @@ export function createOwnedRunCgroup(opts: { enabled?: boolean; parent?: string 
   const ownerStart = testSlotProcessFacts(process.pid)?.start, namespace = readPidNamespace();
   if (!ownerStart || !namespace) throw new Error("cgroup owner identity unavailable");
   const path = join(opts.parent, `rmd-eval-${randomUUID()}`);
-  mkdirSync(path); // Exclusive new leaf. Never adopts or removes a foreign cgroup.
+  mkdirSync(path, { mode: 0o700 }); // Exclusive private leaf, independent of an operator's permissive umask.
   verifyCgroup(path);
   const st = lstatSync(path), identity: OwnedRunCgroupIdentity = Object.freeze({ path, dev: st.dev, ino: st.ino, ownerPid: process.pid, ownerStart, namespace });
   const dir = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
