@@ -1,0 +1,60 @@
+- id: W1-T8917
+  title: "A FIX ROUND'S CENSUS CHECK RUNS ONLY THE SUITES ITS TARGET REPO HOLDS — fixCensusSnapshotSteps always runs core's affected-suite reach ratchet against the fix worktree, so in remudero-console it reads a scripts/affected-reach-baseline.json that repo never had, fails ENOENT, and refuses every console fix commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium # one guard in the fix rung's pre-push census check; core-repo behaviour is unchanged
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-12: forensics on remudero-console #2072 (CONSOLE-T124), operator: file the fixes in parallel"
+  plan_refs: [W1-T7182, W1-T5702, W1-T4693, W1-T8379]
+  files: [src/run-task.ts, test/a-fix-round-runs-only-the-pre-push-suites-its-target-repo-holds.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 to 10-13 on remudero-console #2072 (CONSOLE-T124), console ledger
+    (/mnt/rmd/remudero-console-state/state):
+      23:20:30Z fix.census_check outcome refused:
+        "census-precheck: this branch grows 1 census count(s) CI will refuse:
+           census-suite: test/the-affected-suite-reach-ratchet.test.ts fails — … error: "ENOENT: no such file or
+           directory, open '/home/node/Remudero/worktrees/sweep-CONSOLE-T124-1791846990416/scripts/affected-reach-baseline.json'""
+      23:20:30Z fix.commit_refused (same reason), then fix.done fix_outcome FIXED, subtype commit_refused.
+    The same refusal repeated on every round (23:28Z, 23:37Z, 23:48Z): four FIXED rounds never committed, and the
+    sweep closed #2072 at 00:16:25Z after eight no-diff rounds. The fix rounds' own report named the cause: the
+    precheck "is running the core-daemon suite … with its root resolved to a remudero-console worktree, where
+    scripts/affected-reach-baseline.json has never existed at head or base — it refuses every console PR
+    regardless of diff."
+    BLAST RADIUS: across the console ledger union, every fix.census_check since census snapshots began there
+    (first fix.census_snapshot 2026-10-12T17:55:57Z) is refused, 10 of 10, all on this ENOENT, across 2 tasks.
+    23 console fix.done rows carry subtype commit_refused since 17:59Z. No console fix round can land a commit.
+    ROOT CAUSE (src/run-task.ts fixCensusSnapshotSteps, ~18425): after `census-precheck.mjs --root <worktree>`
+    passes, the step ALWAYS runs `test/the-affected-suite-reach-ratchet.test.ts` from the harness checkout with
+    CENSUS_SNAPSHOT_ENV pointing at the target worktree's snapshot, and treats any non-zero exit as a census
+    refusal. That suite measures core's own src/run-task.ts importers against core's
+    scripts/affected-reach-baseline.json (W1-T5702); a consumer repo has neither, so the read throws ENOENT and
+    the refusal is unconditional. census-precheck.mjs itself passed for the console tree; only this extra run refuses.
+  design: |
+    1. src/run-task.ts fixCensusSnapshotSteps: run the reach suite only when the target tree holds the suite's
+       input, i.e. `scripts/affected-reach-baseline.json` exists in the snapshot's head or base paths (equivalently
+       on disk under `root`). A tree without it (a consumer repo) skips the reach run and logs
+       fix.census_check with outcome "passed" (or "partially-measured" when the precheck itself said so) plus
+       `skipped: [{ suite: "test/the-affected-suite-reach-ratchet.test.ts", reason: "target repo holds no
+       scripts/affected-reach-baseline.json" }]`, so the skip is visible, never silent.
+    2. A core tree (the baseline present) behaves exactly as today: the reach run still refuses growth.
+    3. No change to census-precheck.mjs's own suite table here; it already passes for a consumer root.
+    NOT IN SCOPE: the build worker's `rmd preflight --fast` reporting 24 of 26 steps failing in a console worktree
+    (core's step table run against a consumer repo, seen in CONSOLE-T124's build report); that is a separate defect.
+  acceptance:
+    - claim: "a fix round in a repo without scripts/affected-reach-baseline.json is not refused by the reach suite, and the skip is ledgered with its reason"
+      proof: 'grep: test("W1-T8917: a consumer-repo fix round skips the reach suite and records why" in test/a-fix-round-runs-only-the-pre-push-suites-its-target-repo-holds.test.ts'
+    - claim: "a fix round in a tree that holds the baseline still runs the reach suite and still refuses importer growth"
+      proof: 'grep: test("W1-T8917: a core fix round still runs the reach suite and refuses its growth" in test/a-fix-round-runs-only-the-pre-push-suites-its-target-repo-holds.test.ts'
+  falsifier: |
+    Call checkFixCensusSnapshot on a gitRepo() fixture shaped like remudero-console (src/, no
+    scripts/affected-reach-baseline.json) with a snapshot of a clean edit. At origin/main it returns a refusal whose
+    text contains "affected-reach-baseline.json" and "ENOENT"; with the change it returns no refusal and the
+    fix.census_check row names the skipped suite. Remove the guard and the first test reds; make the guard skip
+    unconditionally and the second (a fixture that holds the baseline and adds a src/run-task.ts importer) reds.
