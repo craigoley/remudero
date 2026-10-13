@@ -572,6 +572,7 @@ test("W1-T8868: a failed auto-resolve in the rejudge sweep puts the issue back o
 
 test("W1-T8868: the rejudge sweep skips an open issue that has no recorded triage subject", async () => {
   const f = sweepFixture(async () => "unused");
+  writeFileSync(f.lp, "");
   const url = f.url;
   const issues = {
     listOpen: (label: string) => label === NEEDS_HUMAN_LABEL ? [{ number: 41, url, title: "t", body: "**Task:** W1-TS\n" }] : [],
