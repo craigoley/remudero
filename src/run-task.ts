@@ -1509,6 +1509,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   bodyReviewContractDigest,
   reviewContractDigest,
@@ -8290,7 +8291,7 @@ async function runReview(args: {
   prUrl: string;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -8503,9 +8504,11 @@ async function runReview(args: {
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
-  const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
+  const preparedDecision = await preparePromisedReviewDecision({
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
+  const decisionDigest = preparedDecision.decisionDigest;
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8763,7 +8766,7 @@ async function runReview(args: {
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
-  const computed = await judgeReviewAsync(criteria, {
+  const computed = await preparedDecision.judge({
     diff,
     report,
     planLint,
@@ -14351,6 +14354,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: reviewTask,
       report: reviewReport,
+      implementationReport: workerTranscript(fixResult),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       reviewInputBody,
@@ -21070,9 +21074,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       prUrl,
       task,
       report: reviewReport,
-      implementationReport: fullText(impl),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
+      implementationReport: fullText(impl),
       settingsFile,
       config,
       budgetUsd,
