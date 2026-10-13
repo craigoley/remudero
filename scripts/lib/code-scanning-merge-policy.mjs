@@ -40,5 +40,12 @@ export function classifyCodeScanningMergePolicy(input) {
   if (latest.conclusion === 'success' && latest.output.title === 'No new alerts in code changed by this pull request' && summary === link) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-no-new-alerts'};
   }
+  // Security policy is not a quality ratchet: positively enumerated low/medium or
+  // quality-only findings do not become an unbounded hold. Unknown formats stay UNKNOWN.
+  const sections = summary.match(/^### New alerts in code changed by this pull request\n\n(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:(Non-security Alerts:\n(?: \* [1-9][0-9]* (?:error|warning|note)\n)+)\n)?\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);
+  if (['success','failure'].includes(latest.conclusion) && sections && (sections[1] || sections[2]) && sections[3] === link &&
+      /^[1-9][0-9]* new alerts?(?: including .+)?$/.test(latest.output.title ?? '')) {
+    return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
+  }
   return unknown('security-analysis-failed-or-unrecognized');
 }

@@ -37,3 +37,11 @@ test('latest exact-head security generation supersedes stale red but pending nev
  x.checks[1]!.status='completed';x.checks[0]!.conclusion='failure';x.checks[0]!.output={...x.checks[0]!.output,summary:' * 1 high\n'};
  assert.equal(classify(x).state,'safe');
 });
+test('security policy permits positively enumerated below-threshold findings but refuses unrecognized formats',()=>{
+ const x=clean();x.checks[0]!.conclusion='failure';x.checks[0]!.output.title='1 new alert';
+ const link=x.checks[0]!.output.summary;
+ x.checks[0]!.output.summary='### New alerts in code changed by this pull request\n\nSecurity Alerts:\n * 1 medium\n\n\nSee annotations below for details.\n\n'+link;
+ assert.equal(classify(x).state,'safe');
+ x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace('medium','critical');assert.equal(classify(x).state,'blocked');
+ x.checks[0]!.output.summary='something new';assert.equal(classify(x).state,'unknown');
+});

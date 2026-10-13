@@ -1,0 +1,72 @@
+import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES} from './code-scanning-merge-policy.mjs';
+
+export const SECURITY_MERGE_CONTEXT = 'security-merge-policy';
+export const SECURITY_METADATA_MAX_PAGES = 30; // BACKSTOP: complete evidence or UNKNOWN, never partial success.
+const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
+const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+
+/** Trusted API metadata ONLY. Caller supplies an authenticated, bounded HTTP reader;
+ * no PR checkout, uploaded artifact, evaluator, install, merge or dispatch is executed.
+ * SHIPS-UNWIRED: GitHub producer/protection activation awaits main adoption and smoke evidence.
+ */
+export async function readSecurityMergeDecision(target, read) {
+  if (target?.owner !== 'craigoley' || target.repo !== 'remudero' || !Number.isSafeInteger(target.prNumber) || target.prNumber < 1 ||
+      (target.expectedHead !== undefined && !sha(target.expectedHead))) return {decision:unknown('invalid-target')};
+  const prefix = `repos/${target.owner}/${target.repo}`, prPath = `${prefix}/pulls/${target.prNumber}`;
+  let headSha;
+  try {
+    const first = await read(prPath);
+    headSha = first?.head?.sha;
+    if (!sha(headSha) || first.state !== 'open' || first.base?.repo?.full_name !== 'craigoley/remudero' || first.base.ref !== 'main' ||
+        (target.expectedHead !== undefined && target.expectedHead !== headSha)) return {headSha,decision:unknown('head-unavailable-or-changed')};
+    if (!Number.isSafeInteger(first.changed_files) || first.changed_files < 1 || first.changed_files > CODE_SCANNING_MAX_CHANGED_FILES)
+      return {headSha,decision:unknown('changed-file-corpus-incomplete')};
+    const files = [];
+    for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
+      const rows = await read(`${prPath}/files?per_page=100&page=${page}`);
+      if (!Array.isArray(rows) || rows.length > 100) return {headSha,decision:unknown('changed-file-corpus-incomplete')};
+      files.push(...rows);
+      if (files.length >= first.changed_files || rows.length < 100) break;
+    }
+    if (new Set(files.map(file => file?.filename)).size !== files.length) return {headSha,decision:unknown('changed-file-corpus-ambiguous')};
+    const input = {prNumber:target.prNumber,headSha,observedHeadSha:headSha,filesComplete:files.length === first.changed_files,
+      filesHeadSha:headSha,changedFileCount:first.changed_files,files};
+    let decision = classifyCodeScanningMergePolicy(input);
+    if (decision.state !== 'not-applicable' && decision.reason === 'check-corpus-incomplete') {
+      const checks = [];let total;
+      for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
+        const corpus = await read(`${prefix}/commits/${headSha}/check-runs?filter=all&per_page=100&page=${page}`);
+        if (!Number.isSafeInteger(corpus?.total_count) || corpus.total_count < 0 || corpus.total_count > 100 * SECURITY_METADATA_MAX_PAGES ||
+            !Array.isArray(corpus.check_runs) || corpus.check_runs.length > 100 || (total !== undefined && total !== corpus.total_count))
+          return {headSha,decision:unknown('check-corpus-incomplete-or-changing')};
+        total = corpus.total_count;checks.push(...corpus.check_runs);
+        if (checks.length >= total || corpus.check_runs.length < 100) break;
+      }
+      decision = classifyCodeScanningMergePolicy({...input,checksComplete:checks.length === total,checksHeadSha:headSha,checks});
+    }
+    // Changes to head/base/file-count during pagination invalidate even a docs-only result.
+    const last = await read(prPath);
+    if (last?.head?.sha !== headSha || last.state !== 'open' || last.base?.sha !== first.base.sha || last.changed_files !== first.changed_files ||
+        last.base?.repo?.full_name !== first.base.repo.full_name || last.base.ref !== first.base.ref)
+      return {headSha,decision:unknown('head-or-base-changed-during-observation')};
+    return {headSha,decision};
+  } catch {
+    return {headSha,decision:unknown('security-api-unavailable')};
+  }
+}
+
+/** Publish only a SHA-scoped status, never merge permission for another head.
+ * UNKNOWN is an actionable error, not a forever-pending or success-shaped result.
+ * A subsequent CodeQL completion retries through events rather than runner polling.
+ */
+export async function publishSecurityMergeDecision(target, api, targetUrl) {
+  const observed = await readSecurityMergeDecision(target, api.read);
+  if (!sha(observed.headSha)) return {...observed,published:false};
+  const live = await api.read(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`);
+  if (live?.head?.sha !== observed.headSha || live.state !== 'open')
+    return {...observed,decision:unknown('head-changed-before-publication'),published:false};
+  await api.status({sha:observed.headSha,context:SECURITY_MERGE_CONTEXT,
+    state:observed.decision.mergeAllowed ? 'success' : observed.decision.state === 'blocked' ? 'failure' : 'error',
+    description:`${observed.decision.state}: ${observed.decision.reason}`.slice(0,140),target_url:targetUrl});
+  return {...observed,published:true};
+}
