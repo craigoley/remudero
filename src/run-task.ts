@@ -1,5 +1,5 @@
 import {
-  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
@@ -1021,6 +1021,7 @@ import {
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   bodyWithFailingProofAtOpen,
+  checkProofLaunchArgv,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -15028,7 +15029,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
+      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -29786,6 +29787,8 @@ export interface PreflightProofsDeps {
   git?: (args: string[]) => string;
   /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }
 
 /**
@@ -29868,7 +29871,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      checkProofChildArgv(proof, mergeBase),
+      checkProofLaunchArgv(proof, mergeBase, deps.childRoot),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed

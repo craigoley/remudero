@@ -1,4 +1,6 @@
-import { checkProofChildArgv } from "./check-proof.js";
+import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
+import { childEntryArgv } from "./child-entry-argv.js";
+import { fileURLToPath } from "node:url";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
 import { join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -36,6 +38,20 @@ export type OpenPullRequestProofRunner = (
 /** Use the harness runtime and entry even in consumer repositories without tsx or rmd. */
 const PROOF_NODE = process.execPath;
 
+/** The harness package root, never the cwd: a consumer repository carries neither the entry nor tsx. */
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+/**
+ * W1-T9279: the node argv that runs the narrow check-proof entry for `root` (default: this harness). The
+ * precompiled bundle runs under plain node when childEntryIsCurrent vouches for it; any other answer takes
+ * the tsx source entry, exactly as checkProofChildArgv did. `extra` follows `--base <base>`.
+ */
+export function checkProofLaunchArgv(
+  proof: string, base: string, root: string = HARNESS_ROOT, extra: readonly string[] = [],
+): string[] {
+  return childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra]).argv;
+}
+
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
 /** The filed task id carried by a worker's session branch, if this is a task branch. */
@@ -45,11 +61,13 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 }
 
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
-function proofArgs(proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE): string[] {
+function proofArgs(
+  proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
+): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
   if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
-  return [...checkProofChildArgv(proof, mergeBase), ...repo];
+  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo);
 }
 
 // A PR proof runs on the branch being published. The child already receives its exact base
@@ -63,8 +81,10 @@ export function defaultProofRunner(
   repoRoot: string,
   target?: SuiteRegistryTarget,
   bin: string = PROOF_NODE,
+  /** The tree whose check-proof entry runs; the harness itself unless a test supplies a fixture. */
+  harnessRoot: string = HARNESS_ROOT,
 ): OpenPullRequestProofResult {
-  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin), {
+  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot), {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: PROOF_MAX_BUFFER,
