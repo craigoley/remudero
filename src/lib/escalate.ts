@@ -1427,6 +1427,17 @@ function ledgerClassTier(e: Escalation, ledgerPath: string): TriageEvidence["cla
   return escalationClassSignal(lines.rows, e.class).tier;
 }
 
+/** The escalation as the later re-judge reads it back from the `issue_opened` row. An escalation whose
+ *  fields cannot be serialised is still raised: it simply carries no subject, so it is never re-judged. */
+function serialisableSubject(e: Escalation): { triage_subject?: Escalation } {
+  try {
+    return { triage_subject: JSON.parse(JSON.stringify(e)) as Escalation };
+  } catch {
+    // deliberate: an unserialisable escalation is raised without a subject (see above); nothing is lost but the re-judge.
+    return {};
+  }
+}
+
 /** Where a triaged escalation is routed when the triage ACTS (see {@link triageRoute}). */
 interface TriageRoute {
   queueLabel: string;
@@ -1476,7 +1487,6 @@ function* triageRoute(
     ...(outcome.kind === "auto_resolve" ? { triage_action: outcome.action } : {}),
     triage_decided_by: outcome.decidedBy,
     triage_reason: outcome.reason,
-    triage_subject: e,
   });
   if (mode !== "act") return { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" };
   if (outcome.kind === "deliver") return { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" };
@@ -1542,7 +1552,7 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
     queueLabel: route?.queueLabel ?? NEEDS_HUMAN_LABEL,
     step: route?.step ?? "escalation.issue_opened",
     ...(route?.firstComment ? { firstComment: route.firstComment } : {}),
-    extra: { ...route.extra, triage_subject: resolved },
+    extra: { ...route.extra, ...serialisableSubject(resolved) },
     messageCheck,
   });
   // W1-T4659: a new issue for a NEW head retires whichever older-head issue(s) it just superseded.

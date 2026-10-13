@@ -21136,7 +21136,7 @@ export async function runStaleEscalationRejudge(
         stateKey: c.stateKey,
         outcome: "demote-failed",
         decision: verdict.decision,
-        reason: `demotion failed: ${String(err)}`,
+        reason: verdict.reason,
       });
     }
   }

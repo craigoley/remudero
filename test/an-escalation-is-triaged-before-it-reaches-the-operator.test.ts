@@ -315,6 +315,7 @@ test("W1-T8868: a rekick requires a block and malformed policy cannot enable act
 
 test("W1-T8868: stale demotion awaits the write and records a rejected write", async () => {
   let completed = false;
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const lp = ledger();
   const result = await runStaleEscalationRejudge([{
     issueUrl: "https://github.com/craigoley/remudero/issues/1", escalation: esc(),
@@ -327,11 +328,13 @@ test("W1-T8868: stale demotion awaits the write and records a rejected write", a
       throw new Error("label write refused");
     },
     triage: { mode: "act" },
+    log: (step, extra) => { logged.push({ step, extra }); },
   });
   assert.equal(completed, true);
   assert.equal(result.demoted, 0);
   assert.equal(result.results[0].outcome, "demote-failed");
-  assert.match(result.results[0].reason!, /label write refused/);
+  assert.equal(result.results[0].reason, "can wait");
+  assert.match(String(logged.find((l) => l.step === "sweep.escalation_rejudge_demote_failed")?.extra?.error), /label write refused/);
 });
 
 test("W1-T8868: the runtime shares five actions across birth and stale issues", async () => {
