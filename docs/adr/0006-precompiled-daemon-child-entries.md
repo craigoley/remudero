@@ -144,8 +144,11 @@ The parts of the decision:
   tree that ran the build) benefit. Everything else falls back to tsx, which
   is today's behaviour, so this step costs nothing in correctness.
 - Follow-up tasks this record files:
-  - switch the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) to
-    the bundle when `childEntryIsCurrent` holds, with tsx as the fallback;
+  - the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) run the
+    bundle when `childEntryIsCurrent` holds, with tsx as the fallback. Done
+    for the plan-PR preflight (W1-T8775, see the update below); the three
+    other sites (`src/run-task.ts` twice, `src/lib/pr-open.ts`) are filed in
+    that task's typed follow-ups, not promised here;
   - a hash-addressed bundle store shared by all worktrees at one source hash.
     It would be built once per main revision by the daemon, with the tree
     root passed in rather than taken from the bundle's location;
@@ -164,5 +167,6 @@ not what the file now holds, so `childEntryIsCurrent` also checks the entry's
 name and source, the `<name>.mjs` filename, a canonical regular-file path,
 size and digest. A digest is integrity, not authenticity: the store is
 instance-owned. The remaining `checkProofChildArgv` call sites stay on tsx:
-`src/run-task.ts` (two) and `src/lib/pr-open.ts`. Switching them is the open
-part of the first follow-up above.
+`src/run-task.ts` (two, around lines 15028 and 29868) and
+`src/lib/pr-open.ts:52`. Switching them is the open part of the first
+follow-up above, and is reported as a typed follow-up on W1-T8775.
