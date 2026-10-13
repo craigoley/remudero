@@ -128,7 +128,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T4268 re-baselined implement: outputContractLines now splices GH_PR_EDIT_FALLBACK_LINES.
   // W1-T8800 also changes the unfinished subject to chore(checkpoint); real message gates and
   // continuation semantics are exercised by checkpoint-publication-contract.test.ts.
-  assert.equal(sha256(implement), "19f1d219a04af494e78482679983ca326542b53b10ae60567ee3acb299f33dc5");
+  // W1-T8834 adds admitted_outside_files; its proof titles and artifact generators are exercised
+  // by the-build-prompt-names-what-the-harness-admits-outside-files.test.ts.
+  assert.equal(sha256(implement), "d4c4279dd5c19ee98485488b2b4a8b6bb80d0ab685dd84c66f19a3d6a312fa71");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {
