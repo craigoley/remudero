@@ -75,6 +75,20 @@ test("read-only inspection effectiveness sees archive selection and live verdict
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test("read-only inspection help bypasses housekeeping without requiring configuration", () => {
+  const f = fixture();
+  try {
+    for (const flag of ["--help", "-h"]) {
+      const result = f.run(flag);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /rmd inspect --state-dir/);
+      assert.equal(result.stderr, "");
+      assert.deepEqual(readdirSync(f.home), []);
+      assert.equal(existsSync(f.stale), true);
+    }
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test("read-only inspection rejects unsupported options, relative targets and missing archives", () => {
   const f = fixture();
   try {

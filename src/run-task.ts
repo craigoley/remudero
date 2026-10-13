@@ -56877,11 +56877,9 @@ export async function main(
   if (inspectionArgv[0] === "inspect") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("inspect")));
-      await flushThenExit(0);
-      return;
+      return await flushThenExit(0);
     }
-    await flushThenExit(readOnlyInspectionCommand(inspectionArgv.slice(1)));
-    return;
+    return await flushThenExit(readOnlyInspectionCommand(inspectionArgv.slice(1)));
   }
   // Local inspection bypasses invocation logging, housekeeping, credentials and self-sync.
   if (inspectionArgv[0] === "authority" && inspectionArgv[1] === "inspect") {
