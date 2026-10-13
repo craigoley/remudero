@@ -1,0 +1,23 @@
+- id: W1-T9156
+  title: "GROUND: decompose ratification placeholders for W1-T3187 follow-up (master-plan scope)"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: "This W1-T9156 placeholder reserves space for forthcoming tasks tied to followup W1-T3187-1790474289117."
+      proof: "grep: W1-T9156 in MASTER-PLAN.md"
+  origin: "architect"
+
+  rationale: >-
+    From the 2026-09-27 follow-up on W1-T3187-1790474289117, ratified via rmd approve:
+  
+    follow-up harvest [research]: Locate the current product console’s escalation renderer and
+    disposition state, because the task record’s named renderer is absent from this checkout. —
+    from W1-T3187 (run W1-T3187-1790474289117)
