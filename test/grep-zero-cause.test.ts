@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyGrepZeroHit } from "../src/lib/grep-zero-cause.js";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 
 // ── W1-T1224: a zero-hit `grep:` proof must say WHY it read zero ────────────────────────────────
 //
@@ -94,7 +94,7 @@ test("same matcher, never a fixed string: a pattern carrying a bracket expressio
 });
 
 // ── Wiring: check-proof calls the classifier and prints what it says ─────────────────────────────
-// grep: classifyGrepZeroHit( in src/run-task.ts
+// grep: classifyGrepZeroHit( in src/lib/check-proof.ts
 
 test("check-proof: an absent path keeps today's exec_error verdict and exit code, and gains only a cause line", () => {
   const { code, out } = runCheckProof(["grep: anything in src/lib/w1-t1224-this-path-does-not-exist.ts"]);
@@ -105,7 +105,7 @@ test("check-proof: an absent path keeps today's exec_error verdict and exit code
 });
 
 test("check-proof: a genuine zero-hit grep prints a cause line derived from the file, and it is `absent` for a phrase in neither form", () => {
-  const { code, out } = runCheckProof([`grep: totally-unique-xyzzy-w1t1224-nowhere in src/run-task.ts`]);
+  const { code, out } = runCheckProof([`grep: totally-unique-xyzzy-w1t1224-nowhere in src/lib/check-proof.ts`]);
   assert.equal(code, CHECK_PROOF_EXIT.fail);
   assert.match(out, /^verdict:\s+fail/m);
   assert.match(out, /^cause:\s+absent/m);
@@ -114,7 +114,7 @@ test("check-proof: a genuine zero-hit grep prints a cause line derived from the 
 test("check-proof: the static BRE-metacharacter note is gated on an actual unescaped metacharacter, not printed on every non-pass", () => {
   // Ends in `$` (a BLOCKING metachar per breMetacharsIn/task-linter.ts) — a valid regex that
   // genuinely fails to match (no line in this file ends with this exact sentinel text).
-  const withMeta = runCheckProof(["grep: totally-unique-xyzzy-w1t1224-anchor$ in src/run-task.ts"]);
+  const withMeta = runCheckProof(["grep: totally-unique-xyzzy-w1t1224-anchor$ in src/lib/check-proof.ts"]);
   assert.equal(withMeta.code, CHECK_PROOF_EXIT.fail);
   assert.match(
     withMeta.out,
@@ -122,7 +122,7 @@ test("check-proof: the static BRE-metacharacter note is gated on an actual unesc
     "a pattern that genuinely carries `$` must still show the note",
   );
 
-  const noMeta = runCheckProof(["grep: totally-unique-xyzzy-w1t1224-plain in src/run-task.ts"]);
+  const noMeta = runCheckProof(["grep: totally-unique-xyzzy-w1t1224-plain in src/lib/check-proof.ts"]);
   assert.equal(noMeta.code, CHECK_PROOF_EXIT.fail);
   assert.doesNotMatch(
     noMeta.out,

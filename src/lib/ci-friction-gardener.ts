@@ -279,13 +279,26 @@ export function priceCiFrictionCauses(
     rows.set(key, row);
   }
   if (gateFireRates?.status === "measured") {
+    // A gate costs friction only when it fires: a green shard run is the price of running CI, and pricing EVERY run made
+    // the eight coverage-shard legs the eight costliest "causes" (W1-T7358 & co., 2,200–3,900 min each) with no round
+    // behind any of them. Matrix legs of one check are one cause (ciCheckFamily), as on the ci-log path. A report written
+    // before `redMinutes` existed prices nothing rather than mistaking total runtime for friction.
+    const families = new Map<string, { minutes: number; redRuns: number; redPrs: number }>();
     for (const g of gateFireRates.gates) {
-      if (g.minutes <= 0) continue;
-      const cause: CiFrictionCause = { kind: "check", name: g.gate };
+      if (!(g.redMinutes !== undefined && g.redMinutes > 0)) continue;
+      const family = families.get(ciCheckFamily(g.gate)) ?? { minutes: 0, redRuns: 0, redPrs: 0 };
+      family.minutes += g.redMinutes;
+      family.redRuns += g.redRuns;
+      // Summed over legs, so a PR red on two legs counts twice: context only, never the ranking.
+      family.redPrs += g.redPrs ?? 0;
+      families.set(ciCheckFamily(g.gate), family);
+    }
+    for (const [name, family] of families) {
+      const cause: CiFrictionCause = { kind: "check", name };
       const hand = ledgerRounds.filter((r) => r.pricing === "median-proxy" && ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(cause));
       const proxyMinutes = hand.reduce((sum, r) => sum + r.minutes * (nowMs === undefined ? 1 : ciFrictionRecencyWeight(r.at, nowMs)), 0);
-      rows.set(ciFrictionCauseKey(cause), { cause, minutes: g.minutes + proxyMinutes, rounds: g.redRuns + hand.length,
-        prSet: new Set(), prs: g.prs + new Set(hand.map((r) => r.pr)).size });
+      rows.set(ciFrictionCauseKey(cause), { cause, minutes: family.minutes + proxyMinutes, rounds: family.redRuns + hand.length,
+        prSet: new Set(), prs: family.redPrs + new Set(hand.map((r) => r.pr)).size });
     }
   }
   return [...rows.values()]
@@ -1157,10 +1170,13 @@ export function ciFrictionLadder(input: {
   const remedyRounds = remedyRoundsOf(input.rounds);
   const ladder: CiFrictionCauseLine[] = [];
   let next: CiFrictionInventory["next"];
-  for (const price of input.priced.slice(0, LADDER_DEPTH)) {
+  for (const [rank, price] of input.priced.entries()) {
+    // The scorecard reports the top LADDER_DEPTH causes, but a settled cause there (retired, open, measuring, escalated)
+    // never hides a draftable one below it: eight such causes used to leave `next` undefined and the gardener silent.
+    if (rank >= LADDER_DEPTH && next) break;
     const key = ciFrictionCauseKey(price.cause);
     const line: CiFrictionCauseLine = { cause: key, minutes: price.minutes, state: "draft" };
-    ladder.push(line);
+    if (rank < LADDER_DEPTH) ladder.push(line);
     if (price.cause.kind === "conflict") {
       line.state = "delegated";
       continue;

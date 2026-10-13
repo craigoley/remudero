@@ -33,7 +33,7 @@ const GIT = (over: Record<string, string> = {}) => (args: readonly string[]) => 
 function spawnWith(byProof: Record<string, number>) {
   const asked: string[] = [];
   const spawn = (_file: string, args: string[]) => {
-    const proof = args[args.indexOf("check-proof") + 1];
+    const proof = args[args.indexOf("--base") - 1];
     asked.push(proof);
     return { status: byProof[proof] ?? 0, stdout: "", stderr: "" };
   };

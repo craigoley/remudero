@@ -168,16 +168,16 @@ test("W1-T4435: the gardener prices each cause in PR minutes", () => {
   // The `ci-log` dispatch is entirely superseded by the refusal — no double count for one round.
   assert.equal(withRefusal.find((p) => p.cause.kind === "check" && p.cause.name === "ci-log"), undefined);
 
-  // A GateFireRateReport's own measured minutes price `check` causes by real gate name.
+  // A GateFireRateReport prices `check` causes by real gate name on its RED runs' minutes, never its total runtime.
   const gateFireRates: GateFireRateReport = {
     status: "measured",
     prsScanned: 5,
-    gates: [{ gate: "ci", prs: 3, runs: 6, redRuns: 2, refusals: 2, repaired: 2, overridden: 0, minutes: 40 }],
+    gates: [{ gate: "ci", prs: 3, runs: 6, redRuns: 2, refusals: 2, repaired: 2, overridden: 0, minutes: 40, redMinutes: 14, redPrs: 2 }],
     neverFired: [],
     alwaysFired: [],
   };
   const priced2 = priceCiFrictionCauses([], gateFireRates);
-  assert.deepEqual(priced2, [{ cause: { kind: "check", name: "ci" }, minutes: 40, rounds: 2, prs: 3 }]);
+  assert.deepEqual(priced2, [{ cause: { kind: "check", name: "ci" }, minutes: 14, rounds: 2, prs: 2 }]);
 
   // A run this cannot attribute to a pull request contributes no round, never a guess.
   assert.equal(runPrIndex([{ step: "pr.opened", run_id: "orphan", ts: "2026-09-24T00:00:00.000Z" }]).size, 0);
@@ -243,7 +243,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
     gateFireRates: () => ({
       status: "measured",
       prsScanned: 4,
-      gates: [{ gate: "ci", prs: 4, runs: 9, redRuns: 9, refusals: 9, repaired: 9, overridden: 0, minutes: 90 }],
+      gates: [{ gate: "ci", prs: 4, runs: 9, redRuns: 9, refusals: 9, repaired: 9, overridden: 0, minutes: 90, redMinutes: 90, redPrs: 4 }],
       neverFired: [],
       alwaysFired: [],
     }),
@@ -434,7 +434,7 @@ function frictionFixture(kind: string, land: GardenCheckout["land"], extra: Part
     gateFireRates: () => ({
       status: "measured",
       prsScanned: 19,
-      gates: [{ gate: "reviewer-unmet", prs: 19, runs: 26, redRuns: 26, refusals: 26, repaired: 26, overridden: 0, minutes: 465.7 }],
+      gates: [{ gate: "reviewer-unmet", prs: 19, runs: 26, redRuns: 26, refusals: 26, repaired: 26, overridden: 0, minutes: 465.7, redMinutes: 465.7, redPrs: 19 }],
       neverFired: [],
       alwaysFired: [],
     }),
@@ -543,7 +543,7 @@ test("a closed ci-friction filing is not repeated when its price changes", () =>
   }];
   fx.sources.gateFireRates = () => ({
     status: "measured", prsScanned: 20,
-    gates: [{ gate: "reviewer-unmet", prs: 20, runs: 27, redRuns: 27, refusals: 27, repaired: 27, overridden: 0, minutes: 500 }],
+    gates: [{ gate: "reviewer-unmet", prs: 20, runs: 27, redRuns: 27, refusals: 27, repaired: 27, overridden: 0, minutes: 500, redMinutes: 500, redPrs: 20 }],
     neverFired: [], alwaysFired: [],
   });
   fx.deps.prState = () => "closed";

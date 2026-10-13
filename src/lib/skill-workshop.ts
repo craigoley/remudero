@@ -654,6 +654,8 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   budget_omitted_names: string[];
   budget_chars: number;
   zero_selection: boolean;
+  /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
+  withheld_names?: string[];
 }
 
 export interface ObservedSkillSelection {
@@ -661,19 +663,33 @@ export interface ObservedSkillSelection {
   observation: SkillSelectionObservation;
 }
 
+/** Predeclared share of eligible runs on which each approved skill is withheld. Without it a skill
+ *  that fits the budget is selected on every eligible run and the report's control cohort is empty. */
+export const SKILL_WITHHOLDING_SHARE = 0.25;
+
+/** Seeded per-(run, skill) assignment, independent across skills and recomputable from the ledger. */
+export function skillWithheldForRun(runId: string, skillName: string, share: number = SKILL_WITHHOLDING_SHARE): boolean {
+  const digest = createHash("sha256").update(`${runId}\0${skillName}`).digest();
+  return digest.readUInt32BE(0) / 0x1_0000_0000 < share;
+}
+
 export function observeSkillSelection(
   skills: readonly InjectableSkill[],
   taskType: string,
   budgetChars: number,
   taskFiles?: readonly string[],
+  withhold?: (skillName: string) => boolean,
 ): ObservedSkillSelection {
   const want = taskType.toLowerCase();
   const taskTypeEligible = skills.filter((s) => s.appliesTo.includes(want));
   const pathFiltered = taskTypeEligible.filter((s) => !skillMatchesTaskFiles(s, taskFiles));
   const eligible = taskTypeEligible.filter((s) => !pathFiltered.includes(s));
+  // A withheld skill is neither rendered nor charged to the budget, so it frees room for the rest.
+  const withheld = withhold ? eligible.filter((s) => withhold(s.name)) : [];
+  const assigned = eligible.filter((s) => !withheld.includes(s));
   const selected: InjectableSkill[] = [];
   let spent = 0;
-  for (const s of eligible) {
+  for (const s of assigned) {
     const cost = s.body.length;
     if (spent + cost > budgetChars) continue;
     selected.push(s);
@@ -688,9 +704,10 @@ export function observeSkillSelection(
       approved_eligible_names: eligible.map((s) => s.name),
       path_filtered_names: pathFiltered.map((s) => s.name),
       selected_names: selectedNames,
-      budget_omitted_names: eligible.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
+      budget_omitted_names: assigned.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
+      ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
     },
   };
 }
@@ -747,6 +764,9 @@ export interface SkillEffectivenessReport {
   selected: SkillEffectivenessCohort;
   control: SkillEffectivenessCohort;
   harm_outcomes: readonly string[];
+  /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
+   *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
+  assignment: "randomized" | "observational";
 }
 
 type SkillLedgerRow = Record<string, unknown>;
@@ -772,7 +792,7 @@ export function buildSkillEffectivenessReport(
   skillName: string,
 ): SkillEffectivenessReport {
   const terminalOutcomeByRun = new Map<string, string>();
-  const selectionByRun = new Map<string, { selected: boolean }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
 
   for (const row of rows) {
     if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
@@ -786,13 +806,22 @@ export function buildSkillEffectivenessReport(
     ) continue;
     const eligible = stringArray(row.approved_eligible_names);
     if (!eligible.includes(skillName)) continue;
-    selectionByRun.set(row.run_id, { selected: stringArray(row.selected_names).includes(skillName) });
+    selectionByRun.set(row.run_id, {
+      selected: stringArray(row.selected_names).includes(skillName),
+      ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
+    });
   }
+
+  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
+  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
+  const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
+  const inArm = (o: { selected: boolean; withheld?: boolean }, treated: boolean): boolean =>
+    randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated;
 
   const buildCohort = (selected: boolean): SkillEffectivenessCohort => {
     const cohort = emptyCohort();
     for (const [runId, observation] of selectionByRun) {
-      if (observation.selected !== selected) continue;
+      if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
       const outcome = terminalOutcomeByRun.get(runId);
       if (!outcome) continue;
@@ -841,6 +870,7 @@ export function buildSkillEffectivenessReport(
     selected,
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
+    assignment: randomized ? "randomized" : "observational",
   };
 }
 
@@ -863,7 +893,13 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     renderCohort("selected", report.selected),
     renderCohort("control", report.control),
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
-    "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
+    report.assignment === "randomized"
+      ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
+        "selected is every other eligible run (intent to treat)."
+      : "assignment: observational — control is eligible runs on which the budget omitted the skill.",
+    report.assignment === "randomized"
+      ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
+      : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
   ].join("\n");
 }
 

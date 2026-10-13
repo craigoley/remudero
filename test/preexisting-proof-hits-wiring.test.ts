@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { buildBaseProofDir, type BaseProofDir } from "../src/run-task.js";
+import { buildBaseProofDir, type BaseProofDir } from "../src/lib/check-proof.js";
 import { execWhitelistedProof, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");

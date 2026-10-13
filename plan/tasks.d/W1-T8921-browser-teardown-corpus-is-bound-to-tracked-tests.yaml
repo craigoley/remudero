@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   priority: 2
-  origin: "operator#2026-10-13-separate-governed-corpus-repair. Amended 2026-10-13 on operator direction (\"Fix 11201 and keep going\"): the two unit-test proofs a test-only change cannot discriminate are repointed at changed lines"
+  origin: "operator#2026-10-13-separate-governed-corpus-repair. Amended 2026-10-13 on operator direction (\"Fix 11201 and keep going\"): the two unit-test proofs, stale at #11201's head 21efadde6, are repointed at changed lines"
   plan_refs: [W1-T5857, W1-T8801, W1-T2732]
   rationale: |
     W8801 exact045eb76e5e/actual51ae52d1b6 native jUQFKD completed FAILED:
@@ -34,12 +34,14 @@
     AMENDMENT 2026-10-13, READ on origin/main 6bd844ddb and #11201's head 21efadde6. The build
     (#11201) is red on proof-discrimination alone: both unit-test proofs pass at the head AND at
     the merge base 7b8bbbfcf, so `rmd check-proof --base` grades them executed_stale (exit 5),
-    reproduced locally at 21efadde6. That is structural, not a defect in the build. W1-T3098's
-    buildBaseProofDir copies a PR's ADDED test/** files into the base worktree so a new test can
-    re-run against old SOURCE, and this task's whole change is test-only: the new suite and its
-    helper are both added under test/, so the base run executes the same code and passes. No
-    build can pass those two proofs, and a worker may not edit its own task's proofs (Rule 15).
-    Both are repointed at lines only the change adds, each checked with the gate's own command at
+    reproduced locally at 21efadde6. W1-T3098's buildBaseProofDir copies a PR's ADDED test/**
+    files into the base worktree, so a new test that exercises only the new helper passes at base.
+    CORRECTION, same day: this amendment first said no build could pass those two proofs. That
+    was wrong. The build's own fix round (277b273e4, 02:49Z) made both discriminate by exercising
+    the modified, non-copied guard suite. At 277b273e4, `rmd check-proof --base 7b8bbbfcf`
+    reads both "discriminates" (exit 0). Restoring them here is refused by lint-plan's
+    proof-unit-test-unresolvable rule until their titles exist on main, so the grep proofs
+    below stay. They also discriminate at 277b273e4. Both were repointed at lines only the change adds, each checked with the gate's own command at
     21efadde6 against 7b8bbbfcf: the reader's `git ls-files -z -- test` corpus boundary in the new
     helper (exit 0, the file is absent at base), and the existing guard's delegation to the
     composed default in test/serve-browser-teardown.test.ts (1 hit at head, 0 at base). The two
