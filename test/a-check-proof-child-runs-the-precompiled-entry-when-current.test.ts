@@ -157,6 +157,34 @@ test("W1-T8775: a corrupted bundle payload falls back before execution", async (
   }
 });
 
+test("W1-T8775: a currency check that throws falls back to tsx and names why", () => {
+  const root = makeTree();
+  try {
+    const thrown = childEntryArgv(root, NAME, SOURCE, ARGS, () => {
+      throw new Error("boom: cannot read manifest");
+    });
+    assert.equal(thrown.kind, "tsx");
+    assert.equal(thrown.reason, "currency-check-unavailable: boom: cannot read manifest");
+    assert.equal(thrown.argv[0], "--import");
+    assert.equal(thrown.argv[2], join(root, SOURCE));
+    assert.deepEqual(thrown.argv.slice(3), ARGS);
+
+    // A non-Error throw is stringified, and a long message is cut to 80 characters.
+    const nonError = childEntryArgv(root, NAME, SOURCE, ARGS, () => {
+      throw "x".repeat(200); // eslint-disable-line no-throw-literal
+    });
+    assert.equal(nonError.kind, "tsx");
+    assert.equal(nonError.reason, `currency-check-unavailable: ${"x".repeat(80)}`);
+
+    // A check that answers (even "current" without a bundle path) is not the throwing arm.
+    const noBundle = childEntryArgv(root, NAME, SOURCE, ARGS, () => ({ current: true, reason: "source-hash-match" }));
+    assert.equal(noBundle.kind, "tsx");
+    assert.equal(noBundle.reason, "source-hash-match");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T8775: invalid bundle metadata and paths fall back safely", async () => {
   const copies: string[] = [];
   const { root, mod } = await builtTree();
