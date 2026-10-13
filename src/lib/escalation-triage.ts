@@ -145,12 +145,24 @@ export function triageEscalation(
   modelVerdict?: TriageModelVerdict,
 ): TriageOutcome {
   try {
+    if (!["BLOCKED", "MANUAL", "HARD_STOP", "GRILL"].includes(e.class) ||
+        [e.taskId, e.summary, e.detail, e.recommendation].some((value) => typeof value !== "string")) {
+      return { kind: "deliver", decidedBy: "rule", reason: "unreadable escalation input" };
+    }
     if (OPERATOR_OWNED.has(e.class)) {
       return { kind: "deliver", decidedBy: "rule", reason: `${e.class} is operator-owned by rule` };
     }
+    if (!evidence || typeof evidence !== "object" ||
+        (evidence.classTier !== undefined && !["issue", "digest", "board"].includes(evidence.classTier)) ||
+        (evidence.defaultApplies !== undefined && typeof evidence.defaultApplies !== "boolean") ||
+        (evidence.rekick !== undefined && (!evidence.rekick ||
+          typeof evidence.rekick.newFailureSinceLastStrike !== "boolean" ||
+          !Number.isInteger(evidence.rekick.priorRekicks) || evidence.rekick.priorRekicks < 0))) {
+      return { kind: "deliver", decidedBy: "rule", reason: "unreadable triage evidence" };
+    }
     const byRule = ruleOutcome(e, evidence);
     if (byRule) return byRule;
-    if (modelVerdict?.decision === "demote") {
+    if (modelVerdict?.decision === "demote" && typeof modelVerdict.reason === "string") {
       return { kind: "digest", decidedBy: "model", reason: modelVerdict.reason };
     }
     if (modelVerdict?.decision === "deliver") {
@@ -160,7 +172,7 @@ export function triageEscalation(
   } catch (err) {
     return {
       kind: "deliver",
-      decidedBy: "default",
+      decidedBy: "rule",
       reason: `triage failed (${err instanceof Error ? err.message : String(err)}) — delivering`,
     };
   }
@@ -207,12 +219,13 @@ export interface TriagePass {
 }
 
 export function newTriagePass(max: number = DEFAULT_MAX_AUTO_RESOLVES_PER_PASS): TriagePass {
-  return { max, used: 0 };
+  return { max: Number.isInteger(max) && max >= 0 ? Math.min(max, DEFAULT_MAX_AUTO_RESOLVES_PER_PASS) : 0, used: 0 };
 }
 
 /** Take one auto-resolve from the pass; false once the cap is spent. */
 export function takeAutoResolve(pass: TriagePass): boolean {
-  if (pass.used >= pass.max) return false;
+  if (!Number.isInteger(pass.used) || pass.used < 0 || !Number.isInteger(pass.max) ||
+      pass.used >= Math.min(pass.max, DEFAULT_MAX_AUTO_RESOLVES_PER_PASS)) return false;
   pass.used += 1;
   return true;
 }

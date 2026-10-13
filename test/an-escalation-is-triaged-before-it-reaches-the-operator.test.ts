@@ -9,6 +9,8 @@ import {
   escalate,
   escalateWithJudge,
   tryEscalate,
+  escalateAsync,
+  configureEscalationTriage,
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
@@ -18,6 +20,7 @@ import {
   parseEscalationTriagePolicy,
   triageEscalation,
 } from "../src/lib/escalation-triage.js";
+import { runStaleEscalationRejudge } from "../src/lib/sweep.js";
 
 function ledger(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-")), "ledger.ndjson");
@@ -147,12 +150,12 @@ test("W1-T8868: an escalation is triaged before it reaches the operator", async 
     ledgerPath: alp,
     runId: "r",
     judge: async () => ({ decision: "deliver", reason: "x" }),
-    triage: { mode: "act", execute: { plan_amendment_pr: (e) => (ran.push(e.taskId), "opened plan-only PR #1; decline it to undo") } },
+    triage: { mode: "act", pass: newTriagePass(), execute: { plan_amendment_pr: (e) => (ran.push(e.taskId), "opened plan-only PR #1; decline it to undo") } },
   });
   assert.deepEqual(ran, ["W1-TS"]);
   assert.ok(actIssues.calls[0].labels.includes(FLEET_NOTICE_LABEL));
   assert.match(actIssues.comments[0], /plan_amendment_pr.*opened plan-only PR #1/s);
-  assert.ok(rows(alp).some((r) => r.step === "escalation.auto_resolved" && r.triage_action === "plan_amendment_pr"));
+  assert.ok(rows(alp).some((r) => r.step === "escalation.auto_resolve_started" && r.triage_action === "plan_amendment_pr"));
 
   // an unwired executor, a failing executor and a spent pass cap all fall back to needs-human
   const unwired = gateway();
@@ -163,7 +166,7 @@ test("W1-T8868: an escalation is triaged before it reaches the operator", async 
     issues: failing,
     ledgerPath: ledger(),
     runId: "r",
-    triage: { mode: "act", execute: { plan_amendment_pr: () => { throw new Error("nope"); } } },
+    triage: { mode: "act", pass: newTriagePass(), execute: { plan_amendment_pr: () => { throw new Error("nope"); } } },
   });
   assert.ok(failing.calls[0].labels.includes(NEEDS_HUMAN_LABEL));
   const pass = newTriagePass(1);
@@ -190,4 +193,89 @@ test("W1-T8868: an escalation is triaged before it reaches the operator", async 
     mode: "act",
     maxAutoResolvesPerPass: 5,
   });
+});
+
+test("W1-T8868: a judged producer inherits the installed policy and executors", async () => {
+  const issues = gateway();
+  let executed = 0;
+  configureEscalationTriage(() => ({
+    mode: "act", pass: newTriagePass(),
+    execute: { plan_amendment_pr: () => { executed++; return "amendment opened; decline to undo"; } },
+  }));
+  try {
+    await escalateWithJudge(staleProof(), {
+      issues, ledgerPath: ledger(), runId: "r", judge: async () => ({ decision: "deliver", reason: "x" }),
+    });
+    assert.equal(executed, 1);
+    assert.ok(issues.calls[0].labels.includes(FLEET_NOTICE_LABEL));
+  } finally {
+    configureEscalationTriage(undefined);
+  }
+});
+
+test("W1-T8868: malformed evidence and model output deliver", () => {
+  assert.equal(triageEscalation(staleProof(), { rekick: { priorRekicks: NaN, newFailureSinceLastStrike: true } }).kind, "deliver");
+  assert.equal(triageEscalation(esc(), {}, { decision: "demote", reason: undefined } as never).kind, "deliver");
+});
+
+test("W1-T8868: shadow delivers model demotions and hard stops without asking the model", async () => {
+  for (const cls of ["BLOCKED", "MANUAL", "HARD_STOP"] as const) {
+    const issues = gateway();
+    let judged = 0;
+    const lp = ledger();
+    await escalateWithJudge(esc({ class: cls }), {
+      issues, ledgerPath: lp, runId: "shadow",
+      judge: async () => { judged++; return { decision: "demote", reason: "can wait" }; },
+    });
+    assert.ok(issues.calls[0].labels.includes(NEEDS_HUMAN_LABEL));
+    assert.equal(judged, cls === "BLOCKED" ? 1 : 0);
+    assert.equal(rows(lp).find((r) => r.step === "escalation.triaged")?.triage_outcome,
+      cls === "BLOCKED" ? "digest" : "deliver");
+  }
+});
+
+test("W1-T8868: deterministic rules run before the judge and async bare producers ask for the remainder", async () => {
+  let judged = 0;
+  const judge = async () => { judged++; return { decision: "demote", reason: "can wait" } as const; };
+  const issues = gateway();
+  const lp = ledger();
+  await escalateWithJudge(staleProof(), { issues, ledgerPath: lp, runId: "r", judge });
+  assert.equal(judged, 0);
+  await escalateAsync(esc(), { issues, ledgerPath: lp, runId: "r", triage: { judge } });
+  assert.equal(judged, 1);
+  assert.equal(rows(lp).filter((r) => r.step === "escalation.triaged")[1].triage_outcome, "digest");
+});
+
+test("W1-T8868: unreadable evidence cannot digest and an absent pass cannot authorize an action", async () => {
+  const issues = gateway();
+  const lp = ledger();
+  await escalateWithJudge(esc(), {
+    issues, ledgerPath: lp, runId: "r", judge: async () => ({ decision: "demote", reason: "can wait" }),
+    triage: { mode: "act", evidence: () => { throw new Error("unreadable history"); } },
+  });
+  assert.ok(issues.calls[0].labels.includes(NEEDS_HUMAN_LABEL));
+  assert.match(String(rows(lp).find((r) => r.step === "escalation.triaged")?.triage_reason), /unreadable history/);
+  let executed = 0;
+  escalate(staleProof(), {
+    issues, ledgerPath: lp, runId: "r", triage: {
+      mode: "act", execute: { plan_amendment_pr: () => { executed++; return "done"; } },
+    },
+  });
+  assert.equal(executed, 0);
+  assert.ok(issues.calls[1].labels.includes(NEEDS_HUMAN_LABEL));
+});
+
+test("W1-T8868: the stale rejudge records shadow triage without demoting", async () => {
+  const lp = ledger();
+  let demoted = 0;
+  const result = await runStaleEscalationRejudge([{
+    issueUrl: "https://github.com/craigoley/remudero/issues/1", escalation: esc(),
+    ageMs: 7 * 60 * 60 * 1000, referentStateNow: "still open", siblingSummaries: [], stateKey: "head1",
+  }], {
+    ledgerPath: lp, runId: "sweep", judge: async () => ({ decision: "demote", reason: "can wait" }),
+    demote: () => { demoted++; }, triage: { mode: "shadow" },
+  });
+  assert.equal(demoted, 0);
+  assert.equal(result.demoted, 0);
+  assert.equal(rows(lp).find((r) => r.step === "escalation.triaged")?.triage_outcome, "digest");
 });

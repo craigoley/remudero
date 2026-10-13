@@ -236,6 +236,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
+import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
   rollupFromRest,
@@ -20823,6 +20824,11 @@ export interface StaleEscalationRejudgeOptions {
    *  exactly like a fresh install with no history yet; this never widens who gets judged, only
    *  whether a given observed state is judged MORE THAN ONCE. */
   alreadyJudgedStateKeys?: ReadonlySet<string>;
+  triage?: {
+    mode: EscalationTriageMode;
+    evidence?: (e: Escalation) => TriageEvidence;
+    autoResolve?: (candidate: StaleEscalationRejudgeCandidate, action: TriageAction) => Promise<void>;
+  };
 }
 
 /** One candidate's outcome this pass. */
@@ -20922,12 +20928,26 @@ export async function runStaleEscalationRejudge(
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
     // birth judge was never asked either.
+    let evidence: TriageEvidence = {};
+    let evidenceError: string | undefined;
+    try {
+      evidence = deps.triage?.evidence?.(c.escalation) ?? {};
+    } catch (err) {
+      evidenceError = String(err);
+    }
+    const first = triageEscalation(c.escalation, evidence);
     let verdict: EscalationJudgeVerdict;
-    if (isEscalationJudgeExempt(c.escalation)) {
+    if (evidenceError !== undefined) {
+      verdict = { decision: "deliver", reason: `triage evidence unreadable (${evidenceError})` };
+    } else if (isEscalationJudgeExempt(c.escalation)) {
       verdict = { decision: "deliver", reason: `${c.escalation.class} is operator-owned by rule — exempt from judgement` };
+    } else if (first.decidedBy !== "default") {
+      verdict = { decision: first.kind === "digest" ? "demote" : "deliver", reason: first.reason };
     } else {
       try {
-        verdict = await deps.judge(c);
+        const proposed = await deps.judge(c);
+        verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
+          ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
@@ -20938,6 +20958,30 @@ export async function runStaleEscalationRejudge(
             `re-judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
             "leave needs-human, never silently hiding work from the operator",
         };
+      }
+    }
+
+    const triaged = evidenceError !== undefined
+      ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
+      : triageEscalation(c.escalation, evidence, verdict);
+    if (!deps.dryRun && deps.triage) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: c.escalation.taskId, step: "escalation.triaged",
+        class: c.escalation.class, issue_url: c.issueUrl, state_key: c.stateKey,
+        triage_mode: deps.triage.mode, triage_outcome: triaged.kind,
+        triage_decided_by: triaged.decidedBy, triage_reason: triaged.reason,
+        ...(triaged.kind === "auto_resolve" ? { triage_action: triaged.action } : {}),
+      });
+    }
+    if (deps.triage) verdict = {
+      decision: deps.triage.mode === "act" && triaged.kind === "digest" ? "demote" : "deliver",
+      reason: triaged.reason,
+    };
+    if (!deps.dryRun && deps.triage?.mode === "act" && triaged.kind === "auto_resolve" && deps.triage.autoResolve) {
+      try {
+        await deps.triage.autoResolve(c, triaged.action);
+      } catch (err) {
+        log("sweep.escalation_auto_resolve.failed", { issue_url: c.issueUrl, reason: String(err) });
       }
     }
 
