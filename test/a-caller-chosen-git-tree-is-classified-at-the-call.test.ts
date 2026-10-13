@@ -73,8 +73,10 @@ const RECORDS: readonly CallerRecord[] = [
     tree: "CHECKOUT: run-task.ts's repoRoot, status-board's deps.repoDir, panel-graph's deps.root, at origin/main", decision: "CHECKOUT",
   },
   {
-    file: "src/lib/paired-trial.ts", helper: "gitProbe", via: ["sealedPairedAttemptDispatcher", "probeSealedIsolation"], callers: ["src/run-task.ts"],
-    tree: "WORKTREE: the sealed attempt tree a worker just ran in (and the fleet clone it was cut from)", decision: "leaf",
+    file: "src/lib/paired-trial.ts", helper: "gitProbe", via: ["sealedPairedAttemptDispatcher", "probeSealedIsolation"],
+    callers: ["src/lib/skill-eval-command.ts", "src/run-task.ts"],
+    tree: "WORKTREE: the sealed attempt tree a worker just ran in (and the fleet clone it was cut from; both callers pass <root>/repos/<repo>)",
+    decision: "leaf",
   },
   {
     file: "src/lib/plan-architect.ts", helper: "gitAddAndCommitWithRollback", via: ["applyPlanProposalCommit", "gitAddAndCommitWithRollback"],

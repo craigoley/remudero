@@ -45,7 +45,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DAEMON_SELF_COMMIT_SCOPE, DAEMON_SELF_PATH_PREFIXES, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -240,6 +240,69 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
     samples++;
   }
   return { totalMs, samples };
+}
+
+export interface RestartBoundaryContext { waitingOn: string; runId: string }
+export type RestartBoundary = (context?: RestartBoundaryContext) => Extract<DaemonFreshness, { stale: true }> | undefined;
+type RestartEstimate = { ms: number | undefined; samples: number };
+export type RestartWorkHistory = { yieldCost: RestartEstimate; remaining: ReadonlyMap<string, RestartEstimate> };
+export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
+export function restartWorkHistory(rawLines: readonly string[], nowMs: number): RestartWorkHistory {
+  const since = nowMs - RESTART_HISTORY_WINDOW_MS;
+  const rows: Array<{ row: Record<string, unknown>; at: number }> = [];
+  for (const raw of new Set(rawLines)) {
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn row is not a duration */ continue; }
+    if (!row || typeof row.ts !== "string" || typeof row.run_id !== "string") continue;
+    const at = Date.parse(row.ts);
+    if (Number.isFinite(at) && at >= since && at <= nowMs) rows.push({ row, at });
+  }
+  rows.sort((a, b) => a.at - b.at);
+  const yields = new Map<string, { at: number; run: string }>();
+  const phases = new Map<string, Map<string, number>>();
+  const gaps: number[] = [];
+  const durations = new Map<string, number[]>();
+  for (const { row, at } of rows) {
+    const run = row.run_id as string;
+    const task = typeof row.task_id === "string" ? row.task_id : undefined;
+    if (row.step === "run.start" && task) {
+      const yielded = yields.get(task);
+      if (yielded && yielded.run !== run) {
+        yields.delete(task);
+        if (at > yielded.at) gaps.push(at - yielded.at);
+      }
+    }
+    if (row.step === "verdict" && row.reason === "freshness_yield" && task) yields.set(task, { at, run });
+    const phase = row.step === "run.phase" ? row.waiting_on
+      : row.step === "recon.done" ? "implementing"
+      : row.step === "implement.done" ? "preopen_gate"
+      : row.step === "implement.unfinished" ? "checkpointed"
+      : row.step === "fallback_push.cause" ? "pushing" : undefined;
+    if (typeof phase === "string") {
+      const observed = phases.get(run) ?? new Map<string, number>();
+      if (!observed.has(phase)) observed.set(phase, at);
+      phases.set(run, observed);
+    }
+    if (row.step === "pr.opened") {
+      for (const [phase, startedAt] of phases.get(run) ?? []) {
+        if (at <= startedAt) continue;
+        const samples = durations.get(phase) ?? [];
+        samples.push(at - startedAt);
+        durations.set(phase, samples);
+      }
+      phases.delete(run);
+    }
+    if (row.step === "verdict") phases.delete(run);
+  }
+  const estimate = (values: number[]): RestartEstimate => {
+    values.sort((a, b) => a - b);
+    const middle = Math.floor(values.length / 2);
+    return { ms: values.length === 0 ? undefined : values.length % 2 ? values[middle]
+      : (values[middle - 1] + values[middle]) / 2, samples: values.length };
+  };
+  return { yieldCost: estimate(gaps), remaining: new Map([...durations].map(([phase, values]) => [phase, estimate(values)])) };
 }
 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
@@ -1045,6 +1108,8 @@ export interface DaemonDeps {
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
    *  ABSENT = today's behaviour exactly, an empty released set. */
   readLedgerLines?: () => readonly string[];
+  /** Complete archive union for the boot-time restart estimates; an unreadable union disables holdouts. */
+  readRestartHistory?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
    *  because the cheap signal is caller-specific: a plan tree sha costs ~8ms, the parse ~60ms (impl-FZ). */
@@ -1165,7 +1230,7 @@ export interface DaemonDeps {
   /** Run ONE task through the existing run-task path (default = runTask). W1-T7806: `restartAtWorkerBoundary` is
    *  the dispatch phase's restart latch, read by the run at each worker boundary. */
   runOne: (taskId: string, options?: {
-    restartAtWorkerBoundary: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    restartAtWorkerBoundary: RestartBoundary;
   }) => Promise<RunResult>;
   /** `laneDispatchBudget`'s other input: the same open-PR-count closure the real wiring already
    *  builds for `checkQueueGovernor`, never a second read path. Consulted only at two or more lanes.
@@ -3373,6 +3438,13 @@ export async function runDaemon(
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
   const runLengths = dispatchRunHistory(bootLedgerLines);
+  let restartHistoryLines: readonly string[] = bootLedgerLines;
+  try { restartHistoryLines = deps.readRestartHistory?.() ?? bootLedgerLines; }
+  catch (error) {
+    restartHistoryLines = [];
+    log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
+  }
+  const restartHistory = restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now());
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
   // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
   // pass's run-branch guard reads it. A failed read keeps the entry it had.
@@ -5863,6 +5935,8 @@ export async function runDaemon(
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map<string, number>();
     const restartHoldouts = new Set<string>();
+    const holdoutDeadlines = new Map<string, number>();
+    const yieldAsked = new Set<string>();
     const admittedUnderLatch = new Set<string>();
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
     const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
@@ -6166,8 +6240,37 @@ export async function runDaemon(
     const admittedWork = runLanePool(admitted, (id) => {
       const startedAtMs = preparedStartTimes.get(id)!;
       // Preserve the current worker-boundary handoff; a reservation never preempts it.
-      return deps.runOne(id, { restartAtWorkerBoundary: () => {
+      return deps.runOne(id, { restartAtWorkerBoundary: (context) => {
         if (!inFlightFreshness) return undefined;
+        const phase = context?.waitingOn ?? "unknown";
+        const remaining = restartHistory.remaining.get(phase);
+        const yieldCost = restartHistory.yieldCost;
+        const nowMs = daemonClock.now();
+        const selfScoped = inFlightFreshness.changes?.some((change) =>
+          DAEMON_SELF_COMMIT_SCOPE.test(change.subject ?? "") ||
+          change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix))));
+        const deadline = holdoutDeadlines.get(id);
+        const reason = selfScoped ? "self_scoped_change"
+          : yieldAsked.has(id) ? "already_asked"
+          : deadline !== undefined && nowMs >= deadline ? "estimate_elapsed"
+          : remaining?.ms === undefined || yieldCost.ms === undefined ? "no_history"
+          : remaining.ms >= yieldCost.ms ? "yield_is_cheaper" : "finish_is_cheaper";
+        const hold = reason === "finish_is_cheaper";
+        if (hold && deadline === undefined) holdoutDeadlines.set(id, nowMs + remaining!.ms!);
+        log(hold ? "daemon.restart_holdout" : "daemon.restart_yield_asked", {
+          task_id: id, run_id: context?.runId ?? null, phase, reason,
+          remaining_ms: remaining?.ms ?? null, remaining_samples: remaining?.samples ?? 0,
+          yield_cost_ms: yieldCost.ms ?? null, yield_samples: yieldCost.samples,
+          deadline_ms: holdoutDeadlines.get(id) ?? null,
+          old_sha: inFlightFreshness.oldSha, new_sha: inFlightFreshness.newSha,
+        });
+        if (hold) {
+          refillClosed ??= "stale code";
+          restartHoldouts.add(id);
+          wakeParkedLanes();
+          return undefined;
+        }
+        yieldAsked.add(id);
         restartHoldouts.delete(id);
         if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
         wakeParkedLanes();

@@ -47,6 +47,7 @@ import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/pla
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -173,6 +174,7 @@ test("classifyProposal: a {ready, dep-unmet, evidence-drifted, deferred-with-tri
   };
 
   const ctx = baseCtx({
+    clock: fixedClock(Date.parse("2026-10-12T20:30:00-04:00")),
     grepAnchorTrue: (a) => a.pattern === anchorTrue.pattern,
     openProposalIds: new Set(["P-READY", "P-DEP-UNMET", "P-EVIDENCE-DRIFTED", "P-DEFERRED"]),
   });
@@ -182,7 +184,11 @@ test("classifyProposal: a {ready, dep-unmet, evidence-drifted, deferred-with-tri
   const readyResults = results.filter((r) => r.state === "ready");
   assert.equal(readyResults.length, 1, "exactly one READY");
   assert.equal(readyResults[0].proposalId, "P-READY");
-  assert.deepEqual(readyResults[0].draft, drafts["P-READY"]);
+  assert.deepEqual(readyResults[0].draft, {
+    ...drafts["P-READY"],
+    stampLine: "- P-READY (plan) — RATIFIED 2026-10-13 -> W1-T900.",
+  });
+  assert.equal(drafts["P-READY"].stampLine, "- P-READY (plan) — RATIFIED 2026-07-20 -> W1-T900.");
   assert.deepEqual(readyResults[0].reasons, []);
 
   const depUnmetResult = results.find((r) => r.proposalId === "P-DEP-UNMET")!;

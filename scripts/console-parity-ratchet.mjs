@@ -132,6 +132,9 @@ export const CLI_ONLY = {
       "host-alert",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
+      // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
+      // a spend the operator confirms per invocation, not a console action.
+      "skill-eval",
       "benchmark-aa",
       "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
