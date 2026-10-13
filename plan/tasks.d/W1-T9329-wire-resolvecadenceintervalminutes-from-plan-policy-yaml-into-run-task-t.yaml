@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=8b145524f863e80b
   attempts: 0
   files:
     - src/run-task.ts
