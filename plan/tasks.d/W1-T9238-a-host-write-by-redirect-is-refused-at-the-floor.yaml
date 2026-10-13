@@ -1,0 +1,68 @@
+- id: W1-T9238
+  title: "A HOST WRITE BY REDIRECT OR TEE IS REFUSED AT THE FLOOR — deny-floor rule 16 refuses kill, docker restart and rm -rf sent to `ssh remudero` but passes `ssh remudero 'ps aux > /tmp/.x'`, `... | tee /dev/shm/x` and `... > ~/out.txt`, and agents wrote /tmp/.x and /dev/shm/x on the read-only fleet host three times on 2026-10-12/13"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # one concern: the host-mode walk of rule 16 also judges redirect targets and tee; one hook file and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: three agent slips wrote files on the READ-ONLY fleet host over ssh (a redirect into /tmp/.x, /dev/shm/x); the prompts already said never write there"
+  plan_refs: [W1-T2213, W1-T3059, W1-T3222]
+  files:
+    - hooks/deny-floor.sh
+    - test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts
+  status: queued
+  priority: 2  # a tripwire for a rule the prompts did not hold; each slip leaves stray files on the host the operator cleans by hand
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 on origin/main 6732a7690 by piping the PreToolUse JSON the Bash tool sends into
+    `bash hooks/deny-floor.sh` (the harness test/the-house-rules-are-refused-at-the-floor.test.ts uses), with
+    RMD_HOUSE_RULE_OVERRIDE unset:
+      - `ssh remudero 'ps aux > /tmp/.x'`                        exit 0 (runs)
+      - `ssh remudero 'docker logs core 2>&1 | tee /dev/shm/x'`  exit 0 (runs)
+      - `ssh remudero 'cat foo > ~/out.txt'`                     exit 0 (runs)
+      - `ssh remudero 'pkill node'` (control)                    exit 2, "destructive process control sent to the fleet host"
+    WHY, READ on origin/main (symbols, not lines): rule 16's host mode is `hr_ssh`, which collects the words after the
+    `remudero` destination (skipping LOCAL redirect tokens outside the quoted remote command, which is right) and hands the
+    remote text to `hr_check ... host`. `hr_segment` then judges only the PROGRAM position in host mode (kill, pkill,
+    killall, docker, systemctl, rm). A redirect token inside the remote command (`>`, `>>`, `2>`, `&>`, `>file`) and a
+    `tee` program are never looked at, so a host write passes as a read-only query.
+    The house rule (agent-brief preamble, "Host"): never write ANY file on the host, no `>` or `tee` into /tmp, /dev/shm,
+    ~ or anywhere else over ssh; stream output back to the Mac instead (`ssh remudero '...' > ~/local-file`).
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for `hr_ssh` (main 0, no head more),
+    `/dev/shm` (main 0; one head, codex/plan-w1-t2956-1788697284364, names it as a TMPDIR in an unrelated shard), and the
+    pair deny-floor + redirect (10 shards on main, none about host writes). Control: `acceptance-author-gate` reads 93
+    shards on main and on every head.
+  design: |
+    1. HOST MODE JUDGES REDIRECTS. In host mode (the text `hr_ssh`, a host heredoc or here-string, `docker exec` or a
+       pipe into ssh hands to `hr_check`), a write redirect (`>`, `>>`, `N>`, `N>>`, `&>`, `>|`, and the glued `>path`
+       forms the tokenizer keeps as one word) whose target is a path is refused through `hr_host_refuse` with the rule
+       name `host`, naming the redirect and its target. Two targets are not writes and still run: `/dev/null` and an fd
+       duplication (`2>&1`, `>&2`).
+    2. HOST MODE JUDGES TEE. `tee` at the program position with any file operand other than `/dev/null` is refused the
+       same way. `tee` with no file operand (or only `/dev/null`) still runs.
+    3. LOCAL REDIRECTS STAY LOCAL. A redirect OUTSIDE the quoted remote command (`ssh remudero 'ps aux' > ~/x`,
+       `ssh remudero cat f 2>&1 | tee ~/local`) is the Mac's and still runs; `hr_ssh`'s existing skip of local redirect
+       tokens is the boundary, and an unquoted remote word list is judged by what ssh sends (the remote words), never the
+       local redirect after them.
+    4. THE MESSAGE NAMES THE ALTERNATIVE: stream the output back (`ssh remudero '<query>' > <local file>`) and, if a host
+       write is truly needed, report the exact command to the operator. RMD_HOUSE_RULE_OVERRIDE=host keeps working as for
+       the other host refusals.
+    No new number: the refusal is a shape, like every other rule-16 refusal.
+    Tests go in test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts, driving the hook as the house-rules test
+    does, each refused shape paired with an allowed near-miss so deleting the rule fails both.
+  acceptance:
+    - claim: "a redirect into a host path inside an ssh remudero command is refused, naming the host rule"
+      proof: 'grep: test("W1-T9238: a redirect into a host path over ssh is refused" in test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts'
+    - claim: "tee into a host path over ssh is refused, including through a host heredoc and a docker exec"
+      proof: 'grep: test("W1-T9238: tee into a host path over ssh is refused" in test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts'
+    - claim: "a redirect to /dev/null, an fd duplication, and a redirect outside the quoted remote command still run"
+      proof: 'grep: test("W1-T9238: dev-null, fd duplication and local redirects still run" in test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts"
+  falsifier: |
+    Delete the host-mode redirect check: `ssh remudero 'ps aux > /tmp/.x'` exits 0 and the first test fails. Judge every
+    redirect token after ssh (local ones too): `ssh remudero 'ps aux' > ~/x` is refused and the third test fails. Treat
+    `2>&1` as a path write: `ssh remudero 'docker logs core 2>&1'` is refused and the third test fails.
