@@ -221,7 +221,23 @@ if [ "$root_watched" = 0 ]; then
   W_FREE_KB=(0 ${W_FREE_KB[@]+"${W_FREE_KB[@]}"}); W_FREE_TXT=("" ${W_FREE_TXT[@]+"${W_FREE_TXT[@]}"})
 fi
 
-log() { printf '%s\n' "$*"; }
+# The durable audit log (W1-T8861): every REMOVE / ARCHIVE / PRUNE decision is appended here whatever
+# stdout is redirected to, so a pass run outside the cron's redirect still leaves a trace. One line:
+# ISO time, uid, DRY_RUN, pid, then the decision as logged (action, path, reason).
+AUDIT_LOG="${RMD_CLEANUP_AUDIT_LOG:-$CLEAN_HOME/.local/state/remudero/janitor-audit.log}"
+audit_writable() {
+  mkdir -p -- "$(dirname -- "$AUDIT_LOG")" 2>/dev/null && : >> "$AUDIT_LOG" 2>/dev/null
+}
+audit_append() {
+  printf '%s uid=%s dry_run=%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_UID" "$DRY_RUN" "$$" "$*" \
+    >> "$AUDIT_LOG" 2>/dev/null
+}
+log() {
+  printf '%s\n' "$*"
+  case "$*" in
+    "REMOVE "*|"ARCHIVE "*|"ARCHIVE-WORKTREE "*|"PRUNE "*) audit_append "$*" || true ;;
+  esac
+}
 
 # retention_window <points below the mark> — the idle window in minutes. Tiered, never under six
 # hours. Twin of retention_window in deploy/mac/tmp-reclaim.sh: change the two together.
@@ -253,6 +269,10 @@ esac
 # Every mutation goes through here, so DRY_RUN=1 has exactly one place to hold.
 act() {
   if [ "$DRY_RUN" = 1 ]; then log "DRYRUN would: $*"; return 0; fi
+  # A destructive step with no audit trail is refused, not done silently (W1-T8861).
+  case "$1" in
+    rm) audit_writable || { log "KEEP $*: audit log unwritable ($AUDIT_LOG)"; return 1; } ;;
+  esac
   "$@"
 }
 
@@ -380,10 +400,50 @@ worktree_saved() {
   esac
   return 1
 }
+# Every ref of a clone outside refs/remotes, as "<object> <refname>" lines (heads, tags, stash, ...).
+local_refs() {
+  local out
+  out="$(rgit "$1" for-each-ref --format='%(objectname) %(refname)')" || return 1
+  printf '%s\n' "$out" | awk 'NF && $2 !~ /^refs\/remotes\//'
+}
+# A clone's non-remote refs that no remote-tracking branch contains: one refname per line. Returns
+# non-zero when the refs cannot be read at all (unknown reads as unsaved).
+clone_unsaved_refs() {
+  local wt="$1" refs obj name
+  refs="$(local_refs "$wt")" || return 1
+  while read -r obj name; do
+    [ -n "$obj" ] || continue
+    [ -n "$(rgit "$wt" branch -r --contains "$obj" 2>/dev/null)" ] || printf '%s\n' "$name"
+  done <<< "$refs"
+}
+# The first live linked worktree whose git dir is this clone's: its `gitdir` file names the
+# worktree's .git file, and the directory holding it still exists.
+clone_live_worktree() {
+  local gitdir="$1" entry target
+  for entry in "$gitdir"/worktrees/*/; do
+    [ -d "$entry" ] || continue
+    if [ ! -r "${entry}gitdir" ]; then printf '%s\n' "${entry%/} (gitdir unreadable)"; return 0; fi
+    target="$(head -n 1 -- "${entry}gitdir" 2>/dev/null)"
+    [ -n "$target" ] || { printf '%s\n' "${entry%/} (gitdir empty)"; return 0; }
+    if [ -d "$(dirname -- "$target")" ]; then printf '%s\n' "$(dirname -- "$target")"; return 0; fi
+  done
+  return 1
+}
 archive_worktree_head() {
   local wt="$1" head="$2" archive="$WORKTREE_ARCHIVE_ROOT" name bundle tmp probe archive_fsid root_fsid
   local mode="${3:-head}" refs="$head HEAD" tag="" source="$ROOT_FS"
-  if [ "$mode" = branches ]; then
+  local -a all_refs=()
+  if [ "$mode" = all ]; then
+    local lines name_ref
+    lines="$(local_refs "$wt")" || return 1
+    # a stash keeps older entries only in its reflog, which a bundle cannot carry
+    if printf '%s\n' "$lines" | grep -q ' refs/stash$' && \
+       [ "$(rgit "$wt" reflog show refs/stash 2>/dev/null | grep -c .)" -gt 1 ]; then return 1; fi
+    refs="$(printf '%s\n%s\n' "$head HEAD" "$lines")"
+    while read -r _ name_ref; do [ -n "$name_ref" ] && all_refs+=("$name_ref"); done <<< "$lines"
+    tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
+    source="$wt"
+  elif [ "$mode" = branches ]; then
     refs="$(rgit "$wt" for-each-ref --format='%(objectname) %(refname)' refs/heads)" || return 1
     refs="$(printf '%s\n%s\n' "$head HEAD" "$refs")"
     tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
@@ -393,7 +453,7 @@ archive_worktree_head() {
   name="$(basename "$wt" | tr -c 'A-Za-z0-9._-' '-')"
   name="${name%-}"
   bundle="$archive/${name}-${head}${tag}.bundle"
-  if [ "$mode" = branches ]; then
+  if [ "$mode" = branches ] || [ "$mode" = all ]; then
     probe="$archive"
     while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
     archive_fsid="$(fs_id "$probe")"; root_fsid="$(fs_id "$source")"
@@ -419,6 +479,7 @@ archive_worktree_head() {
   [ ! -e "$tmp" ] || return 1
   local -a bundle_refs=(HEAD)
   [ "$mode" = branches ] && bundle_refs+=(--branches)
+  [ "$mode" = all ] && bundle_refs+=("${all_refs[@]}")
   if ! rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
      ! verify_worktree_bundle "$wt" "$tmp" "$refs"; then
     rm -f -- "$tmp"
@@ -439,7 +500,7 @@ verify_worktree_bundle() {
   done <<< "$refs"
 }
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head
+  local wt="$1" gitdir idle_status kind head hosted unsaved
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
@@ -472,9 +533,25 @@ sweep_worktree() {
     repo_fetch "$wt" --quiet origin 2>/dev/null || true
   fi
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
-  if ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
+  if [ "$kind" = "standalone clone" ]; then
+    # A clone is the git dir of every linked worktree built on it, and holds every local ref: judging
+    # it by HEAD alone deleted a clone hosting 33 worktrees (W1-T8861).
+    if hosted="$(clone_live_worktree "$gitdir")"; then
+      log "KEEP $wt: hosts linked worktree $hosted"; return
+    fi
+    if ! unsaved="$(clone_unsaved_refs "$wt")"; then
+      log "KEEP $wt: refs are unreadable (unknown)"; return
+    fi
+    if [ -n "$unsaved" ] || ! worktree_saved "$wt"; then
+      if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
+      if ! archive_worktree_head "$wt" "$head" all; then
+        log "KEEP $wt: unsaved refs (${unsaved//$'\n'/ }${unsaved:+ }HEAD) could not be archived safely"; return
+      fi
+    fi
+  elif ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
     log "KEEP $wt: unpublished HEAD could not be archived safely"; return
   fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
   log "REMOVE $wt ($kind)"
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$kind" = "standalone clone" ]; then log "DRYRUN would: rm -rf -- $wt"
