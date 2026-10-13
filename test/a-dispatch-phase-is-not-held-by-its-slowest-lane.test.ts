@@ -296,7 +296,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
   return {
     run, started, rows,
     /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
-    boundary: (id: string) => boundaries.get(id)?.(),
+    boundary: (id: string, waitingOn?: string) => (boundaries.get(id) as ((c?: { waitingOn: string; runId: string }) => unknown) | undefined)?.(waitingOn ? { waitingOn, runId: `${id}-run` } : undefined),
     settle: async (id: string, ageMinutes: number) => {
       nowMs = start + ageMinutes * minute;
       merged.add(id);
@@ -345,14 +345,31 @@ test("lane refill uses the adaptive queue admission and resumes only an exact ha
 });
 
 test("W1-T7697: freed lanes keep refilling while one slow lane holds the phase", async () => {
-  const h = phase(5 * minute);
+  // W1-T9069: under a latch a freed lane takes work that ends before the restart's expected time, so the holdouts
+  // report an estimate (implementing ends in 55 min against a 200-min yield) and the src class's span is 5 min.
+  const now = Date.now();
+  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({ ts: new Date(now - age * minute).toISOString(), ...fields });
+  const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
+    staleSinceMs: now - 120 * minute };
+  let visible = false;
+  const h = phase(5 * minute, {
+    checkFreshness: () => visible ? material : { stale: false },
+    readRestartHistory: () => [
+      row(600, { step: "run.start", task_class: "src", run_id: "span" }), row(595, { step: "verdict", run_id: "span", verdict: "merged" }),
+      row(400, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
+      row(200, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
+      row(300, { step: "run.phase", waiting_on: "implementing", run_id: "completed" }), row(245, { step: "pr.opened", run_id: "completed" }),
+    ],
+  });
   try {
     await flush();
+    visible = true;
     await h.tick(1, true);
     await h.settle("B", 1);
     await h.settle("C", 5);
     await h.tick(11);
     assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
+    for (const id of ["A", "D", "E"]) assert.equal(h.boundary(id, "implementing"), undefined, `${id} holds the restart open`);
     for (const [id, age] of [["D", 21], ["E", 26], ["F", 31], ["G", 36]] as const) await h.settle(id, age);
     assert.deepEqual(h.rows.find(({ step, extra }) => step === "dispatch.lane_refilled" && extra?.finished_task === "E")?.extra?.waiting_on, ["A"]);
     assert.ok(h.started.filter(({ age }) => age > 20 * minute).length >= 4);
