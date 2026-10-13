@@ -11,7 +11,8 @@
   origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
   plan_refs: [W1-T5720, W1-T5724, W1-T4998, W1-T5722, W1-T7747, W1-T8170]
   files: [docs/recon/boot-to-first-dispatch.md]
-  status: queued
+  status: blocked
+  retirement: retired  # superseded by W1-T9072 (filed in this PR), which measured the answer (69 boots on 10-10..13: gate opens at a median 4.1 min; first run.start at a median 4.9 min; ~280 lane-min/day) and removes the wait; operator approval 2026-10-13
   priority: 2
   attempts: 0
   rationale: |

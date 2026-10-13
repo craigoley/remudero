@@ -1,0 +1,26 @@
+- id: W1-T9124
+  title: Enhance daemon sweep to detect PR body changes without code changes
+  repo: remudero
+  depends_on:
+    - W1-T254
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/sweep.ts
+    - src/lib/review.ts
+    - src/lib/daemon.ts
+  acceptance:
+    - claim: Daemon sweep identifies PRs where the review status is stale relative to the current PR body
+      proof: "unit test: sweep detects stale body and queues re-review"
+    - claim: Sweep module is invoked by daemon during PR processing
+      proof: "grep: detectStaleBody( in src/lib/daemon.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-09-15 follow-up on https://github.com/craigoley/remudero/pull/5662, ratified via
+    rmd approve:
+  
+    risk raised to high due to spanning daemon, review, sweep concerns (Rule 19).
