@@ -3597,8 +3597,14 @@ export async function runDaemon(
   const bootGateStartedAtMs = daemonClock.now();
   const bootGateHolds = deps.sweep !== undefined && ((deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
   let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
-  let releaseBootGate = (): void => {};
-  const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
+  // W1-T9072 — THE GATE HOLDS CADENCES, NEVER DISPATCH. Tick 1's selection reads only what the boot itself loads:
+  // the tick's own `refreshMerged` builds the projection `isOpenPr`, `isCreditIndeterminate`, `openPrCount` and
+  // `readQueueAdmission` read; the run-branch listing is its own per-tick read; the dispatch claim is taken inside
+  // `runOne`. The two inputs the first full pass produces fail safe without it: no `planOnlyRunBranchReceipts` means
+  // every pushed run branch still blocks, and no `reviewerCodeStale` means no stale-reviewer restart. So no input is
+  // gated, and dispatch waits on nothing. The deferral rows are written once, on the first gated tick.
+  let bootGateOpenedAtMs: number | undefined = bootGateHolds ? undefined : bootGateStartedAtMs;
+  let bootCadencesDeferred = false;
   const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
   const deferBootCadence = (cadence: string): void =>
     log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
@@ -3618,16 +3624,33 @@ export async function runDaemon(
   const openBootGate = (trigger: string): void => {
     if (bootGateTrigger !== undefined) return;
     bootGateTrigger = trigger;
+    bootGateOpenedAtMs = daemonClock.now();
     clearTimeout(bootGateTimer);
     log("daemon.boot_gate.opened", {
       trigger, waited_ms: Math.max(0, daemonClock.now() - bootGateStartedAtMs), bound_ms: bootGateBoundMs,
       pass_in_flight: sweepLiveness.inFlight,
     });
     gardens.push(...deferredGardens.map((start) => start(pollIntervalMs)));
-    releaseBootGate();
   };
   // Unref'd: while the gate is closed the first pass's own bound timer keeps the process alive.
   const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
+  // W1-T9072 — ONE ROW PER BOOT: how long this process took to reach its first dispatch, and whether the gate was
+  // open by then. Written at the first lane start, or at the first selection that admits nothing.
+  let bootFirstSelectionAtMs: number | undefined;
+  let bootFirstDispatchWritten = false;
+  const noteBootFirstDispatch = (outcome: { startedAtMs: number; admitted: number } | { heldReason: string }): void => {
+    if (bootFirstDispatchWritten) return;
+    bootFirstDispatchWritten = true;
+    const sinceBoot = (atMs: number | undefined): number | null => (atMs === undefined ? null : Math.max(0, atMs - bootGateStartedAtMs));
+    log("daemon.boot_first_dispatch", {
+      boot_at: new Date(bootGateStartedAtMs).toISOString(),
+      gate_open_ms: sinceBoot(bootGateOpenedAtMs),
+      first_selection_ms: sinceBoot(bootFirstSelectionAtMs),
+      ...("heldReason" in outcome
+        ? { first_run_start_ms: null, admitted_count: 0, held_reason: outcome.heldReason }
+        : { first_run_start_ms: sinceBoot(outcome.startedAtMs), admitted_count: outcome.admitted }),
+    });
+  };
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
@@ -4734,7 +4757,7 @@ export async function runDaemon(
 
     // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
     // Start, don't await: a slow review must not serialize the background full sweep behind it.
-    const bootReviewPass = bootGateTrigger === undefined ? (async () => {
+    const bootReviewPass = bootGateTrigger === undefined && !bootCadencesDeferred ? (async () => {
       try {
         await deps.sweepLight?.({ reviewOnly: true });
       } catch (e) {
@@ -4896,16 +4919,22 @@ export async function runDaemon(
       }
     };
 
-    if (bootGateTrigger === undefined) {
+    // W1-T9072: while the gate is closed this tick skips the gated cadences and goes on to dispatch. They run at
+    // the first iteration top after it opens, so never beside a lane this tick starts. The deferral rows hold
+    // cadences, not lanes, so they leave this tick's idle-slot cause as it was.
+    if (bootGateTrigger === undefined && !bootCadencesDeferred) {
       await bootReviewPass;
+      bootCadencesDeferred = true;
+      const [idleCause, idleHold] = [idleLaneTickCause, idleLaneTickHold];
       for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
-      await bootGateOpened;
+      [idleLaneTickCause, idleLaneTickHold] = [idleCause, idleHold];
     }
-    startDueRungsTimer();
+    const cadencesThisTick = bootGateTrigger !== undefined;
+    if (cadencesThisTick) startDueRungsTimer();
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
-    if (deps.sweepOrphans) {
+    if (cadencesThisTick && deps.sweepOrphans) {
       try {
         const report = await deps.sweepOrphans();
         log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
@@ -4917,7 +4946,7 @@ export async function runDaemon(
     // Feedback-landing sweep, on the same once-per-iteration cadence; boot already runs it once. This is
     // the per-poll half, so an entry captured or failed to land BETWEEN polls is still found within one
     // cycle. Best-effort (W1-T530 part ii).
-    if (deps.sweepFeedbackLanding) {
+    if (cadencesThisTick && deps.sweepFeedbackLanding) {
       try {
         const result = await deps.sweepFeedbackLanding();
         log("daemon.feedback_landing_sweep", {
@@ -4933,7 +4962,7 @@ export async function runDaemon(
     // GitHub-side posture drift check, on the same once-per-iteration cadence. The hook throttles the actual read to
     // at most once a day, so most ticks cost nothing. A non-empty return is LEDGERED — never gated, never a continue,
     // never consulted by any governor — so a posture finding can never halt a dispatch or fail a check (W1-T1040).
-    if (deps.checkGithubPosture) {
+    if (cadencesThisTick && deps.checkGithubPosture) {
       try {
         const findings = await deps.checkGithubPosture();
         for (const finding of findings) {
@@ -4944,7 +4973,7 @@ export async function runDaemon(
       }
     }
 
-    {
+    if (cadencesThisTick) {
       const running = readOnlyRungs.joined();
       if (running) await running;
       else {
@@ -5188,7 +5217,7 @@ export async function runDaemon(
 
     spendGatesOpen = true;
     let intakeHeld = false;
-    {
+    if (cadencesThisTick) {
       const running = intakeRungs.joined();
       if (running) intakeHeld = await running;
       else {
@@ -5216,9 +5245,9 @@ export async function runDaemon(
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
     // no wait-and-continue: the gates above exist to REFUSE a dispatch, but the retro gates nothing and
     // only delayed reaching dispatch by a full poll interval (W1-T2265). Forensics: docs/forensics/daemon.md.
-    if (deps.checkRetroTrigger && ledgerCompactionDecision?.overBound) {
+    if (cadencesThisTick && deps.checkRetroTrigger && ledgerCompactionDecision?.overBound) {
       log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
-    } else if (deps.checkRetroTrigger) {
+    } else if (cadencesThisTick && deps.checkRetroTrigger) {
       let decision: RetroTriggerDecision | undefined;
       try {
         decision = await deps.checkRetroTrigger();
@@ -5285,7 +5314,7 @@ export async function runDaemon(
     }
 
     let wipeTestHeld = false;
-    {
+    if (cadencesThisTick) {
       const running = wipeTestRung.joined();
       if (running) wipeTestHeld = await running;
       else {
@@ -5501,6 +5530,7 @@ export async function runDaemon(
     // Hoisted for the same reason. Left at 0 on the forced path: an operator-forced dispatch is not
     // evidence of spare capacity.
     let laneBudget = 0;
+    bootFirstSelectionAtMs ??= daemonClock.now();
     if (forcedNext) {
       dispatchSet = [forcedNext];
     } else {
@@ -5534,7 +5564,7 @@ export async function runDaemon(
     // to collide, so the rung that CREATES work could only fire when work already existed. Measured on a
     // starved daemon: about 87 feedback entries unread, thirteen hours. The accepted cost is a skipped row
     // per held tick, each naming which bound held. Forensics: docs/forensics/daemon.md.
-    if (deps.checkAutoTriage) {
+    if (cadencesThisTick && deps.checkAutoTriage) {
       let decision: AutoTriageDecision | undefined;
       try {
         decision = await deps.checkAutoTriage({
@@ -5632,6 +5662,7 @@ export async function runDaemon(
     }
 
     if (dispatchSet.length === 0) {
+      noteBootFirstDispatch({ heldReason: "nothing_runnable" });
       scheduleRepositoryMaintenance(false);
       // Unlike drain.ts, where nothing runnable is a terminal stop, the daemon is persistent: new work can
       // land later, so it paces itself with the injected clock and keeps polling.
@@ -5881,6 +5912,7 @@ export async function runDaemon(
       admitted.push(t);
     }
     if (admitted.length === 0) {
+      noteBootFirstDispatch({ heldReason: `governor:${deferredVerdict!.kind}` });
       await flushLifetimePressure();
       ticks++;
       logDispatchGovernorDefer(deferredVerdict!, ticks);
@@ -6222,6 +6254,7 @@ export async function runDaemon(
       if (inFlightFreshness) admittedUnderLatch.add(task.id);
       laneStartedAtMs.set(task.id, preparedStartTimes.get(task.id)!);
       attempted.push(task.id);
+      noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
         deps.clearKick?.(task.id);
