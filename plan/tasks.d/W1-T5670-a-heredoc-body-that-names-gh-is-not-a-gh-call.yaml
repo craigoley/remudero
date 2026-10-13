@@ -34,7 +34,7 @@
     - claim: "a heredoc whose body says 'over the async gh transport' is not counted as a gh call, while a gh command fed by a heredoc and a heredoc body holding a gh command substitution still are"
       proof: "unit test: test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts"
     - claim: "a heredoc body fed to bash, or to ssh running bash -s, that holds a gh command is still counted as a gh call, under both a quoted and an unquoted delimiter"
-      proof: "unit test: a heredoc fed to an interpreter that runs gh is still a gh call"
+      proof: "grep: keep_interpreters in hooks/deny-floor.sh"
   falsifier: |
     Revert to the whole-text match; the plain heredoc case is refused and the test fails.
     Drop every heredoc body regardless of the reading command; the interpreter case is allowed and
