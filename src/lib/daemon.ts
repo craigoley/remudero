@@ -3636,6 +3636,7 @@ export async function runDaemon(
   const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
   // W1-T9072 — ONE ROW PER BOOT: how long this process took to reach its first dispatch, and whether the gate was
   // open by then. Written at the first lane start, or at the first selection that admits nothing.
+  const bootAtIso = daemonClock.iso();
   let bootFirstSelectionAtMs: number | undefined;
   let bootFirstDispatchWritten = false;
   const noteBootFirstDispatch = (outcome: { startedAtMs: number; admitted: number } | { heldReason: string }): void => {
@@ -3643,7 +3644,7 @@ export async function runDaemon(
     bootFirstDispatchWritten = true;
     const sinceBoot = (atMs: number | undefined): number | null => (atMs === undefined ? null : Math.max(0, atMs - bootGateStartedAtMs));
     log("daemon.boot_first_dispatch", {
-      boot_at: new Date(bootGateStartedAtMs).toISOString(),
+      boot_at: bootAtIso,
       gate_open_ms: sinceBoot(bootGateOpenedAtMs),
       first_selection_ms: sinceBoot(bootFirstSelectionAtMs),
       ...("heldReason" in outcome
