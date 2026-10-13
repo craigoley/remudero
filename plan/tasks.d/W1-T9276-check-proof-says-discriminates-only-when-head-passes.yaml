@@ -1,0 +1,64 @@
+- id: W1-T9276
+  title: "RMD CHECK-PROOF --BASE CALLS A PROOF THAT FAILS AT BOTH HEAD AND BASE DISCRIMINATING — compareAgainstBase prints \"discriminates — head and base disagree\" for every outcome pair except pass/pass, so a proof reading verdict fail, hits 0, base hits 0, base fail ends on a line saying it tells done from not-done; an operator read that tail and opened #11430, which failed review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # one concern: the closing discrimination line of check-proof --base reads the head outcome; src/lib/check-proof.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11430's guard proof read fail at head and base, check-proof --base said it discriminates, and the PR failed review"
+  plan_refs: [W1-T273, W1-T362, W1-T7821, W1-T9225]
+  files:
+    - src/lib/check-proof.ts
+    - test/check-proof-says-discriminates-only-when-head-passes.test.ts
+  status: queued
+  priority: 2  # every author runs this verb before pushing; a fail/fail proof told "discriminates" reaches review and costs a round
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 on origin/main fe381f93b from the operator checkout:
+      `./bin/rmd check-proof 'grep: zzqq-no-such-text-zzqq in package.json' --base origin/main` printed
+      `verdict: fail`, `hits: 0`, `base hits: 0`, `base: fail`, then
+      `discrimination: discriminates — head and base disagree; this proof tells done from not-done.` and exited 1.
+    The same shape on 2026-10-13: the proof `grep: "kind: guard  # the file exists at base", in plan/tasks.d/W1-T9225-...yaml`
+    read fail at head and at base, the tail said "discriminates", and #11430 was opened on it and failed review.
+    WHY, READ on origin/main (symbols, not lines), src/lib/check-proof.ts `compareAgainstBase` (inside
+    `checkProofCommand`): after the base run it special-cases only `outcome === "pass" && baseOutcome === "pass"`
+    (executed_stale, exit 5) and prints the "discriminates" line for every other pair: fail/fail, no-match/no-match,
+    fail/no-match, and fail at head with pass at base (a proof this head breaks). The COULD NOT LINK arm and the
+    copied-added-test-file arm print "discriminates" without reading the head outcome either. The exit code is already
+    the head's (`headExit`: fail 1, no-match 3), distinct from executed_stale 5; only the closing line misreports.
+    The house rule tells authors to read the whole output, but the last line is the one that names the conclusion, and
+    an author who trusts it ships a proof that cannot pass.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 349 readable open origin heads for "head and base disagree"
+    (main 1: W1-T7821, which is about a COMMENT-ONLY pass/pass match, not a failing head; no head more) and for
+    check-proof failing at both (main 1: W1-T7728, a narrow-entry loader task; no head more). Control: the same sweep
+    finds `^- id: W1-T9237$` on main and finds a head-only shard on plan/W1-T3455-log-proven-ratchet-admission.
+  design: |
+    1. "DISCRIMINATES" NEEDS A PASSING HEAD. Every arm of `compareAgainstBase` that prints
+       `discrimination: discriminates` (the final pair, COULD NOT LINK, and the added-test-file arm) does so only when the
+       head outcome is pass.
+    2. FAIL AT HEAD IS NAMED AS SUCH. Head fail or no-match with base fail or no-match prints a distinct line, e.g.
+       `discrimination: none — this proof FAILS at head (and at base); it proves nothing until it passes at head`.
+       Head fail with base pass prints that the proof passes at the base and fails at this head (the head breaks what
+       it checks). Each line names the head verdict above it, so the tail alone cannot be misread.
+    3. EXITS UNCHANGED. The command still returns `headExit` for every non-stale pair (fail 1, no-match 3), never 0 and
+       never executed_stale's 5, so a script reading the exit already tells these apart. No new exit code.
+    Tests go in test/check-proof-says-discriminates-only-when-head-passes.test.ts, driving the command against a
+    gitRepo() fixture (local user.email/name set) whose base and head differ by one line, capturing stdout and the
+    returned exit for each pair.
+  acceptance:
+    - claim: "a proof failing at both head and base never prints discriminates, names that it fails at head, and returns the fail exit"
+      proof: 'grep: test("check-proof: a proof failing at head and base is never called discriminating" in test/check-proof-says-discriminates-only-when-head-passes.test.ts'
+    - claim: "a proof failing at head but passing at base is reported as broken by this head, not as discriminating"
+      proof: 'grep: test("check-proof: a proof passing at base and failing at head is named as broken by this head" in test/check-proof-says-discriminates-only-when-head-passes.test.ts'
+    - claim: "a proof passing at head and failing at base still prints discriminates, and pass/pass still exits executed_stale"
+      proof: 'grep: test("check-proof: pass at head with fail at base still discriminates" in test/check-proof-says-discriminates-only-when-head-passes.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/check-proof-says-discriminates-only-when-head-passes.test.ts"
+  falsifier: |
+    Restore the unconditional closing line: the fail/fail case prints "discriminates" and the first test fails, and
+    the base-pass/head-fail case is called discriminating and the second test fails. Gate "discriminates" on the two
+    outcomes differing instead of on a passing head: fail at head with pass at base is still called discriminating and
+    the second test fails. Print the new "fails at head" line for a passing head too: the third test fails.
