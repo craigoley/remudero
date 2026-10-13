@@ -1,0 +1,67 @@
+id: fb-1791856366585-19538c
+ts: 2026-10-13T01:52:46.587Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+
+  WHAT NANOCLAW DOES (OBSERVED):
+
+  - When a deterministic setup step fails, setup hands off to a bounded
+  diagnosis. It passes the step id, the error, a hint and FILE REFERENCES rather
+  than contents. The model run is read-only (--tools Read,Grep,Glob).
+
+  - The answer must be exactly REASON: plus COMMAND:, and the human can edit the
+  command before it runs. A retry then skips the steps already completed
+  (setup/lib/claude-assist.ts:48-98, 255-277; setup/lib/runner.ts:369-400).
+
+  - A shell script's EXIT trap always writes a handoff.json, which the next step
+  treats as its recovery point (migrate-v2.sh:57-103).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - deploy/recycle-container.sh already keeps a phase variable and an EXIT trap
+  (commission_on_exit, lines 155-189). The trap prints a recovery sentence and
+  appends a recycle.git_author_commission ledger row, but only in commission
+  mode.
+
+  - git grep finds no reader of that step in src/.
+
+  - Every other recycle or host-update failure leaves only stdout, and recovery
+  is a human re-running the script.
+
+
+  ASK (design first; verify: human; risk: high because it touches deploy):
+
+  1. Every run of deploy/recycle-container.sh and deploy/host-update.sh writes
+  one value-free receipt row on exit: script, instance, phase reached, outcome,
+  the recovery sentence, and a bounded, redacted log tail.
+
+  2. The core daemon turns a failed or refused receipt into one read-only
+  diagnosis: Read, Grep and Glob over the repo plus the receipt, with no network
+  and no writes. The answer is REASON plus one COMMAND (or none). It is staged
+  as an inbox ASK the operator approves, and never executed automatically.
+
+  3. When the diagnosis names a defect in the script itself, it lands a feedback
+  entry against that script, so the fix flows through the normal lanes.
+
+  Deduplicate per receipt.
+
+
+  FALSIFIER: make a recycle refuse at preflight. Today it writes no receipt row.
+  After the change it writes one receipt row and stages one ASK.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/deploy-failure-diagnosis
+thread_id: null
