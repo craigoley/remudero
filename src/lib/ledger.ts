@@ -561,6 +561,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "dispatch.claim", // W1-T9001: recoverPromisedFollowUpReports uses claim time to bound its archive scan.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",

@@ -56,7 +56,7 @@ import { adjudicateReservationChain, parseReservationHolderLine, parseReservatio
 /** The commit-status context string the merge gate keys on. Never change casually. */
 export const REVIEW_CONTEXT = "remudero-review";
 
-/** A judged success/failure or a cannot-evaluate hold, posted as pending until the toolchain is repaired. */
+/** A judged success/failure or a load/harvest hold, posted as pending until review can complete. */
 export type ReviewState = "success" | "failure" | "pending";
 
 /** States the commit-status poster accepts. */
@@ -4854,42 +4854,44 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     if (!names.includes(LEDGER_FILENAME)) incomplete = true;
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
-    if (!liveOnly) {
-      const bound = firstRun ?? args.prCreatedAt ?? await (args.fetchPrCreatedAt ?? (async prUrl => {
-        const target = prLifecycleUrlTarget(prUrl);
-        if (!target) throw new Error("promise harvest PR identity is unavailable");
-        const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
-        if (!row.created_at) throw new Error("promise harvest PR creation time is unavailable");
-        return row.created_at;
-      }))(args.prUrl);
-      afterRotation = rotationBeforeTime(names, bound);
-    }
-    for await (const row of openLedgerUnion(stateDir, {
-      step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
-      ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
-      onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
-    }, args.io)) {
-      if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
-          typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts))) {
-        if (firstRun === undefined || Date.parse(row.ts) < Date.parse(firstRun)) firstRun = row.ts;
+      if (!liveOnly) {
+        const prCreatedAt = args.prCreatedAt ?? await (args.fetchPrCreatedAt ?? (async prUrl => {
+          const target = prLifecycleUrlTarget(prUrl);
+          if (!target) throw new Error("promise harvest PR identity is unavailable");
+          const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
+          if (!row.created_at) throw new Error("promise harvest PR creation time is unavailable");
+          return row.created_at;
+        }))(args.prUrl);
+        // The earliest live start may be a retry whose original start has already rotated away.
+        const bound = firstRun !== undefined && Date.parse(firstRun) < Date.parse(prCreatedAt) ? firstRun : prCreatedAt;
+        afterRotation = rotationBeforeTime(names, bound);
       }
-      if (row.step !== "report.followups") continue;
-      if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
-      if (!Array.isArray(row.entries)) { incomplete = true; continue; }
-      for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
-        if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
-          incomplete = true; continue;
+      for await (const row of openLedgerUnion(stateDir, {
+        step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
+        ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
+        onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
+      }, args.io)) {
+        if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
+            typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts))) {
+          if (firstRun === undefined || Date.parse(row.ts) < Date.parse(firstRun)) firstRun = row.ts;
         }
-        const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
-        entries.set(JSON.stringify(entry), entry);
-        if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
+        if (row.step !== "report.followups") continue;
+        if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
+        if (!Array.isArray(row.entries)) { incomplete = true; continue; }
+        for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
+          if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
+            incomplete = true; continue;
+          }
+          const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
+          entries.set(JSON.stringify(entry), entry);
+          if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
+        }
       }
-    }
-    const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-    if (unreportedFollowUps(observation.promised,
-      followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
-      return { ...observation, harvested: found, harvestCorpusComplete: !liveOnly && !incomplete };
-    }
+      const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      if (unreportedFollowUps(observation.promised,
+        followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
+        return { ...observation, harvested: found, harvestCorpusComplete: !liveOnly && !incomplete };
+      }
     }
     const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
@@ -5368,7 +5370,7 @@ export function judgeReview(
   const summary =
     state === "pending"
       ? (verdicts.some(v => v.loadError !== undefined)
-        ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError}`
+        ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
         : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
       : state === "success"
       ? planOnly
@@ -10650,7 +10652,7 @@ export async function postReviewStatusGuarded(
       };
     }
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
-        !opts.description.includes("promise harvest") && opts.prUrl &&
+        !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
       // Load escalation only for this exceptional pending path. Its worker graph reaches review
       // through eval-card; a top-level import closes a cycle and fails the dependency gate.
