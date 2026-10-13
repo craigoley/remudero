@@ -14,6 +14,9 @@ const HEAD = "5492549254925492549254925492549254925492";
 const NEXT_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TASK = "W1-T5492";
 const PR_URL = "https://github.com/craigoley/remudero/pull/5492";
+function securityCheck(head:string){return {total_count:1,check_runs:[{id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'success',
+ app:{id:57789,slug:'github-advanced-security',owner:{login:'github'}},
+ output:{title:'No new alerts in code changed by this pull request',summary:'[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A5492+tool%3ACodeQL+is%3Aopen).'}}]};}
 
 function pr(overrides: Partial<OpenPrView> = {}): OpenPrView {
   return {
@@ -28,19 +31,24 @@ function harness(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-armed-idle-"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const live = { state: "open", merged: false, auto_merge: {} as unknown, draft: false,
-    head: { sha: HEAD }, base: { ref: "main" }, mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
+    head: { sha: HEAD }, base: { ref: "main",sha:'b'.repeat(40),repo:{full_name:'craigoley/remudero'} },changed_files:1,
+    mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
   const shim = ghShim([
     { when: "/merge", stdout: '{"merged":true}' },
     { when: "/update-branch", stdout: '{}' },
     { when: "/files", stdout: '[{"filename":"src/example.ts"}]' },
+    { when: "/check-runs?", stdout: JSON.stringify(securityCheck(HEAD)) },
     { when: "/compare/", stdout: '{"behind_by":0}' },
     { when: "/rules/branches/main", stdout: '[]' },
     { when: "/pulls/5492", stdout: JSON.stringify(live) },
   ], { kind: "armed-idle-gh" });
   const previousPath = process.env.PATH;
+  const previousCache = process.env.RMD_GH_CACHE_HOME;
   process.env.PATH = `${shim.dir}:${previousPath}`;
+  process.env.RMD_GH_CACHE_HOME=shim.dir;
   t.after(() => {
     process.env.PATH = previousPath;
+    if(previousCache===undefined)delete process.env.RMD_GH_CACHE_HOME;else process.env.RMD_GH_CACHE_HOME=previousCache;
     rmSync(root, { recursive: true, force: true });
     rmSync(shim.dir, { recursive: true, force: true });
   });
@@ -67,6 +75,7 @@ function harness(t: TestContext) {
   const setLive = (changes: Partial<typeof live>) => {
     Object.assign(live, changes);
     shim.addRoute({ when: "/pulls/5492", stdout: JSON.stringify(live) });
+    shim.addRoute({when:'/check-runs?',stdout:JSON.stringify(securityCheck(live.head.sha))});
   };
   return { pass, rows, merges, shim, review, setLive, logs, ledgerPath, deps };
 }
