@@ -41,6 +41,9 @@ function sources(label: string, opts: { answerThreadId?: string; answerInstance?
   const calls = { list: 0, detail: 0, reply: 0, read: 0 };
   const readBody = (req: Parameters<Route["handler"]>[0]): Body => JSON.parse(String((req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] ?? "{}")) as Body;
   const routes: Route[] = [
+    ...["/v1/inbox", "/v1/inbox/attention-census", "/v1/inbox/proposal"].map(path => ({ method: "GET" as const, path, scope: "read" as const,
+      handler: (req: Parameters<Route["handler"]>[0], res: Parameters<Route["handler"]>[1]) => sendJson(res, 200, { proposalId: new URL(req.url ?? "/", "http://x").searchParams.get("id"), items: [] }) })),
+    { method: "POST", path: "/v1/inbox/reframe", scope: "write", tier: "low", handler: (_req, res) => sendJson(res, 200, { ok: true }) },
     { method: "GET", path: "/v1/inbox/threads", scope: "read", handler: (_req, res) => {
       calls.list++;
       res.setHeader("x-source", label);
@@ -160,7 +163,7 @@ test("instance inbox advertises only its mounted conversation routes", (t) => {
   for (const id of ["core", "site", "console"]) {
     const caps = byId[id].capabilities;
     const advertised = [...caps.views, ...caps.writes].filter((cap) => methodOf.has(cap));
-    const mountedInbox = mounted.filter((m) => m.includes(`/v1/i/${id}/inbox/`));
+    const mountedInbox = mounted.filter((m) => m.endsWith(`/v1/i/${id}/inbox`) || m.includes(`/v1/i/${id}/inbox/`));
     for (const cap of advertised) assert.ok(mounted.includes(`${methodOf.get(cap)} /v1/i/${id}/${cap}`), `${id} advertises ${cap}, so serve must mount it`);
     // Each mounted path appears ONCE: core's raw unprefixed copy no longer shadows the contract route.
     assert.equal(new Set(mountedInbox).size, mountedInbox.length, `${id}'s conversation routes are mounted once`);
@@ -392,7 +395,7 @@ test("instance inbox unavailable contract never holds PR flow", async (t) => {
   const blocked = join(f.base, "not-a-dir");
   writeFileSync(blocked, "");
   const direct = sources("direct");
-  const [, , reply] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: blocked, routes: direct.routes, contract: () => ({ mode: "read-write" }) });
+  const reply = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: blocked, routes: direct.routes, contract: () => ({ mode: "read-write" }) }).find(r => r.path.endsWith("/thread/reply"))!;
   let directStatus = 0;
   let text = "";
   const res = { statusCode: 200, setHeader() {}, writeHead(code: number) { directStatus = code; return res; }, end(chunk?: string) { text = chunk ?? ""; } };
@@ -401,7 +404,7 @@ test("instance inbox unavailable contract never holds PR flow", async (t) => {
   assert.equal(directStatus, 503);
   assert.equal((JSON.parse(text) as Body).error, "inbox_receipt_store_unavailable");
   assert.equal(direct.calls.reply, 0);
-  const [, , unrooted] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: undefined, routes: direct.routes, contract: () => ({ mode: "read-write" }) });
+  const unrooted = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: undefined, routes: direct.routes, contract: () => ({ mode: "read-write" }) }).find(r => r.path.endsWith("/thread/reply"))!;
   await unrooted.handler(req as never, res as never, { params: {} });
   assert.equal((JSON.parse(text) as Body).error, "inbox_read_only", "no state root means nowhere to keep a receipt: read-only");
 
