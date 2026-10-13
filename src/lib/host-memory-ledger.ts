@@ -76,6 +76,7 @@ export interface MemoryReservationEntry {
   /** The process holding the occupancy. Its verified exit ends the occupancy (a crashed worker). */
   owner: ProcessIdentity;
   workerClass: WorkerClass;
+  entry_kind?: "bundle" | "tsx";
   estimateMib: number;
   estimateSource: EstimateSource;
   openedAt: string;
@@ -146,6 +147,7 @@ export const DEFAULT_ESTIMATE_MIB: Readonly<Record<WorkerClass, number>> = {
 
 export interface OpenReservationInput {
   workerClass: WorkerClass;
+  entryKind?: "bundle" | "tsx";
   /** A measured estimate, with its sample count. Absent means the class default, said so. */
   measured?: { estimateMib: number; samples: number };
   root?: string;
@@ -532,6 +534,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       generation: ctx.generation,
       owner: { pid: ownerPid, start: owner.state === "alive" ? owner.start : "unknown" },
       workerClass: input.workerClass,
+      ...(input.entryKind ? { entry_kind: input.entryKind } : {}),
       estimateMib: input.measured?.estimateMib ?? DEFAULT_ESTIMATE_MIB[input.workerClass],
       estimateSource: input.measured ? { kind: "measured", samples: input.measured.samples } : { kind: "default-unmeasured" },
       openedAt: nowIso,
@@ -552,6 +555,11 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
     // The handle keeps the entry in memory and retries the write on bind/release.
     recordError(deps, "open-write", error);
   }
+  return handleForEntry(ctx, entry, deps, published);
+}
+
+function handleForEntry(ctx: Context, initial: MemoryReservationEntry, deps: HostMemoryLedgerOptions, published: boolean): MemoryReservationHandle {
+  let entry = initial;
   return {
     id: entry.id,
     get published() { return published; },
@@ -577,6 +585,33 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       }
     },
   };
+}
+
+/** Reclaim a live child's existing record after a daemon restart, preserving its tree and estimate. */
+export function adoptMemoryReservation(
+  id: string,
+  identity: ProcessIdentity & { generation: ContainerGeneration },
+  deps: HostMemoryLedgerOptions = {},
+): { handle: MemoryReservationHandle; entry: MemoryReservationEntry } | undefined {
+  try {
+    if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error("invalid reservation id");
+    const ctx = contextOf(deps);
+    const entry = readEntry(ctx, entryPath(ctx, id));
+    if (!entry || entry.id !== id || !sameGeneration(entry.generation, ctx.generation) ||
+        !sameGeneration(identity.generation, ctx.generation) || entry.occupancyReleasedAt !== undefined ||
+        !entry.roots.some((root) => root.pid === identity.pid && root.start === identity.start) ||
+        identityState(ctx, identity) !== "alive") return undefined;
+    const pid = deps.ownerPid ?? process.pid;
+    const owner = ctx.probe(pid);
+    if (owner.state !== "alive" || owner.start === "unknown") throw new Error("adopting owner identity unreadable");
+    const claimed = { ...entry, owner: { pid, start: owner.start }, verifiedAt: ctx.clock.iso() };
+    persist(ctx, claimed);
+    rememberOwn(ctx, claimed);
+    return { handle: handleForEntry(ctx, claimed, deps, true), entry: claimed };
+  } catch (error) {
+    recordError(deps, "adopt", error);
+    return undefined;
+  }
 }
 
 /** Walk the listing for descendants of every live recorded identity, adding each new one as (pid, start). */
