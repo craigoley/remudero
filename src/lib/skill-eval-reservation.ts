@@ -6,7 +6,9 @@ import { HEAVY_READY_ESCALATION_MS } from "./heavy-build-reservation.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD } from "./paired-trial.js";
 import { SKILL_EVAL_ARMS, SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_TRIALS_PER_ARM } from "./skill-eval.js";
 
+/** PRIMARY CONTROL: only a fresh resource observation can price admission; tested at both boundary sides. */
 export const EVAL_CAPACITY_MAX_AGE_MS = 10_000;
+/** PRIMARY CONTROL: closed timing evidence expires as the host workload drifts, independent of grant age. */
 export const EVAL_CALIBRATION_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /** All inputs that can change cost, timing, held-out leakage or the paired comparison. */
