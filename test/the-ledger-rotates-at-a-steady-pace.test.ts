@@ -100,8 +100,11 @@ test("W1-T4100: an archive name never runs ahead of its file", () => {
     padPast(ledgerPath, ceiling, 0);
 
     // THE FALSIFIER'S OWN SCENARIO: a clock set ahead — the exact incident, a year and change
-    // past the real date the archive actually lands on disk.
-    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date("2027-10-14T21:24:52.494Z") });
+    // past the real date the archive actually lands on disk. The incident's LEAD, not its date: a
+    // literal 2027-10-14 stamp stops running ahead of the real clock on that day.
+    const ahead = new Date(Date.now() + Date.parse("2027-10-14T21:24:52.494Z") - Date.parse("2026-09-13T00:00:00.000Z"));
+    assert.ok(ahead.getTime() - Date.now() > 365 * 86_400_000, "fixture: the injected clock runs over a year ahead of the run");
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => ahead });
     assert.equal(result.rotated, true);
     assert.ok(result.archivePath, "a rotation that fires must name the archive it wrote");
 
@@ -116,7 +119,7 @@ test("W1-T4100: an archive name never runs ahead of its file", () => {
       `FALSIFIER: named from the wall clock alone, the archive's name (${stampIso}) would run ahead of ` +
         `its own real file (mtime ${new Date(mtimeMs).toISOString()})`,
     );
-    assert.ok(!archivePath.includes("2027-10-14"), "the injected future stamp must not survive into the archive's real name");
+    assert.ok(!archivePath.includes(ahead.toISOString().slice(0, 10)), "the injected future stamp must not survive into the archive's real name");
 
     // Back-date the first archive's own mtime past the rotation-smoothing window (a SEPARATE
     // W1-T4100 concern, covered by its own test) so this test's second rotation below is not
@@ -226,20 +229,25 @@ test("W1-T4100: healing a future-dated name never overwrites another archive", (
     padPast(ledgerPath, 2000, 0);
     // Two future-named archives whose real mtimes share one millisecond, plus a third archive
     // already holding the name that millisecond encodes: a heal by `renameSync` alone would
-    // silently replace one file with another.
+    // silently replace one file with another. "Future" is ahead of the RUN's clock, 100 and 101 days
+    // as the 2027-01-01/02 names were when written: a `ledger.2027` prefix stops meaning future on
+    // 2027-01-01, when this rotation's own archive is named 2027.
     const realMs = Date.parse("2026-09-13T00:00:00.000Z");
-    const names = ["ledger.2027-01-01T00-00-00-000Z.ndjson.gz", "ledger.2027-01-02T00-00-00-000Z.ndjson.gz", "ledger.2026-09-13T00-00-00-000Z.ndjson.gz"];
+    const aheadName = (days: number) => `ledger.${new Date(Date.now() + days * 86_400_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`;
+    const isFuture = (f: string) => Date.parse(rotationStampIso(f) ?? "") > Date.now();
+    const names = [aheadName(100), aheadName(101), "ledger.2026-09-13T00-00-00-000Z.ndjson.gz"];
     names.forEach((n, i) => {
       writeFileSync(join(dir, n), `archive-${i}`);
       utimesSync(join(dir, n), new Date(realMs), new Date(realMs));
     });
+    assert.equal(archivesIn(dir).filter(isFuture).length, 2, "fixture: two names run ahead of the clock before the heal");
     assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2000 }).rotated, true);
     const contents = archivesIn(dir)
       .filter((f) => f.startsWith("ledger.2026-09-13"))
       .map((f) => readFileSync(join(dir, f), "utf8"))
       .sort();
     assert.deepEqual(contents, ["archive-0", "archive-1", "archive-2"], "FALSIFIER: every archive survives its heal");
-    assert.equal(archivesIn(dir).filter((f) => f.startsWith("ledger.2027")).length, 0, "no future-dated name survives");
+    assert.equal(archivesIn(dir).filter(isFuture).length, 0, "no future-dated name survives");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
