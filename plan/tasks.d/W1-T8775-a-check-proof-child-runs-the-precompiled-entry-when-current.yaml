@@ -1,5 +1,5 @@
 - id: W1-T8775
-  title: "A CHECK-PROOF CHILD RUNS THE PRECOMPILED ENTRY WHEN IT IS CURRENT, AND TSX ONLY AS THE FALLBACK — W1-T7729 baked dist/child-entries into core's image on 2026-10-12, but every daemon child still starts through tsx, so the ADR's 173-182 MB bundle run never replaces a 284 MB warm or 519 MB cold tsx start"
+  title: "A CHECK-PROOF CHILD RUNS THE PRECOMPILED ENTRY WHEN IT IS CURRENT, AND TSX ONLY AS THE FALLBACK — W1-T7729 baked bundles into core's image but no spawn site uses them; native help ABBA measured 166-167 MiB bundled versus 528-547 MiB cold TSX, not a full-gate forecast or verified warm-cache result"
   repo: remudero
   depends_on: [W1-T7728]
   type: implement
@@ -22,6 +22,10 @@
     284 MB warm, and 173-182 MB as an esbuild bundle. ADR 0006 "Follow-up tasks this record files" names this switch
     first, and none of its four follow-ups was filed: W1-T7729's acceptance let it merge without them (W1-T8779 closes
     that gap).
+    PROMISE IDENTITY (W1-T7729, ADR 0006, first bullet): switch the check-proof spawn sites (`checkProofChildArgv`,
+    W1-T7728) to the bundle when `childEntryIsCurrent` holds, with tsx as the fallback;
+    The original ADR numbers above are historical. Later native help ABBA measured166-167MiB bundled and528-547MiB
+    cold TSX; repeated TSX runs had499zero-byte cache entries and are not verified warm-cache samples or gate forecasts.
     WHY A NEW TASK, NOT AN AMENDMENT TO W1-T7728: W1-T7728 already moves ~830 lines across 21 files and has a dormant
     checkpoint branch; widening it would re-open its contract mid-flight. Its narrow entry (src/check-proof-main.ts) and
     its single argv builder (checkProofChildArgv) are exactly what this task switches, so it depends on W1-T7728.

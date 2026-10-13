@@ -20,6 +20,11 @@
     mounted checkout (/home/node/Remudero/remudero), not /app, and spawns its children into per-pass worktrees, so on
     2026-10-12 no daemon child could find a current bundle. sourceHash never includes the absolute path, so every
     worktree holding main's source shares one key: one build per main revision can serve all of them.
+    PROMISE IDENTITY (W1-T7729, ADR 0006, second bullet): a hash-addressed bundle store shared by all worktrees at one
+    source hash. It would be built once per main revision by the daemon, with the tree root passed in rather than
+    taken from the bundle's location;
+    This explicitly names the filed promise for W1-T8779; the design below corrects its path-resolution strategy
+    using owned worktree materialization, not execution from the store directory.
     WHY MATERIALIZE INTO THE TREE, NOT A ROOT PASSED IN: the ADR's bullet says the tree root should be "passed in rather
     than taken from the bundle's location". But the recipe leaves bare imports external (`packages: "external"`) and
     resolves each module's `import.meta.url` relative to the bundle, so a bundle run from a store directory would
