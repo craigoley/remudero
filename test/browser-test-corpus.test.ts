@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { fileURLToPath } from "node:url";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import { assertBrowserTeardownSources, assertTrackedBrowserTeardown, trackedBrowserTestSources } from "./lib/browser-test-corpus.js";
 
@@ -26,6 +27,38 @@ function fixture(t: TestContext): GitRepo {
 }
 
 const realList = (root: string) => execFileSync("git", ["ls-files", "-z", "--", "test"], { cwd: root, encoding: "utf8" });
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const GUARD_TITLE = "every browser-launching test file awaits the launch PROMISE";
+
+/** Env for a nested `node --test` without the parent runner's markers (see serve-browser-teardown.test.ts). */
+function cleanTestEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = undefined;
+  return env;
+}
+
+/** Install the REAL shipped guard (and its sibling reader) into a fixture repo, track a fourth browser suite. */
+function installGuard(repo: GitRepo): void {
+  mkdirSync(join(repo.dir, "test", "lib"), { recursive: true });
+  for (const file of ["test/serve-browser-teardown.test.ts", "test/lib/browser-test-corpus.ts"]) {
+    copyFileSync(join(REPO_ROOT, file), join(repo.dir, file));
+  }
+  writeFileSync(join(repo.dir, "test", "d.test.ts"), validSource());
+  repo.git("add", "test");
+  repo.git("commit", "--quiet", "-m", "test: install the real browser teardown guard");
+}
+
+/** Run ONLY the guard's corpus test, as a real subprocess, rooted in the fixture repo. */
+function runGuard(repo: GitRepo): { status: number | null; output: string } {
+  const run = spawnSync(
+    process.execPath,
+    ["--import", import.meta.resolve("tsx"), "--test", "--test-reporter=tap", "--test-name-pattern", GUARD_TITLE, "test/serve-browser-teardown.test.ts"],
+    { cwd: repo.dir, timeout: 90_000, encoding: "utf8", env: cleanTestEnv() },
+  );
+  return { status: run.status, output: `${run.stdout}\n${run.stderr}` };
+}
 
 test("browser teardown corpus reads tracked nested tests without traversing transient fixtures", (t) => {
   const repo = fixture(t);
@@ -53,6 +86,19 @@ test("browser teardown corpus reads tracked nested tests without traversing tran
   assert.equal(trackedBrowserTestSources(repo.dir).length, 3);
 });
 
+test("browser teardown corpus reads tracked nested tests without traversing transient fixtures: the shipped guard ignores an untracked broken suite", (t) => {
+  const repo = fixture(t);
+  installGuard(repo);
+  const transient = join(repo.dir, "test", ".tmp-w1-t1053-audit-fixture");
+  mkdirSync(transient);
+  writeFileSync(join(transient, "not-a-real-suite.test.ts"), `broken ${LAUNCH}{});`);
+  const { status, output } = runGuard(repo);
+  // A guard that still greps the live tree meets the untracked broken launch text and fails here.
+  assert.equal(status, 0, output);
+  assert.match(output, /^# pass 1$/m, output);
+  assert.match(output, /^# fail 0$/m, output);
+});
+
 test("browser teardown corpus refuses unavailable tracked sources without hiding a real regression", (t) => {
   const repo = fixture(t), path = "test/a.test.ts", absolute = join(repo.dir, path);
   rmSync(absolute);
@@ -69,6 +115,17 @@ test("browser teardown corpus refuses unavailable tracked sources without hiding
   const broken = validSource().replace("const launched = await browserPromise;", "const launched = browser;");
   writeFileSync(absolute, broken);
   assert.throws(() => assertTrackedBrowserTeardown(repo.dir), /test\/a.test.ts: teardown must await/);
+});
+
+test("browser teardown corpus refuses unavailable tracked sources without hiding a real regression: the shipped guard fails on a deleted tracked suite", (t) => {
+  const repo = fixture(t);
+  installGuard(repo);
+  // Three tracked browser suites remain on disk, so a guard that scans the live tree still passes its floor.
+  rmSync(join(repo.dir, "test", "d.test.ts"));
+  const { status, output } = runGuard(repo);
+  assert.notEqual(status, 0, output);
+  assert.match(output, /ENOENT/, output);
+  assert.match(output, /^# fail 1$/m, output);
 });
 
 test("browser teardown corpus refuses empty failed malformed and binary evidence", (t) => {
