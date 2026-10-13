@@ -1,0 +1,102 @@
+- id: W1-T9035
+  title: "THE KNOWLEDGE GARDENER'S PER-PASS ACTION BOUND IS EARNED FROM ITS OWN RECORD, NOT FIXED AT 3 — #11245 capped a retire or merge pass at GARDEN_MAX_ACTIONS_PER_PASS = 3, while the retire class's judged record on host remudero reads alpha 20, beta 4 and all 34 learnings the garden log retired are still superseded on main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — how many merge or retire actions one knowledge-garden pass may land; it spans the knowledge spec, the framework's candidates hook (gardener.ts) and #11245's test, and what is a candidate, and how a class is chosen and judged, are unchanged
+  band_meaning: span
+  origin: "operator approval 2026-10-13 (\"go\"): replace #11245's fixed cap with an adaptive bound (standing rule: no hard fixed thresholds)"
+  plan_refs: [W1-T4095, W1-T4110, W1-T4114, W1-T4802]
+  files:
+    - src/lib/knowledge-gardener.ts
+    - src/lib/gardener.ts
+    - test/the-knowledge-gardener-acts-on-at-most-three-entries-a-pass.test.ts
+    - test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 58e1376af. Symbols, not lines.
+    WHAT #11245 ADDED (43bf77d01, "feat(knowledge): cap the gardener at 3 retire/merge actions per pass", a hand PR
+    with no shard). `GARDEN_MAX_ACTIONS_PER_PASS = 3` in src/lib/knowledge-gardener.ts. `capByCertainty`, called from
+    `candidateActions` after test-pinned entries are set aside, keeps each of the merge and retire classes to its 3
+    most certain targets: share of posterior draws below the corpus median for a retire (`retireCertainties`), text
+    similarity for a merge (`learningSimilarity`), ties by id. It names the rest as `deferred` in the
+    `knowledge.scorecard` row and the garden log ("over this pass's cap of 3; the next pass judges it again").
+    THE HARM IT GUARDS. Its message: one pass retired 14 learnings at once (#7205), and nothing bounded how many a single
+    pass could land. Bounded edits per pass keep a wholesale rewrite from collapsing the context workers are given
+    (ACE, ICLR 2026; Microsoft SkillOpt). The operator ruled 3 on 2026-10-13. The operator approved replacing that
+    fixed number with an adaptive bound on 2026-10-13, under the standing rule against hard fixed thresholds. The
+    bound below reproduces 3 exactly on a fresh record, so it changes nothing until evidence moves it.
+    THE EVIDENCE THE GARDENER ALREADY KEEPS. Each class has a Beta record (`GardenState.classes`, src/lib/gardener.ts).
+    It starts at Beta(3, 1) (`initialGardenState`). It gains alpha or beta when the class's PR is closed (a debit),
+    when its metric moves beyond one standard error after a merge (`judgeGardenPending`), and when the gardener
+    overseer folds an effect or churn verdict (`foldGardenEffects`, W1-T4802). That is the class's measured precision,
+    judged on outcomes. Read niced on host remudero, ~/rmd-state2/state/knowledge-gardener.json at 10:35Z:
+    retire {alpha 20, beta 4}, merge and every other class {alpha 3, beta 1}, no pending PR, no declined targets.
+    The undo signal is not in that record. docs/knowledge-garden-log.md on main holds 18 pass sections and 34
+    actions, all retirements. Each of the 34 targets still reads `lifecycle: superseded` in learnings/*.yaml on main.
+    Control: every id was found in a shard, and none was missing. So the gardener's measured undo rate is 0 of 34
+    today, but nothing yet reads it.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 327 origin heads for GARDEN_MAX_ACTIONS_PER_PASS,
+    capByCertainty, "retire/merge actions" and a knowledge-gardener cap, allowance or per-pass bound. No shard names
+    them. No head changes GARDEN_MAX_ACTIONS_PER_PASS in src/: main reads 4 hits and no head with the symbol differs.
+    W1-T7954 (queued) edits src/lib/knowledge-gardener.ts for the learnings store's merge conflicts, not the bound.
+    Overlap packing serializes the two.
+  design: |
+    No new fixed count, ratio or timer. The bound is the acting class's own posterior odds that its next change is
+    good. It grows with each credit, shrinks with each debit or undone action, and is reported with its inputs.
+    1. THE ALLOWANCE. For the merge or retire class acting this pass:
+         allowance = max(1, floor(alpha / (beta + undone)))
+       `alpha` and `beta` are that class's record in the state the pass planned from, after any pending verdict or
+       overseer effect was folded. `undone` counts that class's past targets the garden log records as acted on
+       (`- retire <id>:` or `- merge <id> into <x>:` lines in `GARDEN_LOG`) whose learning reads `lifecycle: active`
+       in this pass's inventory: an action a person or a later change reversed. Units match: alpha and beta count
+       judged changes of the class, and each undone target is one more judged-bad change. The floor of one is
+       structural, not a tuning: a class that may never act can never earn evidence, and its Beta draw already decides
+       whether it acts at all. A fresh record is Beta(3, 1), giving 3, the operator's 2026-10-13 value. Today's retire
+       record (20, 4, 0 undone) gives 5. One more debit gives 4.
+    2. REPLACE THE CONSTANT. Remove `GARDEN_MAX_ACTIONS_PER_PASS`. `capByCertainty` takes the allowance per class
+       instead and keeps its ranking: most certain first, ties by id, test-pinned and declined entries set aside
+       first. To give `candidates` the record, add an optional fourth argument to `GardenSpec.candidates`
+       (src/lib/gardener.ts): the class records `runGarden` already holds as `state.classes`. Other gardeners ignore it.
+       `planGardenPass` passes its own `opts.state.classes`.
+    3. A NAMED ROW RECORDS THE BOUND AND WHY. When merge or retire has candidates in a pass, the knowledge spec logs
+       `knowledge.action_allowance` once per such class: `{ class, allowance, alpha, beta, undone, undone_targets,
+       candidates, kept, deferred, reason }`. `reason` states the rule with its numbers, e.g. "posterior odds of a
+       good retire: floor(20 / (4 + 0)) = 5". The scorecard's `deferred` and the garden log keep naming every deferred
+       target. The log line names the allowance and its inputs instead of "cap of 3".
+    4. UNCHANGED: `retireCertainties` and its confidence, `MERGE_SIMILARITY`, `planGarden`'s class draw,
+       `judgeGardenPending`, `foldGardenEffects`, and every other gardener.
+    Tests go in a new file, test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive `runGardenPass` the way
+    test/the-knowledge-gardener-acts-on-at-most-three-entries-a-pass.test.ts does: a temp root, a learnings shard, a
+    usage file, the other classes switched off, and a written `knowledge-gardener.json` state for the record. Update
+    that older file so it no longer imports the removed constant. Its behaviour on a fresh record stays: 14 eligible
+    retire 3, and 2 eligible retire 2.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts"
+    - claim: "a retire class with a stronger judged record lands more of its most certain targets in one pass, and a fresh record still lands 3"
+      proof: 'grep: test("W1-T9035: the allowance grows with the judged record of its class" in test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts'
+    - claim: "a debit, or a retired target found active again, lowers the allowance, and the allowance never falls below one"
+      proof: 'grep: test("W1-T9035: a debit or an undone action lowers the allowance" in test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts'
+    - claim: "each pass with merge or retire candidates writes one knowledge.action_allowance row naming the allowance, its inputs and its reason"
+      proof: 'grep: test("W1-T9035: the pass ledgers its allowance and why" in test/the-knowledge-gardeners-action-bound-is-earned-from-its-record.test.ts'
+    - claim: "the knowledge gardener writes the named row"
+      proof: 'grep: knowledge\.action_allowance in src/lib/knowledge-gardener.ts'
+  falsifier: |
+    A pass sees 14 eligible retirements. With state retire {alpha 20, beta 4} and no undone target, today's code
+    retires 3 and defers 11. The fix retires the 5 most certain and defers 9, and its `knowledge.action_allowance` row
+    reads allowance 5, alpha 20, beta 4, undone 0. With a fresh Beta(3, 1) it retires 3. With {alpha 20, beta 4} and
+    two garden-log retire targets back at `lifecycle: active`, it retires 3 (floor(20 / 6)). Keep the constant, and the
+    first test retires 3 where it expects 5. Ignore undone targets, and the second test retires 5 where it expects 3.
+    Drop the row, and the third test finds none.
+  note: |
+    EFFECT, measured after merge from the core ledger union and docs/knowledge-garden-log.md, with no numeric pass
+    mark: pair each `knowledge.action_allowance` row with the class's later verdict on that PR (credit, debit or
+    released) and with any of its targets later found active. A bound that is earning its keep rises while verdicts
+    are credits and falls the pass after a debit or an undo.

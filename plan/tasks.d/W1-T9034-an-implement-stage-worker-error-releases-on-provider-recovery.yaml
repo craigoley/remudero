@@ -1,0 +1,97 @@
+- id: W1-T9034
+  title: "AN IMPLEMENT-STAGE WORKER ERROR RELEASES ON PROVIDER RECOVERY, AS EVERY OTHER WORKER STAGE DOES — W1-T8676 recognises a worker error by its reason text, but at the `implement` stage `failOnWorkerError` writes the retry driver's reason (\"strikes exhausted (2)\"), so that latch reads as task-caused and never takes the provider_recovered release"
+  repo: remudero
+  depends_on: [W1-T8676]  # merged (#11224, ae9ff3169); this task changes how its latch classifies a worker error
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the independent-failure latch classifies a worker error by its structured verdict fields; it spans the latch (status.ts), the stage set's call sites (run-task.ts) and W1-T8676's fixture, and no release rule changes
+  band_meaning: span
+  origin: "operator approval 2026-10-13 (\"go\"): the gap W1-T8676's builder reported, filed as its own task"
+  plan_refs: [W1-T8676, W1-T7533, W1-T8677, W1-T2515]
+  files:
+    - src/lib/status.ts
+    - src/run-task.ts
+    - test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts
+    - test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    READ on origin/main 58e1376af. Symbols, not lines.
+    THE RELEASE. W1-T8676 (#11224, ae9ff3169) made `independentFailureLatch` (src/lib/status.ts) release a `failed`
+    latch with evidence `provider_recovered` once the same provider ends a later worker call clean
+    (`firstCleanWorkerResultAfter`). It decides that a latch came from a worker error with
+    `WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/`, tested against the `verdict` row's `reason`.
+    THE GAP, VERIFIED. `workerErrorVerdict` (src/run-task.ts) writes that prefix. But `failOnWorkerError` spreads an
+    optional `reason` argument over it: `log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ?
+    { reason } : {}) })`. Only the `implement` call passes one: `failOnWorkerError(impl, "implement",
+    driverResult.reason)`. The recon, `implement.resumed`, `implement.continued` and `implement.preopen_continued` calls
+    pass none, so they keep the prefix. `driverResult` comes from `runDiagnoseThenRetry` (src/lib/classify.ts). When
+    the implement worker's last result is an error envelope, the driver returned `gave_up` with a reason of
+    "strikes exhausted (2)" (`planRetry`, MAX_STRIKES), "fix progress loop: ..." (the progress judge), or "usage window
+    shut — ..." (W1-T2515). A transient exhaustion is diverted earlier by `finishTransientRetry` as
+    `blocked_transient`, and a budget breach is `blocked_budget`. So every implement-stage `failed` worker error
+    carries a reason without the prefix. The row still carries `stage: "implement"`, the worker `subtype` (for example
+    `error_codex`, which `classifyFailure` counts as a strike when no transient text matches) and the `provider` from
+    `terminalVerdictFields`. The latch ignores those fields, reads the latch as task-caused, and falls back to
+    W1-T7533's doubling back-off and main_moved. Both providers can be serving clean results the whole time.
+    LEDGER, READ niced on host remudero (~/rmd-state2/state): all 356 October rotations hold 215 `failed` verdicts.
+    Of those, 5 are worker-stage worker errors: 3 `implement.continued` error_codex, 1 `implement.resumed` and
+    1 `implement.preopen_continued` error_during_execution. All 5 carry the prefix. NONE is at stage `implement`. So
+    the gap is latent in this window, not yet observed. The query saw its corpus: the 5 rows and the 215 are the
+    positive control. Rotations before 2026-10-01 were not read, to bound host I/O.
+    AN EXISTING FIXTURE ENCODES THE OLD CLASSIFICATION. test/a-restored-checkpoint-outlives-its-runs-worker-error.test.ts,
+    "W1-T8676: a task-caused latch keeps its back-off", builds its task-caused rows from `workerFailure()` (stage
+    `implement.continued`, subtype `error_codex`, provider codex) and overrides only `reason` ("tests failed", or none).
+    run-task never writes that row. Under a classification by structured fields it reads as a worker error and would
+    release. Change that fixture to a real task-caused shape. Keep the test title verbatim: it is W1-T8676's proof.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 327 origin heads for WORKER_ERROR_REASON,
+    provider_recovered, failOnWorkerError, driverResult.reason, "worker error at implement" and error_codex. Main
+    reads 36 hits in 11 files, which is the control, and no head adds a matching file. W1-T8677 ledgers a Codex error
+    message, and W1-T8676 shipped the release. Neither classifies an implement-stage row. No head changes
+    WORKER_ERROR_REASON in src/.
+  design: |
+    No new count, timer or cap. Only the classification changes.
+    1. CLASSIFY BY STRUCTURED FIELDS. In `independentFailureLatch`, a `failed` verdict row is a worker error when its
+       structured fields say `workerErrorVerdict` produced it, whatever its `reason` says. The fields are its `stage`
+       (a stage `failOnWorkerError` is called with: recon, implement, implement.resumed, implement.continued,
+       implement.preopen_continued) and its worker `subtype` (an `error_*` subtype, never `success`, never
+       `error_max_budget_usd`, which is `blocked_budget` anyway). Rows already in the ledger carry both fields, so
+       historical implement-stage latches classify correctly with no backfill. Keep one named set of those stages in
+       status.ts, or in a small module both files import. status.ts must not import src/run-task.ts. A comment beside
+       the `failOnWorkerError` calls in run-task.ts names that set, so a new call site is added to it. If the builder
+       prefers an explicit marker, `workerErrorVerdict` may also write one (e.g. `worker_error: true`) and the latch may
+       read it first, but the stage-and-subtype reading must still classify older rows. Keep the reason-prefix test
+       only as a fallback for a row missing both fields.
+    2. DO NOT CHANGE THE RELEASE. The provider_recovered evidence, `firstCleanWorkerResultAfter`, the per-run
+       provider fallback (`providerByRun`), the `INDEPENDENT_BLOCK_RELEASED_STEP` receipt and W1-T7533's back-off for
+       task-caused latches stay as they are. The implement-stage verdict keeps its driver reason, which is the
+       decision that produced the outcome (doctrine: a ledger line carries the reason from its decision).
+    3. Update W1-T8676's task-caused fixture (see rationale) so it no longer carries a worker stage and an error
+       subtype. Its title and assertions stay.
+    Tests go in a new file, test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive `independentFailureLatch` with rows shaped as `failOnWorkerError`
+    writes them at stage `implement`, plain and through `buildLedgerIndex`, as W1-T8676's test does. Use no live
+    ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts"
+    - claim: "an implement-stage worker error whose reason is the retry driver's releases with provider_recovered on the first later clean result from the same provider, with no back-off"
+      proof: 'grep: test("W1-T9034: an implement-stage worker error releases once its provider serves a clean end" in test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts'
+    - claim: "the latch classifies a worker error by its stage and subtype, so every reason the driver writes releases alike"
+      proof: 'grep: test("W1-T9034: a worker error is classified by its verdict fields, not its reason text" in test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts'
+    - claim: "a failed verdict with no worker stage or no error subtype, and a budget breach, keep W1-T7533's back-off"
+      proof: 'grep: test("W1-T9034: a failed verdict without a worker error subtype keeps its back-off" in test/an-implement-stage-worker-error-releases-on-provider-recovery.test.ts'
+  falsifier: |
+    A ledger holds run r2's `verdict` row {verdict failed, stage implement, subtype error_codex, provider codex, reason
+    "strikes exhausted (2)"}, its `dispatch.blocked_independent verdict failed`, and one minute later another task's
+    `implement.done` from codex with subtype success. Today `independentFailureLatch` returns blocked with no release,
+    because "strikes exhausted (2)" fails WORKER_ERROR_REASON. With the fix it returns blocked false, evidence
+    provider_recovered, backoffMs 0. Restore the reason-prefix test as the only classifier, and the first two tests
+    fail. Classify every `failed` row as a worker error, and the third test fails.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: for each `verdict failed stage
+    implement` row with a worker `error_*` subtype, look for the `dispatch.independent_block_released` row with evidence
+    provider_recovered that follows the provider's next clean worker result. None should wait for main_moved.
