@@ -1767,7 +1767,7 @@ export interface InboxDraftingItem extends InboxSender {
  * one entered on reasoning that has since been shown wrong.
  *
  * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
- * and must never read as work in progress. Nothing here is actionable except restore.
+ * and must never read as work in progress. Restore, reframe and thread replies remain available.
  */
 export interface InboxDeclinedItem extends InboxSender {
   proposalId: string;

@@ -85,9 +85,10 @@ export function servePlainOptions(plain: PlainInboxMessage, lane: InboxOptionLan
   return {
     ...plain,
     options: plain.options.map((o): ServedPlainOption => {
-      if (o.intent === undefined) return { ...o, intent: "reply" };
+      const option: ServedPlainOption = { label: o.label, consequence: o.consequence, intent: o.intent ?? "reply" };
+      if (o.intent === undefined) return option;
       const action = optionAction(o.intent, lane, proposalId);
-      return { ...o, intent: o.intent, ...(action ? { action } : {}) };
+      return { ...option, ...(action ? { action } : {}) };
     }),
   };
 }
@@ -293,6 +294,7 @@ async function askWriter(
   }
   const card = validateDecisionSummary(out);
   if (!card) return { message: null, problems: ["not a decision card"] };
+  if (card.options.some((option) => option.intent === undefined)) return { message: null, problems: ["give every option an intent"] };
   const message: PlainInboxMessage = {
     headline: card.headline,
     whatHappened: card.what_happened,

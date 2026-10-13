@@ -247,6 +247,7 @@ export function buildDecisionSummaryPrompt(input: SummarizeInput): string {
     '{"headline": string (<=15 words), "what_happened": string (1-2 sentences),',
     ' "decision": string (an IMPERATIVE instruction, never a question),',
     ' "options": [{"label": string, "consequence": string (one line)}, ...] (2-3 entries)}',
+    'An optional "intent" on each option is one of "approve", "decline", "reframe", "reply", "keep"; include it when the item asks for it.',
     'When the item below asks for it, add one more key, "if_nothing_happens": string (one line).',
     "",
     "ITEM:",

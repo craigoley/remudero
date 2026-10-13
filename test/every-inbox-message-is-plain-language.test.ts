@@ -62,8 +62,8 @@ const CLEAN: PlainInboxMessage = {
   whatWeNeed: "Decide whether the fleet should go ahead or drop it.",
   ifNothingHappens: "The task stays blocked.",
   options: [
-    { label: "Go ahead", consequence: "The fleet starts the work." },
-    { label: "Drop it", consequence: "The item is closed." },
+    { label: "Go ahead", consequence: "The fleet starts the work.", intent: "approve" },
+    { label: "Drop it", consequence: "The item is closed.", intent: "decline" },
   ],
   source: "writer",
 };

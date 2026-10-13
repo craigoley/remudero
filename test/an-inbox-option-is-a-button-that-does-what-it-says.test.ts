@@ -3,12 +3,12 @@
 // carries an `intent` and, where a route is valid for its lane, an `action` naming that existing route. The action is
 // attached at serve time from intent + lane + proposal id and is never stored.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { InboxClassification, InboxState } from "../src/lib/inbox.js";
-import { validateDecisionSummary } from "../src/lib/feedback.js";
-import { plainSourceFingerprint, plainStorePath, plainTemplate, type PlainOption } from "../src/lib/inbox-plain.js";
+import { buildDecisionSummaryPrompt, validateDecisionSummary } from "../src/lib/feedback.js";
+import { backfillPlainMessages, plainSourceFingerprint, plainStorePath, plainTemplate, writePlainMessage, type PlainOption } from "../src/lib/inbox-plain.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { inboxLanes } from "../src/lib/panel-graph.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -111,4 +111,106 @@ test("W1-T8826: a template option is tagged and a fleet finding is not offered a
   assert.ok(plainTemplate({ id: "ruling:W1-T1", summary: "x" }).options.every((o) => o.intent !== undefined));
   const fleet = served(t, "ready", [{ label: "Ask why", consequence: "A question is added to the thread.", intent: "reply" }, TAGGED[0]!], "adoption:W1-T9");
   assert.equal(fleet.byLabel("Ask why").action, undefined);
+});
+
+test("W1-T8826: actions are recomputed from the current lane without trusting stored routes", (t) => {
+  const root = makeTempDir("rmd-inbox-option-lane");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const path = plainStorePath(join(root, "state"));
+  const stale = { method: "POST", path: "/v1/inbox/approve", fields: { proposalId: "another-item" } };
+  const options = TAGGED.map((option) => ({ ...option, action: stale }));
+  writeFileSync(path, JSON.stringify({ [ID]: stored(options) }));
+  const before = readFileSync(path, "utf8");
+  const classification: InboxClassification = { proposalId: ID, state: "ready", reasons: [] };
+  const classified = {
+    proposals: [{ id: ID, summary: SUMMARY, evidenceAnchors: [] }],
+    classifications: [classification],
+    ledgerLines: Object.assign([], { torn: 0, present: true }),
+  };
+  const ready = inboxLanes(classified, root).ready[0]!.plain.options;
+  assert.equal(ready[0]!.action, undefined, "keep never inherits a stored action");
+  assert.deepEqual(ready[1]!.action, { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: ID }, input: "feedback" });
+  assert.deepEqual(ready[2]!.action, { method: "POST", path: "/v1/inbox/approve", fields: { proposalId: ID } });
+
+  classification.state = "declined";
+  const declined = inboxLanes(classified, root).declined[0]!.plain.options;
+  assert.equal(declined[2]!.intent, "approve");
+  assert.equal(declined[2]!.action, undefined, "a lane change removes the approve action");
+  assert.equal(readFileSync(path, "utf8"), before, "serving never rewrites the stored message");
+
+  const untaggedOptions = [
+    { label: "Ask the author", consequence: "The author explains the item.", action: stale },
+    TAGGED[0]!,
+  ];
+  writeFileSync(path, JSON.stringify({ [ID]: stored(untaggedOptions) }));
+  const untagged = inboxLanes(classified, root).declined[0]!.plain.options[0]!;
+  assert.equal(untagged.intent, "reply");
+  assert.equal(untagged.action, undefined, "an untagged option never inherits a stored action");
+});
+
+test("W1-T8826: the backfill preserves writer intents and stores no model supplied action", async (t) => {
+  const root = makeTempDir("rmd-inbox-option-writer");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const message = stored(TAGGED);
+  const count = await backfillPlainMessages({
+    stateDir: join(root, "state"),
+    readProposals: () => [{ id: ID, summary: SUMMARY }],
+    summarize: () => ({
+      headline: message.headline,
+      what_happened: message.whatHappened,
+      decision: message.whatWeNeed,
+      if_nothing_happens: message.ifNothingHappens,
+      options: TAGGED.map((option) => ({ ...option, action: { method: "POST", path: "/untrusted" } })),
+    }),
+  }, 1);
+  assert.equal(count, 1);
+  const saved = JSON.parse(readFileSync(plainStorePath(join(root, "state")), "utf8"))[ID];
+  assert.equal(saved.source, "writer");
+  assert.deepEqual(saved.options, TAGGED);
+});
+
+test("W1-T8826: the writer schema permits intents and retries an untagged answer", async () => {
+  const message = stored(TAGGED);
+  const prompt = buildDecisionSummaryPrompt({ context: SUMMARY });
+  assert.match(prompt, /"intent"/);
+  assert.match(prompt, /optional.*intent/i, "the shared schema allows inbox intents without requiring them on escalation cards");
+  let calls = 0;
+  const result = await writePlainMessage({ id: ID, summary: SUMMARY }, {
+    summarize: (input) => {
+      calls++;
+      if (calls === 2) assert.match(input.context, /last answer was refused.*intent/);
+      return {
+        headline: message.headline,
+        what_happened: message.whatHappened,
+        decision: message.whatWeNeed,
+        if_nothing_happens: message.ifNothingHappens,
+        options: calls === 1 ? TAGGED.map(({ label, consequence }) => ({ label, consequence })) : TAGGED,
+      };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.source, "writer");
+  assert.deepEqual(result.options, TAGGED);
+});
+
+test("W1-T8826: repeated untagged writer answers fall back to tagged template choices", async () => {
+  const message = stored(TAGGED);
+  let calls = 0;
+  const result = await writePlainMessage({ id: ID, summary: SUMMARY }, {
+    summarize: () => {
+      calls++;
+      return {
+        headline: message.headline,
+        what_happened: message.whatHappened,
+        decision: message.whatWeNeed,
+        if_nothing_happens: message.ifNothingHappens,
+        options: TAGGED.map(({ label, consequence }) => ({ label, consequence })),
+      };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(result, plainTemplate({ id: ID, summary: SUMMARY }));
+  assert.ok(result.options.every((option) => option.intent !== undefined));
 });
