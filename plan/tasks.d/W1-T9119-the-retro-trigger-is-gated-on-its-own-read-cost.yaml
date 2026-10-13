@@ -1,0 +1,123 @@
+- id: W1-T9119
+  title: "THE RETRO TRIGGER IS GATED ON WHAT ITS OWN LEDGER READ WOULD COST, NOT ON A FIXED ARCHIVE COUNT, AND A DEFERRAL THAT OUTLASTS THE RETRO'S OWN CADENCE SAYS SO — every tick since 2026-10-06T18Z deferred the retro with \"over bound — N archive(s) > 400\" (111 rows over 10-10..13, zero retro_triggered), because the check borrows the compaction rung's fixed maxArchives as its pressure signal and the archive count has only grown"
+  repo: remudero
+  depends_on: [W1-T9113]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the retro check's own read cost decides whether it runs, and a persistent deferral is named; it spans the tick gate (daemon.ts), the check's ledger read and wiring (run-task.ts) and the new test
+  band_meaning: span
+  origin: "found 2026-10-13 by an operator session (the retro trigger never ran on 10-10..13); operator standing direction: fix at the root, no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T4355, W1-T4262, W1-T6312, W1-T2870, W1-T2288, W1-T4664, W1-T5649, W1-T5790, W1-T9113, W1-T264]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts
+  status: queued
+  priority: 1  # the automated retro has not run for 7 days (marker 2026-10-06T10:45:50Z, last retro_triggered 2026-10-06T18Z)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13, host remudero (core state ~/rmd-state2/state), read-only and niced, `free -m` checked first,
+    rows deduplicated by exact line (carried rows repeat across rotations: `ledger_compaction.fired` read 375 raw,
+    202 distinct).
+      - THE SYMPTOM, 2026-10-10..13 (81 .ndjson.gz rotations plus the live ledger.ndjson; no plain rotations exist):
+        111 `daemon.retro_trigger.deferred_ledger_pressure` rows (2026-10-09T23:56Z to 10-13T13:14Z) against 109
+        `daemon.tick_phases` rows, and ZERO `retro_triggered`. Positive control, same pass: 83 `daemon.boot` rows.
+      - WHEN IT STARTED, 2026-10-05..09 (69 rotations): 101 deferrals from 2026-10-05T00Z, interleaved with retros
+        until the last `retro_triggered` and `daemon.retro_trigger.detached` at 2026-10-06T18Z (9 of each in that
+        set, which is the positive control that the query sees retro rows). state/last-retro.json holds
+        `ts: 2026-10-06T10:45:50.161Z`. The policy cadence is 25 merges or 7 days (plan/policy.yaml `retro`).
+      - THE ARCHIVE COUNT ONLY GROWS. The compaction rung's own reason strings, by day (min to max):
+        10-08 413, 10-09 413-433, 10-10 434-453, 10-11 454-477, 10-12 478-500, 10-13 501-514. A readdir at 13:51Z
+        counted 514 `ledger.*.ndjson.gz` (232.7 MB on disk), matching the daemon's 513-514. Rotations arrive about
+        20-24 a day (per-day name counts 10-09..12: 20, 20, 24, 24).
+      - WHY IT GREW: COMPACTION WAS WEDGED, A SEPARATE DEFECT NOW FIXED ON MAIN. The last `ledger_compaction.ran` was
+        2026-10-08T15Z (44 in 10-05..08; the last cold-store move and the small day archives it wrote are stamped
+        2026-10-08T15:27:39). Since 10-08T16Z every pass is `ledger_compaction.run_failed` (175 distinct rows in
+        10-10..13 alone), each with "refusing to overwrite unselected archive
+        .../ledger.2026-09-17T23-44-53-740Z.ndjson.gz": the pass's day output is named after the newest row of that
+        day, which carried rows make equal to an archive the pass did not select. PR #11355 ("fix(ledger): unblock compaction
+        with collision-safe output names", d0f9cc49f) merged 2026-10-13T14:04Z and is the fix; this task does not
+        repeat it. Its live effect (a `ledger_compaction.ran` row and a falling count) was not yet observed when this
+        record was filed. It fixes the growth, not the gate: the retro still defers whenever the count is over 400.
+    READ on origin/main 9ea9dd671 (symbols, not lines):
+      - THE 400. `DEFAULT_LEDGER_COMPACTION_TRIGGER.maxArchives` (src/lib/ledger-compaction-rung.ts), "between the 347
+        the corpus holds when healthy and the 959 that aborted the daemon" on 2026-09-10, when the sync
+        `resolveLedgerUnion` decompressed 4.0 GB against an 8 GB heap. It is a fixed count chosen for the compaction
+        rung. `decideLedgerCompaction` sets `overBound` whenever the count exceeds it, throttled or not.
+      - THE BORROWING. The daemon tick's retro block (src/lib/daemon.ts) skips `checkRetroTrigger` whenever
+        `ledgerCompactionDecision?.overBound` (since W1-T9072, on ticks that run cadences). It is the only reader of `overBound` in src/.
+      - WHAT THE RETRO ACTUALLY READS. `retroTriggerCheckAsync` (src/run-task.ts) calls `readRetroTriggerLedgerAsync`,
+        which is `resolveLedgerUnionAsync(stateDir, RUN_LEDGER_STEP_PATTERN)` with NO `since`: every rotation, every
+        tick, for seven steps (run.start, verdict, pr.opened, recon.done, implement.done, implement.resumed,
+        correction.provenance). What it uses: runs since the marker (`shippedSinceAsync`), and `taskIdsWithRuns` for
+        `runlessMergesSince`, which needs runs of tasks merged since the marker even when the run began earlier.
+      - SO THE COUNT IS THE WRONG SIGNAL. The cost of the read is the bytes it decompresses, not the number of files.
+        On 2026-10-10 the whole corpus was 446 rotations, 3.97 M lines, 1.78 GB decompressed (`createIncrementalLedgerUnion`'s
+        own record of the dispatch selection read, src/lib/ledger-union.ts). The archives stamped since the marker's day are about 130 of 514 (82 MB of 233 MB on disk)
+        even with a 7-day-old marker; with a marker a day old it is about 20. And the repo already has the reader that
+        makes a repeat read nearly free: `createIncrementalLedgerUnion` (durable per-rotation step digests, used by
+        dispatch selection and inbox-replay).
+    LATENT HAZARD THIS ORDERING AVOIDS: once the retro check runs again, every check walks the whole closed-PR half
+    (91 pages) inline before the dispatch pick until W1-T9113 seeds it from the board snapshot (W1-T9113, filed in PR
+    #11353, merged 2026-10-13). Hence depends_on W1-T9113. #11355 (merged) will bring the count under 400 and
+    wake the check under today's gate before either task lands; that interaction is named in the filing PR for the
+    operator.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 344 open origin heads for deferred_ledger_pressure,
+    retro_trigger, "refusing to overwrite", "unselected archive", ledger_compaction and maxArchives. Control: main reads
+    11 shards for retro_trigger. One head read more: plan-file-1791897336437 (#11353, since merged), whose W1-T9113 cites the same
+    111 deferrals as evidence that the retro check is dormant and fixes the closed-PR read, not the gate. W1-T5790
+    (queued) moves when the check is awaited, not whether it is gated. W1-T6312 (merged) refuses no-reduction passes.
+  design: |
+    No fixed count, no fixed byte bound and no timer.
+    1. THE CHECK READS ONLY WHAT IT USES. `readRetroTriggerLedgerAsync` reads the union from a window derived from its
+       own inputs: `since` = the marker's ts, widened back to the earliest `run.start` of any run still unsettled at the
+       marker (the runs `taskIdsWithRuns` can need), read from the previous check's result; with no marker or no
+       previous result it reads the whole union once, as today. Repeat reads go through the incremental union (or its
+       digests) so a tick re-reads only new rotations and the live tail. Off the loop, as today.
+    2. EACH READ IS MEASURED. Every check ledgers `retro_trigger.ledger_read` {since, rotations_opened, digests_used,
+       bytes_decompressed, rows, ms}. These rows are the evidence the gate below learns from.
+    3. THE GATE IS THE READ'S PROJECTED COST AGAINST MEASURED HEADROOM. Replace the `overBound` borrow. Before the
+       check, project its cost: the decompressed bytes of the rotations in its window that it holds no digest for,
+       estimated as their on-disk bytes times the expansion ratio observed by its own recent `retro_trigger.ledger_read`
+       rows (no rows yet: the ratio of the newest rotation, measured once). Defer only when that projection exceeds the
+       daemon's measured heap headroom at that moment (`v8.getHeapStatistics()` limit minus used, the same figures
+       `daemon.alive` reports). Ledger the projection, the headroom and the reason on every deferral. The compaction
+       rung keeps its own trigger; nothing else reads `overBound`.
+    4. A PERSISTENT DEFERRAL IS NAMED, WITH N DERIVED. Count consecutive deferrals with the same reason class. When
+       their span exceeds the retro's own expected interval, ledger `daemon.retro_trigger.deferral_persisting` once per
+       episode {reason, first_deferred_at, observations, expected_interval_ms, last_retro_at}. The expected interval is
+       learned: the median gap between the last retros' `retro_triggered` rows in the union; with fewer than two, the
+       policy's `daysThreshold`. N (observations) is that interval divided by the median gap between this daemon's
+       deferral observations, so it is never configured. A new `retro_triggered` row ends the episode.
+    Tests go in test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts, with `test(` titles verbatim as in the
+    proofs below. Drive the tick with fake `checkRetroTrigger`/`checkLedgerCompaction` deps, a fake heap reader and a
+    fixed clock; drive the read with a temp state dir of small gzip rotations.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts"
+    - claim: "an over-bound archive count with headroom for the read runs the retro check"
+      proof: 'grep: test("W1-T9119: an archive count over the compaction bound no longer defers the retro" in test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts'
+    - claim: "a read whose projected bytes exceed measured heap headroom defers, and the row carries both figures"
+      proof: 'grep: test("W1-T9119: a read projected past heap headroom defers with both figures" in test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts'
+    - claim: "the check reads only rotations from its derived window and ledgers what it read"
+      proof: 'grep: test("W1-T9119: the check reads only its window and ledgers the read" in test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts'
+    - claim: "a deferral that outlasts the learned retro interval writes one persisting row per episode"
+      proof: 'grep: test("W1-T9119: a deferral past the learned retro interval is named once" in test/the-retro-trigger-is-gated-on-its-own-read-cost.test.ts'
+    - claim: "the persisting-deferral row exists in the daemon"
+      proof: "grep: deferral_persisting in src/lib/daemon.ts"
+  falsifier: |
+    Keep `ledgerCompactionDecision?.overBound` as the gate and the first test defers at 514 archives with ample
+    headroom. Drop `since` and the window test opens every fixture rotation. Use a fixed observation count and the
+    persistence test names the episode early under a short learned interval or never under a long one.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union, with no numeric pass mark:
+    `retro_triggered` rows (healthy shape: present again at roughly the policy cadence); `retro_trigger.ledger_read`
+    `bytes_decompressed` (healthy shape: a small fraction of the corpus on repeat reads); `daemon.tick_phases` on ticks
+    that run the check (healthy shape: no step change in time to admission once W1-T9113 has landed);
+    `daemon.retro_trigger.deferral_persisting` (healthy shape: none).
+    ARCHIVE GROWTH, CHECKED AND NOT FILED SEPARATELY: the growth since 10-08T15Z is the compaction wedge #11355 fixed.
+    Under working compaction the corpus floor is one archive per UTC day of history (67 days on 10-13) plus 64 MiB
+    splits, so the count still rises about 1-3 a day and will cross the rung's fixed 400 again in months; once this
+    task lands, nothing but the compaction rung reads that number.
