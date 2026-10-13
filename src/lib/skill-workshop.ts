@@ -413,6 +413,8 @@ export interface StageSkillDraftResult {
   backfilled?: boolean;
   /** The staged entry's Procedure named fewer behavioral steps, so this call replaced it. */
   refreshed?: boolean;
+  /** An unstamped legacy payload differed from the newly scanned draft and was replaced before stamping. */
+  legacyReplaced?: boolean;
   /** The entry already carried its file but no staged-at stamp; this call stamped it and changed nothing else. */
   stamped?: boolean;
   reason?: string;
@@ -462,6 +464,7 @@ export function stageSkillDraft(
   let alreadyStaged = false;
   let backfilled = false;
   let refreshed = false;
+  let legacyReplaced = false;
   let stamped = false;
   updateProposalRegistry(
     registryPath,
@@ -470,6 +473,7 @@ export function stageSkillDraft(
       alreadyStaged = false;
       backfilled = false;
       refreshed = false;
+      legacyReplaced = false;
       stamped = false;
       const existing = current.findIndex((p) => p.id === id);
       const skillFile = { name: draft.name, markdown: draft.markdown };
@@ -481,13 +485,15 @@ export function stageSkillDraft(
         // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
         // Compare behavioral steps: removed outcome-only bullets do not count as lost procedure.
         const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
-        if (stored && skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length) {
+        legacyReplaced = stored !== undefined && skillFileStagedAtMs(current[existing].skillFileStagedAt) === null &&
+          (stored.name !== skillFile.name || stored.markdown !== skillFile.markdown);
+        if (stored && (legacyReplaced || skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length)) {
           refreshed = true;
           return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
         }
         if (stored && skillFileStagedAtMs(current[existing].skillFileStagedAt) !== null) return null; // already staged with its file — never a duplicate write
         if (stored) {
-          // Staged before the stamp existed: stamp it now, the conservative (later) instant.
+          // Identical to the scanned draft: stamp it now, the conservative (later) instant.
           stamped = true;
           return current.map((p, i) => (i === existing ? { ...p, skillFileStagedAt } : p));
         }
@@ -506,9 +512,12 @@ export function stageSkillDraft(
     alreadyStaged,
     ...(backfilled ? { backfilled: true } : {}),
     ...(refreshed ? { refreshed: true } : {}),
+    ...(legacyReplaced ? { legacyReplaced: true } : {}),
     ...(stamped ? { stamped: true } : {}),
     reason: backfilled
       ? "already staged; skill file backfilled"
+      : legacyReplaced
+        ? "already staged; legacy text replaced with scanned draft before stamping"
       : refreshed
         ? "already staged; procedure refreshed with more steps"
         : stamped
