@@ -36,9 +36,9 @@
   design: |
     1. evidenceNames reads a dotted step name whole, hyphens included (`ci-friction.garden_filing_failed`), and never
        one that continues a path or a longer word (`plan/tasks.d/...` yields no `tasks.d`).
-    2. A ledger step fact reads "0 row(s) in the last 48 h" only for a step that a source file on origin/main names
-       (the backticked-token grep already runs). Otherwise the fact says the name is not a step any code on
-       origin/main writes, so its absence from the ledger is no evidence either way.
+    2. A zero-row ledger step fact tells the judge that a zero is absence, not proof of a fix, and the prompt says
+       a resolved verdict needs evidence of something present. A source grep cannot tell a real step from a misread
+       one, because step names are composed at runtime (`${spec.name}.garden_filing_failed` in src/lib/gardener.ts).
     3. decideAction never closes on a `resolved` verdict whose citation is only an absence (zero rows, or "does not
        appear"): guard `absence-only-citation`, keep. Act mode closes only on a citation that names something
        present, such as a merged PR, a commit or a row.
@@ -46,7 +46,7 @@
        48 h of the pass: guard `condition-reobserved`, keep. Comments are already read for every actionable verdict.
     Shadow and act apply the same guards, so the next shadow pass's table shows them.
   acceptance:
-    - claim: "the #10269 shape never closes: a hyphenated step is read whole, a zero for an unwritten step is no evidence, and an absence-only citation or a re-observed escalation is kept with its guard"
+    - claim: "the #10269 shape never closes: a hyphenated step is read whole, a zero is told to the judge as absence, not proof, and an absence-only citation or a re-observed escalation is kept with its guard"
       proof: 'grep: test("W1-T9181: the revalidation garden never closes on an absence" in test/the-revalidation-garden-never-closes-on-an-absence.test.ts'
     - claim: "decideAction names the absence guard"
       proof: 'grep: absence-only-citation in src/lib/issue-revalidation-garden.ts'
