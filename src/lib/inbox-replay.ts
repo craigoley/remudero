@@ -421,6 +421,7 @@ function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
         deps.escalate(stranded);
         return;
       } catch (e) {
+        // A delivery that threw still owes its row: written below, undelivered, with this error.
         error = String((e as Error)?.message ?? e);
       }
     }
