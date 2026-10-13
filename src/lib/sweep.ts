@@ -18930,8 +18930,11 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
 let lightPassSpawningReservations = 0;
 let lightPassPlanFilingReservations = 0;
 const lightPassReservedHeads = new Set<string>();
-// W1-T5901: at most one plan PR direct-merges across overlapping light passes.
-let lightPassPlanMergeInFlight = false;
+// W1-T5901: at most one plan PR direct-merges across overlapping light passes. The claim is the
+// owning pass's token, released when ITS candidate's sweep settles, not when that whole pass ends:
+// a pass also awaits every other PR it disposes, and on 2026-10-13 one ran ~20 min, deferring every
+// overlapping pass's ready plan PR (#11367, #11368, #11371 waited 16-22 min, all green).
+let lightPassPlanMergeOwner: symbol | undefined;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
 // W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
 let fullPassReviewsInFlight = 0;
@@ -19047,10 +19050,14 @@ export async function runSweepLightPass(
     if (refillArmed) void refillFreedLanes();
   };
   // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
-  const planMergeCandidate = lightPassPlanMergeInFlight
+  const planMergeToken = Symbol("light-pass-plan-merge");
+  const planMergeCandidate = lightPassPlanMergeOwner !== undefined
     ? undefined
     : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
-  if (planMergeCandidate) lightPassPlanMergeInFlight = true;
+  if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
+  const releasePlanMerge = (): void => {
+    if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
+  };
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -19169,6 +19176,7 @@ export async function runSweepLightPass(
         };
       }
       return runSweep([pr], scopedDeps, policy).finally(() => {
+        if (pr.prNumber === planMergeCandidate?.prNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
       });
     }),
@@ -19282,7 +19290,7 @@ export async function runSweepLightPass(
   refillArmed = true;
   return summaries;
   } finally {
-    if (planMergeCandidate) lightPassPlanMergeInFlight = false;
+    releasePlanMerge();
     for (const [number, release] of releases) {
       if (!detachedNumbers.has(number)) release();
     }
