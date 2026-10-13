@@ -2028,6 +2028,21 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
   parentPort.postMessage(answerReadModelIssueRequest((workerData as { request: ReadModelIssueRequest }).request));
 }
 
+/** One row's malformed provenance is named unknown, never an empty set of otherwise valid bodies. */
+function storedBodyQualification(raw: string | undefined, etag: string): { qualificationGeneration?: string; reason?: string } {
+  if (raw === undefined) return {};
+  try {
+    const identity: unknown = JSON.parse(raw);
+    if (identity === null || typeof identity !== "object" || Array.isArray(identity)) return { reason: "stored qualification metadata is malformed" };
+    const saved = identity as { etag?: unknown; qualificationGeneration?: unknown };
+    if (saved.etag !== etag) return { reason: "stored qualification metadata names another body ETag" };
+    if (typeof saved.qualificationGeneration === "string" && saved.qualificationGeneration.length > 0 && saved.qualificationGeneration.length <= 160) return { qualificationGeneration: saved.qualificationGeneration };
+    return saved.qualificationGeneration === null ? {} : { reason: "stored qualification generation is malformed" };
+  } catch {
+    return { reason: "stored qualification metadata is not valid JSON" };
+  }
+}
+
 /** The last committed bodies, read once at construction through a read-only connection. */
 export function loadCommittedViewBodies(stateDir: string, home: string): { bodies: ReadModelBodyEntry[]; reason?: string } {
   let db: ReadModelDb | undefined;
@@ -2038,21 +2053,7 @@ export function loadCommittedViewBodies(stateDir: string, home: string): { bodie
       bodies: rows.map((row) => {
         const view = String(row.view), key = String(row.key), etag = String(row.etag);
         const raw = db!.meta(bodyQualificationKey(view, key));
-        let qualificationGeneration: string | undefined, qualificationReason: string | undefined;
-        if (raw !== undefined) {
-          try {
-            const identity: unknown = JSON.parse(raw);
-            if (identity === null || typeof identity !== "object" || Array.isArray(identity)) qualificationReason = "stored qualification metadata is malformed";
-            else {
-              const saved = identity as { etag?: unknown; qualificationGeneration?: unknown };
-              if (saved.etag !== etag) qualificationReason = "stored qualification metadata names another body ETag";
-              else if (typeof saved.qualificationGeneration === "string" && saved.qualificationGeneration.length > 0 && saved.qualificationGeneration.length <= 160) qualificationGeneration = saved.qualificationGeneration;
-              else if (saved.qualificationGeneration !== null) qualificationReason = "stored qualification generation is malformed";
-            }
-          } catch {
-            qualificationReason = "stored qualification metadata is not valid JSON";
-          }
-        }
+        const { qualificationGeneration, reason: qualificationReason } = storedBodyQualification(raw, etag);
         return { view, key, version: Number(row.version), generation: Number(row.generation), etag, body: JSON.parse(String(row.body)) as ViewBody, ...(qualificationGeneration === undefined ? {} : { qualificationGeneration }), ...(qualificationReason === undefined ? {} : { qualificationReason }) };
       }),
     };

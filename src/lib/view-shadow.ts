@@ -753,7 +753,7 @@ const qualifiedStateKey = (view: string, generation: string | undefined): string
 
 /** Only the required generation is current; archived generations remain stored, never added or reset. */
 function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number): ShadowReadiness[] {
-  const views = new Set([...Object.keys(qualifications), ...[...states].map(([key, state]) => state.view ?? key)]);
+  const views = new Set([...states].map(([key, state]) => state.view ?? key));
   return [...views].sort().flatMap((view) => {
     const generation = qualifications[view];
     const stored = states.get(qualifiedStateKey(view, generation));
