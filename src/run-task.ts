@@ -52352,9 +52352,9 @@ export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => voi
  * also mirrored onto each proposal's thread, once the run ends — the ledger rows stay the record, and the
  * mirror is keyed on them, so the daemon's live tail and boot backfill add nothing a second time.
  */
-export async function approveCommandMirrored(rest: string[], deps: NonNullable<Parameters<typeof approveCommand>[1]> = {}): Promise<number> {
+export async function approveCommand(rest: string[], deps: NonNullable<Parameters<typeof approveCommandRun>[1]> = {}): Promise<number> {
   const startedAt = (deps.clock ?? systemClock).now();
-  const code = await approveCommand(rest, deps);
+  const code = await approveCommandRun(rest, deps);
   const ids = rest.filter((token) => !token.startsWith("--") && !namesATask(token));
   if (ids.length === 0) return code;
   try {
@@ -52374,7 +52374,7 @@ export async function approveCommandMirrored(rest: string[], deps: NonNullable<P
   return code;
 }
 
-export async function approveCommand(
+async function approveCommandRun(
   rest: string[],
   // W1-T3351 appended `root`/`clock`/`log` LAST, all optional: the `--note` chain needs a store
   // root and a clock a test can pin, and no existing caller passes either. `clock` is the shared
@@ -57238,7 +57238,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
         console.error(USAGE);
         return 2;
       }
-      return await approveCommandMirrored(rest);
+      return await approveCommand(rest);
     },
   ],
   ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
