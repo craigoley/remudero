@@ -169,6 +169,26 @@ export interface NavBadgeAnalytics {
   routingTelemetry: Pick<AnalyticsSnapshot["routingTelemetry"], "buckets">;
 }
 
+/** Validate the fields the sole engine reads before arithmetic, interpolation or slugging. */
+export function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string | undefined {
+  const agent = snapshot?.consoleV1?.operatorAgent;
+  const lists = [snapshot?.consoleV1?.metrics, snapshot?.routingTelemetry?.buckets, agent?.outcomes?.classes, agent?.decisions?.classes, agent?.capacity?.measurements];
+  if (agent === undefined || agent === null || agent.proof === null || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
+  if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
+  if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object" || Array.isArray(row)))) return "malformed committed proposal analytics";
+  const label = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  const number = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const nullableNumber = (value: unknown): boolean => value === null || number(value);
+  if (snapshot!.consoleV1.metrics.some((metric) => !label(metric.key) || !["observed", "provider_reported", "modeled"].includes(metric.class) || !nullableNumber(metric.value))) return "malformed committed metric provenance or value";
+  if (snapshot!.routingTelemetry.buckets.some((row) => !label(row.taskType) || !label(row.assignedModel) || !number(row.terminalResults) || !number(row.failures))) return "malformed committed routing signal row";
+  if (agent.outcomes.classes.some((row) => !label(row.verdictClass) || !number(row.total) || !number(row.revertedCount) || !nullableNumber(row.revertRate))) return "malformed committed outcomes signal row";
+  if (agent.decisions.classes.some((row) => !label(row.taskClass) || !number(row.approvalDenominator) || !nullableNumber(row.approvalRate) || !number(row.approvedCount) || !number(row.acceptedCount) || !number(row.rejectedCount))) return "malformed committed decisions signal row";
+  if (agent.capacity.measurements.some((row) => !label(row.repo) || !["scale-up", "underutilized", "balanced"].includes(row.recommendation) || !number(row.configuredCapacity) || !number(row.admittedLanes) || !number(row.activeWorkers) || !number(row.queuedWork) || !number(row.utilizationRatio) || !label(row.windowStart) || !label(row.windowEnd))) return "malformed committed capacity signal row";
+  const proof = agent.proof;
+  if (!["measured", "not-collected"].includes(proof.status) || (proof.status === "measured" && (!nullableNumber(proof.denominator) || !nullableNumber(proof.passRate) || !number(proof.executedPass) || !number(proof.executedFail)))) return "malformed committed proof signal";
+  return undefined;
+}
+
 export function navBadgeAnalyticsSlice(snapshot: NavBadgeAnalytics): NavBadgeAnalytics {
   const agent = snapshot.consoleV1.operatorAgent;
   return {
@@ -228,6 +248,8 @@ export function operatorAgentCandidates(
   history: readonly OperatorAgentHistory[],
   observation?: DetailObservation,
 ): Candidate[] {
+  const reason = proposalSnapshotReason(snapshot);
+  if (reason) throw new Error(reason);
   const metrics = new Map<string, number>();
   for (const m of snapshot.consoleV1.metrics) if (m.value !== null && Number.isFinite(m.value)) metrics.set(m.key, m.value);
   const runs = metrics.get("runs.completed");
@@ -349,12 +371,14 @@ interface InstanceInputs {
 }
 
 function countInstance(input: InstanceInputs, nowMs: number, sources: ViewSource[]): CountedInstance {
-  const analyticsState = sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
+  const reason = input.analytics === null ? undefined : proposalSnapshotReason(input.analytics);
+  const analyticsState = reason ? "unavailable" : sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
   // A cold cache (never refreshed, or dropped by serve.analytics_shed) leaves this instance out of the sum: a partial answer, so warming.
-  const cold = input.analytics === null || analyticsState === "unavailable";
+  const cold = input.analytics === null || (reason === undefined && analyticsState === "unavailable");
   sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState, kind: "analytics", budgetMs: ANALYTICS_STALE_AFTER_MS, ...(cold ? { phase: "warming" as const } : {}) });
   const base = { instanceId: input.instanceId, ...(input.repository ? { repository: input.repository } : {}) };
   if (input.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
+  if (reason) return { badge: { ...base, reason }, ids: [] };
   if (input.analytics === null || cold) return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
   const memory = input.memory();
   if ("reason" in memory) {

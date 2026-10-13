@@ -22,7 +22,7 @@ import { DELEGATION_PROFILE_VERSION, projectDelegationProfile } from "./delegati
 import { followUpHistoryFromRows } from "./follow-up-policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, type LedgerRotationMemo } from "./ledger-union.js";
-import { AGENT_RECORD_LIMITS, operatorAgentCandidates, visibleOperatorAgentProposals, type NavBadgeAnalytics, type ProposalDetail } from "./nav-badge-view.js";
+import { AGENT_RECORD_LIMITS, operatorAgentCandidates, proposalSnapshotReason, visibleOperatorAgentProposals, type NavBadgeAnalytics, type ProposalDetail } from "./nav-badge-view.js";
 import type { NowInstance } from "./now-view.js";
 import {
   readDelegationProfiles,
@@ -82,16 +82,6 @@ export interface AgentProposalsBody {
 
 /** One instance's committed analytics, as the proposal engine reads it; undefined before a first refresh. */
 type AgentAnalytics = { asOf: string; analytics?: NavBadgeAnalytics; console: AnalyticsConsoleSource; signalsAsOf?: string | null; reason?: string; sourceState?: ViewSource["state"]; sourceInstance?: string };
-
-function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string | undefined {
-  const agent = snapshot?.consoleV1?.operatorAgent;
-  const lists = [snapshot?.consoleV1?.metrics, snapshot?.routingTelemetry?.buckets, agent?.outcomes?.classes, agent?.decisions?.classes, agent?.capacity?.measurements];
-  if (agent === undefined || agent === null || agent.proof === null || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
-  if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
-  if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object"))) return "malformed committed proposal analytics";
-  if (snapshot!.consoleV1.metrics.some((metric) => typeof metric.key !== "string" || !["observed", "provider_reported", "modeled"].includes(metric.class) || (metric.value !== null && !Number.isFinite(metric.value)))) return "malformed committed metric provenance or value";
-  return undefined;
-}
 
 /** Every part's body for one instance over `rows`, computed by the readers its route calls. */
 export function agentPartBodies(input: { ledgerDir: string; instance: string; repository?: string; now: number; rows: readonly Row[]; analytics?: AgentAnalytics }): Record<AgentViewPart, Omit<AgentViewData, "instance" | "part">> {

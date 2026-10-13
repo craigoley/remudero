@@ -140,6 +140,63 @@ test("W1-T9244: proposal detail publication preserves bounds identity and honest
   assert.equal(recommendationBody(invalidMetric).coverage.complete, 1, "fractional run denominator cannot qualify token-burn detail");
 });
 
+test("malformed nonnull signal rows are refused before agent publication and preserve valid cohorts", (t) => {
+  const ledgerDir = makeTempDir("agent-malformed-rows");
+  t.after(() => rmSync(ledgerDir, { recursive: true, force: true }));
+  const publish = (snapshot: AnalyticsSnapshot): AgentProposalsBody => agentPartBodies({ ledgerDir, instance: "core", repository: REPO, now: NOW, rows: [],
+    analytics: { asOf: snapshot.asOf!, sourceState: "fresh", sourceInstance: "core", console: analyticsSourceBodies(snapshot, REPO)[0]!.body as any, analytics: snapshot } }).proposals.body as AgentProposalsBody;
+  const good = supportedSignalsSnapshot();
+  const positive = publish(good);
+  assert.equal(positive.coverage!.complete, 7, "all real source families are positively observed before mutation");
+  const cases: Array<[string, (s: any) => void]> = [
+    ["outcomes", (s) => { s.consoleV1.operatorAgent.outcomes.classes = [{}]; }],
+    ["outcomes", (s) => { delete s.consoleV1.operatorAgent.outcomes.classes[0].verdictClass; }],
+    ["outcomes", (s) => { s.consoleV1.operatorAgent.outcomes.classes[0].verdictClass = 42; }],
+    ["outcomes", (s) => { delete s.consoleV1.operatorAgent.outcomes.classes[0].total; }],
+    ["outcomes", (s) => { delete s.consoleV1.operatorAgent.outcomes.classes[0].revertRate; }],
+    ["outcomes", (s) => { delete s.consoleV1.operatorAgent.outcomes.classes[0].revertedCount; }],
+    ["decisions", (s) => { s.consoleV1.operatorAgent.decisions.classes = [{}]; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].taskClass; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].approvalDenominator; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].approvalRate; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].approvedCount; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].acceptedCount; }],
+    ["decisions", (s) => { delete s.consoleV1.operatorAgent.decisions.classes[0].rejectedCount; }],
+    ["capacity", (s) => { s.consoleV1.operatorAgent.capacity.measurements = [{}]; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].repo; }],
+    ["capacity", (s) => { s.consoleV1.operatorAgent.capacity.measurements[0].repo = {}; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].recommendation; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].configuredCapacity; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].admittedLanes; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].activeWorkers; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].queuedWork; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].utilizationRatio; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].windowStart; }],
+    ["capacity", (s) => { delete s.consoleV1.operatorAgent.capacity.measurements[0].windowEnd; }],
+    ["routing", (s) => { s.routingTelemetry.buckets = [{}]; }],
+    ["routing", (s) => { delete s.routingTelemetry.buckets[0].taskType; }],
+    ["routing", (s) => { delete s.routingTelemetry.buckets[0].assignedModel; }],
+    ["routing", (s) => { delete s.routingTelemetry.buckets[0].terminalResults; }],
+    ["routing", (s) => { delete s.routingTelemetry.buckets[0].failures; }],
+    ["proof", (s) => { delete s.consoleV1.operatorAgent.proof.denominator; }],
+    ["proof", (s) => { delete s.consoleV1.operatorAgent.proof.passRate; }],
+    ["proof", (s) => { delete s.consoleV1.operatorAgent.proof.executedPass; }],
+    ["proof", (s) => { delete s.consoleV1.operatorAgent.proof.executedFail; }],
+  ];
+  for (const [family, mutate] of cases) {
+    const snapshot = structuredClone(good);
+    mutate(snapshot);
+    const original = JSON.stringify(snapshot);
+    let body: AgentProposalsBody | undefined;
+    assert.doesNotThrow(() => { body = publish(snapshot); }, family);
+    assert.match(body!.reason!, new RegExp("malformed.*" + family), family);
+    assert.equal(body!.proposals, undefined, "an invalid family never fabricates empty ranks");
+    assert.equal(body!.records, undefined, "an invalid family never publishes complete detail");
+    assert.equal(JSON.stringify(snapshot), original, "validation is read-only");
+  }
+  assert.deepEqual(publish(good), positive, "restored full source retains exact rank policy and observations");
+});
+
 test("committed source clock mismatch and failed refresh refuse complete records without touching the fold", async (t) => {
   const { stateDir } = await corpus(t);
   const { db, lease } = projected(t, stateDir);
