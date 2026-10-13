@@ -21,6 +21,7 @@ import { isGhRateLimitError } from "./status.js";
 export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
+import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
@@ -764,6 +765,7 @@ export interface InboxClassification {
   lifecycleAction?: SkillLifecycleAction;
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
   skillFile?: SkillFilePayload;
+  skillEval?: SkillEvalRecord;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -1332,7 +1334,8 @@ export function classifyProposal(
   }
   // W1-T4338: a skill draft needs no Architect-drafted task — the staged SKILL.md IS the artifact approval writes.
   if (proposal.skillFile) {
-    return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile, ...referentUnverified };
+    return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile,
+      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}), ...referentUnverified };
   }
 
   const reasons: PredicateFailure[] = [];
@@ -3102,7 +3105,9 @@ export function approveProposal(
       ? `${classification.proposalId} is a skill draft, and this gateway cannot write a skill file`
       : skillFile && !approvedSkillRelPath(skillFile.name)
         ? `${classification.proposalId}'s skill name ${JSON.stringify(skillFile.name)} is not a single safe path segment`
-        : undefined;
+        : skillFile
+          ? skillEvalApprovalRefusal(classification.proposalId, skillFile.markdown, classification.skillEval)
+          : undefined;
   if ((!skillFile && (classification.state !== "ready" || !classification.draft)) || skillRefusal) {
     const refusal = skillRefusal ?? refusalReason(classification);
     appendLedger(deps.ledgerPath, {
