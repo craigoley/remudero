@@ -6283,8 +6283,12 @@ export async function runDaemon(
         const selfScoped = inFlightFreshness.changes?.some((change) =>
           DAEMON_SELF_COMMIT_SCOPE.test(change.subject ?? "") ||
           change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix))));
+        // A self-scoped code change only delays the daemon's own reload by the holdout, so it takes the same cost
+        // comparison as any other restart; an install-input change still yields every run, because its restart
+        // reinstalls the node_modules every running worktree links.
+        const installChanged = changesInstallInputs(inFlightFreshness.changes);
         const deadline = holdoutDeadlines.get(id);
-        const reason = selfScoped ? "self_scoped_change"
+        const reason = installChanged ? INSTALL_INPUTS_RELEASE
           : yieldAsked.has(id) ? "already_asked"
           : deadline !== undefined && nowMs >= deadline ? "estimate_elapsed"
           : remaining?.ms === undefined || yieldCost.ms === undefined ? "no_history"
@@ -6292,7 +6296,7 @@ export async function runDaemon(
         const hold = reason === "finish_is_cheaper";
         if (hold && deadline === undefined) holdoutDeadlines.set(id, nowMs + remaining!.ms!);
         log(hold ? "daemon.restart_holdout" : "daemon.restart_yield_asked", {
-          task_id: id, run_id: context?.runId ?? null, phase, reason,
+          task_id: id, run_id: context?.runId ?? null, phase, reason, self_scoped: selfScoped === true,
           remaining_ms: remaining?.ms ?? null, remaining_samples: remaining?.samples ?? 0,
           yield_cost_ms: yieldCost.ms ?? null, yield_samples: yieldCost.samples,
           deadline_ms: holdoutDeadlines.get(id) ?? null,
