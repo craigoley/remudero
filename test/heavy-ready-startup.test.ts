@@ -100,9 +100,16 @@ test("startup sidecar descriptor-close errors are UNKNOWN, not fatal startup or 
 
 test("startup sidecar default location is captured once and absence writes no files", t => {
   let opened: string | undefined;
-  t.mock.method(fs, "openSync", (path: fs.PathLike) => { opened = String(path); throw Object.assign(new Error("absent"), { code: "ENOENT" }); }); syncBuiltinESMExports();
+  t.mock.method(fs, "lstatSync", (path: fs.PathLike) => { opened = String(path); throw Object.assign(new Error("absent"), { code: "ENOENT" }); }); syncBuiltinESMExports();
   try {
     const gate = captureHeavyNewBuildStartupGate(() => assert.fail("no logging when absent"), {}, { env: {} });
     assert.ok(opened?.endsWith("/" + HEAVY_READY_STARTUP_FILENAME)); assert.equal(gate(), undefined); assert.equal(gate(), undefined);
   } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("startup sidecar disappearing after a positive lstat is UNKNOWN and never disabled", t => {
+  const f = fixture(t); f.publish();
+  t.mock.method(fs, "openSync", () => { throw Object.assign(new Error("disappeared after observation"), { code: "ENOENT" }); }); syncBuiltinESMExports();
+  try { assert.equal(readHeavyReadyStartupFile(f.path).state, "unavailable"); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });

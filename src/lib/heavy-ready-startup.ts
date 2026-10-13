@@ -15,9 +15,11 @@ export function readHeavyReadyStartupFile(path: string): StartupReading {
   let fd: number | undefined;
   try {
     if (!isAbsolute(path) || resolve(path) !== path) throw new Error("startup path must be canonical and absolute");
-    if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_NONBLOCK !== "number") throw new Error("safe startup reads unavailable");
-    try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    try { lstatSync(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" }; throw error; }
+    // An unconfigured host stays disabled even on platforms without these safe-read flags.
+    if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_NONBLOCK !== "number") throw new Error("safe startup reads unavailable");
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const parent = dirname(path), directory = lstatSync(parent), uid = process.getuid?.();
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== uid || (directory.mode & 0o077) !== 0 || realpathSync(parent) !== parent) throw new Error("startup parent must be canonical, private and owned");
     const before = fstatSync(fd);
