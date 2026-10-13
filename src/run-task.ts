@@ -20470,6 +20470,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       if (!decision.resume) break;
       const judgedYield = await yieldAtWorkerBoundary("checkpoint");
       if (judgedYield) return judgedYield;
+      noteRestartPhase("implementing");
       impl = account(
         await spawn({
           cwd: worktreePath,

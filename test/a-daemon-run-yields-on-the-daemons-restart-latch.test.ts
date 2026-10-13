@@ -31,6 +31,7 @@ async function fixture(t: TestContext, options: {
   atGate?: () => void;
   recycle?: () => string | undefined;
   gateSuccess?: boolean;
+  checkpoint?: boolean;
 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t8198-"));
   const origin = gitRepo({ bare: true });
@@ -94,6 +95,11 @@ async function fixture(t: TestContext, options: {
       }
       mkdirSync(join(args.cwd, "src"), { recursive: true });
       writeFileSync(join(args.cwd, "src/D.ts"), "export const value = 42;\n");
+      if (options.checkpoint) {
+        seed.git("-C", args.cwd, "add", "src/D.ts");
+        seed.git("-C", args.cwd, "commit", "--quiet", "-m",
+          "chore(checkpoint): retain partial work\n\n[remudero-context]\nremaining: finish implementation");
+      }
       return worker("REPORT\nCOMMIT_MESSAGE: fix(test): retain boundary work\n");
     },
     preopenGate: async () => {
@@ -217,6 +223,22 @@ test("W1-T8927: a gate repair reports implementing before the worker resumes", a
   assert.equal(h.calls, 3);
   assert.equal(h.outcome.verdict, "failed");
   assert.equal(h.repairPhase, "implementing");
+  assert.equal(h.rows.some((row) => row.step === "run.freshness_handoff"), false);
+});
+
+test("W1-T8927: a checkpoint continuation reports implementing before the worker resumes", async (t) => {
+  const seen: RestartBoundaryContext[] = [];
+  const h = await fixture(t, { checkpoint: true, latch: (context) => {
+    assert.ok(context);
+    seen.push(context);
+    return undefined;
+  } });
+  assert.equal(h.calls, 3, "the checkpoint reaches its continuation worker");
+  assert.equal(h.gates, 0);
+  assert.equal(h.outcome.verdict, "failed");
+  assert.deepEqual(seen.map((context) => context.waitingOn), ["checkpointed", "checkpointed"]);
+  assert.equal(h.repairPhase, "implementing");
+  assert.equal(h.rows.findLast((row) => row.step === "run.phase")?.waiting_on, "implementing");
   assert.equal(h.rows.some((row) => row.step === "run.freshness_handoff"), false);
 });
 
