@@ -15881,7 +15881,6 @@ export async function runSweep(
         task_id: pr.taskId ?? "SWEEP",
         step: "sweep.review_reuse_reach",
         pr_number: pr.prNumber,
-        pr_url: pr.prUrl,
         head_sha: pr.headSha,
         reviewed_merge_base_sha: from,
         current_merge_base_sha: to,
