@@ -1,0 +1,92 @@
+- id: W1-T9038
+  title: "THE COST-OF-DELAY VALIDITY SHARE READS ONE RUN — `costOfDelayContext` keys its age tallies by a start's exact millisecond age, so each of the 2,453 dated runs in the core ledger union is its own key and no key holds two; P(still valid | age) is then one historic run's outcome, so it takes only two values (0.913 or 0.580), and same-priority order flips minute to minute (22 changes in 60 one-minute steps for three P1s on 2026-10-13)"
+  repo: remudero
+  depends_on: []  # shares src/lib/dispatch-value.ts `costOfDelayContext` with queued P2 W1-T8166 (which start spends a stride); this changes only the age-validity estimate, so neither waits on the other
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — P(still valid | filing age) is a share over the runs nearest in age, not one run's outcome; priority, stride, impact and cost are unchanged
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-13 (\"go\"): diagnosis of why P1 W1-T8514 has not resumed since its 03:06:18Z freshness handoff"
+  plan_refs: [W1-T4064, W1-T7534, W1-T7742, W1-T8166, W1-T8514, W1-T8771]
+  files:
+    - src/lib/dispatch-value.ts
+    - test/the-validity-share-reads-more-than-one-run.test.ts
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    READ on origin/main e7975fca6, against the core ledger union on host remudero (~/rmd-state2/state: 512 rotations
+    plus the live file, read 2026-10-13 ~10:55Z). Symbols, not lines.
+    THE DESIGN W1-T4064 FILED. "P(still valid | age) is LEARNED from this ledger: by filing age at dispatch, the share
+    of dispatches that ended already-satisfied, no-op, or refused as merged."
+    WHAT THE CODE COMPUTES. `costOfDelayContext` (src/lib/dispatch-value.ts) builds `ages`, a Map from
+    `start.at - filedAt` (milliseconds) to a `{ valid, total }` tally. A task's probability is
+    `(nearest.valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (nearest.total + DISPATCH_VALUE_PRIOR_WEIGHT)` over the ONE
+    key nearest its age. Two runs share a key only if they started at the same millisecond offset from their filings.
+    MEASURED over the union's run.start, verdict and dispatch.refused_already_merged rows (3,899 starts): 2,453 dated
+    samples, 2,453 keys, 0 keys holding more than one run. The fleet prior is 2,134/2,453 valid, about 0.870, so every
+    task's probability is (1 + 2 x 0.870) / 3 = 0.913 when the single nearest run was valid, or 2 x 0.870 / 3 = 0.580 when
+    it was stale. Nothing between. The "share" W1-T4064 designed is never computed.
+    WHY THE TEST DID NOT CATCH IT. test/new-work-is-ordered-by-cost-of-delay.test.ts gives its 20 history runs exactly
+    two ages (10 at 1 day and 10 at 30 days, all started at the same `ts`), so its tallies hold 10 runs each. Production
+    writes no two runs at the same millisecond age.
+    WHAT IT DOES TO ORDER. Within a priority tier, `compareDispatch` orders by `stridePassByTaskId`, which is
+    `(1 + counted starts) / score`, and `score` is that probability times impact and class terms. In one tier, with equal
+    impact and class, a 1.57x swing in score is decided by which unrelated historic run happens to lie nearest the task's
+    age, and that changes as `nowMs` moves. A replica of the probability term over the union, stepped one minute at a time
+    from 09:30Z on 2026-10-13, flipped the nearest outcome for W1-T8514, W1-T7957 and W1-T8863 22 times in 60 steps.
+    At 10:37:04Z W1-T8514's nearest run was W1-T2500-1788186263945, refused as merged on 2026-08-31 (0.580). W1-T8863's
+    was W1-T2314-1787791393347, merged on 2026-08-27 (0.913).
+    THE CASE THAT SURFACED IT. W1-T8514 (P1; src/lib/drain.ts, src/lib/daemon.ts) handed off at 03:06:18Z with a live
+    receipt for run-W1-T8514-1791858550379 at cbc58a6a0. It logged `dispatch.lifetime_pressure` at every one of 16
+    selection passes after that and no skip, filter or serialized row, so it was eligible throughout. From 03:33Z to
+    08:32Z it lost to P0.9 W1-T8927 holding src/lib/daemon.ts in flight. That is priority-correct, and W1-T8771 names
+    that silent pass-over. From 08:32Z its files were free, and it lost each pass on same-tier order: the 08:33:49Z refill
+    took W1-T8868, the 09:10:08Z and 09:42:38Z ticks took W1-T8238 and W1-T7957, and the 10:37:09Z refill took W1-T8863
+    although W1-T8514 shared no file with in-flight W1-T9001 or W1-T7957. INFERRED, NOT REPRODUCED: the replica above
+    does not reproduce the daemon's exact order at 09:42Z (the daemon's `nowMs` and union tail are not recorded), so this
+    task does not claim the estimator alone decided those picks. It claims the term that ranks one tier is one run's
+    outcome, which the code and the corpus show directly.
+    NOT COVERED: W1-T8166 changes which starts spend a stride (the numerator). W1-T7534 contains an undatable task. W1-T8514
+    reserves files against strictly lower priority. W1-T8771 names a pass-over. None touches the age-validity estimate.
+  design: |
+    1. THE SHARE, IN src/lib/dispatch-value.ts. Export a pure `validityShareNearAge(samples, age)` that takes the sorted
+       `[age, { valid, total }]` samples `costOfDelayContext` already builds and returns `{ valid, total }` summed over the
+       NEIGHBOURHOOD of `age`: the k samples nearest in absolute age difference, where k = ceil(sqrt(n)) and n is the
+       number of dated runs. k grows with the corpus, so no fixed count is written (the operator's no-hard-thresholds
+       rule). Every sample at the same distance as the k-th is included, so the result does not depend on input order.
+       `costOfDelayContext` then computes `(share.valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (share.total +
+       DISPATCH_VALUE_PRIOR_WEIGHT)` from that share instead of from one key. With no dated samples it keeps `prior`.
+    2. UNCHANGED: `prior`, `DISPATCH_VALUE_PRIOR_WEIGHT`, the stride numerator and `streakRefusal` (W1-T7742, W1-T8166),
+       impact and fanout, class estimates, W1-T7534's unscored handling, `compareDispatch`, and W1-T4064's invariant that
+       the order is a pure function of (plan tree sha, calibration snapshot). A corpus whose tallies already hold many runs
+       at one age, like the existing fixture, keeps its ranking.
+    Tests go in the new file test/the-validity-share-reads-more-than-one-run.test.ts, with `test(` titles exactly as in
+    the proofs below. Build production-shaped corpora: every run at its own millisecond age. Call
+    `buildDispatchValueContext` with an explicit `nowMs` and filing snapshot, as test/new-work-is-ordered-by-cost-of-delay.test.ts
+    does. Use no live ledger, no wall clock and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-validity-share-reads-more-than-one-run.test.ts"
+    - claim: "a task whose single nearest run was stale but whose neighbourhood is mostly valid gets the neighbourhood's share, not 2 x prior / 3"
+      proof: 'grep: test("W1-T9038: the validity share pools the runs nearest a task age, not the one nearest run" in test/the-validity-share-reads-more-than-one-run.test.ts'
+    - claim: "moving nowMs by one minute does not reorder two same-tier tasks whose neighbourhood shares are unchanged"
+      proof: 'grep: test("W1-T9038: a one-minute step in nowMs does not reorder same-tier tasks" in test/the-validity-share-reads-more-than-one-run.test.ts'
+    - claim: "the share is the same for the same samples in any input order, and ties at the k-th distance are all included"
+      proof: 'grep: test("W1-T9038: the neighbourhood share is order-independent and includes ties at its edge" in test/the-validity-share-reads-more-than-one-run.test.ts'
+    - claim: "dispatch-value.ts exports the neighbourhood share"
+      proof: 'grep: validityShareNearAge in src/lib/dispatch-value.ts'
+  falsifier: |
+    Production-shaped corpus: 25 dated runs at distinct millisecond ages around age A. The run nearest A is stale and the
+    other 24 are valid. Today the task at age A scores with probability 2 x prior / 3, the value one stale run gives. With
+    the fix it scores near the neighbourhood's share. Two same-tier tasks X and Y, where a lone stale run lies nearest Y's
+    age at nowMs but not at nowMs + 60 s: today X sorts first at nowMs and Y at nowMs + 60 s. With the fix the order holds.
+    Revert to the single nearest key and the first two tests go red. Drop the tie rule and the third test reads a
+    different share for a reversed input.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark: over a day of selection passes,
+    compare how often the P1 order written by `dispatch.lifetime_pressure` rows changes between consecutive passes with
+    no plan change, before and after. Healthy shape: same-tier order moves when a task is dispatched (its stride) or when
+    evidence near its age changes, not every few minutes.
