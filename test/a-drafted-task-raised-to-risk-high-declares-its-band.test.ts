@@ -231,7 +231,8 @@ test("W1-T8714: a replayed proposal is re-drafted and filed through the inbox pa
   assert.deepEqual(approved, [REFILE]);
   assert.equal(replayed(f).some((r) => r.proposal_id === REFILE), false, "handing it to approve is not filing it");
 
-  f.append({ ts: AFTER, task_id: REFILE, step: "approve.shards_written", proposal_id: REFILE, paths: ["plan/tasks.d/W1-T9100-x.yaml"] });
+  // W1-T9041: filed means the plan PR opened, so its ratify.approved receipt, not approve.shards_written.
+  f.append({ ts: AFTER, task_id: REFILE, step: "ratify.approved", pr_url: "https://github.com/o/r/pull/9100", branch: "plan-ratify-x" });
   f.pass(SEED_MS + 7_200_000);
   const rows = replayed(f).filter((r) => r.proposal_id === REFILE);
   assert.equal(rows.length, 1);
@@ -283,7 +284,7 @@ test("W1-T8714: a second replay pass writes no second row", () => {
   const f = fixture();
   f.pass();
   f.append(
-    { ts: AFTER, task_id: REFILE, step: "approve.shards_written", proposal_id: REFILE, paths: [] },
+    { ts: AFTER, task_id: REFILE, step: "ratify.approved", pr_url: "https://github.com/o/r/pull/9100" },
     { ts: AFTER, task_id: REFUSED, step: "approve.error", error: "rmd approve: transient" },
   );
   f.pass(SEED_MS + 1000);
