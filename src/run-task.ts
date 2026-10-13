@@ -1132,6 +1132,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -16475,8 +16476,12 @@ export function buildRuleHeadlinesPart(
   enabled: boolean,
   sourcePath: string,
   readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+  displayPath: string = sourcePath,
 ): string {
   if (!enabled) return "";
+  // `sourcePath` is where the file is READ from (an absolute worktree path at the real call site);
+  // `displayPath` is what the WORKER is told. The worker's cwd is its own worktree, so the
+  // repo-relative name is the one that resolves for it, and no prompt line names a foreign tree.
   const introLine =
     `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
     `bodies, so you know what exists without paying for what you don't need yet. ` +
@@ -16485,9 +16490,11 @@ export function buildRuleHeadlinesPart(
   if (raw === undefined) {
     const unreadable: RuleHeadline = {
       headline: "CLAUDE.md rule index",
-      body: ` (unavailable — could not read rule source ${sourcePath})`,
+      body: ` (unavailable — could not read rule source ${displayPath})`,
     };
-    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined)}`].join("\n");
+    // Indented without its own bullet, like the index lines below: it continues the cited intro claim. As a
+    // bullet it was an uncited claim, and the provenance gate refused every dispatch to a tree with no CLAUDE.md.
+    return [introLine, `    ${retrieveRuleBodyOrDegrade(unreadable, () => undefined).replace(/^- /, "")}`].join("\n");
   }
   const rules = parseRuleHeadlines(raw);
   const indexLines = renderHeadlineOnlyIndex(rules)
@@ -16503,9 +16510,9 @@ export function buildRuleHeadlinesPart(
   const migrated = rules.some((r) => parseRuleBodyPointer(r.body) !== undefined);
   const pointer = migrated
     ? `    Each headline's full body — the measurement that earned it — is a file under ` +
-      `doctrine/ in your own worktree, and ${sourcePath} names the exact path beside every ` +
+      `doctrine/ in your own worktree, and ${displayPath} names the exact path beside every ` +
       `headline. Read one when you are about to apply that rule precisely, or you doubt it.`
-    : `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+    : `    Read a headline's full body from ${displayPath} in your own worktree when you need it — ` +
       "this index carries headlines only.";
   return [introLine, ...indexLines, pointer].join("\n");
 }
@@ -20015,7 +20022,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleHeadlinesEnabled = opts.maskRules
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
-    const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
+    const ruleHeadlinesPart = buildRuleHeadlinesPart(
+      ruleHeadlinesEnabled,
+      join(worktreePath, "CLAUDE.md"),
+      undefined,
+      "CLAUDE.md",
+    );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
     // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
     // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
@@ -41236,7 +41248,7 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
-    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection?.isReady ?? boardGate.isReady)], tokens.read);
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
     if (boardProjection) boardProjection.start();
@@ -55696,6 +55708,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.",
   },
   {
+    name: "skill-eval",
+    syntax: "rmd skill-eval <proposal-id> --confirm-spend",
+    summary: "Attempt a staged skill draft with and without it on held-out tasks; record the verdict.",
+    detail: "Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.",
+  },
+  {
     name: "check-acceptance",
     syntax: "rmd check-acceptance <body-file>",
     summary: "Report what the reviewer's own parser actually resolves from a PR body file.",
@@ -56646,6 +56664,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["verdict-calibration", (rest) => verdictCalibrationCommand(rest)],
   ["autonomy-rate", (rest) => autonomyRateCommand(rest)],
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
+  ["skill-eval", async (rest) => await skillEvalCommand(rest,
+    skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],

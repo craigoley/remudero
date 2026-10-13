@@ -1,0 +1,72 @@
+- id: W1-T9001
+  title: "A PROMISE HARVEST READS ONLY THE ROTATIONS ITS PR CAN BE IN, AND A HARVEST THAT CANNOT FINISH IS RETRIED, NOT ESCALATED AS A BROKEN TOOLCHAIN — W1-T8779's recoverPromisedFollowUpReports scans every ledger rotation since 2026-08-08 under a fixed 30 s abort, the scan aborts, review posts cannot-evaluate, the escalation calls it a reviewer-toolchain fault, and #11255 (the memory cut W1-T8775) sat pending with every proof passed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # review's verdict path, its cannot-evaluate escalation, and the ledger union reader
+  band_meaning: span
+  origin: "operator session 2026-10-13 (standing approval: keep going, don't drop anything): regression from W1-T8779 (#11230) found holding #11255"
+  plan_refs: [W1-T8779, W1-T8775, W1-T7729, W1-T913, W1-T2844]
+  files: [src/lib/review.ts, src/lib/ledger-union.ts, src/lib/sweep.ts, test/a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.test.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts, test/a-proof-run-that-cannot-load-is-not-unmet.test.ts, test/review-status-pending.test.ts]
+  status: queued
+  priority: 0.85 # operator-2026-10-13: W1-T8779's harvest aborts on the host and leaves every PR that promises follow-ups pending forever; it is holding the memory cut (#11255, W1-T8775) and will hold W1-T8776..W1-T8778
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the Azure host (core ledger, read-only):
+      - src/lib/review.ts recoverPromisedFollowUpReports (W1-T8779, #11230, merged 04:42Z d408a8e1d) arms
+        `setTimeout(() => controller.abort(), 30_000)` and, when the live ledger lacks the PR's report.followups
+        row, walks openLedgerUnion over EVERY rotation. ~/rmd-state2/state holds 509 rotations
+        (ledger.2026-08-08T23-38-25-814Z .. ledger.2026-10-13T07-48-28-751Z), 230 MB gzipped. The union parses every
+        row as JSON on a host at load 8-10, so the full walk exceeds 30 s; the newest 20 rotations (17 MB) take
+        0.5 s for zcat+grep, so a bounded walk is cheap.
+      - #11255 (W1-T8775): review-PR11255 runs at 05:04Z and 05:27Z each logged review.cannot_evaluate_escalated with
+        reason "promise harvest unavailable: AbortError: This operation was aborted" while every proof
+        "executed and PASSED on the PR head". remudero-review has been pending cannot-evaluate since 05:28Z.
+        Escalations it raised: #11260 ("proof runner cannot load test files", recommendation "Repair reviewer
+        toolchain"), then the clarification rung's #11269 and #11272 ("PR stage stalled — awaiting-review …
+        DIAGNOSIS: unknown signature").
+    WHY THREE DEFECTS, ONE TASK: they are one failure chain. (1) The corpus is unbounded, so the harvest cannot
+    finish. (2) An unfinished harvest becomes `proof_exec: "cannot_evaluate"` with `loadError` = the abort reason
+    (judgeReview, the promiseObservation.state === "unknown" branch), and the cannot-evaluate escalation (the
+    `remudero-review: cannot-evaluate` branch near the escalation's "The toolchain refresh and one retry did not
+    resolve the load error" detail) files it as a broken toolchain — so the operator is told to repair an install
+    that is fine. (3) Nothing re-reviews the head: the decision digest carries the unknown observation, so a same-head
+    re-review decides the same thing, and the clarification rung escalates instead of re-running review.
+  design: |
+    1. BOUND THE CORPUS BY THE PR'S OWN AGE. A report.followups row for this task and PR cannot predate the task's
+       first dispatch (its earliest run.start / dispatch.claim for this task in the live ledger) or, when that is not
+       readable, the PR's creation time. Rotation files are named by the time they were cut, and a row lives in the
+       first rotation cut after it was written, so select only rotations named at or after that bound (use
+       openLedgerUnion's existing `afterRotation`, given the newest rotation name strictly before the bound; add a
+       name-from-time helper beside it in src/lib/ledger-union.ts if one is missing). No new fixed timeout constant
+       (operator rule: no hard thresholds) — the bound is the PR's age, and the existing abort stays only as the
+       backstop it already is.
+    2. AN UNFINISHED HARVEST IS ITS OWN TRANSIENT CAUSE. When the bounded walk is still aborted or a read fails, the
+       observation records a distinct cause (e.g. `cause: "promise-harvest-incomplete"`), the synthetic criterion is
+       pending with that cause, and the cannot-evaluate escalation does NOT fire for it and never recommends
+       "Repair reviewer toolchain" (that wording stays for real proof-load failures).
+    3. THE SAME HEAD IS RE-REVIEWED. A transient-harvest pending must not be a settled decision input: the decision
+       digest excludes it (or the sweep's post-review row treats a transient-harvest pending as due again on a learned
+       back-off), so the sweep re-runs review on the same head. Verify the sweep row's `checksState === "green"`
+       precondition does not count a non-required CodeQL failure (W1-T5633 judges CodeQL but never holds), or #11255
+       would never qualify.
+    4. #11255 RECOVERS WITHOUT A HAND STEP. After this merges and core boots on it, the next sweep pass re-reviews
+       #11255's head; record the re-review row with its prior cause so the recovery is visible in the ledger.
+  acceptance:
+    - claim: "the harvest reads only rotations cut after the PR's task first ran, and still finds the PR's row"
+      proof: 'grep: test("W1-T9001: a promise harvest reads only the rotations its PR can be in" in test/a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.test.ts'
+    - claim: "an aborted or unreadable harvest is a transient cause, never a toolchain escalation"
+      proof: 'grep: test("W1-T9001: an unfinished harvest is transient and never asks to repair the toolchain" in test/a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.test.ts'
+    - claim: "a head held only by a transient harvest is re-reviewed by the sweep"
+      proof: 'grep: test("W1-T9001: a head held only by an unfinished harvest is reviewed again" in test/a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.test.ts'
+  falsifier: |
+    Fixture union: many old rotations holding unrelated rows plus one rotation cut after the task's first run holding
+    the PR's report.followups row. At base the harvest walks every rotation (count the rotations opened through the
+    union's io seam) — the first test asserts only the fresh rotation and the live file are opened and the row is
+    found. Inject an AbortError into the harvest: at base the verdict carries `loadError` and the escalation recommends
+    "Repair reviewer toolchain"; the second test asserts the transient cause and no toolchain escalation. Give the
+    sweep a PR whose only pending reason is the transient harvest: at base it waits or escalates; the third test asserts
+    the post-review row fires.

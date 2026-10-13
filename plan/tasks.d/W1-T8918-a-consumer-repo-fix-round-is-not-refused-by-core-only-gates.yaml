@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12/13: forensics on remudero-console #2072 (CONSOLE-T124), which the sweep closed after eight fix rounds made no diff (operator: file the fixes in parallel)"
   plan_refs: [W1-T7182, W1-T5702, W1-T4693, W1-T8379, W1-T8833, W1-T8834]
   files: [src/run-task.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-consumer-repo-fix-round-is-not-refused-by-core-only-gates.test.ts]
-  status: queued
+  status: merged
   priority: 0.9 # operator-2026-10-13: every console fix round refused since 10-12 17:55Z (10/10 census checks ENOENT scripts/affected-reach-baseline.json; 23 commit_refused)
   attempts: 0
   rationale: |

@@ -8,7 +8,7 @@ import { OPERATOR_ACTIVITY_CONTRACT_VERSION } from "../src/lib/panel-graph.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { captureFeedback } from "../src/lib/feedback.js";
 import { buildFeedbackInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createConsoleSnapshotCache, ifNoneMatchHits, snapshotEtag, type ConsoleResponseStaleness } from "../src/lib/console-snapshot-cache.js";
+import { COMPUTE_DUTY_DIVISOR, createConsoleSnapshotCache, ifNoneMatchHits, snapshotEtag, type ConsoleResponseStaleness } from "../src/lib/console-snapshot-cache.js";
 import { boundConsoleReadRoutes, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -123,6 +123,31 @@ test("an unchanged cached body answers 304 to its own etag", async () => {
   assert.equal(changed.status, 200);
   assert.deepEqual(changed.json().ready, [2]);
   assert.notEqual(changed.headers.etag, etag);
+});
+
+test("a slow recompute stretches the refresh period, so a read inside it defers no refresh (#7399)", async () => {
+  // #7399: before the test above pinned its clock, a loaded host made this cache's own compute measurement
+  // stretch the period (COMPUTE_DUTY_DIVISOR x compute time), so its third read was not yet due, deferred no
+  // refresh, and version 2 was never read: 304 where 200 was expected. This pins that mechanism on a manual clock.
+  let now = 0;
+  let version = 1;
+  const inbox = countingRoute("/v1/inbox", () => {
+    now += 5; // the recompute takes 5 ms
+    return { ready: [version] };
+  });
+  const deferred: Array<() => void> = [];
+  const cache = createConsoleSnapshotCache(inbox, { budgetMs: 50, fallbackBody: (staleness) => ({ staleness }), minRefreshMs: 0, clock: { ...fixedClock(0), now: () => now }, defer: (run) => void deferred.push(run), setTimer: () => {} });
+  await read(cache.handler, reqOf("/v1/inbox"));
+  version = 2;
+  now = 5 * COMPUTE_DUTY_DIVISOR - 1;
+  assert.deepEqual((await read(cache.handler, reqOf("/v1/inbox"))).json().ready, [1]);
+  assert.equal(deferred.length, 0, "inside the stretched period a read is served from the cache and defers no refresh");
+  now = 5 * COMPUTE_DUTY_DIVISOR;
+  await read(cache.handler, reqOf("/v1/inbox"));
+  assert.equal(deferred.length, 1, "once the period has passed, a read defers one refresh");
+  for (const run of deferred.splice(0)) run();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual((await read(cache.handler, reqOf("/v1/inbox"))).json().ready, [2]);
 });
 
 test("a non-200 cached body never answers 304", async () => {

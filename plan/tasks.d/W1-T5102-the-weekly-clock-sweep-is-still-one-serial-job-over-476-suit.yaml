@@ -18,7 +18,7 @@
     - scripts/clock-sweep-aggregate.mjs
     - src/lib/review.ts
     - test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 431d71762 (reading `git show origin/main:<path>`), the two in-flight branches

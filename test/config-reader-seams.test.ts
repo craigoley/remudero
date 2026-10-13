@@ -370,7 +370,11 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // THIRTY-FOUR since the quiet-worker watchdog's no-history fallback bound (run-task.ts, W1-T7807) started reading
   // `policy.values.workerStall`. It is SEAMED from the moment it was written
   // (`workerStallMs ?? loadDefaultPolicy().values.workerStall`), so it is NOT allowlisted, and the file set is UNCHANGED.
-  assert.equal(readers.length, 34, `expected 34 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-FIVE since `rmd skill-eval`'s production seams (skill-eval-command.ts) bound each sealed held-out attempt by
+  // `workerAbandon`, as the calibration driver above does. SEAMED from the start
+  // (`seams.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon`), so NOT allowlisted; the file set GAINS
+  // `src/lib/skill-eval-command.ts`.
+  assert.equal(readers.length, 35, `expected 35 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
@@ -392,6 +396,7 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
     "src/lib/panel-graph.ts",
     "src/lib/policy.ts",
     "src/lib/review.ts",
+    "src/lib/skill-eval-command.ts",
     "src/lib/sweep.ts",
     "src/lib/worker-home.ts",
     "src/lib/worker.ts",

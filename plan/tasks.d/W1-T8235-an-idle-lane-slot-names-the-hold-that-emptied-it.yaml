@@ -11,7 +11,7 @@
   origin: "2026-10-11 detection research: pause, recycle-drain and restart idle time was invisible to the fleet's own accounting"
   plan_refs: [W1-T4837, W1-T4939, W1-T4416, W1-T7697, W1-T7839, W1-T8197]
   files: [src/lib/idle-lane-accounting.ts, src/lib/daemon.ts, test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

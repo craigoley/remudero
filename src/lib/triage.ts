@@ -260,9 +260,8 @@ export function parseTriageVerdict(text: string): TriageVerdict | null {
 
 export type TriageOutcome = { kind: "verdict"; verdict: TriageVerdict } | { kind: "unparseable" };
 
-/** Classify one worker attempt's raw output text — the third-state boundary {@link
- *  runTriageWithRetry} narrows its retry decision on. Pure wrapper over {@link
- *  parseTriageVerdict}. */
+/** Classify one worker attempt's raw output text — the third-state boundary {@link runTriageWithRetry}
+ *  narrows its retry decision on. Pure wrapper over {@link parseTriageVerdict}. */
 export function classifyTriageOutcome(text: string): TriageOutcome {
   const verdict = parseTriageVerdict(text);
   return verdict === null ? { kind: "unparseable" } : { kind: "verdict", verdict };
@@ -285,6 +284,15 @@ export interface CitationReferents {
 const CITED_PATH_EXT = /\.(?:md|yaml|yml|ts|mjs|json)$/;
 const CITED_PATH_ROOT = /^(?:plan|src|test|docs|doctrine|scripts|learnings|bin|hooks|settings)\//;
 
+/** Whether a cited path names something real, read as people write it: past an anchor or line, as a bare shard
+ *  filename, or as an id-only shard stub. Read literally, each grilled a decided entry (#10911, #11067). */
+function citedPathExists(path: string, evidence: CitationEvidence): boolean {
+  if (evidence.pathExists(path)) return true;
+  const stub = /^plan\/tasks\.d\/(W\d+-T\d+)$/.exec(path);
+  if (stub) return evidence.planIds.has(stub[1]!);
+  return !path.includes("/") && /\.ya?ml$/.test(path) && evidence.pathExists(`plan/tasks.d/${path}`);
+}
+
 /** Every plan task id and repo path a citation names, split by whether `evidence` has it. */
 export function unresolvedCitationReferents(citation: string, evidence: CitationEvidence): CitationReferents {
   const resolved: string[] = [];
@@ -299,7 +307,8 @@ export function unresolvedCitationReferents(citation: string, evidence: Citation
   for (const raw of citation.split(/\s+/)) {
     const token = raw.replace(/^[`'"(\[<]+|[`'")\]>,;:.]+$/g, "");
     if (token.includes("://")) continue;
-    if (CITED_PATH_EXT.test(token) || (token.includes("/") && CITED_PATH_ROOT.test(token))) note(token, evidence.pathExists(token));
+    const path = token.replace(/#.*$/, "").replace(/:\d+(?:-\d+)?$/, "");
+    if (CITED_PATH_EXT.test(path) || (path.includes("/") && CITED_PATH_ROOT.test(path))) note(token, citedPathExists(path, evidence));
   }
   const advisoryPrs = [...citation.matchAll(/(?<![\w&])#\d+\b/g)].map((m) => m[0]);
   return { resolved, unresolved, advisoryPrs: [...new Set(advisoryPrs)] };
@@ -472,8 +481,7 @@ export interface TriageAttemptResult {
 }
 
 export interface TriageRetryDeps {
-  /** Spawn ONE triage attempt and return its raw result. Called with the IDENTICAL `prompt`
-   *  every time. */
+  /** Spawn ONE triage attempt and return its raw result. Called with the IDENTICAL `prompt` every time. */
   spawnAttempt: (prompt: string) => Promise<TriageAttemptResult>;
   /** One ledger-shaped line per attempt, so the count is auditable, not inferred. No-op default. */
   log?: (step: string, extra?: Record<string, unknown>) => void;

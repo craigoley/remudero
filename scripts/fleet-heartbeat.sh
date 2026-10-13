@@ -607,11 +607,15 @@ if [ -n "$_janitor_files" ]; then
   fi
 fi
 
-# Sizes (`du -sk`) of the known consumers, every Nth beat only (RMD_CONSUMER_EVERY, default 6) —
-# `du` over a worktrees root is not free. Failed scheduled reads publish unknown, never 0.
-# The gardener attributes a falling disk to whichever of these grows fastest.
+# Sizes (`du -sk`) of the known consumers, every Nth beat only (RMD_CONSUMER_EVERY, default 6): `du` over a
+# worktrees root is not free. Failed or budget-cut reads publish unknown, never 0; the gardener blames a falling
+# disk on whichever grows fastest. One walk spends a wall-clock budget (RMD_CONSUMER_WALK_BUDGET_S, default 120 s):
+# `du -sk /mnt/rmd` once sat 11-16 min in disk-wait, and the beat's liveness waited with it (2026-10-06, #9643).
 CONSUMER_EVERY="${RMD_CONSUMER_EVERY:-6}"
 case "$CONSUMER_EVERY" in ''|*[!0-9]*|0) CONSUMER_EVERY=6 ;; esac
+CONSUMER_WALK_BUDGET_S="${RMD_CONSUMER_WALK_BUDGET_S:-120}"
+case "$CONSUMER_WALK_BUDGET_S" in ''|*[!0-9]*|0) CONSUMER_WALK_BUDGET_S=120 ;; esac
+CONSUMER_WALK_CUT=""
 BEAT_N_FILE="${RMD_ROOT}/state/heartbeat-count.txt"
 BEAT_N=0
 if [ -r "$BEAT_N_FILE" ]; then BEAT_N="$(head -n 1 "$BEAT_N_FILE" 2>/dev/null)"; fi
@@ -623,14 +627,18 @@ mount_root_used_kb() {
   [ "$(findmnt -n -o FSROOT -M "$1" 2>/dev/null)" = "/" ] || return 1
   df_field "$1" 3
 }
-# ionice -c3 is kept for hosts whose block scheduler is BFQ. It is a NO-OP under `none` and
-# `mq-deadline` (the Azure host's nvme0n1 reads `[none] mq-deadline`), so it never protects that disk:
-# the adaptive schedule below is what keeps the walk off a busy data disk.
+# ionice -c3 is kept for hosts whose block scheduler is BFQ; it is a NO-OP under `none` and `mq-deadline` (the
+# Azure host's nvme0n1), so the adaptive schedule is what keeps the walk off a busy data disk. Each du runs under
+# `timeout` for what is left of the budget, none starts once it is spent (both 124); without `timeout`, between walks.
 du_idle() {
-  if command -v ionice >/dev/null 2>&1; then ionice -c3 -t nice -n 19 du -sk "$1"; else nice -n 19 du -sk "$1"; fi
+  local left
+  left=$((CONSUMER_WALK_DEADLINE - $(date +%s)))
+  [ "$left" -gt 0 ] || return 124
+  command -v timeout >/dev/null 2>&1 || left=""
+  if command -v ionice >/dev/null 2>&1; then ${left:+timeout "$left"} ionice -c3 -t nice -n 19 du -sk "$1"; else ${left:+timeout "$left"} nice -n 19 du -sk "$1"; fi
 }
 consumer_kb() {
-  local name="$1" total=0 seen=0 failed=0 p kb device devices="" paths=""
+  local name="$1" total=0 seen=0 failed=0 cut=0 p kb device devices="" paths=""
   shift
   for p in "$@"; do
     case "$p" in *'*'*) continue ;; esac
@@ -647,6 +655,7 @@ ${p}"
     elif kb="$(du_idle "$p" 2>/dev/null | awk 'NR==1 {print $1}')"; then
       case "$kb" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + kb)) ;; esac
     else
+      [ "$?" = 124 ] && cut=1
       failed=1
     fi
     device="$(df_field "$p" 1)"; [ -n "$device" ] || device="unknown"
@@ -654,6 +663,7 @@ ${p}"
 ${device}"
   done
   if [ "$seen" = 0 ] || [ "$failed" = 1 ]; then total="unknown"; fi
+  if [ "$cut" = 1 ]; then CONSUMER_WALK_CUT="${CONSUMER_WALK_CUT:+${CONSUMER_WALK_CUT},}${name}"; fi
   if [ -z "$devices" ] || [[ "$devices" = *unknown* ]]; then
     devices="unknown"
   else
@@ -670,12 +680,11 @@ live_consumer_path() {
   source="$(printf '%s\n' "$CONSUMER_MOUNTS" | awk -F '\t' -v p="$path" -v d="$destination" '$2==p || $2==d {print $1; exit}')"
   case "$source" in /*) printf '%s' "$source" ;; *) printf '%s' "$path" ;; esac
 }
-# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct
-# filesystems (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat
-# noise, which decays by a quarter each scheduled beat so a one-off swing does not suppress walks for
-# long. A falling disk drifts every beat and keeps walking; a quiet one stops paying a multi-minute
-# metadata walk at the data disk's IOPS cap (2026-10-09: 94% util ~470 r/s for ~1 min per walk).
-# No state, an unreadable signature or a walk older than the backstop always walks.
+# The walk is due only when the consumers' disks have MOVED: the summed used KB of their distinct filesystems
+# (statfs, no walk) drifted from the last walk by more than twice the observed beat-to-beat noise, which decays by
+# a quarter each scheduled beat so a one-off swing does not suppress walks for long. A falling disk drifts every
+# beat and keeps walking; a quiet one stops paying a multi-minute metadata walk at the data disk's IOPS cap
+# (2026-10-09: 94% util ~470 r/s for ~1 min per walk). No state, an unreadable signature or a stale walk walks.
 CONSUMER_STATE_FILE="${RMD_ROOT}/state/consumer-probe.state"
 CONSUMER_BACKSTOP_S="${RMD_CONSUMER_BACKSTOP_S:-21600}"
 case "$CONSUMER_BACKSTOP_S" in ''|*[!0-9]*) CONSUMER_BACKSTOP_S=21600 ;; esac
@@ -711,6 +720,7 @@ if [ $((BEAT_N % CONSUMER_EVERY)) -eq 0 ]; then
   fi
 fi
 if [ "$CONSUMER_PROBE" = "walked" ]; then
+  CONSUMER_WALK_DEADLINE=$((CONSUMER_NOW_S + CONSUMER_WALK_BUDGET_S))
   CONSUMER_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
   CONSUMER_MOUNTS="$("$CONSUMER_RUNTIME" inspect "${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}" \
     --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || CONSUMER_MOUNTS=""
@@ -738,11 +748,14 @@ if [ "$CONSUMER_PROBE" = "walked" ]; then
   consumer_kb transcripts "${HOME}/.claude/projects" "${HOME}/.codex"
   consumer_kb npm_cache "${HOME}/.npm"
   WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
+  [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_PROBE="budget_exhausted"
 fi
 if [ -n "$CONSUMER_PROBE" ]; then
   CONSUMER_LINES="${CONSUMER_LINES}
 consumer_walk_state=${CONSUMER_PROBE}
 consumer_walk_signature=${CONSUMER_USED_KB:-unknown}"
+  [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_LINES="${CONSUMER_LINES}
+consumer_walk_budget_exhausted=${CONSUMER_WALK_CUT}"
   if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_CONSUMER_STATE_WRITE:-}" = "1" ]; then
     mkdir -p "$(dirname "$CONSUMER_STATE_FILE")" 2>/dev/null && printf 'walk_used_kb=%s\nwalk_epoch=%s\nprev_used_kb=%s\nnoise_kb=%s\n' \
       "${WALK_USED_KB:-}" "${WALK_EPOCH:-}" "${CONSUMER_USED_KB:-}" "${NOISE_KB:-0}" > "$CONSUMER_STATE_FILE" 2>/dev/null
