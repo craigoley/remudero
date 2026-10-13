@@ -9,6 +9,7 @@ import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
 import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
+import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
@@ -19,7 +20,7 @@ import { readLedgerLines } from "./status.js";
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector()];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -315,10 +316,14 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
-  const flowRows = await evaluateIdleCapacityDetectors({
-    stateDir: deps.stateDir, nowMs: now, detectors: deps.detectors ?? SRE_LANE_DETECTORS,
-    readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent,
-  });
+  const detectors = deps.detectors ?? SRE_LANE_DETECTORS;
+  const flowInput = { stateDir: deps.stateDir, nowMs: now, readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent };
+  // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
+  // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
+  const flowRows = [
+    ...await evaluateIdleCapacityDetectors({ ...flowInput, detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID) }),
+    ...await evaluateStrandedTaskDetectors({ ...flowInput, detectors }),
+  ];
   const store = readSreLaneStore(deps.stateDir);
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
