@@ -1,0 +1,47 @@
+- id: W1-T9087
+  title: "sweep.runChild.mode auto PROMOTES ON ITS OWN EVIDENCE AND DEMOTES ON A LOST CHILD — the operator keeps automated flow (2026-10-13), so the switch from shadow to children is decided by measured round-trips across a boot cycle, not by a person editing a value"
+  repo: remudero
+  depends_on: [W1-T9086, W1-T9105, W1-T9102]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when run children switch on and off
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T8472, W1-T9082, W1-T9085, W1-T9086, W1-T9080, W1-T9105, W1-T9102]
+  files: [src/lib/run-child-mode.ts, src/lib/run-child.ts, src/run-task.ts, plan/policy.yaml, test/run-child-mode-auto-promotes-on-evidence.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision A.9. The memory offsets this depends on (bounded daemon memos, learned test fan-out; the garden
+    bundle through the spawn task's W1-T8778) land first, so turning children on never raises pressure unoffset.
+    Operator rules: no hard fixed thresholds, keep automated flow, a shadow-then-enforce rollout where risky.
+  design: |
+    1. New src/lib/run-child-mode.ts, `decideRunChildMode(evidence)` over the window since the previous daemon boot (a
+       whole boot cycle, so the evidence includes one adoption):
+       - promote shadow -> on when, across that whole cycle, every probe or child round-tripped the contract, every live
+         child at the boot was adopted, no child was lost or misidentified, and the measured child tree peaks
+         (`run_child.shadow` tree_peak_bytes, then the class peaks) fit the class estimate they were admitted under;
+       - demote on -> shadow on any contract_mismatch, misidentified child, or lost child; a loss whose stderr or
+         cgroup events name an outside kill (OOM kill, container stop) is named as such and does not count against the
+         contract, but an OOM kill does hold promotion until the lane governor's projection has absorbed it;
+       - re-promote only after a fresh clean boot cycle; no fixed count or cooldown constant.
+       Ledger `run_child.mode_decision` {from, to, window_start, evidence, reason} on every change and once per boot.
+    2. The daemon's runOne wiring (src/run-task.ts) asks `runChildModeFor(policy, evidence)` (src/lib/run-child-mode.ts)
+       at each dispatch; when the policy says `auto` it returns `decideRunChildMode`'s current answer.
+    3. plan/policy.yaml `sweep.runChild.mode` becomes `auto`.
+  acceptance:
+    - claim: "auto promotes to on only after a clean whole boot cycle, including one adoption"
+      proof: 'grep: test("W1-T9087: auto promotes only after a clean boot cycle with an adoption" in test/run-child-mode-auto-promotes-on-evidence.test.ts'
+    - claim: "a lost or misidentified child demotes auto to shadow and ledgers why"
+      proof: 'grep: test("W1-T9087: a lost child demotes auto to shadow" in test/run-child-mode-auto-promotes-on-evidence.test.ts'
+    - claim: "a measured child peak above its admitted class estimate holds promotion"
+      proof: 'grep: test("W1-T9087: a child peak above its class estimate holds promotion" in test/run-child-mode-auto-promotes-on-evidence.test.ts'
+    - claim: "the run-child spawn path reads the mode decision"
+      proof: 'grep: decideRunChildMode( in src/lib/run-child.ts'
+    - claim: "the daemon's runOne wiring asks the mode at each dispatch"
+      proof: 'grep: runChildModeFor( in src/run-task.ts'
+  falsifier: |
+    Promote on the first clean probe: the first test promotes before any boot cycle completes.
