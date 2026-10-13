@@ -246,17 +246,31 @@ const BACKSTOP_TEXT: readonly [string, RegExp][] = [
     /\b(auto-?merge|branch[- ]protection|merge[- ]queue|required (status )?checks?|rulesets?|(merge|deploy(ment)?|review) policy|(bypass\w*|disabl\w*)\b[^.;\n]{0,40}\b(reviews?|gates?|checks?))\b/i],
 ];
 
+/** A machine filing's text with its own `origin:` cause key masked out. A filer quotes the key it measured
+ *  (W1-T9042, 2026-10-13: W1-T5984's `own-red:required checks red`), which names an observed symptom, not
+ *  what the record will do. Only a machine record is masked; an operator record is read as written. */
+function withoutOwnCauseKey(text: string, task: { origin?: string; author_class?: string }): string {
+  const origin = task.origin?.trim() ?? "";
+  if (task.author_class !== "machine" || origin === "") return text;
+  const colon = origin.indexOf(":");
+  const keys = [origin, colon < 0 ? "" : origin.slice(colon + 1).trim()].filter((k) => k !== "");
+  return keys.reduce((t, k) => t.replace(new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "<cause key>"), text);
+}
+
 /** Why a record must go to a person whatever a judge would say, or undefined. Reads what the record
- *  will DO — title, prompt, acceptance claims and declared paths — never its narrative note. */
+ *  will DO — title, prompt, acceptance claims and declared paths — never its narrative note, nor the
+ *  cause key a machine filer quotes from its `origin:`. The path rules read every declared path. */
 export function deterministicEscalation(task: {
   title: string;
   prompt?: string;
   files?: readonly string[];
   acceptance?: readonly { claim?: string }[];
+  origin?: string;
+  author_class?: string;
 }): string | undefined {
   const path = (task.files ?? []).find((f) => SENSITIVE_SURFACE.test(f) || MERGE_POLICY_PATH.test(f));
   if (path) return `it declares ${path}, a secrets, auth, CI, deploy, merge-policy or ruling path`;
-  const text = [task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n");
+  const text = withoutOwnCauseKey([task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n"), task);
   for (const [why, re] of BACKSTOP_TEXT) {
     const hit = re.exec(text);
     if (hit) return `it ${why} ("${hit[0].trim()}")`;
