@@ -15,7 +15,7 @@
   # own-read yield this task replaces (its comment: "replacing the run's own read is W1-T8198's separate
   # decision"). That suite was undeclared, so the build could not update it.
   files: [src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts]
-  status: queued
+  status: merged
   priority: 0.9 # operator-2026-10-12: 160 freshness handoffs in the live ledger; W1-T7729 yielded 5x, W1-T8472 3x, W1-T7735 6x today without a PR; this gates every long build
   attempts: 0
   rationale: |
