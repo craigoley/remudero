@@ -738,8 +738,10 @@ export function skillsInjectedEvent(
   };
 }
 
-/** W1-T3379's deliberately small pilot measures only the existing implement-task path. */
+/** W1-T3379's pilot lane, and still the report's default: every existing caller reads implement rows. */
 export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
+/** The fix rung's task class: `applies-to: fix` makes a skill eligible there, and its report reads these rows. */
+export const SKILL_FIX_TASK_TYPE = "fix";
 /** Predeclared before observing any result, so the report cannot lower it after the fact. */
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
 /** A terminal worker failure is the named harm signal for this descriptive pilot. */
@@ -757,7 +759,7 @@ export type SkillEffectivenessStatus = "INSUFFICIENT EVIDENCE" | "RETIRE-CANDIDA
 
 export interface SkillEffectivenessReport {
   skill_name: string;
-  task_type: typeof SKILL_EFFECTIVENESS_TASK_TYPE;
+  task_type: string;
   horizon: number;
   status: SkillEffectivenessStatus;
   basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison";
@@ -783,13 +785,14 @@ const emptyCohort = (): SkillEffectivenessCohort => ({
 });
 
 /**
- * Deterministically joins the one `skills.selection` row emitted at prompt assembly to the
+ * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
  * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
  */
 export function buildSkillEffectivenessReport(
   rows: readonly SkillLedgerRow[],
   skillName: string,
+  taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
   const terminalOutcomeByRun = new Map<string, string>();
   const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
@@ -801,7 +804,7 @@ export function buildSkillEffectivenessReport(
     }
     if (
       row.step !== "skills.selection" ||
-      row.task_type !== SKILL_EFFECTIVENESS_TASK_TYPE ||
+      row.task_type !== taskType ||
       typeof row.run_id !== "string"
     ) continue;
     const eligible = stringArray(row.approved_eligible_names);
@@ -863,7 +866,7 @@ export function buildSkillEffectivenessReport(
 
   return {
     skill_name: skillName,
-    task_type: SKILL_EFFECTIVENESS_TASK_TYPE,
+    task_type: taskType,
     horizon: SKILL_EFFECTIVENESS_HORIZON,
     status,
     basis,
