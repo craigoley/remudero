@@ -133,9 +133,6 @@ function resumableApprove(kind: string, id: string) {
       "- id: W1-T4\n  title: \"a seed task\"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n",
     );
     writeFileSync(join(dir, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
-    // W1-T9039: the draft is linted with the tree's own facts, so the module it edits exists.
-    mkdirSync(join(dir, "src", "lib"), { recursive: true });
-    writeFileSync(join(dir, "src", "lib", "plan.ts"), "");
   });
   const priorRunId = `APPROVE-${id}-1791000000000`;
   const branch = approveRunBranch(priorRunId);
@@ -154,7 +151,7 @@ function resumableApprove(kind: string, id: string) {
     JSON.stringify({
       [id]: {
         proposalId: id,
-        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
+        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
         stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
         anchorFingerprint: "",
       },

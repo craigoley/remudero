@@ -390,6 +390,7 @@ import {
   runRelintLoop,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
+import { censusRunDirs } from "./lib/run-child-contract.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -39178,6 +39179,13 @@ export async function daemonCommand(
     // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
     headroom_enabled: opts.headroomEnabled,
   });
+  // W1-T9070: the positive control for ADR 0007's run children. No spawn site writes a run directory yet, so this
+  // reads all zeros; the adoption task builds on it. A failed read is ledgered, never read as zeros.
+  try {
+    log("run_child.boot_census", { ...censusRunDirs(join(config.root, "state")) });
+  } catch (censusError) {
+    log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
+  }
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
