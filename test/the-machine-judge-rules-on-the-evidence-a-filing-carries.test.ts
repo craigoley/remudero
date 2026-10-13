@@ -59,7 +59,7 @@ const FORTY_ROUNDS = [
   "- PR #11230: 6 rounds",
 ];
 
-test("W1-T9042: the machine judge is shown the record's rationale and note, bounded, with a deterministic evidence line", async () => {
+test("W1-T9042: the machine judge is shown the record's rationale and note", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}machine-evidence-`));
   try {
     mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });

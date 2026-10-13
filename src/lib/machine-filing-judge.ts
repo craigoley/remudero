@@ -151,7 +151,8 @@ export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined
   return m?.[1];
 }
 
-/** How much of a record's `note:` and `rationale:` the judge is shown, in characters (W1-T9042). */
+/** How much of a record's `note:` and `rationale:` the judge is shown, in characters (W1-T9042).
+ *  PRIMARY CONTROL: it fires on a healthy long rationale by design and states its cut; the evidence line counts all. */
 export const MACHINE_JUDGE_EVIDENCE_CAP = 4000;
 
 /** `text` cut to `cap` characters at a line boundary, with the cut stated; a lone longer line is cut mid-line. */
