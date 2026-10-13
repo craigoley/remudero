@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { createReadModelTicker, createReadModelWorker, threadViews, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { shadowReadiness, viewShadowPath, withViewShadow } from "../src/lib/view-shadow.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { trackWorkerThreads } from "../src/lib/worker-heaps.js";
 
-async function until(done: () => boolean): Promise<void> {
-  const deadline = Date.now() + 10_000;
+async function until(done: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!done() && Date.now() < deadline) await sleep(5);
   assert.ok(done(), "real worker lanes produced the expected receipt");
 }
@@ -159,9 +159,11 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
 `);
   const book = trackWorkerThreads();
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const timers = new Map<number, () => void>();
   const worker = createReadModelWorker({
     stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], viewsModule: pathToFileURL(modulePath).href,
     log: (step, extra) => void logs.push({ step, extra: extra ?? {} }),
+    every: (run, ms) => { timers.set(ms, run); return () => void timers.delete(ms); },
   });
   let sent = 0;
   t.after(async () => {
@@ -171,11 +173,18 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
   });
   worker.start();
   const state = () => existsSync(viewShadowPath(dir)) ? JSON.parse(readFileSync(viewShadowPath(dir), "utf8"))["paired-worker"] : undefined;
-  await until(() => logs.some((row) => row.step === "read_model.view_lane_moved" && row.extra.view === "paired-worker" && row.extra.to === "heavy"));
-  await until(() => existsSync(marks) && readFileSync(marks, "utf8").includes('"lane":"heavy"'));
+  // Native threads load the application under the flake screen's CPU contention before building.
+  await until(() => logs.some((row) => row.step === "read_model.view_lane_moved" && row.extra.view === "paired-worker" && row.extra.to === "heavy"), 60_000);
+  await until(() => existsSync(marks) && readFileSync(marks, "utf8").includes('"lane":"heavy"'), 60_000);
   // Attach the real sampler once the heavy reader exists: an earlier cold sample is held for its minute.
   withViewShadow({ shadow: (request) => { sent++; worker.shadow(request); }, driveShadow: (sample) => worker.driveShadow(sample) }, { readModel: worker, legacy: [] });
-  await until(() => (state()?.samples ?? 0) > 0);
+  const drive = timers.get(READ_MODEL_SWITCH_RECHECK_MS);
+  assert.ok(drive, "the real handle registered its shadow driver");
+  drive();
+  await until(() => (state()?.samples ?? 0) > 0, 60_000);
+  assert.equal(sent, 1, "one driver offer produces one comparison without a request");
+  assert.equal(state().samples, 1);
+  assert.equal(state().requests, 0);
   assert.equal(state().diffs.real, 0);
   assert.equal(shadowReadiness("paired-worker", state(), Date.now()).ready, false);
   assert.equal(worker.autoMode?.("paired-worker"), "shadow");
