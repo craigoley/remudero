@@ -29,8 +29,10 @@ export function createSkillEvalControl(input?: SkillEvalControlInput): SkillEval
       const now = clock.now();
       if (!Number.isSafeInteger(now) || now < 0) throw new Error("eval clock unavailable");
       if (now >= finishByMs - shutdownReserveMs) controller.abort("fixed-eval-shutdown-deadline");
-    } catch (error) { controller.abort(`eval-deadline-observation-unavailable: ${
-      (error instanceof Error ? error.message : String(error)).slice(0, 200)}`); }
+    } catch (error) {
+      const reason = `eval-deadline-observation-unavailable: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`;
+      controller.abort(reason);
+    }
     return !controller.signal.aborted;
   };
   if (signal?.aborted) cancel();
