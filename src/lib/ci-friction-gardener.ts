@@ -466,9 +466,9 @@ function namedRunnerFailures(bodies: readonly string[]): { named: string[]; firs
   return { named, firstNamedAt };
 }
 
-/** W1-T9057: how many failing titles a `fix.dispatch` row keeps per failing check. */
+/** BACKSTOP (W1-T9057): bounds the failing titles a `fix.dispatch` row keeps per failing check. */
 export const CI_FAILURE_TESTS_CAP = 5;
-/** W1-T9057: the most characters of a failing log a `fix.dispatch` row keeps per failing check. */
+/** BACKSTOP (W1-T9057): bounds the log characters a `fix.dispatch` row keeps per failing check. */
 export const CI_FAILURE_EXCERPT_CAP = 600;
 
 const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
