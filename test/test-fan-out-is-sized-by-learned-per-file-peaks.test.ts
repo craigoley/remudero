@@ -178,7 +178,7 @@ test("W1-T9102: a real test file child's kernel peak is learned through a reserv
   const file = join(fx.dir, "real.test.mjs");
   writeFileSync(file, 'import { test } from "node:test";\ntest("real peak", async () => {\n' +
     'console.log("file-peak-ready");\nawait new Promise(resolve => setTimeout(resolve, 500));\n});\n');
-  const env = { ...process.env };
+  const env = { ...process.env, NODE_V8_COVERAGE: undefined };
   delete env.NODE_TEST_CONTEXT;
   const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--import", "tsx",
     "--import", "./test/setup/tmp-hygiene.ts", file], { env, stdio: ["ignore", "pipe", "pipe"] });
