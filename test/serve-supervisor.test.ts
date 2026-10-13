@@ -799,6 +799,7 @@ function realSupervisor(port: number, modes: Record<string, string>) {
     pollMs: 50,
     readyBoundMs: 4_000,
     // The swap itself is under test here, not this test host's own memory pressure.
+    freeMemory: () => AMPLE.memAvailableBytes!, rss: () => 1_000, peakRss: () => 1_000,
     hostPressure: async () => ({ ...AMPLE, atMs: Date.now() }),
     upgradeThresholds: () => THRESHOLDS,
   });

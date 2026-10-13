@@ -30,10 +30,14 @@ import { RAW_BODY_CACHE, readBoundedRawBody, type Route } from "./service.js";
 
 /** The conversation contract: each capability, the instance-relative path it mounts at, and the source route it wraps. */
 export const INSTANCE_INBOX_ROUTES = [
+  { capability: "inbox", method: "GET", kind: "view", source: "/v1/inbox" },
+  { capability: "inbox/attention-census", method: "GET", kind: "view", source: "/v1/inbox/attention-census" },
+  { capability: "inbox/proposal", method: "GET", kind: "view", source: "/v1/inbox/proposal" },
   { capability: "inbox/threads", method: "GET", kind: "view", source: "/v1/inbox/threads" },
   { capability: "inbox/thread", method: "GET", kind: "view", source: "/v1/inbox/thread" },
   { capability: "inbox/thread/reply", method: "POST", kind: "write", action: "reply", source: "/v1/inbox/thread/reply" },
   { capability: "inbox/thread/read", method: "POST", kind: "write", action: "read", source: "/v1/inbox/thread/read" },
+  { capability: "inbox/reframe", method: "POST", kind: "write", action: "reframe", source: "/v1/inbox/reframe" },
 ] as const;
 
 type ContractRoute = (typeof INSTANCE_INBOX_ROUTES)[number];
@@ -200,6 +204,16 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
         return;
       }
       const mode = (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))().mode;
+      if (spec.capability === "inbox/proposal" && captured.status === 200) {
+        if (body.proposalId !== requested) {
+          sendScoped(res, binding, 502, { error: "inbox_proposal_identity_mismatch" }); return;
+        }
+        if (typeof body.snapshotKey !== "string" || !/^[a-f0-9]{64}$/.test(body.snapshotKey)) {
+          sendScoped(res, binding, 502, { error: "inbox_proposal_source_unreadable" }); return;
+        }
+        const reframe = binding.routes.some(r => r.method === "POST" && r.path === "/v1/inbox/reframe");
+        body.actions = mode === "read-write" && reframe ? [{ action: "reframe", tier: "low", path: `/v1/i/${binding.instance}/inbox/reframe` }] : [];
+      }
       emit(res, captured, { ...body, ...identity(binding), contract: mode });
     },
   };
@@ -239,6 +253,12 @@ function sameBinding(a: IntentBinding, b: IntentBinding): boolean {
 }
 
 function canonicalPayload(action: string, body: Body): { error: string } | { payload: unknown } {
+  if (action === "reframe") {
+    if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 4000) return { error: "feedback must contain 1-4000 characters" };
+    if (typeof body.snapshotKey !== "string" || !/^[a-f0-9]{64}$/.test(body.snapshotKey)) return { error: "proposal snapshotKey is required" };
+    if (body.proposalId !== proposalIdOfThread(String(body.threadId))) return { error: "proposalId must identify the requested thread" };
+    return { payload: { feedback: body.feedback, snapshotKey: body.snapshotKey } };
+  }
   if (action === "reply") {
     if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
     return { payload: { text: body.text.trim() } };
