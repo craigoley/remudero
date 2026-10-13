@@ -70,6 +70,10 @@ export function createOwnedRunCgroup(opts: { enabled?: boolean; parent?: string 
   if (opts.enabled !== true) return undefined;
   if (!opts.parent || opts.parent === "/sys/fs/cgroup") throw new Error("explicit delegated cgroup parent required");
   verifyCgroup(opts.parent);
+  const current = /^0::(\/[^\n]+\/rmd-heavy-run-[a-f0-9-]{36}\.service)$/m.exec(readControl("/proc/self/cgroup"));
+  if (!current || resolve(opts.parent) !== `/sys/fs/cgroup${current[1]}`) {
+    throw new Error("whole-run scope requires its own isolated user-service parent, never a fleet or sibling cgroup");
+  }
   const ownerStart = testSlotProcessFacts(process.pid)?.start, namespace = readPidNamespace();
   if (!ownerStart || !namespace) throw new Error("cgroup owner identity unavailable");
   const path = join(opts.parent, `rmd-eval-${randomUUID()}`);
