@@ -12450,6 +12450,27 @@ function reviewOutcomeKeyForPr(pr: OpenPrView): string {
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
+function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  if (pr.reviewState !== "pending") return false;
+  const row = lines.findLast(row => row.task_id === reviewOutcomeTaskIdFor(pr) && row.pr_url === pr.prUrl &&
+    row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  if (row?.step !== "review.posted" || row.state !== "pending") return false;
+  if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
+  if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  if (verdict?.criteria?.some(criterion => criterion.proof_exec === "cannot_evaluate" &&
+      criterion.cause !== "promise-harvest-incomplete" && !/^promise harvest (?:unavailable:|corpus is unreadable)/.test(criterion.loadError ?? criterion.reason))) return false;
+  const observation = verdict?.promisedFollowUpObservation;
+  return observation?.state === "unknown" && (observation.cause === "promise-harvest-incomplete" ||
+    /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
+}
+
+function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
+  // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
+  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+}
+
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
  *  and carried verbatim into the PR's own reason. THIS TABLE NAMES A COST; IT DECIDES NOTHING — by
  *  the time it is read the guarded call has ALREADY been refused. */
@@ -13280,7 +13301,7 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key))) reviewDelivered.delete(key);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -14520,6 +14541,7 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
   const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
   const stuckStages = new Map<string, Record<string, unknown>>();
@@ -15440,8 +15462,9 @@ export async function runSweep(
     }
     claimedReviewKeys.add(reviewKey);
     try {
-      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath), openPrs);
-      const delivered = fresh.reviewDelivered.has(reviewKey);
+      const freshLines = readLedger(deps.ledgerPath);
+      const fresh = priorActionsFromLedger(freshLines, openPrs);
+      const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
@@ -15945,7 +15968,8 @@ export async function runSweep(
     const refusedCurrentPending = pr.reviewState === "pending" &&
       refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
       refusalAttemptedAt >= pendingSince;
-    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
+    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : promiseHarvestRetryView(pr, ledgerLines);
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -15960,6 +15984,9 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    if (disposition === "post-review" && harvestIncomplete) {
+      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
+    }
     // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
     // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
     // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
@@ -18458,6 +18485,7 @@ export async function runSweep(
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
       review_mode: job.mode.kind,
+      ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });
@@ -18942,6 +18970,7 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {

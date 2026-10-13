@@ -151,6 +151,16 @@ export function rotationStampIso(name: string): string | undefined {
   return m ? `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z` : undefined;
 }
 
+/** Exclusive cursor that keeps the first rotation cut at or after a row's earliest possible time. */
+export function rotationBeforeTime(names: readonly string[], timestamp: string): string {
+  const bound = Date.parse(timestamp);
+  if (!Number.isFinite(bound)) throw new Error(`invalid ledger rotation bound: ${timestamp}`);
+  return names.filter(name => {
+    const stamp = rotationStampIso(name);
+    return stamp !== undefined && Date.parse(stamp) < bound;
+  }).sort().at(-1) ?? "";
+}
+
 const MAX_PATTERN_LENGTH = 200;
 
 function sanitizeRegExp(pattern: string): string {

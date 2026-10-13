@@ -275,3 +275,26 @@ test("cannot-evaluate posts pending and escalates once for the same head", async
     assert.match(ledger, /cannot-evaluate|cannot_evaluate/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a real proof load failure still escalates when a promise harvest is incomplete too", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-proof-harvest-load-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  const verdict = judgeReview([{ claim: "load proof works", proof: "unit test: load proof" }], {
+    diff: "+++ b/src/a.ts\n@@\n+export const a = 1;", report: "load proof works", headCheckoutDir: dir,
+    execProof: () => { throw new ProofCannotLoadError(loadError); },
+    promisedFollowUpObservation: { state: "unknown", cause: "promise-harvest-incomplete", reason: "promise harvest unavailable: AbortError" },
+  });
+  assert.equal(verdict.state, "pending");
+  assert.match(verdict.summary, /cannot-evaluate.*Cannot find package/);
+  let recommendation: string | undefined;
+  const result = await postReviewStatusGuarded({ owner: "o", repo: "r", sha: "a".repeat(40),
+    taskId: "W1-T9001", prUrl: "https://github.com/o/r/pull/1", ledgerPath, runId: "mixed-load",
+    state: verdict.state, description: verdict.summary, evidence: "no_evidence",
+    fetchLifecycle: () => ({ merged: false, closed: false }), post: () => {},
+    issues: { listOpen: () => [], create: (_title, body) => { recommendation = body; return "https://github.com/o/r/issues/1"; } },
+  });
+  assert.equal(result.posted, true);
+  assert.match(recommendation ?? "", /Repair reviewer toolchain/);
+});
