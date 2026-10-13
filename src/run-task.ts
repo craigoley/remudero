@@ -46811,7 +46811,7 @@ export async function sweepEscalationTriage(
     issues?: IssueGateway;
     runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
     clock?: Clock;
-    relabel?: (url: string, label: string) => void;
+    relabel?: (url: string, label: string) => void | Promise<void>;
   } = {},
 ): Promise<void> {
   try {
@@ -46823,10 +46823,11 @@ export async function sweepEscalationTriage(
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
     const deps = { issues, ledgerPath, runId };
     const cfg = runtime(deps);
-    const relabel = io.relabel ?? ((url, label) => {
+    // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
+    const relabel = io.relabel ?? (async (url: string, label: string): Promise<void> => {
       assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
-      ghExec(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
-        "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], { stdio: "pipe" });
+      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
+        "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"]);
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];
     for (const issue of open) {
@@ -46853,14 +46854,14 @@ export async function sweepEscalationTriage(
           return Promise.resolve({ decision: "deliver", reason: "referent state unavailable" });
         return cfg.judge!({ ...candidate.escalation, detail: buildStaleEscalationRejudgePrompt(candidate) });
       },
-      demote: async (url, reason) => { await issues.comment?.(url, reason); relabel(url, "fleet-notice"); },
+      demote: async (url, reason) => { await issues.comment?.(url, reason); await relabel(url, "fleet-notice"); },
       triage: {
         mode: cfg.mode ?? "shadow", evidence: cfg.evidence,
         autoResolve: async (candidate) => {
           try {
             await triageExistingEscalation(candidate.escalation, candidate.issueUrl, { ...deps, triage: cfg }, relabel);
           } catch (err) {
-            relabel(candidate.issueUrl, "needs-human");
+            await relabel(candidate.issueUrl, "needs-human");
             throw err;
           }
         },
