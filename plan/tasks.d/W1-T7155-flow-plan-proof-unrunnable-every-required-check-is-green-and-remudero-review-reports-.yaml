@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.36
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "flow-blocker:plan-proof-unrunnable:every required check is green and remudero-review reports success, but the verdict ledgered for this head is CAPPED (zero proofs executed) with no operator override"
@@ -16,7 +16,7 @@
   acceptance:
     - claim: "plan-proof-unrunnable:every required check is green and remudero-review reports success, but the verdict ledgered for this head is CAPPED (zero proofs executed) with no operator override is cleared by its owner without manual intervention"
       proof: "grep: test(\"W1-T7155: flow-plan-proof-unrunnable-every-required-check-is-green-and-remudero-review-reports- clears without a person\" in test/flow-plan-proof-unrunnable-every-required-check-is-green-and-remudero-review-reports-.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  note: "WITHDRAWN 2026-10-13 by operator ruling: priced by a defect. flow-remedy's isFleet missed the bare remudero-fleet login GraphQL returns for mergedBy, so fleet merges read as failed blocker episodes and inflated this cause; #11221 fixes it, and the gardener re-files any real cause from corrected pricing. Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
   rationale: |
     plan-proof-unrunnable:every required check is green and remudero-review reports success, but the verdict ledgered for this head is CAPPED (zero proofs executed) with no operator override cost 3.00 PR-hours; owner NONE
     Owner NONE is absent.

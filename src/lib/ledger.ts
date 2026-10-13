@@ -598,6 +598,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
   "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
   "implement.checkpoint_dropped", // Retain the resolution too, so rotation cannot revive a dropped handoff receipt.
+  // W1-T8676: pendingWorkerBoundaryHandoffs (daemon.ts) re-pends the receipt a worker-error verdict consumed from
+  // this row; rotated away while that receipt stayed, the receipt would read consumed again.
+  "implement.checkpoint_kept",
+  // W1-T8676: independentFailureLatch (status.ts) reads it as the release's receipt; rotated away, it is re-written.
+  "dispatch.independent_block_released",
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched

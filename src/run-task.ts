@@ -1,3 +1,13 @@
+import {
+  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
+  releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
+} from "./lib/check-proof.js";
+export {
+  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
+  releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
+} from "./lib/check-proof.js";
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -191,7 +201,7 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
-import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
@@ -223,7 +233,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointCommitSubject, checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -1391,6 +1401,7 @@ import {
   renderSkillEffectivenessReport,
   renderSkillsPart,
   skillsInjectedEvent,
+  skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
   workerAllowlistFromSettings,
@@ -1624,6 +1635,7 @@ import {
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
+  independentBlockReleasesFrom,
   readLedgerLines,
   type DeriveDeps,
   type GitHub,
@@ -3028,7 +3040,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
-import { heavyNewBuildGate } from "./lib/heavy-build-reservation.js";
+import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
@@ -3533,7 +3545,7 @@ export function watchDispatchSpawn(
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `wip: yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            `${checkpointCommitSubject(`yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
             {}, task.acceptance, { checkpoint: true });
           // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
           if (!checkpoint.committed) {
@@ -3579,7 +3591,7 @@ export async function commitAndPushRestartCheckpoint(
   let undeclared: readonly string[] = [];
   if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
     const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
-      `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+      `${checkpointCommitSubject(`yield at ${waitingOn}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
       {}, task.acceptance, { checkpoint: true });
     if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
     undeclared = checkpoint.undeclared;
@@ -5286,7 +5298,7 @@ export async function restoreBoundaryCheckpoint(
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}), ...absence };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+    `${checkpointCommitSubject("merge main into the restored checkpoint")}\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
   return { base: "main", headSha: merged, ...absence };
 }
@@ -13295,8 +13307,9 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
-    const censusSnapshotPath = fixHarnessOwnsGit ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
-    if (fixHarnessOwnsGit && !deps.writeFixCensusSnapshot) {
+    const fixCensusApplies = fixCensusAppliesToRepo(opts.reviewBase.repo, deps.log);
+    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
@@ -14874,6 +14887,8 @@ export function proofRepairRoundRefusalInWorktree(input: {
   roundStartSha: string | undefined;
   stageable: readonly string[];
   proofs: readonly string[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
     hostWorktreeGit(input.worktreePath, args).trim();
@@ -14891,7 +14906,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase], {
+      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -18333,6 +18348,30 @@ const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
 
+/** W1-T8918: core's census suites (census-precheck and the reach ratchet) measure core's own registry and shrink-only
+ *  baselines, so they run only for the harness's own repository. Decided by repository IDENTITY — the task's repo
+ *  against the repo the harness serves — never by whether a baseline file exists: a core branch that deletes
+ *  scripts/affected-reach-baseline.json must still be refused. A repo that is not core's is ledgered
+ *  `fix.census_check` "not-applicable" so the skip is visible. An unnamed repo or an unresolvable core identity
+ *  keeps the check (fail closed), and says why. */
+export function fixCensusAppliesToRepo(
+  repo: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  resolveSelf: () => { owner: string; repo: string } = resolveOwnerRepo,
+): boolean {
+  if (repo === undefined) return true;
+  let coreRepo: string;
+  try {
+    coreRepo = resolveSelf().repo;
+  } catch (error) {
+    log("fix.census_check", { outcome: "core-identity-unresolved", repo, reason: String(error) });
+    return true;
+  }
+  if (repo === coreRepo) return true;
+  log("fix.census_check", { outcome: "not-applicable", repo, core_repo: coreRepo });
+  return false;
+}
+
 export function writeFixCensusSnapshot(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -18790,7 +18829,7 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits ? writeFixCensusSnapshot(cwd, log) : undefined;
+    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? writeFixCensusSnapshot(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,
@@ -19081,6 +19120,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     return r;
   };
 
+  // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
+  let restoredCheckpoint: { branch: string; headSha: string } | undefined;
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
    * error). Turn it into a terminal verdict: clean the worktree so no debris
@@ -19092,6 +19133,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
+    // W1-T8676: a worker error is not the checkpoint's fault. Unless this run pushed its own branch (the newer
+    // checkpoint, W1-T7837) — read while the worktree stands; only a proven absence (exit 1) keeps it.
+    const keptCheckpoint = v.verdict === "failed" && restoredCheckpoint !== undefined &&
+      hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
+      ? restoredCheckpoint : undefined;
     try {
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", { on: `${stage}.error` });
@@ -19099,6 +19145,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
     }
     log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
+    if (keptCheckpoint) {
+      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
+        failed_stage: stage, failed_subtype: r.subtype });
+    }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
     );
@@ -19591,10 +19641,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     if (checkpoint) {
       try {
         const restored = await restoreBoundaryCheckpoint(checkpoint, taskId, (args) => hostWorktreeGitAsync(worktreePath, args), log);
-        if (!(restored.base === "main" && restored.dropped)) log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
-          base: restored.base, restored_head_sha: restored.headSha,
-          ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
-          ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        if (!(restored.base === "main" && restored.dropped)) {
+          restoredCheckpoint = checkpoint;
+          log("implement.checkpoint_restored", { source_branch: checkpoint.branch, source_head_sha: checkpoint.headSha, branch,
+            base: restored.base, restored_head_sha: restored.headSha,
+            ...(restored.sourceBranchAbsent ? { source_branch_absent: true } : {}),
+            ...(restored.base === "checkpoint" ? { main_conflicts: restored.mainConflicts, merge_unreadable: restored.reason } : {}) });
+        }
       } catch (error) {
         log("verdict", { verdict: "no_pr", reason: "restart_checkpoint_restore_failed", branch,
           source_branch: checkpoint.branch, detail: String((error as Error)?.message ?? error), cost_usd: costUsd });
@@ -19937,13 +19990,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
     const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Empty for every task until an operator approves a skill that
-    // declares `applies-to:`, so today this changes no prompt by a single byte.
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
+    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
     const skillSelection = observeSkillSelection(
       loadInjectableSkills(join(repoRoot, ".claude", "skills")),
       task.type,
       DEFAULT_KNOWLEDGE_BUDGET_CHARS,
       task.files,
+      (skillName) => skillWithheldForRun(runId, skillName),
     );
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
@@ -21778,247 +21832,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
  */
 // resolveReviewTarget moved to src/lib/report-commands.ts (W1-T2888) — imported/re-exported
 // below.
-
-/**
- * (R-11) What {@link buildBaseProofDir} hands back — the evidence fields it becomes, plus the one
- * fact the caller needs for teardown. `baseCheckoutDir` is a REAL CHECKOUT (a detached worktree at
- * the merge-base) exactly when `baseIsCheckout` is true; otherwise it is the blob-only fallback
- * (or absent), and `baseWorktreeFailure` names why the worktree could not be created.
- */
-export interface BaseProofDir {
-  baseCheckoutDir: string | undefined;
-  baseUnreadablePaths: ReadonlySet<string>;
-  baseIsCheckout: boolean;
-  /** (W1-T5528) Set only on the `detachedAsync` path: the base probe's checkout still in flight. */
-  pendingCheckout?: Promise<void>;
-  /** True when every proof was a house-dialect `grep:` and `baseCheckoutDir` holds exactly the merge-base
-   *  bytes at each target and nothing else ({@link materialiseBaseGrepTree}), never a checkout. A complete
-   *  base for THOSE proofs; teardown is a plain delete ({@link releaseBaseProofDir}). */
-  baseIsGrepTree?: boolean;
-  baseWorktreeFailure?: string;
-  /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
-   *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
-   *  non-discriminating about a file the merge-base never had. Empty when no copy happened. */
-  addedTestFiles: ReadonlySet<string>;
-}
-
-/**
- * Build the BASE-revision tree {@link preexistingProofHits} needs. Returns `baseCheckoutDir:
- * undefined` when there is nothing to compare (no dialect proof at all, or no resolvable
- * merge-base) — in which case the staleness check stays inert exactly as it was.
- *
- * (R-11) A REAL CHECKOUT, NOT A BLOB DIRECTORY. This used to materialise only the blobs `grep:`
- * proofs name (via {@link materialiseBaseProofBlobs}) and returned a dir only when one was
- * written. W1-T362 had already extended the staleness check to `unit test:` proofs, so every one
- * of those was re-run in a directory holding no `package.json` and no `test/` — or in NO base at
- * all, when the review carried no grep proof. `node --test` there exits 1 with empty stdout, the
- * executor reports "fail", and `classifyBaseProofOutcome` (review.ts) graded that "discriminates":
- * a test passing identically at both commits was certified `executed_pass` with a reason asserting
- * it told done from not-done. Every W1-T362 test injected a fake executor, so the shape was never
- * exercised. The base is now `git worktree add --detach <dir> <merge-base>`, run from the head
- * checkout through the same injectable seam the head materialisation uses, so a `unit test:` proof
- * re-runs in the tree it was written for; its `node_modules` is primed by the executor's existing
- * `ensureDeps` (review.ts) only when a `unit test:` proof actually runs there — a `grep:`-only
- * review pays for the checkout and never for an install. Teardown is the CALLER's (the same
- * `withMaterializedWorktree` that removes the head; `rmd check-proof` removes its own).
- *
- * A `grep:`-ONLY REVIEW CHECKS NOTHING OUT. Every proof a house-dialect grep ⇒ the base is a GREP TREE
- * ({@link materialiseBaseGrepTree}): exactly the merge-base bytes at each target, read through the leaf,
- * and nothing else, so the same `grep -arn` sees the same input. `baseIsGrepTree` marks it; a target a
- * plain-file tree cannot reproduce (a symlink or submodule on its path) falls through to the worktree.
- *
- * THE BLOB PATH IS THE FALLBACK, ONLY when the worktree cannot be created (a checkout that is not a
- * git repo, a base object the repo does not hold, disk): `grep:` proofs are still checked against
- * their blobs exactly as before, and `baseIsCheckout: false` tells the classifier that a
- * `unit test:` proof is `base_unknown` there — never "discriminates". `git show <rev>:<dir>` for a
- * DIRECTORY target (R-12) can no longer reach this path either: `parseDialectGrep` refuses the
- * directory shape, so no such proof compiles to a blob to materialise.
- *
- * THE MERGE-BASE, not `origin/main`: "already matched before this work existed" is a question about
- * the commit the branch forked from, and a proof legitimately added by a PR merged in between must
- * not count against this one.
- *
- * (W1-T460) `baseUnreadablePaths` names the paths whose base blob GENUINELY failed to read on the
- * fallback path (never the ordinary absent-at-base forward reference, which stays carved out). It
- * is a PER-PROOF fact and cannot be folded into `baseCheckoutDir === undefined`, the GLOBAL "no
- * base at all" fact: a mixed review where one blob reads and another fails still produces a
- * perfectly good dir, and collapsing the two would either exempt every proof in the review or
- * silently credit the one that was never checked. On the worktree path it is always empty — a
- * checkout has no per-blob read step.
- */
-export function buildBaseProofDir(
-  criteria: ReadonlyArray<{ proof?: string }>,
-  headCheckoutDir: string,
-  deps: {
-    detachedAsync?: { path: string; revision: string; run: (args: string[]) => Promise<void> };
-    mergeBase?: (cwd: string) => string;
-    showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
-    makeDir?: () => string;
-    /** (R-11) `git worktree add --detach <worktreePath> <revision>` run from `repoDir` — the same
-     *  shape {@link ReviewWorktreeDeps.addWorktree} has for the head. Injected by tests to force the
-     *  fallback (throw) or to observe the call; real callers omit it. */
-    addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
-    /** (W1-T3098) The diff's ADDED `test/**` paths between `base` and the head checkout's
-     *  `HEAD` — what {@link buildBaseProofDir} copies into the base worktree so a `unit test:` proof
-     *  for a PR-added test can be RE-RUN there instead of failing on a file the merge-base checkout
-     *  never had. Injected by tests against a real temp repo; real callers omit it. */
-    changedTestFiles?: (headDir: string, base: string) => string[];
-    /** (W1-T3098) Copies one file from the head checkout into the base worktree, creating parent
-     *  directories as needed. Injected by tests to observe/force failure; real callers omit it. */
-    copyFile?: (src: string, dest: string) => void;
-    /** The grep tree's own git readers ({@link materialiseBaseGrepTree}); injected by tests only. */
-    grepTree?: Omit<BaseGrepTreeReaders, "showBlob">;
-  } = {},
-): BaseProofDir {
-  const detachedArgs = (path: string, revision: string) => ["worktree", "add", "--detach", path, revision];
-  if (deps.detachedAsync) {
-    const { path, revision, run } = deps.detachedAsync;
-    return {
-      baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
-      pendingCheckout: run(detachedArgs(path, revision)),
-    };
-  }
-  const mergeBase = deps.mergeBase ?? ((cwd: string) => hostWorktreeGit(cwd, ["merge-base", "origin/main", "HEAD"]).trim());
-  const showBlob =
-    deps.showBlob ??
-    ((cwd: string, rev: string, rel: string) =>
-      // W1-T460: `stdio` PIPES git's stderr instead of letting it inherit the reviewer's. Without
-      // it, the routine absent-at-base read (every filing PR has one) printed `fatal: path … does
-      // not exist in …` straight through a PASSING review — it surfaced on #1732/#1734/#1735/#1736
-      // and reads as breakage. Piping does not change what the caller can tell apart: the
-      // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
-      // Node `code`) was MEASURED with stderr already piped, and is locked by
-      // test/base-blob-read-failure.test.ts Group 0.
-      hostWorktreeGit(cwd, ["show", `${rev}:${rel}`], { maxBuffer: 1 << 26 }));
-  const addWorktree =
-    deps.addWorktree ??
-    ((repoDir: string, worktreePath: string, revision: string) =>
-      // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
-      // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
-      // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      hostWorktreeGit(repoDir, detachedArgs(worktreePath, revision)));
-  const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
-  // (W1-T3098) `--diff-filter=A` — ADDED ONLY, never M/D/R/C. The narrowing from `AM` is this
-  // seam's correctness, and the two halves are asymmetric:
-  //
-  // ADDED IS THE POINT. A file the base never had makes `node --test` fail on a MISSING FILE there,
-  // and "absent" is not "fails" — that result says nothing about the code. Copying it in makes the
-  // base run the SAME test, which is what separates a new test passing at base anyway (proves
-  // nothing, graded `executed_stale`) from one that needs this PR's own source change (real
-  // discrimination, because its import or assertion is what is missing at base).
-  //
-  // MODIFIED MUST NOT BE COPIED. A modified file EXISTS at base and its own version already runs
-  // there — that run IS the evidence. Overwriting it with the head version manufactures a pass: a
-  // test legitimately FAILING at base passes instead, and the single strongest discrimination
-  // signal (a task REPAIRING a failing test, the case CLAUDE.md names) silently grades stale.
-  // MEASURED on this branch 2026-09-08, running
-  // test/check-proof-declines-on-a-parity-that-no-longer-holds.test.ts under each filter: with `AM`
-  // exactly one case reddens — "a unit-test proof that passes at head and fails at base reports
-  // discrimination, verdict unchanged" — and with `A` the file is 8/8. That case is this rule's
-  // falsifier; restore the `M` and it fails again.
-  //
-  // The pathspec restricts the walk to `test/` itself, matching design (iv): only files a
-  // `unit test:` proof could ever name are ever copied.
-  const changedTestFiles =
-    deps.changedTestFiles ??
-    ((headDir: string, base: string) =>
-      hostWorktreeGit(headDir, ["diff", "--name-only", "--diff-filter=A", base, "HEAD", "--", "test/"])
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean));
-  const copyFile =
-    deps.copyFile ??
-    ((src: string, dest: string) => {
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, readFileSync(src));
-    });
-
-  const noBase: BaseProofDir = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>(), baseIsCheckout: false, addedTestFiles: new Set<string>() };
-  // No DIALECT proof at all (prose only, or no criteria) ⇒ nothing will ever be re-run against a
-  // base, so no checkout is paid for. A single `grep:` OR `unit test:` proof is enough to want one.
-  if (!criteria.some((c) => typeof c.proof === "string" && parseWhitelistedProof(c.proof) !== null)) return noBase;
-  let base: string;
-  try {
-    base = mergeBase(headCheckoutDir);
-  } catch {
-    return noBase; // unresolvable base ⇒ no staleness signal, never a false positive
-  }
-  if (!base) return noBase;
-
-  const dir = makeDir();
-  // A review whose every proof is a `grep:` reads the base blobs it names and checks nothing out: the
-  // grep reads one path, and a checkout of the whole tree for it was observed taking 66 minutes on a loaded host.
-  const grepTargets = grepOnlyBaseTargets(criteria);
-  if (grepTargets !== undefined) {
-    const tree = materialiseBaseGrepTree(headCheckoutDir, base, grepTargets, dir, { ...deps.grepTree, showBlob: deps.showBlob });
-    if (tree.needsCheckout.length === 0) {
-      // (W1-T3190) The same ADDED set the worktree path copies, so a grep naming a test file this diff adds
-      // still classifies `discriminates`; nothing is copied, since no test re-runs in a grep tree.
-      let added: string[] = [];
-      try {
-        if (grepTargets.some((t) => t.startsWith("test/"))) added = changedTestFiles(headCheckoutDir, base);
-      } catch {
-        // `git diff` broke: no added file is known, which is the pre-W1-T3098 reading and never a false stale.
-      }
-      return { baseCheckoutDir: dir, baseUnreadablePaths: new Set(tree.unreadable), baseIsCheckout: false, baseIsGrepTree: true, addedTestFiles: new Set(added) };
-    }
-    // A symlink or submodule on the way to a target: only a real checkout resolves it, into an empty dir.
-    rmSync(dir, { recursive: true, force: true });
-    mkdirSync(dir, { recursive: true });
-  }
-  let worktreeFailure: string;
-  try {
-    addWorktree(headCheckoutDir, dir, base);
-    registerReviewerCheckout(dir);
-    // (W1-T3098) THE DIFFERENTIAL RUN: a bare `git worktree add --detach <dir> <base>` (R-11) is a
-    // checkout of the MERGE-BASE and so never contains a test the PR itself added — `node --test`
-    // there finds nothing, exits nonzero, and the classifier used to read that as `discriminates`.
-    // Copy the diff's ADDED `test/**` files in at the same repo-relative paths so the SAME
-    // proof that just passed on the head can actually be re-run here. Best-effort and isolated in
-    // its own try: a copy failure (or a `git diff` that itself throws) narrows what gets re-run —
-    // that one file's proof falls back to whatever it graded before this change — it must never
-    // downgrade `baseIsCheckout`, which is a fact about the WORKTREE, already true by this point,
-    // not about any one file inside it.
-    const copiedTestFiles = new Set<string>();
-    try {
-      for (const rel of changedTestFiles(headCheckoutDir, base)) {
-        try {
-          copyFile(join(headCheckoutDir, rel), join(dir, rel));
-          copiedTestFiles.add(rel); // W1-T3190: only on SUCCESS, so set and tree agree
-        } catch {
-          // per-file: leave this one path absent from the base tree, exactly as before this change
-        }
-      }
-    } catch {
-      // `changedTestFiles` itself failed to run (e.g. `git diff` broke) — no files copied, no worse
-      // than the pre-W1-T3098 checkout.
-    }
-    return { baseCheckoutDir: dir, baseUnreadablePaths: new Set<string>(), baseIsCheckout: true, addedTestFiles: copiedTestFiles };
-  } catch (e) {
-    // Not erased: the reason rides out on `baseWorktreeFailure` below, where `rmd check-proof`
-    // prints it and the classifier reads the fallback's `baseIsCheckout: false` (R-11).
-    worktreeFailure = String((e as Error)?.message ?? e);
-  }
-  // FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir.
-  const { written, unreadable } = materialiseBaseProofBlobs(
-    criteria,
-    base,
-    (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
-    (rel: string, contents: string) => {
-      const dest = join(dir, rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, contents);
-    },
-  );
-  return {
-    baseCheckoutDir: written > 0 ? dir : undefined,
-    baseUnreadablePaths: new Set(unreadable),
-    baseIsCheckout: false,
-    addedTestFiles: new Set<string>(), // the blob fallback copies nothing in; absent means absent
-
-    baseWorktreeFailure: worktreeFailure,
-  };
-}
 
 // ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
 //
@@ -24346,141 +24159,6 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * the open-PR read deliberately — that is a stated scope reduction, still reported, still
  * exit 0 (the history scan still runs offline — it is a local git read, not a network one).
  */
-/**
- * `rmd check-proof <proof>` — run ONE acceptance proof through the REVIEWER'S OWN parser AND
- * executor and print what it did, so an author never has to hand-roll a verification that
- * differs from the thing that actually runs.
- *
- * WHY THIS EXISTS. The recurring cost is not that authors are careless — it is that local
- * verification and remote execution are two different programs. PR #1071's author checked a
- * `grep:` proof with `grep -F`, a FIXED-STRING matcher; the executor runs `grep -arn --`, a REGEX.
- * The `[call-site]` in the pattern was a character class to one and a literal to the other, so the
- * local check said green and the review said fail. Measured across the unioned ledger, 1,952
- * verdicts carry a failed grep proof. This verb removes the gap BY CONSTRUCTION rather than by
- * asking people to remember a rule nothing states: it calls `parseWhitelistedProof`, prints the
- * exact argv, and — W1-T387 — judges the run through {@link "./lib/review.js".execWhitelistedProof}
- * itself, the SAME function `judgeCriterion` calls at review time, rather than a second hand-rolled
- * exit-code check of its own.
- *
- * W1-T387 (THE PARSER/EXECUTOR SPLIT THIS CLOSES). Before this, `checkProofCommand` shared only
- * `parseWhitelistedProof` with the reviewer; past that it ran its OWN raw `spawnSync` and judged
- * PASS/FAIL purely by `status === 0`. For a name-filtered `unit test:` proof that is unsound:
- * `node --test --test-name-pattern` exits 0 and emits its file's own trivial TAP wrapper line even
- * when ZERO named tests matched — MEASURED live, `unit test: fixHeadAcceptable` (resolves to
- * `test/fix-rung-no-task.test.ts`) reads `exit: 0, hits: 17` here while
- * {@link "./lib/review.js".execWhitelistedProof}, which reads the TAP stream instead of the exit
- * code, reports `no-match`. An author trusted "the reviewer's own executor" and shipped a proof the
- * reviewer would cap. Calling the real executor removes that gap the same way it removed the
- * grep-matcher gap: BY CONSTRUCTION, not by a second implementation kept in sync by hand.
- *
- * DIAGNOSTICS SURVIVE THE COLLAPSE. `execWhitelistedProof` returns only a three-value verdict
- * (`"pass" | "fail" | "no-match"`, or throws) — no stdout, no exit code, no signal. This verb still
- * prints all three, by handing `execWhitelistedProof` a {@link "./lib/review.js".ProofSpawner} that
- * wraps the real one and records what it observed on the side; the VERDICT is still decided
- * entirely inside `execWhitelistedProof`, this file never re-derives it from the exit code.
- *
- * EXIT CODE IS THE VERDICT, MAPPED — see {@link CHECK_PROOF_EXIT}. `no-match` and `fail` used to
- * share exit 1; they no longer do, because they mean different things to the reviewer (`no-match`
- * degrades to the keyword floor, `fail` overrides it to UNMET) and a local check that conflated
- * them could not tell an author which one to expect.
- *
- * STRICTLY READ-ONLY. It writes no cache, no ledger line, and no state file — deliberately unlike
- * `rmd next-task-id`, which looks like a reader and writes a history cache into the SHARED git
- * common dir that every worktree and the live daemon use. Nothing here touches `config.root`,
- * `state/`, or `.git`; the only side effect is one `grep`/`node --test` child process and stdout.
- *
- * "ONE child process" WAS DOING A LOT OF WORK IN THAT SENTENCE, and the `unresolvable` branch below
- * is why it now says less. A `unit test:` proof naming a TITLE compiles to a `--test-name-pattern`
- * run over TEST_GLOB; when the title resolves to no file, that glob survived into the spawn, so the
- * "one child process" was `node --test` over the ENTIRE SUITE, with no timeout. Writing nothing is
- * not the same as doing nothing. The branch below refuses that run by default.
- *
- * W1-T912, OPTIONAL `--base <ref>`: THIS VERB ANSWERED A DIFFERENT QUESTION THAN THE REVIEWER ASKS.
- * Without `--base`, everything above still describes the whole verb — one tree, one verdict. The
- * reviewer applies a SECOND test this CLI never performed: a proof that matches BOTH the PR head and
- * its merge-base discriminates nothing and is downgraded to `executed_stale` (W1-T273 for `grep:`,
- * extended to `unit test:` by W1-T362) — so a proof could read `verdict: pass` here and count for
- * nothing in review, with nothing local ever having asked the second question. `--base <ref>` asks
- * it: it runs the SAME proof again against `<ref>` (via {@link buildBaseProofDir}, the exact builder
- * `rmd review`'s own wiring uses, injected with `<ref>` in place of the real merge-base) and prints a
- * `base:` line alongside the existing `verdict:` line, plus a `discrimination:` line naming the
- * reviewer's own `executed_stale` when both trees agree. Absent `--base`, none of this runs — every
- * line above and the function's return value are byte-identical to before this task, so no existing
- * caller shifts. It REPORTS, it does not RE-RANK: no change to the reviewer, to `executed_stale`
- * itself, or to any exit code other than the new stale case (see {@link CHECK_PROOF_EXIT}). (R-11)
- * The base is a real detached worktree at `<ref>` — the same builder the reviewer uses — so a
- * `unit test:` proof is compared too; when that worktree cannot be created, a `grep:` proof falls
- * back to its materialized base blob and a `unit test:` proof reports `UNKNOWN` (the reviewer's own
- * `base_unknown`) rather than silently skipping the check. The worktree is removed before returning.
- */
-/** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
- *  `unresolvable` branch in {@link checkProofCommand}. */
-export const CHECK_PROOF_FULL_SUITE_FLAG = "--allow-full-suite";
-
-/**
- * `rmd check-proof`'s verdict/refusal → exit-code contract (W1-T387 design (v)). A VERDICT and a
- * REFUSAL are different claims and must never share a code:
- *   - `pass`      (0) — executed, and {@link "./lib/review.js".execWhitelistedProof} says the
- *                       named check holds. Same code as before.
- *   - `fail`      (1) — executed, and it does not hold — a genuine failing test or grep miss.
- *                       Same code as before.
- *   - `refused`   (2) — NOTHING executed: bad usage, an unparseable proof, or a name-filtered
- *                       proof whose candidate resolution was `unresolvable` and
- *                       `--allow-full-suite` was not given. Unchanged from before.
- *   - `noMatch`   (3) — NEW. Executed (or fast-failed on positive evidence of absence) and ZERO
- *                       named tests matched — review.ts DEGRADES this to the keyword floor, never
- *                       a failure, so it must never read the same as `fail`. Before W1-T387 this
- *                       shared exit 1 with `fail`, which is the exact gap this task closes: a
- *                       proof that reads GREEN locally (`exit 0`) could be `no-match` at review,
- *                       and a local check that then reported the SAME code as `fail` would not
- *                       even let an author tell the two verdicts apart once they knew to look.
- *   - `execError` (4) — NEW. The run did not reach a clean pass/fail/no-match verdict at all: a
- *                       timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
- *                       distinct from exit 1's "looked, found nothing" (W1-T219). Inconclusive,
- *                       not evidence either way — review.ts also degrades this to the keyword
- *                       floor, so it must not read as `fail` either.
- *   - `executedStale` (5) — NEW (W1-T912). ONLY reachable with `--base <ref>`: the proof passed on
- *                       BOTH the working tree and `<ref>`, so it discriminates nothing — the exact
- *                       shape review.ts's own `executed_stale` (W1-T273/W1-T362) downgrades. Absent
- *                       `--base` this code is never returned, so every existing caller is unaffected.
- */
-export const CHECK_PROOF_EXIT = {
-  pass: 0,
-  fail: 1,
-  refused: 2,
-  noMatch: 3,
-  execError: 4,
-  executedStale: 5,
-} as const;
-
-/** Fallback when plan/policy.yaml cannot be read: that file's own documented floor for
- *  `proofTimeoutMs`, so this verb is never less bounded than the reviewer. */
-const CHECK_PROOF_TIMEOUT_FLOOR_MS = 60_000;
-
-/**
- * How long `check-proof` lets a proof run. Time-boxed for the SAME reason the reviewer time-boxes,
- * reading the SAME policy field (`proofTimeoutMs`) so the two cannot drift: a proof that hangs must
- * fail rather than wedge the operator's terminal — this verb had no timeout at all, which is half of
- * what made the whole-suite fallback below so expensive.
- *
- * Best-effort by design: an unreadable policy must not turn a diagnostic verb into a crash, so it
- * degrades to that field's own documented floor. `readPolicy` is injected LAST and defaulted, so no
- * caller shifts — and so the catch arm is reachable from a test rather than being dead code that
- * only fires on a broken checkout.
- */
-export function checkProofTimeoutMs(readPolicy?: () => number): number {
-  try {
-    // THE SEAM IS THE `??` FORM DELIBERATELY. test/config-reader-seams.test.ts detects an
-    // injectable policy read by the literal `?? loadDefaultPolicy(` shape; a defaulted PARAMETER
-    // is just as injectable but reads to that detector as unseamed, and allowlisting it would
-    // trip its own stale-entry lock (an allowlisted reader that HAS a seam is a failure). Writing
-    // the seam in the house form is cheaper than teaching the detector a second shape.
-    return readPolicy?.() ?? loadDefaultPolicy().values.proofTimeoutMs;
-  } catch {
-    return CHECK_PROOF_TIMEOUT_FLOOR_MS;
-  }
-}
-
 /** Default window for `rmd emissions`. 30 days covers this host's entire rotation history, so
  *  "zero in the window" is a claim about the corpus rather than about retention. */
 const EMISSIONS_DEFAULT_DAYS = 30;
@@ -27186,458 +26864,6 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
   return 0;
 }
 
-export function checkProofCommand(
-  rest: string[],
-  deps: {
-    pathStatus?: (cwd: string, path: string) => string;
-    /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
-     *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
-     *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
-     *  from two literal fixture trees with NO spawn beyond the executor this verb already
-     *  drives (execWhitelistedProof's own grep/`node --test`) — the "base" tree never needs a
-     *  real git rev to exist for a test. */
-    baseBlobDeps?: {
-      showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
-      makeDir?: () => string;
-      /** (R-11) the merge-base worktree seam — thrown from, in a test, to reach the blob fallback. */
-      addWorktree?: (repoDir: string, worktreePath: string, revision: string) => void;
-      /** (R-11) teardown of that worktree — thrown from, in a test, to prove a failed teardown never
-       *  masks the verdict already computed. */
-      removeWorktree?: (repoDir: string, worktreePath: string) => void;
-    };
-  } = {},
-): number {
-  // Matched as STANDALONE tokens, never a substring: a proof body is free text that could
-  // legitimately quote either flag's name.
-  const allowFullSuite = rest.includes(CHECK_PROOF_FULL_SUITE_FLAG);
-  const baseFlagIdx = rest.indexOf("--base");
-  const baseRef = baseFlagIdx >= 0 ? rest[baseFlagIdx + 1] : undefined;
-  if (baseFlagIdx >= 0 && baseRef === undefined) {
-    console.error("rmd check-proof: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  // W1-T4590: `--repo <owner/name>` resolves the proof against THAT repository's registered suite
-  // roots, as the reviewer does (W1-T3525). Omitted, the default target is unchanged.
-  const repoFlagIdx = rest.indexOf("--repo");
-  const repoSlug = repoFlagIdx >= 0 ? rest[repoFlagIdx + 1] : undefined;
-  const [repoOwner, repoName] = repoSlug?.split("/") ?? [];
-  if (repoFlagIdx >= 0 && (!repoOwner || !repoName)) {
-    console.error("rmd check-proof: --repo needs <owner/name>, e.g. `--repo craigoley/remudero-console`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  const target = repoOwner && repoName ? { owner: repoOwner, repo: repoName } : undefined;
-  const flagTokens = new Set<number>();
-  for (const idx of [baseFlagIdx, repoFlagIdx]) if (idx >= 0) flagTokens.add(idx).add(idx + 1);
-  const proof = rest
-    .filter((t, i) => {
-      if (t === CHECK_PROOF_FULL_SUITE_FLAG) return false;
-      // Only ever excludes a PRESENT flag's own token and its value token, so a caller who omits
-      // both --base and --repo keeps a byte-identical proof string.
-      return !flagTokens.has(i);
-    })
-    .join(" ")
-    .trim();
-  if (!proof) {
-    console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
-    return CHECK_PROOF_EXIT.refused;
-  }
-  const w = parseWhitelistedProof(proof, target);
-  if (!w) {
-    console.log(`proof:      ${proof}`);
-    console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
-    // R-12: name the cause when the parser can — a directory-shaped target, a missing `in <path>`
-    // clause, a traversal — instead of only the generic hint below.
-    const why = explainGrepProofRefusal(proof) ?? explainUnitTestProofRefusal(proof, target);
-    if (why !== undefined) console.log(`            reason: ${why}`);
-    console.log(
-      "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
-        "            test path or title. A proof wrapped in markdown backticks parses since #1063, but a\n" +
-        "            proof with no dialect prefix at all is prose and never executes.",
-    );
-    return CHECK_PROOF_EXIT.refused;
-  }
-  console.log(`proof:      ${proof}`);
-  console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
-
-  let args = w.args as readonly string[];
-  if (w.nameFiltered && w.runner === "vitest") {
-    // The registered Vitest target already scopes the run to its own tests/ root. The
-    // Node-only grep resolver searches this repo's test/ root and would refuse a valid
-    // site/console proof before the shared reviewer executor could run it.
-    console.log("candidates: delegated to the registered Vitest suite root");
-  } else if (w.nameFiltered) {
-    const r = resolveNameFilteredCandidates(process.cwd(), w.label);
-    if (r.status === "resolved") {
-      console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
-      args = narrowNameFilteredArgs(w.args, r.files);
-    } else {
-      console.log(`candidates: ${r.status}${"reason" in r ? ` — ${r.reason}` : ""}`);
-      if (r.status === "absent") {
-        console.log("verdict:    no-match — the executor fast-fails here and never spawns node.");
-        return CHECK_PROOF_EXIT.noMatch;
-      }
-      // UNRESOLVABLE ⇒ `narrowNameFilteredArgs` returns the args UNCHANGED, still carrying
-      // TEST_GLOB — so executing here runs the ENTIRE SUITE. That fallback is defensible inside
-      // the reviewer, whose own comment argues it: with no evidence either way, the wide run is
-      // the honest attempt. It was NOT defensible here, because this verb called `spawnSync` with
-      // no `timeout` — so an operator asking a one-line question about one proof got an UNBOUNDED
-      // full-suite run. review.ts's comment names what that costs: "the full glob loads every file
-      // including several that drive a real headless browser and hang when the name filter matches
-      // none of their tests".
-      //
-      // The trigger is not exotic. `resolveNameFilteredCandidates` answers `unresolvable` whenever
-      // `couldBeInterpolatedTitle` is true — i.e. whenever the proof's title merely SHARES A
-      // STATIC CHUNK with any template-literal title in the corpus — which happens in a perfectly
-      // ordinary checkout, and is indistinguishable to the author from a title that simply typo'd.
-      //
-      // So: report, and decline to be the thing that runs the suite. Everything an author came for
-      // (parse kind, the resolution and its reason, the exact argv) is printed either way; only
-      // the spawn is withheld.
-      if (!allowFullSuite) {
-        console.log(`argv:       ${w.command} ${args.join(" ")}`);
-        console.log(
-          "verdict:    NOT EXECUTED — this proof resolved to no file, so running it would run the\n" +
-            "            WHOLE test suite (note the trailing glob in the argv above), unbounded.\n" +
-            `            Re-run with ${CHECK_PROOF_FULL_SUITE_FLAG} to do it anyway (time-boxed to the\n` +
-            "            same proofTimeoutMs the reviewer uses), or name a test/<file>.test.ts path —\n" +
-            "            the path form runs exactly one file.",
-        );
-        return CHECK_PROOF_EXIT.refused;
-      }
-    }
-  }
-  console.log(`argv:       ${w.command} ${args.join(" ")}`);
-
-  // W1-T1224: resolve the grep TARGET PATH and PATTERN once, up front — {@link grepZeroHitCauseLine}
-  // below and the exec_error branch's path-absent check both need them, and the --base block
-  // further down already relied on this same "argv's last element is the path" assumption (see its
-  // own comment, unchanged) before this task; pattern is the element right before it, matching how
-  // parseDialectGrep (review.ts) always compiles a `grep:` proof's args as `[..flags, "--", pattern,
-  // path]`.
-  const grepTargetPath = w.kind === "grep" && w.args.length >= 1 ? w.args[w.args.length - 1] : undefined;
-  const grepPattern = w.kind === "grep" && w.args.length >= 2 ? w.args[w.args.length - 2] : undefined;
-
-  // W1-T1224: the static BRE-metacharacter note used to print unconditionally on every non-pass
-  // grep verdict, whether or not the pattern actually carried one — now gated (below) behind
-  // breMetacharsIn actually finding one of `[ * ^ $` in the pattern, the SAME check
-  // proofGrepSafetyViolations (task-linter.ts) already uses to decide whether a pattern is
-  // BLOCKING-unsafe.
-  const GREP_METACHAR_NOTE =
-    "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
-    "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.";
-  const grepPatternHasBlockingMetachar = grepPattern !== undefined && breMetacharsIn(grepPattern).blocking.length > 0;
-
-  /**
-   * W1-T1224 — WHY a zero-hit `grep:` proof read zero, as a `cause:` line alongside the unchanged
-   * `verdict:`/exit code (design (iii): report, do not re-rank). Calls {@link classifyGrepZeroHit}
-   * (src/lib/grep-zero-cause.ts) — this file derives NO cause of its own, only reads the file and
-   * formats what the classifier returns. `undefined` when there is nothing to say: a non-grep
-   * proof, or a target path/pattern argv could not resolve.
-   */
-  function grepZeroHitCauseLine(): string | undefined {
-    // grepTargetPath/grepPattern are only ever set (above) when w.kind === "grep" — reading them
-    // rather than w.kind again keeps this closure from needing TS to re-narrow `w` (a `const` from
-    // an outer scope; type guards on it do not apply inside a nested function declaration).
-    if (grepTargetPath === undefined || grepPattern === undefined) return undefined;
-    let fileText: string;
-    try {
-      fileText = readFileSync(join(process.cwd(), grepTargetPath), "utf8");
-    } catch {
-      return undefined; // the file the executor just read a moment ago is now unreadable — say nothing rather than guess
-    }
-    switch (classifyGrepZeroHit(grepPattern, fileText)) {
-      case "line-seam":
-        return (
-          "cause:      line-seam — the pattern's text IS in the file, but a line break falls inside\n" +
-          "            it (a YAML fold or a wrapped paragraph). grep is line-based and this can NEVER\n" +
-          "            match as written — rejoin the phrase onto one physical line, or rewrite the\n" +
-          "            pattern to match text that already lives on one line."
-        );
-      case "case-only":
-        return (
-          "cause:      case-only — the pattern's text IS in the file with different capitalisation.\n" +
-          "            grep here is case-sensitive and this can NEVER match as written — match the\n" +
-          "            file's actual case, or write a separate case-insensitive proof if that is truly\n" +
-          "            the intent."
-        );
-      case "absent":
-        return (
-          "cause:      absent — the pattern's text is not in the file in any form (line-wrap and case\n" +
-          "            both probed). This reads as a legitimate FORWARD REFERENCE to work not yet\n" +
-          "            written, not as a broken proof."
-        );
-      case "matched":
-        return (
-          "cause:      matched — this classifier's own probe found a line match despite the real grep\n" +
-          "            reading zero hits; that is a matcher disagreement, not a fact about the file —\n" +
-          "            treat it as a bug report against the classifier, never as evidence either way."
-        );
-    }
-  }
-
-  // W1-T387: THE COLLAPSE. Everything above this line is UNCHANGED diagnostics (parse kind,
-  // candidate resolution, the exact argv) — the whole point is that they survive. From here down,
-  // the VERDICT is decided by execWhitelistedProof itself, the SAME function judgeCriterion calls
-  // at review time, never by this file re-deriving pass/fail from a raw exit code again.
-  //
-  // execWhitelistedProof returns only "pass" | "fail" | "no-match" (or throws) — no stdout, no
-  // exit code, no signal. `capturingSpawn` wraps the REAL spawner (review.ts's own
-  // `defaultProofSpawner`, the identical primitive execWhitelistedProof would use by default) and
-  // records what it observed on the side, purely so the diagnostics below (`exit:`, `hits:`) can
-  // still be printed — this file never reads `diag` to decide the verdict.
-  let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
-  const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
-    const proofPaths = grepTargetPath === undefined
-      ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
-        .flatMap((arg) => globSync(arg, { cwd: spawnCwd }))
-      : [grepTargetPath];
-    const pathStatus = deps.pathStatus ?? ((cwd: string, path: string) => hostWorktreeGitAtTopLevel(
-      cwd, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--", resolve(cwd, path)],
-      { log: () => {} },
-    ));
-    for (const path of new Set(proofPaths)) {
-      let status: { kind: "read"; text: string } | { kind: "unreadable"; error: unknown };
-      try {
-        status = { kind: "read", text: pathStatus(spawnCwd, path) };
-      } catch (error) {
-        status = { kind: "unreadable", error };
-      }
-      if (status.kind === "read" && status.text.trim() !== "") {
-        console.error(`warning:    ${path} differs from HEAD; the pushed head may answer differently.`);
-      }
-    }
-    try {
-      const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-      diag = { stdout: out, status: 0, signal: null };
-      return out;
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException & {
-        status?: number | null;
-        signal?: NodeJS.Signals | null;
-        stdout?: string | Buffer | null;
-      };
-      diag = {
-        stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
-        status: typeof err.status === "number" ? err.status : null,
-        signal: err.signal ?? null,
-      };
-      throw e;
-    }
-  };
-
-  let outcome: "pass" | "fail" | "no-match";
-  try {
-    outcome = execWhitelistedProof(w, process.cwd(), checkProofTimeoutMs(), capturingSpawn);
-  } catch (e) {
-    // exec_error: a timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
-    // never treated as evidence of a failing proof (W1-T219). Same class of run the reviewer
-    // degrades to the keyword floor rather than an executed_fail.
-    if (diag) {
-      console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
-      const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-      console.log(`hits:       ${hits}`);
-      if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
-    }
-    console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
-    // W1-T1224 (design (iv)): an ABSENT path is the one exec_error cause this task names — it
-    // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
-    // this line. Checked with existsSync rather than the classifier: there is no file text to
-    // read at all, so classifyGrepZeroHit has nothing to classify.
-    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath)))
-      console.log(
-        `cause:      path-absent — ${grepTargetPath} does not exist; grep could not even look (a\n` +
-          "            renamed/missing target, or a permission error).",
-      );
-    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
-    return CHECK_PROOF_EXIT.execError;
-  }
-
-  if (diag) {
-    console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
-    const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-    console.log(`hits:       ${hits}`);
-    if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
-  }
-  console.log(`verdict:    ${outcome}`);
-  if (w.kind === "grep" && outcome !== "pass") {
-    // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
-    // classifyGrepZeroHit( in src/run-task.ts, above, is the wiring this line exercises.
-    const causeLine = grepZeroHitCauseLine();
-    if (causeLine) console.log(causeLine);
-    if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
-  }
-  const headExit =
-    outcome === "pass" ? CHECK_PROOF_EXIT.pass : outcome === "fail" ? CHECK_PROOF_EXIT.fail : CHECK_PROOF_EXIT.noMatch;
-
-  // W1-T912: --base ABSENT ⇒ nothing below this line ever runs, and every line printed above (and
-  // `headExit`, this function's return value with no --base) is byte-identical to before this task —
-  // no existing caller shifts. See this function's own doc comment for the full design.
-  if (baseRef === undefined) return headExit;
-
-  console.log(`base ref:   ${baseRef}`);
-  // Reuses the SAME builder `rmd review` wires (buildBaseProofDir: a detached worktree at <ref>,
-  // falling back to materialiseBaseProofBlobs), injected with `<ref>` in place of the real
-  // `git merge-base origin/main HEAD` — everything downstream (the worktree, the blob fallback, the
-  // absent/unreadable distinction) is the reviewer's own mechanism, not a second implementation
-  // kept in sync by hand.
-  const { removeWorktree, ...builderDeps } = deps.baseBlobDeps ?? {};
-  const built = buildBaseProofDir([{ proof }], process.cwd(), {
-    mergeBase: () => baseRef,
-    ...builderDeps,
-  });
-  try {
-    return compareAgainstBase(built);
-  } finally {
-    // (R-11) A worktree or grep tree this verb built is this verb's to remove — the reviewer's
-    // `withMaterializedWorktree` does the same for its own. A blob-fallback dir is left to the boot sweep.
-    releaseBaseProofDir(process.cwd(), built, removeWorktree);
-  }
-
-  function compareAgainstBase(base: BaseProofDir): number {
-    const { baseCheckoutDir, baseUnreadablePaths } = base;
-    // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
-    // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
-    // A grep tree holds a target only when the base had it and the read succeeded, so a missing one
-    // reads exactly as the blob path's absent or unreadable blob does.
-    const grepTreeLacksTarget =
-      base.baseIsGrepTree === true &&
-      grepTargetPath !== undefined &&
-      !base.addedTestFiles.has(grepTargetPath) &&
-      !existsSync(join(baseCheckoutDir!, grepTargetPath));
-
-    if (baseCheckoutDir === undefined || grepTreeLacksTarget) {
-      if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
-        console.log(
-          `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
-            "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
-            "            base_unreadable degrade the reviewer itself uses (W1-T460).",
-        );
-      } else if (grepTargetPath !== undefined) {
-        console.log(
-          `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
-            "            have matched before the work existed (a forward reference) — the strongest possible\n" +
-            "            form of discriminating.",
-        );
-      } else {
-        // (R-11) A `unit test:` proof with no checkout to run in. The worktree is the only base a
-        // test can be re-run against; without one the reviewer grades base_unknown, and so does this.
-        console.log(
-          `base:       UNKNOWN — a merge-base worktree at ${baseRef} could not be created` +
-            (base.baseWorktreeFailure ? ` (${base.baseWorktreeFailure.split("\n")[0]})` : "") +
-            `, and a \`unit test:\` proof (kind=${w!.kind}) cannot be re-run against materialised\n` +
-            "            blobs — the reviewer grades exactly this base_unknown (R-11): no downgrade, and NO\n" +
-            "            claim that the proof discriminates; the verdict above stands unchanged.",
-        );
-      }
-      console.log("discrimination: unknown — reported verdict above stands unchanged");
-      return headExit;
-    }
-
-    // `buildBaseProofDir` copies ADDED test files into its base checkout only so a `unit test:`
-    // proof can exercise the same test against base source. A `grep:` proof targeting that copied
-    // file still names a path absent at the merge base, so it discriminates by construction. The
-    // reviewer owns this distinction in `classifyBaseProofOutcome`; without this matching arm the
-    // public diagnostic executes grep against the copied head file and falsely reports stale.
-    if (w!.kind === "grep" && grepTargetPath !== undefined && base.addedTestFiles.has(grepTargetPath)) {
-      console.log(
-        `base:       ABSENT at ${baseRef} — ${grepTargetPath} was copied only to re-run added unit tests; ` +
-          "a grep proof still names a path the merge base did not contain.",
-      );
-      console.log("discrimination: discriminates — this proof's target did not exist at the merge base.");
-      return headExit;
-    }
-
-    let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
-    const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
-      try {
-        const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-        baseDiag = { stdout: out, status: 0, signal: null };
-        return out;
-      } catch (e) {
-        const err = e as NodeJS.ErrnoException & {
-          status?: number | null;
-          signal?: NodeJS.Signals | null;
-          stdout?: string | Buffer | null;
-        };
-        baseDiag = {
-          stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
-          status: typeof err.status === "number" ? err.status : null,
-          signal: err.signal ?? null,
-        };
-        throw e;
-      }
-    };
-    let baseOutcome: "pass" | "fail" | "no-match";
-    try {
-      baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
-    } catch (e) {
-      const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
-      const missingExport =
-        w!.kind === "test" && typeof loadOutput === "string"
-          ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
-          : undefined;
-      if (missingExport !== undefined) {
-        console.log(`base:       COULD NOT LINK — ${missingExport}`);
-        console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
-        return headExit;
-      }
-      console.log(
-        `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
-          "            evidence either way, same as the reviewer's own base_unknown degrade.",
-      );
-      console.log("discrimination: unknown — reported verdict above stands unchanged");
-      return headExit;
-    }
-    if (baseDiag && w!.kind === "grep") {
-      const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
-      console.log(`base hits:  ${baseHits}`);
-    }
-    console.log(`base:       ${baseOutcome}`);
-
-    if (outcome === "pass" && baseOutcome === "pass") {
-      console.log(
-        "discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates NOTHING;\n" +
-          "                the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would\n" +
-          "                count for nothing in review despite reading pass above.",
-      );
-      return CHECK_PROOF_EXIT.executedStale;
-    }
-    console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
-    return headExit;
-  }
-}
-
-/** Release what {@link buildBaseProofDir} built: a worktree is deregistered, a grep tree deleted, both through
- *  {@link removeBaseProofWorktree}'s best-effort teardown. A blob-fallback dir is left to the boot sweep, as before. */
-function releaseBaseProofDir(
-  repoDir: string,
-  base: BaseProofDir | undefined,
-  removeWorktree?: (repoDir: string, worktreePath: string) => void,
-): void {
-  if (base?.baseCheckoutDir === undefined) return;
-  if (base.baseIsCheckout) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, removeWorktree);
-  else if (base.baseIsGrepTree === true) removeBaseProofWorktree(repoDir, base.baseCheckoutDir, (_repo, tree) => rmSync(tree, { recursive: true, force: true }));
-}
-
-/**
- * (R-11) `rmd check-proof --base`'s own teardown of the merge-base worktree {@link buildBaseProofDir}
- * added for it — best-effort, never masking the verdict already computed, mirroring
- * {@link withMaterializedWorktree}'s teardown handling for the reviewer's head worktree. The default
- * removes it through {@link hostWorktreeGit}, the hardened leaf the build added it through, so the
- * caller's checkout (a PR head, for a proof amendment) is pinned and inherited git variables are dropped.
- */
-function removeBaseProofWorktree(
-  repoDir: string,
-  worktreePath: string,
-  remove: (repoDir: string, worktreePath: string) => void = (dir, wt) => void hostWorktreeGit(dir, ["worktree", "remove", "--force", wt]),
-): void {
-  try {
-    remove(repoDir, worktreePath);
-  } catch (e) {
-    console.error(`(base worktree teardown failed for ${worktreePath}: ${String((e as Error)?.message ?? e)})`);
-  }
-}
-
 /**
  * W1-T917 — read each OPEN pull request's ACTUAL CHANGED FILES over REST, as
  * {@link OpenPrFileScope} rows for {@link rareOverlapWarnings}.
@@ -27992,19 +27218,6 @@ export function gitRunAdapter(
     const r = run(args);
     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   };
-}
-
-export function hostWorktreeGitAtTopLevel(dir: string, args: string[], opts: HostWorktreeGitOptions = {}): string {
-  const log = opts.log ?? ((step: string, extra: Record<string, unknown>) => {
-    if (extra.observed !== "<absent>") console.error(JSON.stringify({ event: step, ...extra }));
-  });
-  for (let at = resolve(dir); ; at = dirname(at)) {
-    try {
-      return hostWorktreeGit(at, args, { ...opts, log });
-    } catch (error) {
-      if (!(error instanceof WorktreePointerRefusedError) || error.observed !== "<absent>" || dirname(at) === at) throw error;
-    }
-  }
 }
 
 /** The files a refused run branch changed since its merge base with origin/main, or undefined when either read
@@ -30487,7 +29700,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase],
+      checkProofChildArgv(proof, mergeBase),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
@@ -35756,6 +34969,7 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
+  readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
   const gate = (): QueueGovernorResult | undefined => {
@@ -35769,7 +34983,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
+      pressure: readQueuePressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -36409,6 +35623,7 @@ async function drainCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate. Production omits it
      *  and reads the real `/proc/meminfo` ({@link readAvailableMemoryMib}). */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -36612,7 +35827,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -36817,7 +36032,7 @@ async function drainCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
@@ -38504,6 +37719,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "knowledge": {
+      // Preserve knowledge's open-PR reuse, review and assertion-refresh ports in the child,
+      // rather than reducing it to the generic garden workspace and losing those semantics.
+      const d: GardenerDeps<GardenWorkspace> = {
+        ...deps("knowledge"),
+        openWorkspace: () => knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+      };
+      return withDue(async () => {
+        try {
+          await runKnowledgeGardenPass(d);
+        } catch (e) {
+          log("knowledge.gardener_failed", { error: String((e as Error)?.message ?? e) });
+        }
+      }, () => gardenPassDue(knowledgeGardenSpec(d), d));
+    }
     case "plan": {
       const d = deps("plan");
       const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
@@ -39150,6 +38380,7 @@ export async function daemonCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
      *  identical seam. Production omits it and reads the real `/proc/meminfo`. */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
      *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
      *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
@@ -39498,7 +38729,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -40041,6 +39272,7 @@ export async function daemonCommand(
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
         isIndependentFailureBlocked,
+        independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
         // ledger every call — persists across daemon restarts, unlike this
         // loop's own in-memory per-tick block-reasoning flag. W1-T206: routed through
@@ -40093,7 +39325,7 @@ export async function daemonCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
@@ -40256,14 +39488,6 @@ export async function daemonCommand(
         livenessPulse: true,
         ...(target.isSelf
           ? {
-              knowledgeGardener: {
-                stateDir: join(config.root, "state"),
-                repoRoot,
-                openWorkspace: () =>
-                  knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJsonAsync),
-                log,
-              },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
                 // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
@@ -57356,7 +56580,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["preflight", async (rest) => await preflightCommand(rest)],
   ["emissions", (rest) => emissionsCommand(rest)],
   // A daemon-owned check-proof reserves host memory for itself while it runs (250-290 MB measured 2026-10-10).
-  ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest), { bindSelf: true })],
+  ["check-proof", (rest) => withSyncChildReservation("check-proof", () => checkProofCommand(rest, {}, USAGE), { bindSelf: true })],
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],

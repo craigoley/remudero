@@ -101,7 +101,10 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T5532 intentionally adds the typed FIX_OUTCOME contract; its exact wording is pinned above.
   // W1-T6465 re-baselined fix: NEEDS_SCOPE now tells the worker to keep out-of-scope edits saved
   // (test/a-fix-round-that-needs-scope-gets-it.test.ts pins the new text itself).
-  assert.equal(sha256(fix), "178ed4a5d6104ffbd54cb01067dbc57c30d84c2cfcab13904eb785f1d2d491af");
+  // W1-T8800 deliberately corrects ONLY the shared local-range/hosted-title checkpoint contract.
+  // Actual rendered-byte comparison leaves prerequisite/recon/diagnose unchanged below; retain
+  // full fingerprints and compatibility re-exports, not a pattern that could hide other drift.
+  assert.equal(sha256(fix), "4364805a0f3685a2262ef45471263ecc9daa91c18c7a66fbdd55e4bc92bd031c");
   assert.equal(sha256(prerequisite), "802d1ed90dfcdf9bafe73c210c63c61a2856e36228cd268235bc412543518b2b");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted
@@ -123,7 +126,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // Re-baselined implement: its contract now opens with a scope-time check before the first edit
   // (test/implement-contract-orders-a-scope-time-check.test.ts pins the new text itself).
   // W1-T4268 re-baselined implement: outputContractLines now splices GH_PR_EDIT_FALLBACK_LINES.
-  assert.equal(sha256(implement), "8b8d0b88b9c8126df909c182edb7da9855fac054a923840c3bdbd08057ba41a2");
+  // W1-T8800 also changes the unfinished subject to chore(checkpoint); real message gates and
+  // continuation semantics are exercised by checkpoint-publication-contract.test.ts.
+  assert.equal(sha256(implement), "19f1d219a04af494e78482679983ca326542b53b10ae60567ee3acb299f33dc5");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {

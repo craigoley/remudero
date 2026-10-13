@@ -1,0 +1,67 @@
+id: fb-1791856366578-58872f
+ts: 2026-10-13T01:52:46.583Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+  OPERATOR RULED 2026-10-13: "Measure, then design". First measure how workers
+  use the GitHub credential (the measurement DECISIONS.md 2026-09-22, W1-T3103,
+  says is still owed), then design. This entry is the MEASUREMENT; the design is
+  the entry with submission key nanoclaw-2026-10-13/github-api-boundary.
+
+
+  WHAT NANOCLAW DOES (OBSERVED): agents never hold raw keys. A credential
+  gateway injects them per request, and the spawn spec is validated so
+  secret-shaped env is denied by name and by value
+  (src/drivers/types.ts:442-587).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - W1-T2699 (merged) moved the model credential behind a loopback boundary and
+  git behind a credential-helper socket (src/lib/secret-boundary.ts:1-21).
+
+  - But secretBoundaryEnv (src/lib/secret-boundary.ts:252-264) deletes only
+  CLAUDE_CODE_OAUTH_TOKEN. GH_TOKEN stays on buildWorkerEnv's ALLOWLIST
+  (src/lib/env.ts:31), so it reaches the worker by value whenever the daemon's
+  env carries it.
+
+  - The boundary is a no-op absent a model boundary (src/lib/worker.ts:3001), so
+  whether it is on, per instance, is not known.
+
+  - W1-T2914 (blocked) is the consequence: nothing proves who posted
+  remudero-review.
+
+
+  ASK (read-only measurement, no behaviour change):
+
+  Over a real window, on each instance (core, site, console):
+
+  a. Is the secret boundary on?
+
+  b. Does a worker's env carry a real GH_TOKEN, and with what scope? Never
+  record a value.
+
+  c. How many worker turns invoke gh or call api.github.com, by command and
+  route, and how many of them are writes?
+
+  Ledger a value-free report and write the numbers to a doc. Label every figure
+  OBSERVED or INFERRED and name the window.
+
+
+  FALSIFIER: the report names a window and a count per instance. A report with
+  no per-instance boundary state is not this task.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/github-credential-measurement
+thread_id: null

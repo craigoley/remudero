@@ -93,5 +93,5 @@ test("W1-T8397: a checkpoint a PR gate would refuse still reaches origin", async
   assert.ok(ended.ended);
   assert.equal(origin.git("rev-parse", `refs/heads/${branch}`), ended.checkpointSha, "the checkpoint reached origin");
   assert.equal(origin.git("show", `${branch}:src/a.ts`), "export const kept = 1;");
-  assert.match(origin.git("log", "-1", "--format=%B", branch), /^wip: yield at container recycle\n[\s\S]*Remudero-Task: W1-T8397/);
+  assert.match(origin.git("log", "-1", "--format=%B", branch), /^chore\(checkpoint\): yield at container recycle\n[\s\S]*Remudero-Task: W1-T8397/);
 });

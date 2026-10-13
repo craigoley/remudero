@@ -1,0 +1,40 @@
+- id: W1-T8877
+  title: "THE HOST-RESOURCE GARDENER SPENDS 9.2 GiB-HOURS IN 48 H RE-FITTING WINDOWS THAT CANNOT HAVE CHANGED — it runs every 5 minutes (HOST_RESOURCE_MIN_INTERVAL_MS) as a ~1.15 GB child, 529 passes and zero escalations, while its fit windows are six hours or longer; flow-remedy spends 2.5 GiB-h on scorecard-only passes: each is paced by whether its inputs changed, never under 30 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the minimum pacing of the two costliest low-yield gardens
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: optimize and right-size what we have"
+  plan_refs: []
+  files: [src/lib/host-resource-gardener.ts, src/lib/garden-registry.ts, test/a-low-yield-garden-is-paced-by-its-inputs.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8; ledger 48 h deduplicated. Pass peaks were matched to passes by timestamp,
+    3,788/3,788.
+    OBSERVED:
+    - Gardens used 30.8 child-process hours and ≈23.9 GiB-h of tree memory in 48 h.
+    - host-resource: 529 passes, peak p50 1,154 MiB, 57 s each, 9.2 GiB-h, 0 escalations (one sample appended per pass).
+      `HOST_RESOURCE_MIN_INTERVAL_MS = 5 * 60_000`, while its fit windows are ≥6 h with MIN_POINTS 4.
+    - flow-remedy: 129 passes, peak ~1,024 MiB, 2.5 GiB-h, scorecard rows only.
+    - 27,289 of 38,741 `garden.lifecycle` rows are "inputs-unchanged" idle rows.
+    INFERRED: pacing these two by input change with a 30-min floor saves ~6-8 GiB-h per 48 h and keeps a ~1.15 GB child
+    off the host >90% of the time.
+    OWNERSHIP: no shard paces either garden.
+  design: |
+    1. host-resource: a pass is due only when its inputs stamp changed (the heartbeat commit or new sample windows) AND at
+       least 30 min (policy) passed; otherwise `gardenPacingDue` backs off as other gardens do. It still runs at least
+       hourly.
+    2. flow-remedy: the same inputs-changed pacing, with a 30-min floor.
+    3. An idle (inputs-unchanged) decision writes one rate-limited lifecycle row per hour, not per tick.
+  acceptance:
+    - claim: "host-resource and flow-remedy run only when their inputs changed and never more than every 30 minutes, still at least hourly for host-resource, and idle decisions are rate-limited"
+      proof: 'grep: test("W1-T8877: a low-yield garden is paced by its inputs" in test/a-low-yield-garden-is-paced-by-its-inputs.test.ts'
+  falsifier: |
+    Restore the 5-minute floor: the fixture with unchanged inputs over 2 hours schedules 24 host-resource passes, and the
+    test fails.
