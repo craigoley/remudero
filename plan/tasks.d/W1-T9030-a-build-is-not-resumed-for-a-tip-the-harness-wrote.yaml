@@ -11,7 +11,8 @@
   origin: "operator session 2026-10-13 (agree, go): worker-rounds diagnosis, ~/Remudero-notes/worker-rounds-2026-10-13/"
   plan_refs: [W1-T7096, W1-T8676, W1-T8945, W1-T8927, W1-T8133, W1-T8834]
   files: [src/run-task.ts, src/lib/unfinished-checkpoint.ts, test/a-build-is-not-resumed-for-a-tip-the-harness-wrote.test.ts, test/a-build-ending-on-a-wip-checkpoint-is-resumed-not-opened.test.ts, test/a-repeated-checkpoint-stop-is-resumed-only-when-the-judge-says-so.test.ts, test/checkpoint-publication-contract.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts]
-  status: queued
+  status: done
+  # plan gardener: retire W1-T9030 commit 9ea9dd6711e3bc7c37ed135083735d33219be4c2 — Every acceptance proof now holds on main, and did not when it was filed.
   priority: 0.9 # operator-2026-10-13: 47% of build worker time since 10-12 is continuation rounds the harness's own restore-merge tip caused; each extra round is also a checkpoint yield point
   attempts: 0
   rationale: |
