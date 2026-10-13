@@ -33,6 +33,7 @@ import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { readSourceSnapshotBody, sourceSnapshotStates, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
 import { foldGardenerSpend, GARDENER_SPEND_MAX_BYTES, type GardenerSpend, type GardenerSpendSource } from "./gardener-spend.js";
+import { publicRepositoryFlow, REPOSITORY_FLOW_FLEET_MAX_BYTES, type RepositoryFlow } from "./repository-flow.js";
 
 export const ANALYTICS_VIEW_NAME = "analytics";
 export const ANALYTICS_VIEW_VERSION = 1;
@@ -157,6 +158,7 @@ export const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANAL
 /** What one instance's `console-v1` row holds: the projection, and the terms a cross-instance merge needs. */
 export interface AnalyticsConsoleSource {
   gardenerSpendSource?: GardenerSpendSource;
+  repositoryFlow?: RepositoryFlow;
   projection: ConsoleV1Projection;
   /** Registry/config-owned identity captured with this snapshot; older rows carry none. */
   repository?: string;
@@ -207,7 +209,7 @@ export interface AnalyticsViewData {
   /** How many instances the overview counts, of how many serve projects, and which have no snapshot yet. */
   coverage: { counted: number; of: number; missing: string[] };
   /** Each instance's own metrics; `reason` instead when it has no snapshot yet. */
-  instances: Array<{ instanceId: string; repository?: string; gardenerSpend?: GardenerSpend; metrics?: ConsoleV1Metric[]; details?: AnalyticsDetails; reason?: string }>;
+  instances: Array<{ instanceId: string; repository?: string; gardenerSpend?: GardenerSpend; repositoryFlow?: RepositoryFlow; metrics?: ConsoleV1Metric[]; details?: AnalyticsDetails; reason?: string }>;
 }
 
 /** One instance's input to the merge: its last committed snapshot, and a refresh failure newer than it. */
@@ -287,6 +289,7 @@ export function analyticsSource(input: AnalyticsInstanceInput, nowMs: number): V
 export function mergeAnalytics(inputs: readonly AnalyticsInstanceInput[], nowMs: number): { data: AnalyticsViewData; sources: ViewSource[] } {
   const counted = inputs.flatMap((input) => (input.snapshot ? [input.snapshot.console] : []));
   let remainingBytes = ANALYTICS_DETAILS_TOTAL_BYTES;
+  let flowBytes = 0;
   return {
     data: {
       overview: CONSOLE_V1_METRIC_KEYS.map((key) => mergeMetric(key, counted)),
@@ -299,7 +302,15 @@ export function mergeAnalytics(inputs: readonly AnalyticsInstanceInput[], nowMs:
           else remainingBytes -= details.payloadBytes;
         }
         const repository = repositoryName(input.snapshot.console.repository);
-        return { instanceId: input.instanceId, ...(repository ? { repository } : {}), metrics: input.snapshot.console.projection.metrics, ...(details ? { details } : {}) };
+        let repositoryFlow = repository && input.snapshot.console.repositoryFlow !== undefined
+          ? publicRepositoryFlow(input.snapshot.console.repositoryFlow, repository, fixedClock(nowMs).iso()) : undefined;
+        if (repositoryFlow) {
+          const bytes = Buffer.byteLength(JSON.stringify(repositoryFlow));
+          if (flowBytes + bytes > REPOSITORY_FLOW_FLEET_MAX_BYTES) repositoryFlow = undefined;
+          else flowBytes += bytes;
+        }
+        return { instanceId: input.instanceId, ...(repository ? { repository } : {}),
+          ...(repositoryFlow ? { repositoryFlow } : {}), metrics: input.snapshot.console.projection.metrics, ...(details ? { details } : {}) };
       }),
     },
     sources: inputs.map((input) => analyticsSource(input, nowMs)),
