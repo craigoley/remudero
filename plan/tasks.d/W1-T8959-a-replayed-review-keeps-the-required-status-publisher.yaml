@@ -1,0 +1,103 @@
+- id: W1-T8959
+  title: A replayed review keeps the required status publisher
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.2
+  budget_usd: 15
+  risk: high
+  band_meaning: blast-radius
+  origin: operator#2026-10-13-console-review-replay-publisher
+  plan_refs: [W1-T203, W1-T2442, W1-T5726, W1-T5863]
+  files: [src/lib/review.ts, src/run-task.ts, test/a-replayed-review-keeps-the-required-status-publisher.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED: console PR2078 at exact c6e7a2b8c64e021cd5ebf3087f2afee72973e341
+    had all registered checks green but remained blocked. The required remudero-review source
+    was fleet App4648213, while the latest success was attributed to a human User. A native App
+    re-review at 02:39 UTC replayed the immutable decision and reported status_confirmed; an
+    independent 02:54 read still showed the human publisher and the PR remained blocked.
+
+    SOURCE: reviewCommand's replay fetchCurrentStatus in src/run-task.ts retains context and
+    state but discards GitHub creator identity. postReviewStatusGuarded in src/lib/review.ts
+    confirms a same-state prior decision without checking whether its live publisher satisfies
+    the required source. A real material body update subsequently earned a fresh governed App
+    review and normal merge ef73f611, but it did not repair this replay boundary.
+
+    W5726 correctly records completed replay attempts and must stay intact; its status_confirmed
+    receipt needs truthful publisher evidence. W2442 reads pin preconditions, not replay status.
+    W2914 is retired: shared fleet App authentication is deliberate and remains unchanged.
+    This task neither separates reviewer/worker credentials nor claims that an App pin closes
+    the accepted shared-identity threat. Current main and every head in the complete open-PR
+    snapshot were swept with positive plan/source controls; the overlapping W8779 owner changes
+    promise harvesting, not replay publisher confirmation. Keep that owner's work independent.
+
+    The invariant affects merge authority across repositories, so risk is high for blast radius,
+    not an excuse to change protection, authentication, status precedence or replay budgets.
+  design: |
+    An equal state from a different or unknown publisher never confirms the required review.
+    Carry server-attributed publisher evidence through the actual default combined-status read
+    and guarded replay boundary. Reuse existing provenance and required-source readers instead
+    of a second permissive resolver. Evaluate the exact repository, context and head inside the
+    existing lock against the positively established required/trusted publisher. A human,
+    unrelated bot or missing creator cannot become status_confirmed on an App-bound context.
+    A bot user ID is not an App ID; do not invent an app field the commit-status API lacks or
+    infer credential provenance from a description, target URL or caller-supplied login.
+
+    Restore a missing or wrong-source context only through the existing authorized publisher.
+    The immutable completed decision is not re-judged merely to recover its status. When the
+    current native App publication path positively meets the existing source requirement, it
+    may restore the same verdict through postReviewStatusGuarded with all existing lifecycle,
+    exact-head/body/input/decision, code-freshness, lock and evidence-strength guards. An operator
+    review using a different credential must not replace an App-bound context; it reports the
+    named mismatch and leaves publication to the existing correctly authenticated native route.
+    Do not mint a new identity, override tokens, broaden permissions or change App sharing.
+
+    A matching trusted terminal status is confirmed without another reviewer or status post.
+    Preserve W5726's exact-input completed receipt, now recording the evidence that actually
+    justified confirmation. A conflicting terminal state from the trusted publisher retains
+    the existing refusal/adjudication behavior; it is not reclassified as absent to overwrite it.
+    Wrong-source success and failure do not establish a trusted terminal decision. Missing and
+    pending trusted statuses use existing governed recovery semantics, not another model run.
+
+    Unknown publisher evidence is a named refusal, not status_confirmed success.
+    Unreadable/malformed source binding or creator data cannot silently become an unpinned
+    legacy repository, successful confirmation or new grant. Keep genuinely known unpinned
+    legacy behavior compatible and test it independently. Retain decision/lifecycle/freshness
+    conflict guards, capped evidence handling and already-closed/merged/body-moved refusals.
+    No cosmetic SHA, invented body change, decision rewrite, fake status, ledger edit, polling
+    loop or branch-protection bypass may be used to repair publication.
+
+    Exercise the real default CLI transport and every new refusal arm in disposable fixtures.
+    Include a benign fixture gh executable that the actual default adapter shells out to, with
+    server-shaped context/state/creator and required-source data; no live credential or external
+    status write. Drive both reviewCommand and the guarded prior-decision replay path. Independently
+    vary wrong/unknown/trusted publishers, same and contradictory terminal states, pending/absent
+    state, exact head/input/lifecycle and source-read failures. Confirm no extra reviewer call,
+    truthful exact-input ledger receipts and no unauthorized post. Audit all real callers and
+    the replay/status/provenance census suites, not only tests supplying every seam as a fake.
+  acceptance:
+    - claim: Wrong or unknown live publishers cannot produce a replay-confirmed required review
+      proof: 'unit test: W1-T8959: replay refuses equal states from the wrong or unknown required publisher'
+    - claim: Only the existing authorized publisher can restore the immutable decision without another model review
+      proof: 'unit test: W1-T8959: authorized publisher restores replay without changing the decision or rejudging'
+    - claim: Trusted confirmation conflicting verdicts lifecycle guards and unpinned legacy behavior remain governed
+      proof: 'unit test: W1-T8959: trusted replay confirmation preserves conflicts lifecycle and legacy compatibility'
+    - claim: Actual default CLI transport preserves publisher identity and records named source-read refusals
+      proof: 'unit test: W1-T8959: default review CLI retains publisher evidence and refuses unreadable provenance'
+  falsifier: |
+    Remove publisher preservation from the default adapter and publisher checks from guarded
+    replay separately. The real physical boundary cases must fail, restored head pass. Require
+    literal proof selection and complete TAP, native committed-tree author/caller/census gates,
+    same-tree changed-source instrumentation and discriminating coverage, actual GitHub stored
+    acceptance parsing, governed current-head review and all required hosted checks. Use only
+    disposable fixtures for wrong-source posts; do not clobber a real App-bound PR as a control.
+    Filing merge is not implementation, runtime adoption or live recovery acceptance.
+  note: |
+    GitHub documents that a required check can select an expected App source, and the same check
+    from another person or integration does not permit merge:
+    https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
+    https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
