@@ -1,0 +1,89 @@
+- id: W1-T9294
+  title: "A GARDEN PR THAT MAIN SUPERSEDED IS SCORED NEUTRAL, NOT DECLINED — gardenPrState reads every closed-unmerged PR as a person's decline, so the backlog gardener's place class is debited and its targets marked declined when #11381 was closed only because the plan gardener's retirements rewrote its shards underneath it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # one concern: how a closed garden PR is scored; src/lib/gardener.ts, the gardenPrState wiring in src/run-task.ts and one new test
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: #11381 (backlog gardener) closed as superseded by the plan gardener's retirements"
+  plan_refs: [W1-T4941, W1-T5842, W1-T4802, W1-T4927, W1-T9289]
+  files:
+    - src/lib/gardener.ts
+    - src/run-task.ts
+    - test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts
+  status: queued
+  priority: 3  # about one superseded garden PR a week (#11381; #7976 in W1-T4927), each a wrong debit and a wrongly declined target list
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on origin/main 289cac5b0 (symbols, not lines).
+    THE CASE. #11381 (head backlog-garden-1791904155914, fleet App, opened 15:11Z) added `priority:` lines to 9
+    shards for the backlog gardener's `place` class. The plan gardener's retirements #11382 (15:19Z) and #11405
+    (17:58Z) rewrote the same lines in three of those shards, so it went dirty (56 `sweep.disposed` rows with
+    blocker conflict, recorded in W1-T9289's rationale). The operator closed it unmerged at about 19:30Z with
+    a "superseded" comment. No person declined the placements.
+    HOW IT IS SCORED, src/lib/gardener.ts:
+      - gardenPrStateSteps reads `pulls/<n>` and returns "closed" for any unmerged closed PR. It reads nothing
+        about why.
+      - runGardenSteps: "Closing any PR is a debit and declines its targets". On "closed" it calls
+        judgeGardenDecision, which adds 1 to the class's beta, and rememberDeclined, which appends every
+        pending target to declinedTargets so the spec's candidates never propose them again.
+      - judgeGardenPending (the metric-judged path, also used by knowledge-gardener.ts judgePending) settles a
+        closed PR as a debit the same way.
+      - The backlog gardener's `place` class is review-judged (backlog-gardener.ts `review`), so
+        judgeGardenDecision is its whole verdict. The operator's #11381 close therefore costs `place` one
+        beta and blacklists nine placements that were never judged on their merits.
+    WHY IT RECURS. W1-T9289 (merged #11463) gives a dirty fleet plan PR a plan-scoped conflict round that keeps
+    main's side and, when nothing of the branch survives, lets `emptyDiffSupersedes` close the PR. Each such
+    machine close is also read as "closed" and debits the gardener. #7976 (knowledge gardener, W1-T4927) was
+    the same shape: closed because its twin merged first.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the plan/ trees of all 8 open PR heads (2026-10-13
+    19:26Z) for judgeGardenDecision, rememberDeclined, declinedTargets and gardener near superseded. W1-T5842
+    releases an OPEN decision PR after its backstop and does not touch closed PRs. W1-T4802 folds effect and
+    churn verdicts into the record. W1-T4927 stops a gardener opening a second PR for one retirement. W1-T9289
+    resolves a dirty plan PR but does not score it. None scores a superseded close.
+    NOT A DEPENDENCY ON W1-T9289. This task reads the closed PR's own evidence and needs none of W1-T9289's
+    code, and W1-T9289 does not need it either. Landing this first means W1-T9289's empty-diff closes are
+    scored neutral from their first use.
+  design: |
+    1. A CLOSED PR'S STATE CARRIES ITS SUPERSESSION EVIDENCE. gardenPrState (src/lib/gardener.ts) gains a
+       fourth outcome beside merged, closed and open: `superseded`. It is returned for a PR closed unmerged
+       when that PR's own evidence shows main replaced it:
+         a. a three-way merge of the PR's head (`head.sha`, fetched from `refs/pull/<n>/head`) onto origin/main
+            as it stood at `closed_at` (`git merge-tree --write-tree`) conflicts on a path the PR changes, or
+         b. the PR's diff against that main is empty, which is the `emptyDiffSupersedes` shape.
+       The git reads go through an injected seam that run-task.ts wires to the gardener's checkout at both
+       gardenPrState call sites. No comment text, label or closer identity is read.
+    2. SUPERSEDED IS NEUTRAL. judgeGardenDecision and judgeGardenPending clear `pending` and return the
+       existing `released` verdict for `superseded`: no alpha, no beta. runGardenSteps does not call
+       rememberDeclined for it, so the targets stay eligible and the spec may propose them again against the
+       new main. A plain `closed` keeps today's debit and decline unchanged.
+    3. THE ROW SAYS WHY. The `<name>.gardener_judged` ledger row for a superseded PR carries
+       `reason: "superseded"`, the conflicting paths (or `empty-diff`), and the main sha it was measured
+       against.
+    4. UNREAD EVIDENCE IS NAMED, NOT GUESSED. If the head or main-at-close cannot be read, the PR is judged
+       `closed` as today, and the row carries `superseded_evidence: "unread"` with the reason. A wrong debit
+       can be found from the ledger, and a closed PR never leaves `pending` waiting forever.
+    5. NO BACKFILL. This task does not rewrite any host state. Whether to undo the one debit #11381 caused is
+       an operator decision.
+    Tests go in test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts. Use a git fixture in which main
+    retires a shard after the PR's base and the PR's head adds `priority:` to that shard, with a fake `pulls/<n>`
+    fetch returning closed, unmerged, `head.sha` and `closed_at`. Drive runGarden with a review-judged class.
+  acceptance:
+    - claim: "a garden PR closed unmerged whose head conflicts with main at close is released: the class record is unchanged and no target is declined"
+      proof: 'grep: test("W1-T9294: a garden PR closed after main rewrote its shards is released, not debited" in test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts'
+    - claim: "a garden PR closed unmerged whose change main already carries is released"
+      proof: 'grep: test("W1-T9294: a closed garden PR whose change main already carries is released" in test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts'
+    - claim: "a garden PR closed unmerged with no conflict against main is still a debit that declines its targets"
+      proof: 'grep: test("W1-T9294: a garden PR closed with no conflict against main is still declined" in test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts'
+    - claim: "a close whose supersession evidence cannot be read is judged as today and its row names the unread evidence"
+      proof: 'grep: test("W1-T9294: unread supersession evidence is judged closed and named in the row" in test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-garden-pr-superseded-by-main-is-scored-neutral.test.ts"
+  falsifier: |
+    Leave gardenPrState returning `closed` for every unmerged close: the fixture's superseded PR adds one beta
+    to the class and its targets to declinedTargets, and the first two tests fail. Score every closed PR
+    neutral: the clean decline no longer debits, and the third test fails. Treat unread evidence as superseded:
+    the fourth test sees no debit and fails.
