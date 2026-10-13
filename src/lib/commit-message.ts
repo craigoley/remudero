@@ -48,7 +48,7 @@ export function normalizeSubjectCase(subject: string): string {
   return trimmed.charAt(0).toLowerCase() + trimmed.slice(1);
 }
 
-/** Wrap at whitespace as before; split over-long tokens losslessly at natural separators or a hard cut. */
+/** Wrap short tokens as before; split long ones losslessly at separators or a hard cut, never inside a UTF-16 pair. */
 export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bodyMaxLineLength): string[] {
   if (!Number.isSafeInteger(max) || max < 1) throw new RangeError("commit body line width must be a positive integer");
   const out: string[] = [];
@@ -65,7 +65,6 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
       }
       while (word.length > max) {
         let cut = Math.max(...["-", ":", "/", ".", "_"].map(separator => word.lastIndexOf(separator, max - 1))) + 1 || max;
-        // UTF-16 protocol boundaries: never turn an intact surrogate pair into two invalid UTF-8 lines.
         const left = word.charCodeAt(cut - 1), right = word.charCodeAt(cut);
         if (left >= 0xd800 && left <= 0xdbff && right >= 0xdc00 && right <= 0xdfff) cut -= 1;
         if (cut < 1) throw new RangeError("commit body line width cannot hold this Unicode character");
