@@ -2056,6 +2056,23 @@ fi
 
 clear_own_pause "recycle-container: pause cleared — the new container must not come up paused"
 
+# ── 6.5. THE STOPPED WINDOW: THIS INSTANCE'S PENDING RECYCLE ACTIONS (W1-T9071) ─────────────────
+# No container of this instance runs here, so a reviewed one-shot action may change what it binds;
+# one never fails the recycle (deploy/recycle-actions.sh). The Codex sessions plan reads what the
+# actions left, so a move that finished just now is bound by this very launch.
+if [ -f "${SCRIPT_DIR:-}/recycle-actions.sh" ]; then
+  . "${SCRIPT_DIR}/recycle-actions.sh"
+  recycle_actions_run stopped "${STATE_DIR}"
+fi
+CODEX_SESSIONS_ARGS=()
+if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ] && [ -f "${SCRIPT_DIR:-}/codex-sessions-mount.sh" ]; then
+  . "${SCRIPT_DIR}/codex-sessions-mount.sh"
+  if codex_sessions_plan "${STATE_DIR}"; then
+    RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CODEX_SESSIONS_SRC}" "${CODEX_SESSIONS_DEST}" rw)
+  fi
+  echo "recycle-container: codex sessions ${CODEX_SESSIONS_NOTE}"
+fi
+
 echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Bash 3.2 treats an empty array as unset under `set -u`, even when it was initialized with `=()`.
 # Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
@@ -2088,6 +2105,9 @@ DOCKER_RUN_ARGS=(
 )
 if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
+fi
+if [ "${#CODEX_SESSIONS_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${CODEX_SESSIONS_ARGS[@]}")
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
@@ -2243,6 +2263,11 @@ EOF_REPLACEMENT_ENV
 fi
 
 echo "recycle-container: OK — ${CONTAINER_NAME} recycled onto ${PULLED_IMAGE_ID}"
+
+# W1-T9071: the post-start actions run once the replacement has proved itself above.
+if command -v recycle_actions_run >/dev/null 2>&1; then
+  recycle_actions_run post-start "${STATE_DIR}"
+fi
 
 # ── 8. RECLAIM THE IMAGE THIS RECYCLE REPLACED (W1-T2585) ───────────────────────────────────────
 # EVERY RECYCLE PULLED ~6GB AND REMOVED NOTHING. MEASURED 2026-09-01: docker images held 22.92G of

@@ -1276,6 +1276,15 @@ if [ -r "\$SCRATCH_LIB" ]; then
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
 
+# W1-T9071: the Codex sessions bind, once this state dir's stopped-window copy made it ready.
+CODEX_SESSIONS_ARGS=()
+CODEX_SESSIONS_LIB="\$CHECKOUT/deploy/codex-sessions-mount.sh"
+if [ -r "\$CODEX_SESSIONS_LIB" ]; then
+  . "\$CODEX_SESSIONS_LIB"
+  codex_sessions_plan "\$STATE_DIR" || true
+  echo "rmd-relaunch: codex sessions \$CODEX_SESSIONS_NOTE"
+fi
+
 CREDENTIAL_ARGS=()
 $(render_credential_mount)
 
@@ -1299,6 +1308,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e RMD_FOUNDRY_CLAUDE_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_ENDPOINT \\
   -v ${CODEX_DIR}:/home/node/.codex \\
+  "\${CODEX_SESSIONS_ARGS[@]+"\${CODEX_SESSIONS_ARGS[@]}"}" \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
