@@ -1400,6 +1400,7 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   renderSkillsPart,
+  SKILL_FIX_TASK_TYPE,
   skillsInjectedEvent,
   skillWithheldForRun,
   stageSkillDrafts,
@@ -11864,6 +11865,8 @@ export async function runFixRung(opts: {
     packageScripts?: Readonly<Record<string, string>>;
     /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
     branchClaim?: FixRoundBranchClaim;
+    /** The approved skill tree the fix lane selects from; production reads the implement lane's. */
+    approvedSkillsDir?: string;
   };
 }): Promise<FixRungOutcome> {
   const roundRows: Record<string, unknown>[] = [];
@@ -12099,6 +12102,16 @@ export async function runFixRung(opts: {
       standInEscalates = false;
     }
   };
+  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
+  // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  const fixSkillSelection = observeSkillSelection(
+    loadInjectableSkills(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills")),
+    SKILL_FIX_TASK_TYPE,
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    opts.task.files,
+    (skillName) => skillWithheldForRun(opts.runId, skillName),
+  );
+  let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
@@ -13339,6 +13352,9 @@ export async function runFixRung(opts: {
       deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
+    // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
+    if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
+    fixSkillSelectionLogged = true;
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -13347,6 +13363,7 @@ export async function runFixRung(opts: {
         round: attempt,
         branch: opts.branch,
         evidence,
+        skillsPart: renderSkillsPart(fixSkillSelection.selected),
         // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
         // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
         // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
