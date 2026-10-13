@@ -3605,9 +3605,19 @@ export async function runDaemon(
   // gated, and dispatch waits on nothing. The deferral rows are written once, on the first gated tick.
   let bootGateOpenedAtMs: number | undefined = bootGateHolds ? undefined : bootGateStartedAtMs;
   let bootCadencesDeferred = false;
+  // W1-T9225 — TICK 1 STARTS THE BOOT REVIEW PASS AND NEVER AWAITS IT. Dispatch reads nothing that pass produces
+  // (its effects are statuses, arms and ledger rows), and its review workers and tick 1's lanes share the existing
+  // worker budget and memory admission, as on every later tick. Only the gated cadences wait for it: they run once the
+  // gate is open AND this pass has settled, so W1-T5720's order (reviews before the cadences) still holds.
+  let bootReviewStarted = false;
+  let bootReviewInFlight = false;
   const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
-  const deferBootCadence = (cadence: string): void =>
-    log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
+  type BootWait = "first_full_pass" | "boot_review_pass";
+  const bootWaitReason = (waitsFor: readonly BootWait[]): string =>
+    waitsFor.length > 1 ? "first full pass and boot review pass have not settled"
+      : waitsFor[0] === "boot_review_pass" ? "boot review pass has not settled" : "first full pass has not settled";
+  const deferBootCadence = (cadence: string, waitsFor: readonly BootWait[] = ["first_full_pass"]): void =>
+    log("daemon.boot_gate.deferred", { cadence, reason: bootWaitReason(waitsFor), waits_for: waitsFor, bound_ms: bootGateBoundMs });
   const gardens = [
     ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
@@ -4757,14 +4767,20 @@ export async function runDaemon(
     }
 
     // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
-    // Start, don't await: a slow review must not serialize the background full sweep behind it.
-    const bootReviewPass = bootGateTrigger === undefined && !bootCadencesDeferred ? (async () => {
-      try {
-        await deps.sweepLight?.({ reviewOnly: true });
-      } catch (e) {
-        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
-      }
-    })() : undefined;
+    // Start, don't await: a slow review must not serialize the background full sweep, or dispatch, behind it.
+    if (bootGateTrigger === undefined && !bootReviewStarted) {
+      bootReviewStarted = true;
+      bootReviewInFlight = true;
+      void (async () => {
+        try {
+          await deps.sweepLight?.({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+        } finally {
+          bootReviewInFlight = false;
+        }
+      })();
+    }
 
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
@@ -4923,14 +4939,19 @@ export async function runDaemon(
     // W1-T9072: while the gate is closed this tick skips the gated cadences and goes on to dispatch. They run at
     // the first iteration top after it opens, so never beside a lane this tick starts. The deferral rows hold
     // cadences, not lanes, so they leave this tick's idle-slot cause as it was.
-    if (bootGateTrigger === undefined && !bootCadencesDeferred) {
-      await bootReviewPass;
+    // W1-T9225: the boot review pass holds them the same way, skipped and never awaited, and the rows written on the
+    // first held tick name which of the two waits each cadence is held for.
+    const bootWaitsFor: BootWait[] = [
+      ...(bootGateTrigger === undefined ? ["first_full_pass" as const] : []),
+      ...(bootReviewInFlight ? ["boot_review_pass" as const] : []),
+    ];
+    if (bootWaitsFor.length > 0 && !bootCadencesDeferred) {
       bootCadencesDeferred = true;
       const [idleCause, idleHold] = [idleLaneTickCause, idleLaneTickHold];
-      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
+      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence, bootWaitsFor);
       [idleLaneTickCause, idleLaneTickHold] = [idleCause, idleHold];
     }
-    const cadencesThisTick = bootGateTrigger !== undefined;
+    const cadencesThisTick = bootWaitsFor.length === 0;
     if (cadencesThisTick) startDueRungsTimer();
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
