@@ -35752,6 +35752,7 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
+  readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
   const gate = (): QueueGovernorResult | undefined => {
@@ -35765,7 +35766,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
+      pressure: readQueuePressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -36405,6 +36406,7 @@ async function drainCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate. Production omits it
      *  and reads the real `/proc/meminfo` ({@link readAvailableMemoryMib}). */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -36608,7 +36610,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -39146,6 +39148,7 @@ export async function daemonCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
      *  identical seam. Production omits it and reads the real `/proc/meminfo`. */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
      *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
      *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
@@ -39494,7 +39497,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
