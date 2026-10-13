@@ -4667,6 +4667,36 @@ export interface components {
       /** A proposal id from the active registry; must be non-blank. */
       proposalId: string;
     };
+    InstanceInboxProposal: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      summary: string;
+      /** Identity of this active proposal. Reframe must echo it; a changed proposal is refused. */
+      snapshotKey: string;
+      actions: ({
+        action: "reframe";
+        tier: "low";
+        path: string;
+      })[];
+    };
+    InstanceInboxReframeRequest: unknown;
+    InstanceInboxReframeResult: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      ok: true;
+      delivery: "delivered";
+      draftInvalidated: true;
+      replayed?: boolean;
+      receipt: {
+        intentId: string;
+        key: string;
+        status: "settled" | "unknown";
+        action: "reframe";
+        threadId: string;
+      };
+    };
     /** POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`). */
     InboxReframeRequest: {
       proposalId: string;
@@ -6578,6 +6608,43 @@ export interface paths {
           "403": HighTierRefusal;
           "404": InboxRefusal;
           "409": InboxRefusal;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox": {
+    get: {
+      responses: {
+          "200": unknown;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/attention-census": {
+    get: {
+      responses: {
+          "200": unknown;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/proposal": {
+    get: {
+      responses: {
+          "200": InstanceInboxProposal;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/reframe": {
+    post: {
+      responses: {
+          "200": InstanceInboxReframeResult;
+          "400": undefined;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
         };
     };
   };

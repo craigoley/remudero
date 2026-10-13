@@ -31,6 +31,8 @@
     "test": "node --import tsx scripts/test-run.mjs --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "test:ci": "node scripts/test-with-retry.mjs node --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "test:fix-owner-recovery": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts",
+    "test:fold-debt-pull": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ci-filed-fold-debt-reaches-the-daemon.test.ts",
+    "test:merge-queue-gates": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/the-merge-queue-runs-the-recorded-literal-gates.test.ts",
     "test:tier:check": "node scripts/test-tier-manifest.mjs --check",
     "test:fast": "node scripts/test-tier-manifest.mjs --run fast",
     "test:slow": "node scripts/test-tier-manifest.mjs --run slow",

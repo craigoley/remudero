@@ -18,6 +18,7 @@ import { heldOutLeaks, replayIdleGate, type CorpusProofOutcome, type GoldenCorpu
 import { gradeHeadWithReviewerExecutor, PAIRED_ATTEMPT_MAX_BUDGET_USD, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedAttemptResult, type PairedGrade, type PairedGrader } from "./paired-trial.js";
 import { replayOptIn } from "./replay-harness.js";
+import { createSkillEvalControl, type SkillEvalControl, type SkillEvalControlInput } from "./skill-eval-control.js";
 
 /** K: held-out tasks per draft, per the operator's 2026-10-13 ruling. */
 export const SKILL_EVAL_HELD_OUT_TASKS = 3;
@@ -129,7 +130,7 @@ export type SkillEvalArm = (typeof SKILL_EVAL_ARMS)[number];
 export const SKILL_EVAL_MAX_SPEND_USD = SKILL_EVAL_HELD_OUT_TASKS * SKILL_EVAL_TRIALS_PER_ARM * SKILL_EVAL_ARMS.length
   * PAIRED_ATTEMPT_MAX_BUDGET_USD;
 
-export const SKILL_EVAL_STEPS = { attempt: "skill_eval.attempt", result: "skill_eval.result", refused: "skill_eval.refused" } as const;
+export const SKILL_EVAL_STEPS = { attempt: "skill_eval.attempt", result: "skill_eval.result", refused: "skill_eval.refused", cancelled: "skill_eval.cancelled" } as const;
 
 /** One attempt's place in a task's run order: `trial` is its block, `position` its slot within the block. */
 export interface SkillEvalSlot {
@@ -233,28 +234,35 @@ export interface SkillEvalRunInput {
   argv: readonly string[];
   idle: ReplayIdleSignal;
   log: (step: string, row: Record<string, unknown>) => void;
+  /** Default OFF. A fixed whole-loop cancellation control, never capacity-release authority. */
+  control?: SkillEvalControlInput;
 }
 
 export type SkillEvalRunRefusal = "spend-not-confirmed" | "fleet-not-idle" | "draft-not-selected" | "too-few-held-out-tasks"
-  | "over-spend-ceiling";
+  | "over-spend-ceiling" | "invalid-run-control";
 
 export type SkillEvalRun =
   | { state: "refused"; reason: SkillEvalRunRefusal; detail: string; dispatched: 0 }
-  | { state: "evaluated"; verdict: SkillEvalVerdict; attempts: SkillEvalAttempt[] };
+  | { state: "evaluated"; verdict: SkillEvalVerdict; attempts: SkillEvalAttempt[] }
+  | CancelledSkillEval;
+export type CancelledSkillEval = { state: "cancelled"; attempts: SkillEvalAttempt[]; detail: string;
+  /** Cancellation/SDK settlement is not positive proof that dependencies, graders and detached descendants are gone. */
+  capacityReleaseAllowed: false };
 
 /** A failure's label with its own message, bounded, so a paid attempt that died says why in its ledger row. */
 const failureReason = (label: string, error: unknown): string =>
   `${label}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`;
 
 async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusItem, slot: SkillEvalSlot,
-  dispatch: PairedAttemptDispatch<SkillEvalArm>): Promise<SkillEvalAttempt> {
+  dispatch: PairedAttemptDispatch<SkillEvalArm>, control?: SkillEvalControl): Promise<SkillEvalAttempt> {
   const draftSha256 = input.selection.draftSha256;
   const reasons: string[] = [];
   let attempt: PairedAttemptResult | null = null;
   try {
     attempt = await dispatch({ pilotId: `skill-eval-${draftSha256.slice(0, 16)}`, taskId: item.taskId, arm: slot.arm,
       pairId: `skill-eval-${sha256(`${draftSha256}\0${item.taskId}\0${slot.trial}`).slice(0, 16)}`, position: slot.position,
-      ...input.stack, isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false } });
+      ...input.stack, isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false },
+      ...(control === undefined ? {} : { signal: control.signal }) });
   } catch (error) {
     const reason = failureReason("attempt-failed", error);
     reasons.push(reason);
@@ -262,7 +270,8 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
   const breach = attempt?.pushedRef || attempt?.prUrl || attempt?.breach || null;
   const headDir = breach === null ? attempt?.headDir ?? null : null;
   let grade: PairedGrade | null = null;
-  if (breach !== null) reasons.push("isolation-breach");
+  if (control?.checkpoint() === false) reasons.push("eval-cancelled");
+  else if (breach !== null) reasons.push("isolation-breach");
   else if (attempt !== null && headDir === null) reasons.push("no-head");
   else if (headDir !== null) {
     try {
@@ -273,14 +282,17 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
       reasons.push(reason);
     }
   }
+  if (control?.checkpoint() === false && !reasons.includes("eval-cancelled")) reasons.push("eval-cancelled");
   if (grade?.verdict === "unmeasurable") reasons.push(`ungradeable:${grade.reasons.join("+")}`);
   const verdict: CorpusProofOutcome = grade !== null && reasons.length === 0 ? grade.verdict : "unmeasurable";
   try { attempt?.cleanup?.(); }
   catch (error) {
     const reason = failureReason("cleanup-failed", error);
     reasons.push(reason);
+    control?.cancel(`eval-cleanup-unverified: ${reason}`);
   }
-  return { taskId: item.taskId, ...slot, verdict, costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,
+  return { taskId: item.taskId, ...slot, verdict: reasons.some(reason => reason.startsWith("cleanup-failed:")) || control?.checkpoint() === false ? "unmeasurable" : verdict,
+    costUsd: attempt?.costUsd ?? null, servedModel: attempt?.servedModel ?? null,
     breach, headSha: attempt?.headSha ?? null, reasons };
 }
 
@@ -290,7 +302,7 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
  * Refuses, having dispatched nothing, without `--confirm-spend`, when the fleet is not idle, when the draft is not
  * the one the selection was drawn for, or when the attempts could exceed {@link SKILL_EVAL_MAX_SPEND_USD}.
  */
-export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalRun> {
+async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl): Promise<SkillEvalRun> {
   const { selection } = input;
   const tag = { draft_sha256: selection.draftSha256, held_out_set_hash: selection.heldOutSetHash };
   const refuse = (reason: SkillEvalRunRefusal, detail: string): SkillEvalRun => {
@@ -312,24 +324,51 @@ export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalR
   }
   const attempts: SkillEvalAttempt[] = [];
   let committedUsd = 0;
-  for (const item of selection.items) {
+  let cleanupUnverified: string | undefined;
+  attemptsLoop: for (const item of selection.items) {
+    if (control?.checkpoint() === false) break;
     const dispatch = input.dispatcherFor(item);
     for (const slot of skillEvalTrialOrder(selection.draftSha256, item.taskId)) {
+      if (control?.checkpoint() === false) break attemptsLoop;
       // An unreported cost counts at the cap. An attempt that overshot its budget can leave too little room for one more.
       const attempt = committedUsd + PAIRED_ATTEMPT_MAX_BUDGET_USD > SKILL_EVAL_MAX_SPEND_USD
         ? { taskId: item.taskId, ...slot, verdict: "unmeasurable" as const, costUsd: 0, servedModel: null, breach: null, headSha: null,
           reasons: ["spend-ceiling-reached"] }
-        : await runSkillEvalAttempt(input, item, slot, dispatch);
+        : await runSkillEvalAttempt(input, item, slot, dispatch, control);
       committedUsd += attempt.costUsd ?? PAIRED_ATTEMPT_MAX_BUDGET_USD;
       attempts.push(attempt);
       input.log(SKILL_EVAL_STEPS.attempt, { ...tag, task_id: attempt.taskId, arm: attempt.arm, trial: attempt.trial,
         position: attempt.position, verdict: attempt.verdict, cost_usd: attempt.costUsd, served_model: attempt.servedModel,
         breach: attempt.breach, head_sha: attempt.headSha, reasons: attempt.reasons });
+      cleanupUnverified = attempt.reasons.find(reason => reason.startsWith("cleanup-failed:"));
+      if (cleanupUnverified !== undefined) break attemptsLoop;
     }
+  }
+  if (cleanupUnverified !== undefined || control?.checkpoint() === false) {
+    const detail = cleanupUnverified === undefined ? String(control!.signal.reason).slice(0, 200) : `eval-cleanup-unverified: ${cleanupUnverified}`;
+    input.log(SKILL_EVAL_STEPS.cancelled, { ...tag, detail, attempts: attempts.length, committed_usd: committedUsd,
+      capacity_release_allowed: false, termination: "unverified" });
+    return { state: "cancelled", attempts, detail, capacityReleaseAllowed: false };
   }
   const verdict = skillEvalVerdict(attempts);
   input.log(SKILL_EVAL_STEPS.result, { ...tag, verdict: verdict.verdict, reason: verdict.reason, detail: verdict.detail,
     per_task: verdict.perTask, delta: verdict.delta, measurable_tasks: verdict.measurableTasks, total_cost_usd: verdict.totalCostUsd,
     attempts: attempts.length });
   return { state: "evaluated", verdict, attempts };
+}
+
+/** Optional fixed whole-loop control is inert when absent and cannot bypass quiet/spend gates.
+ * Synchronous setup/grading and escaped descendants still require an independently qualified
+ * whole-process boundary. No successful or cancelled return here releases a capacity lease. */
+export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalRun> {
+  if (!replayOptIn(input.argv).enabled) return skillEvalRun(input);
+  let control: SkillEvalControl | undefined;
+  try { control = createSkillEvalControl(input.control); }
+  catch (error) {
+    const detail = failureReason("invalid-run-control", error);
+    input.log(SKILL_EVAL_STEPS.refused, { reason: "invalid-run-control", detail });
+    return { state: "refused", reason: "invalid-run-control", detail, dispatched: 0 };
+  }
+  try { return await skillEvalRun(input, control); }
+  finally { control?.dispose(); }
 }

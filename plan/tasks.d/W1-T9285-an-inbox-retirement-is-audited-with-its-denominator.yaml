@@ -1,0 +1,29 @@
+- id: W1-T9285
+  title: "Audit Inbox retirement outcomes for false dismissal with an explicit denominator"
+  repo: remudero
+  depends_on: []
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved follow-up; issue #7708"
+  plan_refs: ["W1-T216","W1-T4742","W1-T4853"]
+  files: ["src/lib/inbox-dismissal-audit.ts","src/lib/inbox-responder.ts","src/lib/inbox-view.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-inbox-retirement-is-audited-with-its-denominator.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Issue #7708 requires precision and false-dismissal audits before broad release automation. W1-T4853 protects held security asks, but that regression protection is not a measured retirement-outcome audit. The operator approved a separate audit rather than treating old observed counts as a current measurement.
+  design: |
+    Consume durable retirement and restore receipts using their source instance, proposal, task and snapshot identities. Report the sampled/eligible denominator, observation window, source coverage, later outcomes and explicit false-dismissal evidence; distinguish unmeasurable from measured zero. Preserve immutable history and avoid joining attempts or repositories by task id alone. Use the W1-T216 held security drill as a mandatory negative control and a genuinely terminal mechanical ask as a positive control. Recheck the currently authenticated census before claiming any reduction from the old 74-item report. Keep this audit read-only; it never approves, retires or runs a security drill. Publish bounded additive fields and regenerate the schema.
+  acceptance:
+    - claim: "the maintained Inbox pass reaches the dismissal audit"
+      proof: 'grep: buildInboxDismissalAudit( in src/lib/inbox-view.ts'
+    - claim: "missing audit coverage cannot become a measured zero"
+      proof: "grep: test(\"an inbox dismissal audit keeps partial sources unmeasurable\" in test/an-inbox-retirement-is-audited-with-its-denominator.test.ts"
+    - claim: "the denominator and terminal control cannot hide a false dismissal"
+      proof: "grep: test(\"an inbox dismissal audit includes a held security ask as its negative control\" in test/an-inbox-retirement-is-audited-with-its-denominator.test.ts"
+  falsifier: |
+    Remove the source-coverage qualification, denominator, or held-security control. The corresponding audit fixture must fail; a no-retirement corpus must stay distinct from an unreadable corpus.

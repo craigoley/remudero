@@ -3,7 +3,7 @@
 // worker spawn, a fixed clock and injected config: nothing here spawns a real worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,7 +55,7 @@ function sealedFixture(): { origin: GitRepo; fleet: GitRepo; root: string; base:
   seed.addRemote("origin", origin.dir);
   seed.git("push", "--quiet", "origin", "main");
   const fleet = gitRepo({ cloneFrom: origin.dir, kind: "sealed-attempt-fleet" });
-  const root = mkdtempSync(join(tmpdir(), "rmd-sealed-attempt-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-sealed-attempt-")));
   return { origin, fleet, root, base: fleet.git("rev-parse", "origin/main") };
 }
 
@@ -100,6 +100,16 @@ function options(fixture: ReturnType<typeof sealedFixture>, spawn: typeof spawnW
 const registered = (repoDir: string) => git(repoDir, "worktree", "list", "--porcelain");
 const branches = (repoDir: string) => git(repoDir, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort();
 const remoteRefs = (repoDir: string) => git(repoDir, "ls-remote", "origin");
+
+test("a sealed attempt refuses prior cancellation before cutting a checkout and forwards an active caller signal", async () => {
+  const fixture = sealedFixture(), source = new AbortController(), spawned: SpawnWorkerArgs[] = [];
+  const request = { ...attemptRequest(), signal: source.signal }, dispatch = sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned)));
+  const result = await dispatch(request);
+  assert.equal(spawned[0]?.signal, source.signal);result.cleanup?.();
+  const before = registered(fixture.fleet.dir);source.abort();
+  await assert.rejects(dispatch(request));assert.equal(registered(fixture.fleet.dir), before);assert.equal(spawned.length, 1);
+  fixture.fleet.cleanup();fixture.origin.cleanup();
+});
 
 test("a sealed attempt runs the pinned arm in a fresh detached worktree at the base and returns its head for grading", async () => {
   const fixture = sealedFixture();
