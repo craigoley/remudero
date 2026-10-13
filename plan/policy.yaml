@@ -1700,3 +1700,19 @@ daemonMemory:
     origin: "net-new"
     min: 0.1
     max: 1
+
+# W1-T8864: the issue-revalidation garden (src/lib/issue-revalidation-garden.ts) re-checks every open
+# issue against current evidence once an hour at most. `mode` ships as "shadow": each verdict and the
+# action it would take is ledgered as issue_revalidation.verdict and nothing is written to GitHub.
+# "act" closes only positively-evidenced issues that are not MANUAL or GRILL and whose newest comment is
+# not the operator's, at most `maxClosesPerPass` a pass; "off" stops the garden. The operator flips it
+# once the shadow verdict table over the open backlog is right (operator ruling 2026-10-13).
+issueRevalidation:
+  mode:
+    value: "shadow"
+    origin: "net-new"
+  maxClosesPerPass:
+    value: 5
+    origin: "net-new"
+    min: 1
+    max: 20

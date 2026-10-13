@@ -43,6 +43,7 @@
     "inbox-bakeoff",
     "init",
     "install-checkout",
+    "inspect",
     "issues",
     "knowledge",
     "learnings",

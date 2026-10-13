@@ -3012,6 +3012,18 @@ Every comment block of six lines or more at that merge-base is archived below, i
  */
 ```
 
+## SDK init inventory evidence
+
+`collectWorkerResult` retains the first Claude SDK `system/init` inventory as
+`sdk_init_summary` through `workerLedgerFields`. Only validated MCP server/tool names
+are retained; raw init fields such as credentials, cwd, prompts and configuration
+are not copied. This is advertised inventory, not proof of a connected or healthy server.
+The parser inspects at most 256 entries per field and retains at most 16 server names
+and 32 MCP tool names. Rejected or truncated inventories are `partial`; missing fields
+are `unavailable`, and only supplied empty arrays establish observed-empty inventory.
+Legacy runs remain unavailable. Other providers are explicitly `not-applicable` to
+this Claude SDK schema; requested model labels never replace the executing provider.
+
 ## ghPrMergeSquash
 
 `src/lib/worker.ts:5142-5147` at `ea02cc83`.

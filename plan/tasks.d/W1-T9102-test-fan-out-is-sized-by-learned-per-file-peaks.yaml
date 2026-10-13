@@ -1,0 +1,37 @@
+- id: W1-T9102
+  title: "TEST FAN-OUT IS SIZED BY LEARNED PER-FILE PEAKS, NOT A FIXED 512 MiB — TEST_FILE_PEAK_BYTES sizes every test file at 512 MiB while files peak at 300-737 MiB, so a heavy file is under-reserved inside the container that is about to carry a run child per lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the per-file peak a test slot reserves
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7093, W1-T7094]
+  files: [src/lib/test-slot.ts, src/lib/host-memory-learning.ts, src/lib/test-run.ts, test/test-fan-out-is-sized-by-learned-per-file-peaks.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision C, offset 4 (lever D refinement; #10693 bounded the fan-out with a fixed per-file estimate).
+    READ on origin/main 5f8d3f178: src/lib/test-slot.ts `TEST_FILE_PEAK_BYTES = 512 * 1024 ** 2`, "an estimate, not a
+    limit", from the 2026-10-10 census (7-8 file children at 300-570 MB). `memoryTestConcurrency` divides headroom by it.
+    The learner already finds a `node --test` runner inside a tree and gives it a nested "test" reservation
+    (src/lib/host-memory-learning.ts).
+    OBSERVED 2026-10-13 11:47Z, read-only on the host: a single test-file process at 737 MiB RSS inside a review sandbox.
+  design: |
+    1. The tree sampler records, for each `node --test` file child it sees, (test path from argv, peak VmHWM) as a
+       per-file sample beside the class samples, with the same decayed learning (`learnEstimate`).
+    2. A slot's per-file bytes for a selection is the learned p90 of each selected file; an unseen file uses the
+       test class's learned per-file tail; with no history at all, today's constant is the starting prior that counts
+       as one sample (as `learnEstimate`'s default does), and the slot says which basis it used.
+    3. `memoryTestConcurrency` and the slot take the selection's per-file sizes instead of one constant.
+  acceptance:
+    - claim: "a file with a learned heavy peak sizes its slot above 512 MiB"
+      proof: 'grep: test("W1-T9102: a learned heavy file sizes its slot above the old constant" in test/test-fan-out-is-sized-by-learned-per-file-peaks.test.ts'
+    - claim: "an unseen file uses the class tail and no history uses the prior, and the slot names its basis"
+      proof: 'grep: test("W1-T9102: an unseen file uses the class tail and the slot names its basis" in test/test-fan-out-is-sized-by-learned-per-file-peaks.test.ts'
+  falsifier: |
+    Keep the constant: the first test's slot reserves 512 MiB for a file learned at 737 MiB.

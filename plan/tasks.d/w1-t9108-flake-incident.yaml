@@ -1,0 +1,26 @@
+- id: W1-T9108
+  title: "FLAKE INCIDENT — 'W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row' failed CI on 4 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/an-unattributed-loop-stall-is-profiled-live.test.ts#W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row"
+  files:
+    - test/an-unattributed-loop-stall-is-profiled-live.test.ts
+  acceptance:
+    - claim: "the cause of the intermittent failure W1-T9108 records in test/an-unattributed-loop-stall-is-profiled-live.test.ts is fixed, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T9108 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/an-unattributed-loop-stall-is-profiled-live.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T9108 pins the cause of the intermittent failure\" in test/an-unattributed-loop-stall-is-profiled-live.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row' (test/an-unattributed-loop-stall-is-profiled-live.test.ts)
+    Failed CI on 4 distinct pull requests whose changed files include neither the test file nor a module it imports: #11245, #11255, #11332, #11336.
+    CI runs: 38345195074, 38374203489, 38397485389, 38400190008.
+    Retry outcomes: 4 recovered on retry, 0 also failed on retry.
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.

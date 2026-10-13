@@ -1,0 +1,50 @@
+- id: W1-T9094
+  title: "AN IMAGE REBUILT ONLY FOR THE SERVE SUPERVISOR'S SOURCE RECYCLES ONLY SERVE — core recycled 11 times in 24 h on 2026-10-12/13 and 13 of the 14 merges that rebuilt the image touched only BAKED_RUNTIME_SOURCE_PATHS (mostly src/lib/ledger.ts's retained-step list), which a daemon container never executes from the image"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which image inputs make each role's container stale
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T3240, W1-T4061, W1-T5367, W1-T8171, W1-T4267]
+  files: [src/lib/deployer.ts, src/lib/deploy-judge.ts, test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision B.5: a recycle ends every process in the container, run children included, so fewer recycles is
+    the only remedy for this part of the restart cost.
+    MEASURED: ~/Remudero-notes/flow-remeasure-2026-10-13b/boots-classified.txt, 28 core boots 10-12 12:00Z to 10-13
+    11:45Z: 11 deploy recycles, and 7 freshness boots followed by a recycle within 3 min. `git log` over .github/
+    workflows/acr-build.yml's paths for the same window: 14 merges, 13 touching only src/lib/ledger.ts,
+    src/lib/ledger-union.ts, src/lib/config-schema.ts, src/lib/config.ts, src/lib/self-sync.ts,
+    src/lib/serve-generation.ts or src/lib/serve-supervisor.ts; one touching deploy/Dockerfile (4001d1932).
+    READ on origin/main 5f8d3f178: `BAKED_RUNTIME_SOURCE_PATHS` (src/lib/baked-runtime-inputs.ts) is "source executed
+    by the image-resident serve supervisor"; src/lib/image-drift.ts: "Serve generations and workers execute from
+    mounted checkouts." The deploy cycle's `imageBakedCommitsBehind` (src/lib/deployer.ts) counts commits against all
+    of `IMAGE_BAKED_PATHS` for every container, though the same cycle already knows its role
+    (`RMD_RESOURCE_POLICY_ROLE`: serve | build).
+    W1-T8171 (queued) stops the in-place restart that precedes a recycle; this task removes most of the recycles. Both
+    are needed.
+  design: |
+    1. `bakedPathCommitsBehind` takes the role. For `build` (daemon containers) it counts only the image inputs such a
+       container executes: `IMAGE_BAKED_PATHS` minus `BAKED_RUNTIME_SOURCE_PATHS` (deploy/Dockerfile,
+       deploy/entrypoint.sh, .dockerignore, deploy/package.json, deploy/package-lock.json,
+       deploy/codex-requirements.toml); the playwright-core and worker-SDK readings stay. `serve` keeps the full list.
+       An unknown role keeps the full list (today's behaviour).
+    2. Ledger `deploy.image_drift_scoped` {role, behind_all, behind_role, files} whenever the two counts differ.
+    3. Export the role-scoped list from src/lib/deploy-judge.ts so W1-T8171's image-pending read can use the same
+       list and a daemon never defers its restart to a recycle that will not come.
+    4. The PR lists 2026-10-12/13's recycles and which of them would still happen.
+  acceptance:
+    - claim: "a build-role container is not stale for a commit that touches only serve-supervisor source"
+      proof: 'grep: test("W1-T9094: a build container ignores a serve-supervisor-only commit" in test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts'
+    - claim: "a serve-role container still counts that commit, and a Dockerfile change counts for both"
+      proof: 'grep: test("W1-T9094: serve still counts it and a Dockerfile change counts for both" in test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts'
+    - claim: "an unknown role keeps the full baked list"
+      proof: 'grep: test("W1-T9094: an unknown role keeps the full baked list" in test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts'
+  falsifier: |
+    Keep the full list for the build role: the first test recycles core for a ledger.ts-only commit.

@@ -44,23 +44,16 @@
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
 
-# RETENTION FOLLOWS DISK PRESSURE IN TIERS (retention_window). Each pass reads every watched
-# filesystem (RMD_CLEANUP_WATCH_FS, plus RMD_CLEANUP_ROOT_FS at HIGH_WATER) and takes the one
-# closest to its mark. One that is past its minimum free space counts as at its mark. The idle
-# window is then:
-#   20+ points below the mark: 48 h · 10-19: 24 h · 5-9: 12 h · under 5, past it, or df unreadable: 6 h
-# On the Azure root (mark 85%) that is 48 h under 65% used, 24 h at 65-74%, 12 h at 75-79%, and 6 h
-# from 80%. Six hours is the floor, never a target: it protects work that could still be live, so
-# no tier and no override goes under it. A pass re-reads the disks, so the window widens again on
-# its own once space comes back. Scratch-unit idleness and the tsx cache age follow the same window
-# unless pinned. A pinned value under six hours is logged as CLAMP and raised to six hours. It is
-# not FATAL: a janitor that refuses to start reclaims nothing while the disk fills.
+# RETENTION is six hours at every disk pressure tier (W1-T8863), as on the Mac. Scratch-unit
+# idleness and the tsx cache follow that window unless pinned longer. Pins under six hours are
+# logged as CLAMP and raised to six hours; watched filesystem alarms still use their own marks.
 
-# OVERRIDES. Thresholds: IDLE_MINUTES (pins the idle window instead of the tier; empty = tiered)
+# OVERRIDES. Thresholds: IDLE_MINUTES (pins the idle window; empty = six hours)
 # HIGH_WATER ARCHIVE_DAYS DRY_RUN. Roots and probes, so a test
 # drives a fixture tree instead of the real /tmp and /mnt/rmd, on Linux or macOS:
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
+#   RMD_CLEANUP_LIVE_CHECKOUTS  live checkouts kept while judging only untracked immediate clones
 #   RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS  exact checkout paths excluded from those scans
 #   RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT  durable location for unpublished clean HEAD bundles
 #   RMD_CLEANUP_COVERAGE_PATHS   colon-separated exact regenerable coverage cache paths
@@ -118,13 +111,14 @@
 set -uo pipefail
 
 FLOOR_MINUTES=360                        # 6 h: the protective floor for anything that could be live work
-IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: tiered on disk pressure (retention_window)
+IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: six hours (retention_window)
 HIGH_WATER="${HIGH_WATER:-85}"           # [UNVERIFIED] percent of / at which a pass fails
 ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] archive retention
 DRY_RUN="${DRY_RUN:-0}"
 
 CLEAN_HOME="${RMD_CLEANUP_HOME:-${HOME:-/}}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
+LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
 WORKTREE_ARCHIVE_ROOT="${RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-worktree-archive}"
 COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
@@ -239,15 +233,9 @@ log() {
   esac
 }
 
-# retention_window <points below the mark> — the idle window in minutes. Tiered, never under six
-# hours. Twin of retention_window in deploy/mac/tmp-reclaim.sh: change the two together.
+# retention_window <points below the mark> — six hours regardless of disk pressure (W1-T8863).
 retention_window() {
-  local headroom="$1"
-  if [ "$headroom" -ge 20 ]; then echo 2880
-  elif [ "$headroom" -ge 10 ]; then echo 1440
-  elif [ "$headroom" -ge 5 ]; then echo 720
-  else echo "$FLOOR_MINUTES"
-  fi
+  echo "$FLOOR_MINUTES"
 }
 fmt_minutes() { if [ $(( $1 % 60 )) = 0 ]; then printf '%s h' "$(( $1 / 60 ))"; else printf '%s min' "$1"; fi; }
 
@@ -329,7 +317,7 @@ is_protected_worktree() {
   local target="$1" protected
   while IFS= read -r protected; do
     [ -n "$protected" ] && [ "$target" = "$protected" ] && return 0
-  done < <(printf '%s\n' "$PROTECTED_WORKTREE_ROOTS" | tr ':' '\n')
+  done < <(printf '%s\n%s\n' "$PROTECTED_WORKTREE_ROOTS" "$LIVE_CHECKOUTS" | tr ':' '\n' | sed 's:/*$::')
   return 1
 }
 
@@ -508,17 +496,52 @@ verify_worktree_bundle() {
     [ -z "$ref" ] || printf '%s\n' "$heads" | grep -Fxq -- "$ref" || return 1
   done <<< "$refs"
 }
+# Lost Git metadata cannot prove a tree clean: preserve its entire payload before removing it.
+archive_orphan() {
+  local wt="$1" raw parent probe archive="$WORKTREE_ARCHIVE_ROOT/orphans" tmp dest a b
+  raw="$(cat -- "$wt/.git" 2>/dev/null)" || return 1
+  case "$raw" in "gitdir: "/*/.git/worktrees/*) raw="${raw#gitdir: }" ;; *) return 1 ;; esac
+  case "$raw" in *$'\n'*|*/../*|*/./*) return 1 ;; esac
+  case "${raw##*/.git/worktrees/}" in ""|*/*) return 1 ;; esac
+  parent="${raw%/.git/worktrees/*}"
+  [ ! -e "$raw" ] && [ ! -L "$raw" ] && [ ! -e "$parent" ] && [ ! -L "$parent" ] || return 1
+  probe="$(dirname -- "$parent")"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ] && [ "$probe" != / ]; do probe="$(dirname -- "$probe")"; done
+  [ -d "$probe" ] && [ -r "$probe" ] && [ -x "$probe" ] || return 1
+  probe="$archive"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ] && [ "$probe" != / ]; do probe="$(dirname -- "$probe")"; done
+  a="$(fs_id "$wt")"; b="$(fs_id "$probe")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ] || return 1
+  audit_writable || return 1
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: archive orphan $wt -> $archive then remove it"; return 0
+  fi
+  mkdir -p -- "$archive" || return 1
+  [ ! -L "$archive" ] || return 1
+  archive="$(cd -P -- "$archive" && pwd -P)" || return 1
+  case "$archive" in "$wt"|"$wt"/*) return 1 ;; esac
+  b="$(fs_id "$archive")"
+  [ -n "$b" ] && [ "$a" != "$b" ] || return 1
+  tmp="$(mktemp "$archive/${wt##*/}.XXXXXX")" || return 1
+  dest="$tmp.tar"
+  if ! tar -cf "$tmp" --exclude=node_modules --exclude=coverage -C "$wt" . || \
+     [ ! -s "$tmp" ] || ! tar -tf "$tmp" >/dev/null || ! mv -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"; return 1
+  fi
+  log "ARCHIVE-WORKTREE $wt orphan -> $dest"
+}
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head hosted unsaved
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
   else log "KEEP $wt: Git metadata is missing or has an unexpected type"; return
   fi
   if ! gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
-    log "KEEP $wt: Git metadata is unreadable or missing"; return
+    if [ "$kind" = "linked worktree" ]; then orphaned=1
+    else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
-  if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
+  if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
   is_worktree_idle "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -526,6 +549,17 @@ sweep_worktree() {
     *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
   esac
   if is_open "$wt"; then log "KEEP $wt: held open by a process"; return; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $wt: Docker mount snapshot failed (unknown)"; return; fi
+  if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount"; return; fi
+  if [ "$orphaned" = 1 ]; then
+    if ! archive_orphan "$wt"; then
+      log "KEEP $wt: Git metadata is unreadable or missing; orphan archive unavailable or unsafe"; return
+    fi
+    [ "$DRY_RUN" = 1 ] && return
+    log "REMOVE $wt (archived orphan)"
+    act rm -rf -- "$wt" || log "KEEP $wt: orphan removal failed"
+    return
+  fi
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -572,6 +606,25 @@ sweep_worktree() {
   elif ! rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then
     log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"
   fi
+}
+
+sweep_live_checkout() {
+  local checkout="${1%/}" wt child status top
+  [ -d "$checkout/.git" ] || [ -f "$checkout/.git" ] || return
+  [ ! -L "$checkout" ] && [ ! -L "$checkout/.git" ] || return
+  top="$(rgit "$checkout" rev-parse --show-toplevel 2>/dev/null)" || return
+  [ "$top" = "$(cd -P -- "$checkout" && pwd -P)" ] || return
+  for wt in "$checkout"/* "$checkout"/.[!.]* "$checkout"/..?*; do
+    [ -d "$wt/.git" ] && [ ! -L "$wt" ] && [ ! -L "$wt/.git" ] || continue
+    child="${wt##*/}"
+    rgit "$checkout" ls-files --error-unmatch -- "$child/" >/dev/null 2>&1; status=$?
+    [ "$status" = 1 ] || continue
+    rgit "$checkout" ls-files --error-unmatch -- "$child" >/dev/null 2>&1; status=$?
+    # Only Git's explicit no-match is a candidate; errors and tracked paths stay untouched.
+    [ "$status" = 1 ] || continue
+    if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"
+    else sweep_worktree "$wt"; fi
+  done
 }
 
 # ── rule 4 ──
@@ -642,7 +695,9 @@ scratch_repo_check() {
       case "$raw" in
         */.git/worktrees/*)
           parent="${raw%/.git/worktrees/*}"
-          if [ ! -e "$raw" ] && [ ! -e "$parent" ]; then return 0; fi ;;
+          if [ ! -e "$raw" ] && [ ! -e "$parent" ]; then
+            SCRATCH_ORPHAN_REPOS+=("$repo"); return 0
+          fi ;;
       esac
     fi
     SCRATCH_REASON="Git metadata is unreadable or missing"; return 1
@@ -823,7 +878,7 @@ sweep_scratch_unit() {
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
-  local -a SCRATCH_LIVE_REPOS=()
+  local -a SCRATCH_LIVE_REPOS=() SCRATCH_ORPHAN_REPOS=()
   scratch_guard "$p" || return
   is_worktree_idle "$p"; status=$?
   case "$status" in
@@ -844,6 +899,11 @@ sweep_scratch_unit() {
     if ! scratch_repo_check "$repo"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON ($repo)" "$entries"; return; fi
   done <<< "$entries"
   # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
+  for repo in ${SCRATCH_ORPHAN_REPOS[@]+"${SCRATCH_ORPHAN_REPOS[@]}"}; do
+    if ! archive_orphan "$repo"; then
+      keep_scratch_for_repo "$p" "orphan archive unavailable or unsafe ($repo)" "$entries"; return
+    fi
+  done
   for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
       if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
@@ -1103,7 +1163,8 @@ log "rmd-host-cleanup: retention idle $(fmt_minutes "$IDLE_MINUTES"), scratch $(
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 
-if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ]; then snapshot_docker; snapshot_alternates; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ] || [ "$ONLY_TMP" != 1 ]; then snapshot_docker; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ]; then snapshot_alternates; fi
 while IFS= read -r root; do
   [ -n "$root" ] && sweep_scratch_root "$root"
 done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')
@@ -1157,6 +1218,17 @@ if [ "$ONLY_TMP" != 1 ]; then
       else sweep_worktree "$wt"; fi
     done
   done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+
+  while IFS= read -r checkout; do
+    [ -n "$checkout" ] && sweep_live_checkout "$checkout"
+  done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
+
+  if [ -d "$WORKTREE_ARCHIVE_ROOT/orphans" ] && [ ! -L "$WORKTREE_ARCHIVE_ROOT/orphans" ]; then
+    find "$WORKTREE_ARCHIVE_ROOT/orphans" -type f -name '*.tar' -mtime "+$ARCHIVE_DAYS" 2>/dev/null | while IFS= read -r old; do
+      log "REMOVE $old: orphan archive older than ${ARCHIVE_DAYS} days"
+      act rm -f -- "$old"
+    done
+  fi
 
   check_archive_root
   if [ "$ARCHIVE_OK" = 1 ]; then

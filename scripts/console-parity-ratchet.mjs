@@ -116,6 +116,8 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // Explicit host-local state inspection; never a remote console mutation surface.
+      "inspect",
       // Phase 1 P1-04: rebuilds and swaps a host-local SQLite file and writes the kill-switch file on
       // the daemon host; the console reads the views it feeds, never the store itself.
       "read-model",

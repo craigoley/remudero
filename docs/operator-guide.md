@@ -13,6 +13,21 @@ not driving it turn by turn.
 
 ## The commands (`rmd`, `bin/rmd`)
 
+For a strict no-change investigation, use the explicit inspection entry point:
+
+```sh
+rmd inspect --state-dir /absolute/state ledger-grep 'retro'
+rmd inspect --state-dir /absolute/state skill effectiveness proof-preflight
+```
+
+It requires an existing absolute state directory and bypasses CLI invocation
+logging, temporary-directory cleanup, credential refresh and checkout self-sync.
+Only `ledger-grep` and `skill effectiveness` are admitted; write verbs, lifecycle
+actions and unknown flags are refused. No missing config or state is provisioned.
+The readers still require complete archive-plus-live history. Ordinary CLI verbs
+retain their existing behavior; `RMD_SELF_SYNC_DONE=1` alone is not this no-change
+entry point because it does not disable invocation logging or housekeeping.
+
 All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 `src/run-task.ts`.
 

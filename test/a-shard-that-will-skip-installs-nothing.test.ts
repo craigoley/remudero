@@ -169,7 +169,10 @@ test("W1-T5697: push and merge_group install on every ci shard, unconditionally"
   for (const event of ["push", "merge_group"]) {
     for (let shard = 1; shard <= 8; shard += 1) {
       const r = ciShard(event, ["src/lib/leaf.ts"], shard);
-      assert.deepEqual(r.outputs, { setup: "true", browser: "true" }, `${event} shard ${shard}/8`);
+      // started_ms is the job-start stamp the flake screen reads; it is a clock reading, not a decision.
+      const { started_ms: startedMs, ...decided } = r.outputs;
+      assert.match(startedMs ?? "", /^[1-9]\d*$/, `${event} shard ${shard}/8 stamps its start`);
+      assert.deepEqual(decided, { setup: "true", browser: "true" }, `${event} shard ${shard}/8`);
       assert.deepEqual([r.npm, r.chromium], [true, true], `${event} shard ${shard}/8 must install`);
     }
   }
