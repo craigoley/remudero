@@ -243,6 +243,10 @@ test("W1-T9039: the approve relint applies the draft floor repo facts", () => {
   const retired = BLOCKED.replace("  status: blocked\n", "  status: blocked\n  retirement: withdrawn\n");
   assert.deepEqual(relintRatificationFragment(retired, PROPOSAL_ID, facts), { ok: true, fragmentYaml: retired });
   assert.deepEqual(relintRatificationFragment(CALLED_MODULE, PROPOSAL_ID, facts), { ok: true, fragmentYaml: CALLED_MODULE });
+  // The approve gate resolves the same facts in the worktree it files into.
+  const stamp = stored(UNCALLED_MODULE).stampLine;
+  assert.throws(() => inbox.assertRatificationDraftFileable(UNCALLED_MODULE, PROPOSAL_ID, stamp, KNOWN, ROOT), /\[call-site\]/);
+  assert.doesNotThrow(() => inbox.assertRatificationDraftFileable(CALLED_MODULE, PROPOSAL_ID, stamp, KNOWN, ROOT));
   // A repair that leaves YAML the parser refuses is a draft-parse refusal, never a filing.
   const flow = "- {id: NEW-1, title: t, repo: remudero, depends_on: [], type: implement, verify: auto, risk: high, status: queued, " +
     "attempts: 0, files: [src/lib/ledger.ts], acceptance: [{claim: c, proof: \"unit test: c holds\"}], origin: architect}\n";
