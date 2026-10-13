@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createReadStream, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -71,6 +71,8 @@ test("a rotated dispatch claim preserves the promise harvest's earliest archive 
   const args = fixture(t), opened: string[] = [];
   const report = "ledger.2026-10-12T11-00-00-000Z.ndjson.gz";
   writeFileSync(join(args.dir, report), gzipSync(line(reportRow)));
+  const before = new Date(Date.now() - 1000);
+  utimesSync(join(args.dir, report), before, before);
   writeFileSync(args.ledgerPath, line({ step: "run.start", task_id: taskId, ts: "2026-10-12T12:00:00.000Z" }) +
     line({ step: "dispatch.claim", task_id: taskId, ts: firstRun }) +
     line({ step: "unrelated", padding: "x".repeat(4_000) }));
