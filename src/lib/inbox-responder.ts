@@ -7,6 +7,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
+import type { VerifyHumanRuling } from "./verify-human-judge.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
@@ -85,6 +86,7 @@ export interface ThreadDetailView extends ThreadSummaryView {
 }
 
 export type AttentionSourceState = "observed" | "partial" | "unavailable";
+export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
   views: ThreadSummaryView[];
@@ -93,7 +95,7 @@ export interface AttentionCensusInput {
   releasedTaskIds: ReadonlySet<string>;
   releaseReceipts?: ReadonlyMap<string, string>;
   mergedTaskIds?: ReadonlySet<string>;
-  judgeByTask: ReadonlyMap<string, { decision: string; reason: string }>;
+  judgeByTask: ReadonlyMap<string, AttentionJudgment>;
   sources: {
     plan: AttentionSourceState;
     registry: AttentionSourceState;
@@ -127,6 +129,9 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     const taskId = humanTaskId ?? deriveTaskReferent(view.proposalId);
     const task = taskId ? input.taskFacts.get(taskId) : undefined;
     const judge = taskId ? input.judgeByTask.get(taskId) : undefined;
+    const judgment: VerifyHumanRuling | undefined = judge?.state !== undefined ? judge :
+      humanTaskId || judge ? { state: "unclassified", reason: judge ?
+        `prior evidence omitted judgement state; refresh required: ${judge.reason}`.slice(0, 300) : "no judge verdict recorded" } : undefined;
     const released = humanTaskId !== undefined && input.releasedTaskIds.has(humanTaskId);
     const sourceFacts: Array<{ source: string; detail: string }> = [];
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
@@ -134,7 +139,7 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
     if (task?.dispatchHold) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: dispatch_hold: true; a release receipt alone cannot make this task dispatchable` });
     if (task?.risk === "high") sourceFacts.push({ source: "plan", detail: `${taskId}: risk: high in the filed task` });
-    if (judge) sourceFacts.push({ source: "judge", detail: `${humanTaskId ? "" : "Task verification context, not a proposal ruling: "}${judge.decision}: ${judge.reason.slice(0, 300)}` });
+    if (judgment) sourceFacts.push({ source: "judge", detail: `${humanTaskId ? "" : "Task verification context, not a proposal ruling: "}${judgment.state === "judged" ? judgment.decision : "unclassified"}: ${judgment.reason.slice(0, 300)}` });
     if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
     if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
@@ -143,6 +148,8 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
         ? `Proposal ${view.proposalId} references ${taskId}; its recommendation requires review. The task's verification mode is context, not approval of this proposal.`
         : task?.dispatchHold
         ? `${taskId} still has an explicit dispatch hold. A release receipt does not lift it; the operator must review the held task.`
+        : judgment?.state === "unclassified"
+        ? `${taskId}'s verification judgement is unclassified; triage its evidence before treating it as a verified need for an operator decision.`
         : `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.`
         : `Proposal ${view.proposalId} is ready for an operator decision.`
       : view.attention === "reply" ? `Proposal ${view.proposalId} asks for an operator reply.`
@@ -153,19 +160,21 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
       threadId: view.threadId, proposalId: view.proposalId, ...(taskId ? { taskId } : {}),
       kind: inboxKind(view.proposalId), waitingOn: view.waitingOn, attention: view.attention,
       classification: classification?.state ?? "unavailable", whyMe, sourceFacts,
+      ...(judgment ? { judgment } : {}),
       ...(classification?.retiredReason ? { retiredReason: classification.retiredReason } : {}),
     };
   }).sort((a, b) => a.proposalId.localeCompare(b.proposalId));
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
   // A human-attention label is not proof that the proposal is prepared for approval. Keep the
   // observed decision total, but expose that distinction before a UI calls it actionable.
-  const decisionReadiness = { ready: 0, needsPreparation: 0, unknown: 0 };
+  const decisionReadiness = { ready: 0, needsPreparation: 0, needsTriage: 0, unknown: 0 };
   const kinds: Record<string, number> = {};
   for (const item of items) {
     counts[item.attention] += 1;
     kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
     if (item.attention === "decision") {
-      if (item.classification === "ready") decisionReadiness.ready += 1;
+      if (item.proposalId.startsWith("verify-human:") && item.judgment?.state === "unclassified") decisionReadiness.needsTriage += 1;
+      else if (item.classification === "ready") decisionReadiness.ready += 1;
       else if (item.classification === "not_ready" || item.classification === "drafting") decisionReadiness.needsPreparation += 1;
       else decisionReadiness.unknown += 1;
     }
