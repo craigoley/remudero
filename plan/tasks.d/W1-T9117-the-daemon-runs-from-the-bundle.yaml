@@ -104,5 +104,5 @@
     10-30 minutes of uptime, as ADR 0007 split them), and tsx cache churn (bytes written under the daemon's tsx cache
     directory per hour, read by `du` and mtime on the host, against ADR 0006's ~700 MB/h fleet figure). Healthy shape:
     the bundled boot is no slower and no larger than the tsx boot of the same sha, and the daemon writes no tsx cache.
-    ORDER: after W1-T8777 (worker bundles). W1-T8777's priority raise and W1-T9091 are in PR #11347, OPEN when this
-    record was filed; W1-T8777 itself is on origin/main.
+    ORDER: after W1-T8777 (worker bundles). W1-T8777's priority raise and W1-T9091 came in PR #11347, merged
+    2026-10-13 before this filing was opened.

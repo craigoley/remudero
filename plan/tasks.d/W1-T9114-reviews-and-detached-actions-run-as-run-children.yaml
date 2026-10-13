@@ -99,5 +99,5 @@
     pass mark: `review_drain` lane-min in the flow remeasure (healthy shape: near zero once reviews are children);
     `daemon.freshness_drain.completed` `in_flight_reviews` (healthy shape: zero under the promoted mode);
     `run_child.lost` rows by kind (healthy shape: none that were not there before).
-    ORDER: after W1-T9086 (adoption exists for build runs). W1-T9070..W1-T9087 are filed in PR #11347, OPEN when this
-    record was filed; the ids are reserved, so this dependency holds once that filing merges.
+    ORDER: after W1-T9086 (adoption exists for build runs). W1-T9070..W1-T9106 were filed in PR #11347, merged
+    2026-10-13 before this filing was opened.
