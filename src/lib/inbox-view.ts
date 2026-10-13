@@ -12,7 +12,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readInboxStores, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -79,10 +79,12 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
     });
   }
   // The stores are read once, with the pass, and persisted with it: the bodies and every legacy read page the same.
-  const stores = readInboxStores(deps.inboxRoot, proposals);
+  const now = clock.now();
+  // W1-T8825: the slow lane alone records when the inbox first saw each id; a read only reads that record.
+  recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
+  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines });
   const content = persistedContent(classified, stores);
   const identity = persistedInboxIdentity(content);
-  const now = clock.now();
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   if (written) {
