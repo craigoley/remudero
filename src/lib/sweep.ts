@@ -39,6 +39,8 @@ import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   armOutcomeReason,
+  heldPlanPrFromLedger,
+  PLAN_PR_REEVALUATED_STEP,
   decideArmReprobeFromFacts,
   armFailureAction,
   armFailureIsRateLimited,
@@ -19022,13 +19024,24 @@ export async function runSweepLightPass(
   };
   // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
   const planMergeToken = Symbol("light-pass-plan-merge");
-  const planMergeCandidate = lightPassPlanMergeOwner !== undefined
-    ? undefined
-    : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
+  // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
+  // one at a time under that same claim, instead of leaving each for a later pass.
+  const planMerges = lightPassPlanMergeOwner !== undefined
+    ? []
+    : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines);
+  const planMergeCandidate = planMerges[0];
   if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
   const releasePlanMerge = (): void => {
     if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
   };
+  const planMergeSequence = new Map<number, { index: number; done: Promise<void>; finish: () => void }>();
+  planMerges.forEach((pr, index) => {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    planMergeSequence.set(pr.prNumber, { index, done, finish });
+  });
+  const lastPlanMergeNumber = planMerges.at(-1)?.prNumber;
+  const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -19121,7 +19134,8 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      if (planMergeCandidate?.prNumber === pr.prNumber) {
+      const planMergeTurn = planMergeSequence.get(pr.prNumber);
+      if (planMergeTurn !== undefined) {
         // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
         // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
         // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
@@ -19146,8 +19160,28 @@ export async function runSweepLightPass(
           });
         };
       }
-      return runSweep([pr], scopedDeps, policy).finally(() => {
-        if (pr.prNumber === planMergeCandidate?.prNumber) releasePlanMerge();
+      // W1-T9212: a held plan PR waits for the plan PR ahead of it, so the claim covers one merge at a time.
+      const previousPlanMerge = planMergeTurn !== undefined && planMergeTurn.index > 0
+        ? planMergeSequence.get(planMerges[planMergeTurn.index - 1]!.prNumber)?.done : undefined;
+      const heldAtSelection = planMergeTurn !== undefined
+        ? heldPlanPrFromLedger(selectionLedgerLines, pr) : undefined;
+      const sweepOne = async (): Promise<SweepSummary> => {
+        if (previousPlanMerge !== undefined) await previousPlanMerge;
+        return runSweep([pr], scopedDeps, policy);
+      };
+      return sweepOne().then(async (summary) => {
+        if (heldAtSelection !== undefined && !deps.dryRun) {
+          const disposed = readLedger(deps.ledgerPath).findLast((l) => l.step === "sweep.disposed" &&
+            l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+          reevaluationRows(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: PLAN_PR_REEVALUATED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, trigger: heldAtSelection.trigger,
+            wait_ms: Math.max(0, now - heldAtSelection.heldAtMs),
+            ...(typeof disposed?.arm_outcome === "string" ? { arm_outcome: disposed.arm_outcome } : {}) });
+        }
+        return summary;
+      }).finally(() => {
+        planMergeTurn?.finish();
+        if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
       });
     }),
@@ -19278,12 +19312,30 @@ export function selectLightPassPlanMerge(
   now: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): OpenPrView | undefined {
+  return selectLightPassPlanMerges(openPrs, policy, now, ledgerLines)[0];
+}
+
+/** W1-T9212 — the plan PRs ONE light pass merges under its single claim, in the order it takes them:
+ *  the {@link selectLightPassPlanMerge} choice first (a held plan PR, longest-held first, outranks one
+ *  never held), then every OTHER held plan PR this pass observes ready. A plan PR that was never held
+ *  keeps W1-T5901's one-per-pass bound. A PR GitHub still reads unmergeable is re-read by its own arm,
+ *  never merged on the hold's inherited reading. */
+export function selectLightPassPlanMerges(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): OpenPrView[] {
   const attempts = (pr: OpenPrView): number =>
     ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
       l.head_sha === pr.headSha && l.arm_attempted === true).length;
-  return openPrs
+  const ready = openPrs
     .filter((pr) => pr.isPlanFiling === true && deriveDisposition(pr, policy, now).disposition === "mergeable")
-    .sort((a, b) => attempts(a) - attempts(b) || a.prNumber - b.prNumber)[0];
+    .map((pr) => ({ pr, held: heldPlanPrFromLedger(ledgerLines, pr) }));
+  ready.sort((a, b) =>
+    (a.held?.heldAtMs ?? Infinity) - (b.held?.heldAtMs ?? Infinity) || attempts(a.pr) - attempts(b.pr) ||
+    a.pr.prNumber - b.pr.prNumber);
+  return ready.filter((entry, index) => index === 0 || entry.held !== undefined).map((entry) => entry.pr);
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
