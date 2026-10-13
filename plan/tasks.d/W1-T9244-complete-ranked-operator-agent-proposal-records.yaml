@@ -1,0 +1,108 @@
+- id: W1-T9244
+  title: Complete ranked operator-agent proposal records come from the one cached core engine
+  repo: remudero
+  depends_on: [W1-T5051]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.2
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: operator#2026-10-13-console-agent-proposal-detail-followups
+  plan_refs: [W1-T3977, W1-T4001, W1-T4555, CONSOLE-T100]
+  files: [src/lib/agent-view.ts, src/lib/nav-badge-view.ts, test/agent-view.test.ts, test/nav-badge.test.ts, test/read-model-worker.test.ts, openapi/daemon.yaml, docs/views.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED SOURCE on a28c3d23a72be5d47e1479c54b5fc285e40d3fdf:
+    operatorAgentCandidates emits only proposalId/category/signal/confidence and
+    proposalsBody materializes exactly those rank entries. The separate history part
+    contains only already-registered ledger proposals. Console's single-engine consumer
+    joins ranks to that history and correctly refuses unmatched IDs after console2091.
+    A new candidate with no prior registration therefore has no displayable text,
+    reasoning or evidence even after native parity readiness eventually passes.
+
+    The missing-record seam is distinct from collection11319, repository inventory2090,
+    evidence-state2091, paused-card2092 and phone-bounds2093. The live guard remains in
+    shadow; absence of live usable proposals does not prove an empty engine or justify
+    enabling it. Existing W5051 built the fold and sole ranking engine; this task completes
+    its read contract without reviving the console's deleted engine. Risk high describes
+    the producer/contract/cached-consumer span across repositories, not authority to act.
+  design: |
+    Materialize a bounded complete recommendation record for each visible rank from
+    the same operatorAgentCandidates evaluation, committed analytics and folded history
+    used by the badge. Keep one generation/ranking/preference path. Publish explicit
+    text, reasoning, exact repository/instance identity, category, source observation
+    timestamp, evidence values/units/source/freshness, and the native heuristic score.
+    Human-readable templates belong in core at generation time; no LLM/provider call,
+    client reconstruction, request-time ledger scan or second analytics engine.
+
+    Cover every existing supported signal: token-burn, queued/slow runs, worker failure,
+    proof pass/fail, revert class, approval pattern and capacity recommendation. State
+    only what the measured cohort supports. A high pass rate never proves that proof
+    validation can be disabled or made permissive; approval history never grants an
+    auto-merge policy. Do not invent savings, causation, cost, healthy outcomes, confidence
+    probabilities, independent sample sizes, current worker counts or human consent.
+    Unknown denominators, source windows and unmapped signals remain named unavailable.
+
+    Distinguish generated recommendation records from registered durable history. A read
+    never appends a proposal or decision, marks it accepted, records an outcome or creates
+    a learned preference. Preserve existing immutable pending/terminal history, original
+    createdAt and exact lifecycle. Do not overwrite a durable payload merely to attach
+    a newer ranking score. Expose rank and durable detail provenance separately when
+    they differ; later console consumption must not present a draft as ledger history.
+    Existing authorized registration/decision routes remain the only write paths.
+
+    Specify the real additive record shape in AgentProposalsBody and OpenAPI. Preserve
+    existing rank fields, IDs, visibility threshold, ordering and terminal exclusion so
+    older consumers/badge still work. Preserve parts/version compatibility unless a real
+    incompatible change requires a separately gated version transition. Missing details
+    must carry explicit coverage/refusal, not silently drop a rank or certify empty data.
+    Use deterministic content/observation identity for unchanged snapshots; never stamp
+    evidence with request time. Bound strings, rows and total view size before publishing
+    and disclose capped coverage. Foreign repo/instance, malformed analytics, future
+    observations and unknown source data cannot produce fresh complete recommendations.
+
+    Preserve the existing incremental fenced fold, committed source-snapshot ownership,
+    heavy-worker shadow pairing and sole fast comparator writer. GET serves the cached
+    record and sources; no additional timers, scans, activation, permissions or actions.
+    No guard floor,24h horizon, traffic multiplier, source freshness or evidence-strength
+    policy is relaxed. A changed projection must receive genuine native qualification;
+    never inherit an incompatible body generation's old parity receipt or forcepromotion.
+
+    Exercise real candidate generation, persisted fold/source snapshots and default worker
+    plus cached HTTP path, with empty durable history as the positive new-candidate case.
+    Include same IDs in different instances, stale/unknown sources, long untrusted labels,
+    missing details, limits, terminal decisions and pending durable payloads. Preserve
+    badge-rank parity and output stability across refresh/restart. Update actual caller
+    and contract census suites; do not rely only on injected synthetic candidate lists.
+  acceptance:
+    - claim: Each visible native rank has bounded source-qualified text reasoning and evidence without prior registration
+      proof: 'unit test: W1-T9244: new ranked proposals carry complete evidenced records from the sole core engine'
+    - claim: Unknown foreign stale malformed and over-budget inputs cannot create confident complete proposal records
+      proof: 'unit test: W1-T9244: proposal detail publication preserves bounds identity and honest coverage'
+    - claim: Existing badge ranking preferences and immutable ledger lifecycle remain compatible
+      proof: 'unit test: W1-T9244: complete proposal records preserve ranking and durable history ownership'
+    - claim: The actual worker and cached HTTP read publish records without extra scans writes or provider calls
+      proof: 'unit test: W1-T9244: default worker and HTTP serve complete cached proposals without side effects'
+  falsifier: |
+    Remove actual materialization of complete records while retaining rank generation:
+    the empty-history default-worker/HTTP positive case must fail, not an import error.
+    Remove identity/source/bounds checks independently; each refusal case must fail.
+    Restore exact committed source and require native author/caller/census gates, complete
+    physical TAP, same-tree changed-source instrumentation, discriminating diff coverage,
+    actual GitHub stored-body parsing, current-head governed review and all required CI.
+    Merge, runtime adoption, native parity readiness and console consumption are separate
+    receipts. Filing this task is not implementation, adoption or live agent recovery.
+  note: |
+    Reserved by native rmd next-task-id from the operator checkout for branch
+    codex/agent-projection-followups-2026-10-13; independently verified anchor
+    ab7090c5f8328522a6d3c4b11713fc07af722fe5 at refs/rmd-id/W1-T9244.
+    Main and every head in the complete16:09 open-PR snapshot were subject-swept with
+    positive physical plan/source controls. W5051, W3977 and consoleT100 are related
+    contracts, not a completed detail materialization. Recheck current owners and the
+    native selector before building. Preserve W216/other operator holds and all guards.
+    Consumer work must first pin the actual merged, positively observed producer shape;
+    no guessed DTO, fake ledger entry or prospective schema becomes a production read.
+    Research: https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view
