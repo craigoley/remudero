@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { REAL_SCRIPT } from "./helpers/fleet-heartbeat-harness.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
 // live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
@@ -297,7 +298,7 @@ function budgeted(overrides: Record<string, string>): { beat: Record<string, str
 
 test("a consumer walk stops at its time budget and publishes the cut consumer and every later walk unknown, never 0", () => {
   const { beat, walks, elapsedMs } = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" });
-  assert.ok(elapsedMs < 8_000, `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s`);
+  assertWallClockBound(elapsedMs, 8_000, `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s`);
   assert.ok(walks.at(-1)?.endsWith(" du -sk /var/lib/containerd"), "positive control: the slow walk started, and no walk started after it");
   assert.equal(beat.consumer_containerd_kb, "unknown", "a walk cut off by the budget is unknown, never 0");
   assert.equal(beat.consumer_worktrees_kb, "42000", "walks finished inside the budget keep their sizes");
