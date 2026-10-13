@@ -55,7 +55,7 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -198,7 +198,7 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./li
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
-import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
@@ -390,6 +390,7 @@ import {
   runRelintLoop,
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
+import { censusRunDirs } from "./lib/run-child-contract.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -3035,7 +3036,7 @@ import {
   REPORT_EXCERPT_CAP,
   STDERR_EXCERPT_CAP,
   noPrReportExcerpt,
-  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock,
+  foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath,
   workerLedgerFields,
   workerTranscript,
   withAssignmentTrailer, resolveCommitAssignment,
@@ -33058,15 +33059,68 @@ export async function addLaneWorktree(
   return { branch, worktreePath };
 }
 
+/** W1-T9153: an add refused because another LIVE run's lock is at the path. Nothing was written: the holder's lock,
+ *  worktree and branch are exactly as they were, and the message names the path, the holder's pid and its run_id. */
+export class RunWorktreeHeldError extends RmdError {
+  constructor(readonly worktreePath: string, readonly holder: RunLockInfo) {
+    super("git", GENERIC_EXIT_CODE,
+      `refusing to add ${worktreePath}: its run lock is held by live pid ${holder.pid} (run_id ${holder.run_id}) (W1-T9153)`,
+      { worktreePath, holder_pid: holder.pid, holder_run_id: holder.run_id });
+    this.name = "RunWorktreeHeldError";
+  }
+}
+
+function parseRunLockHolder(raw: string): RunLockInfo | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<RunLockInfo> | null;
+    return typeof parsed?.pid === "number" ? (parsed as RunLockInfo) : null;
+  } catch {
+    return null; // garbled bytes name no holder, so reclaimStaleLock judges them stale, as it does a dead pid
+  }
+}
+
+/** W1-T9153: CLAIM a path's run lock, never overwrite it. The overwrite let a second approve replace a live holder's lock,
+ *  fail its add, and then delete the lock the holder depended on. `link(2)` is the exclusive create: it fails EEXIST
+ *  over any lock, so of two runs that both found none exactly one wins, and the link publishes complete bytes, so no
+ *  reader sees a half-written lock. A lock already there is judged by {@link worktreeLockIsPidAlive}, the reaper's own
+ *  predicate: another live run's refuses the add; a dead or unparseable holder's (or this process's own, as the
+ *  overwrite allowed) is reclaimed through {@link reclaimStaleLock}, whose identity check keeps two reclaimers of one
+ *  dead lock from both winning. */
+function claimRunLock(worktreePath: string, runId: string): void {
+  const target = runLockPath(worktreePath);
+  const staged = `${target}.claim-${process.pid}`; // one claim per process at a time: this function never yields
+  writeFileSync(staged, JSON.stringify({ pid: process.pid, run_id: runId, startedAt: systemClock.iso() }, null, 2));
+  try {
+    for (;;) {
+      try {
+        linkSync(staged, target);
+        return;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      const held = reclaimStaleLock(target, {
+        parseHolder: parseRunLockHolder,
+        isStale: (holder) => holder.pid === process.pid || !worktreeLockIsPidAlive(holder.pid, holder),
+      });
+      if (held.outcome === "live") throw new RunWorktreeHeldError(worktreePath, held.holder);
+      // "reclaimed" | "missing" | "lost": the path changed under this look, so claim again from the top.
+    }
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
 /** W1-T5356: a `run-*` lane's sync add, LOCK FIRST — runTaskBody's W1-T5280 order for every other lane. A sync add blocks
  *  only its own event loop; a prune in ANOTHER process (an approve pid, a hand-run `rmd`) still reaches a lockless path
- *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on. */
+ *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on.
+ *  W1-T9153: the lock is CLAIMED ({@link claimRunLock}), so a path another live run holds is refused before anything is
+ *  written, and the lock a failed add drops is always this run's own. */
 export function addLockedRunWorktree(
   repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   mkdirSync(worktreePath, { recursive: true }); // reapStaleWorktrees deletes a `.lock` whose directory is absent
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  claimRunLock(worktreePath, runId);
   try {
     worktreeAdd(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
@@ -33082,7 +33136,7 @@ export async function addLockedRunWorktreeAsync(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<void> {
   mkdirSync(worktreePath, { recursive: true });
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  claimRunLock(worktreePath, runId); // W1-T9153: the same claim as the sync add
   try {
     await worktreeAddAsync(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
@@ -39124,6 +39178,13 @@ export async function daemonCommand(
     // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
     headroom_enabled: opts.headroomEnabled,
   });
+  // W1-T9070: the positive control for ADR 0007's run children. No spawn site writes a run directory yet, so this
+  // reads all zeros; the adoption task builds on it. A failed read is ledgered, never read as zeros.
+  try {
+    log("run_child.boot_census", { ...censusRunDirs(join(config.root, "state")) });
+  } catch (censusError) {
+    log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
+  }
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
@@ -52323,6 +52384,10 @@ export async function approveCommand(
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
+  // W1-T9153: the worktree this run may tear down, recorded only once ITS add returned. Both are set by
+  // `addApproveWorktree` below and never before the add: a run whose add threw or was refused never owned what lives at
+  // that path, which may be another live approve's tree, so its teardown removes nothing.
+  let addedWorktreePath: string | undefined;
   // The shard path(s) this ratification wrote, captured beside `filedTaskIds` and for the same
   // reason: `openPlanPr` runs after the branch call and must name what was ACTUALLY written rather
   // than a path it assumes. Empty on the adopt/resume paths, which write nothing.
@@ -52350,6 +52415,10 @@ export async function approveCommand(
     }
     return repoDir;
   };
+  const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
+    addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
+    return (addedWorktreePath = path);
+  };
   // A fresh, locked worktree on this run's branch at origin/main — shared by the two skill paths (W1-T4338's write,
   // the lifecycle retirement), which write under .claude/skills/ rather than filing plan shards.
   const freshSkillApproveWorktree = (): { branch: string; path: string } => {
@@ -52357,9 +52426,7 @@ export async function approveCommand(
     const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
     if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
     const branch = approveRunBranch(runId);
-    // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
-    const path = (worktreePath = join(worktreesDir(config), branch));
-    addLockedRunWorktree(dir, path, branch, "origin/main", runId, log); // W1-T5356: lock before add
+    const path = (worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main"));
     return { branch, path };
   };
   // W1-T4437: the mint/write/commit steps `createRatificationBranch` and `joinRatificationBranch`
@@ -52512,10 +52579,9 @@ export async function approveCommand(
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
       // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
-      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
+      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, `origin/${branch}`);
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
@@ -52539,9 +52605,8 @@ export async function approveCommand(
       // never the id itself (a registry key and a ledger value), and the SAME call fixes the
       // WORKTREE DIRECTORY on the next line, which is derived from this string.
       const branch = approveRunBranch(runId);
-      worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see completeRatificationBranch's identical note, above.
-      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
+      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main");
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -52556,8 +52621,7 @@ export async function approveCommand(
       const dir = ensureRepoDir();
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-      worktreePath = join(worktreesDir(config), branch);
-      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
+      worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, `origin/${branch}`);
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -52686,14 +52750,15 @@ export async function approveCommand(
     // (if any) comes back rather than punching a phantom-id hole.
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlock?.releaseAll();
-    if (repoDir && worktreePath) {
+    // W1-T9153: only a worktree this run's add returned. A refused or failed add left nothing of its own here.
+    if (repoDir && addedWorktreePath) {
       try {
-        worktreeRemove(repoDir, worktreePath);
+        worktreeRemove(repoDir, addedWorktreePath);
       } catch {
         /* best-effort */
       }
       try {
-        removeRunLock(worktreePath);
+        removeRunLock(addedWorktreePath);
       } catch {
         /* best-effort */
       }
@@ -52737,7 +52802,7 @@ export async function approveCommand(
     throw new Error("rmd approve: gateway reported success but never created a ratification branch");
   }
   const ownedRepoDir = repoDir;
-  const ownedWorktreePath = worktreePath;
+  const ownedWorktreePath = addedWorktreePath; // W1-T9153: the one this run's add returned
   const removeApproveWorktree = () => {
     if (ownedRepoDir && ownedWorktreePath) worktreeRemove(ownedRepoDir, ownedWorktreePath);
   };
