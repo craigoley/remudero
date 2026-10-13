@@ -1828,7 +1828,8 @@ import {
   inFlightReviewCount,
   readIdleLightCadence,
 } from "./lib/sweep.js";
-import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { createSizedMemo, sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -2277,7 +2278,7 @@ export function readyDraftViaGh(
 }
 
 let baseReproductionQueue: Promise<void> = Promise.resolve();
-const baseReproductionHostCache = new Map<string, BaseProbeFile>();
+const baseReproductionHostCache = createSizedMemo<string, BaseProbeFile>();
 
 export function buildBaseReproductionProbe(
   config: Config, repoDir: string, ledgerPath: string,
@@ -35625,7 +35626,7 @@ export function openSiblingObservation(
   };
 }
 
-const dispatchFilingCache = new Map<string, CostOfDelaySnapshot>();
+const dispatchFilingCache = createSizedMemo<string, CostOfDelaySnapshot>();
 const dispatchFallbackKeys = new Map<string, string>();
 
 /** The dispatch filing read's answer: the committed filing dates, or why they could not be read. */
@@ -35722,9 +35723,17 @@ export function prefetchedDispatchFilingReader(
 /** The process's one prefetched filing reader: the daemon and the drain prime it, dispatch selection reads it. */
 export const dispatchFilingPrefetch = prefetchedDispatchFilingReader();
 
+const DISPATCH_LEDGER_FIELDS = new Set(["ts", "step", "run_id", "task_id", "task_class", "verdict", "cost_usd", "stage", "reason", "key"]);
+
+export function projectDispatchLedgerRow(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([field]) => DISPATCH_LEDGER_FIELDS.has(field)));
+}
+
 /** The daemon's dispatch-selection union: a repeated selection over an unchanged ledger reads nothing, and a
  * changed one reads only the live file's new tail and any new rotation (see createIncrementalLedgerUnion). */
-const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({ holder: "dispatch-value", reducerVersion: "1" });
+const dispatchSelectionLedgerUnion = createIncrementalLedgerUnion({
+  holder: "dispatch-value", reducerVersion: "2", project: projectDispatchLedgerRow,
+});
 /** The sorted evidence of a frozen (cached, so unchanging) union, so an unchanged union is never re-sorted. */
 const dispatchEvidenceByUnion = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReadonlyArray<Record<string, unknown>>>();
 
@@ -38582,6 +38591,13 @@ export function daemonMemoryTelemetryReader(
       heapStatistics: v8HeapStatistics,
       workload: () => ({ active_workers: activeWorkerCount(), in_flight_reviews: inFlightReviewCount() }),
       bootHeadSha,
+      memoSizes: () => ({
+        dispatchSelectionLedgerUnion: dispatchSelectionLedgerUnion.size(),
+        terminalUnionScans: terminalUnionScans.size(),
+        mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size(),
+        dispatchFilingCache: dispatchFilingCache.size(),
+        baseReproductionHostCache: baseReproductionHostCache.size(),
+      }),
     });
     // The same reading, kept as the daemon's own rolling footprint for the memory budget (daemon-footprint.ts). A
     // failed persist keeps the sample in memory and rides the row.
@@ -43875,7 +43891,10 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
-    if (opts.cache) opts.cache.mergedPathsByPr = byPr;
+    if (opts.cache) {
+      opts.cache.mergedPathsByPr = byPr;
+      if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
+    }
   } catch {
     /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
   }
@@ -43909,7 +43928,10 @@ function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptio
       const m = line.match(/\(#(\d+)\)\s*$/);
       if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
     }
-    if (opts.cache) opts.cache.mergeSubjects = byPr;
+    if (opts.cache) {
+      opts.cache.mergeSubjects = byPr;
+      if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
+    }
   } catch {
     /* best-effort: an unreadable log yields an empty map, and unknown declines */
   }
@@ -43926,7 +43948,7 @@ const MERGED_PATHS_PER_PR_CAP = 200;
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
-const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
+const mergeLogEvidenceByRoot = createSizedMemo<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
 /** W1-T4774: retain one successful snapshot per checkout; failed reads remain retryable. */
 function resolveMergeLogReadOptions(root: string | undefined): MergeLogReadOptions {

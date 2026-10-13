@@ -16,6 +16,7 @@ import {
   LEDGER_STAGE_TAGS,
 } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
+import { approximateMemoBytes, createSizedMemo, type MemoSize } from "./daemon-memory-telemetry.js";
 
 const gunzipAsync = promisify(nodeGunzip);
 
@@ -1749,15 +1750,25 @@ interface IncrementalUnionState {
  * The union itself (order, replay dedupe, `ok` and `unread`) is still {@link readLedgerUnionRecordsSync}'s.
  * Only `step`, `refuseIncomplete` and `requireArchives` are cached; any other option reads uncached. The
  * returned `rows` array is frozen and shared between calls: a caller must not mutate it or its rows.
+ * `project` declares the fields this consumer reads; change `reducerVersion` whenever it changes.
  */
 export function createIncrementalLedgerUnion(
-  opts: { holder: string; reducerVersion: string },
+  opts: { holder: string; reducerVersion: string; project?: (row: Record<string, unknown>) => Record<string, unknown> },
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
-): (stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead {
+): ((stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead) & { size(): MemoSize } {
   const statSync = fsDeps.statSync ?? realLedgerFs.statSync;
   const readRange = fsDeps.readRangeSync ?? realLedgerFs.readRangeSync;
-  const states = new Map<string, IncrementalUnionState>();
-  return (stateDir, readOpts = {}) => {
+  const states = createSizedMemo<string, IncrementalUnionState>((key, state) => {
+    const reads = [...state.rotations.values()].map((entry) => entry.read);
+    if (state.live) reads.push(state.live.read);
+    const rows = new Set(reads.flatMap((read) => read.rows));
+    for (const row of state.last?.result.rows ?? []) rows.add(row);
+    return { entries: rows.size, approx_bytes: approximateMemoBytes([key, [...rows],
+      [...state.rotations].map(([path, entry]) => [path, entry.key]), reads.map((read) => read.tornLines),
+      state.last?.signature]) + (state.live?.anchor.length ?? 0) + rows.size * 64 };
+  });
+  const project = opts.project ?? ((row: Record<string, unknown>) => row);
+  const reader = (stateDir: string, readOpts: LedgerUnionRecordReadOptions = {}): LedgerUnionRecordRead => {
     const { step, refuseIncomplete, requireArchives, ...rest } = readOpts;
     if (step === undefined || Object.values(rest).some((value) => value !== undefined)) {
       return readLedgerUnionRecordsSync(stateDir, readOpts, fsDeps);
@@ -1765,7 +1776,6 @@ export function createIncrementalLedgerUnion(
     const steps = typeof step === "string" ? [step] : [...step];
     const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
-    states.set(stateKey, state);
 
     const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
     const keys = new Map<string, string>();
@@ -1790,13 +1800,18 @@ export function createIncrementalLedgerUnion(
     }
     const signature = JSON.stringify([unclassified, auxiliary, rotations.map((entry) => [entry.path, keys.get(entry.path) ?? null]), liveKey ?? null]);
     if (liveKey !== undefined && state.last?.signature === signature) return state.last.result;
+    if (liveKey === "absent") state.live = undefined;
 
-    const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => rows.filter((row) => stepMatches(row, steps));
+    const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
+      rows.filter((row) => stepMatches(row, steps)).map(project);
     let digests: ReturnType<typeof ledgerRotationDigests> | undefined;
     const kept = new Map<string, { key: string; read: LedgerRotationRecords }>();
     const rotationRecords: LedgerRotationHook = (entry, parse) => {
       const key = keys.get(entry.path);
-      if (key === undefined) return parse();
+      if (key === undefined) {
+        const read = parse();
+        return { ...read, rows: reduce(read.rows) };
+      }
       const hit = state.rotations.get(entry.path);
       if (hit?.key === key) {
         kept.set(entry.path, hit);
@@ -1811,7 +1826,7 @@ export function createIncrementalLedgerUnion(
     const scan = (buf: Buffer): LedgerRotationRecords => {
       const rows: Array<Record<string, unknown>> = [];
       const tornLines: string[] = [];
-      const torn = scanLedgerBuffer(buf, undefined, (row) => void (stepMatches(row, steps) && rows.push(row)), 0,
+      const torn = scanLedgerBuffer(buf, undefined, (row) => void (stepMatches(row, steps) && rows.push(project(row))), 0,
         Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
       return { rows, torn, tornLines };
     };
@@ -1845,8 +1860,10 @@ export function createIncrementalLedgerUnion(
     Object.freeze(result.rows);
     state.rotations = kept;
     state.last = result.unread.length === 0 ? { signature, result } : undefined;
+    states.set(stateKey, state);
     return result;
   };
+  return Object.assign(reader, { size: states.size });
 }
 
 export function resolveLedgerUnion(
