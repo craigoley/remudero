@@ -117,6 +117,18 @@ export interface LedgerMalformedRowFinding {
   namedTaskIds?: string[];
 }
 
+export const ledgerRunBelongsToTask = (taskId: string, runId: unknown): runId is string =>
+  typeof runId === "string" && (runId === taskId || runId.startsWith(`${taskId}-`));
+
+/** A damaged row could be this task's only when it names the task or one of its runs, or when it
+ * names no identity at all and its time cannot be read or falls inside the task's window. */
+export function malformedRowCouldBelong(finding: LedgerMalformedRowFinding, taskId: string, windowStart: string): boolean {
+  if (finding.taskId === taskId || ledgerRunBelongsToTask(taskId, finding.runId) || (finding.namedTaskIds ?? []).includes(taskId)) return true;
+  if (finding.taskId !== undefined || finding.runId !== undefined) return false;
+  const at = finding.timestamp === undefined ? Number.NaN : Date.parse(finding.timestamp);
+  return Number.isNaN(at) || at >= Date.parse(windowStart);
+}
+
 export interface LedgerMalformedSource {
   path: string;
   form: LedgerFileForm;
