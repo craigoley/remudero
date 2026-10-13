@@ -146,8 +146,7 @@ export interface DecisionSummary {
   decision: string;
   /** 2-3 labelled choices, each with a one-line consequence. */
   options: DecisionSummaryOption[];
-  /** OPTIONAL (W1-T8829) — one line on what concretely happens if nobody decides. Absent on cards
-   *  whose producer does not ask for it (escalation, triage); present only when well-formed. */
+  /** Optional (W1-T8829): what happens if nobody decides; escalation and triage omit it. */
   if_nothing_happens?: string;
 }
 
@@ -186,7 +185,6 @@ export function validateDecisionSummary(x: unknown): DecisionSummary | null {
     consequence: opt.consequence.trim(),
   }));
   const card: DecisionSummary = { headline, what_happened: (o.what_happened as string).trim(), decision, options };
-  // Optional: a malformed value is dropped, never a reason to refuse an otherwise valid card.
   if (isBoundedString(o.if_nothing_happens, 300) && !(o.if_nothing_happens as string).includes("\n")) {
     card.if_nothing_happens = (o.if_nothing_happens as string).trim();
   }
