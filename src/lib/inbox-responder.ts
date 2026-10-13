@@ -230,11 +230,20 @@ export function markThreadRead(path: string, threadId: string, seq: number): voi
   writeAtomic(path, JSON.stringify(marks, null, 2) + "\n");
 }
 
+/** W1-T9252: replies and answers read in the order they were stored; an EVENT is stored when it is mirrored or
+ *  backfilled, which can be after later messages, so each one is placed by its own time instead. */
+function inTimeOrder(stored: ThreadMessageView[]): ThreadMessageView[] {
+  const events = stored.filter((m) => m.extra?.event).sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.seq - b.seq);
+  const ordered = stored.filter((m) => !m.extra?.event).sort((a, b) => a.seq - b.seq);
+  for (const event of events) {
+    const at = ordered.findIndex((m) => !m.extra?.event && (m.ts ?? 0) > (event.ts ?? 0));
+    ordered.splice(at === -1 ? ordered.length : at, 0, event);
+  }
+  return ordered;
+}
+
 function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMarks): ThreadDetailView {
-  // W1-T9252: an event is stored when it is mirrored (or backfilled), which can be after later messages, so the
-  // thread reads in the order things happened: the opening message, then by time (seq breaks a tie).
-  const ordered = stored.map(storedMessageView).sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.seq - b.seq);
-  const messages = [openingMessage(item), ...ordered];
+  const messages = [openingMessage(item), ...inTimeOrder(stored.map(storedMessageView))];
   const last = messages[messages.length - 1]!;
   const threadId = inboxThreadId(item.proposalId);
   return {

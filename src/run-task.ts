@@ -52250,7 +52250,6 @@ export function approveParkedTask(
     };
   }
   const releaseRow = {
-    ts: systemClock.iso(),
     run_id: deps.runId,
     task_id: taskId,
     step: RELEASE_LEDGER_STEP,
@@ -52414,7 +52413,8 @@ async function approveCommandRun(
       recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
       recordThreadRow: (row) =>
         void recordRowThreadEvents(
-          row,
+          // The row as the ledger stamped it: the event's key is the stored row's `ts`, which this call never chose.
+          readLedgerLines(ledgerPathFor(config)).filter((line) => line.step === row.step && line.run_id === row.run_id && line.task_id === row.task_id).at(-1) ?? row,
           parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
           { threadStorePath: inboxThreadStorePath(config.root) },
           (step, extra) => console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`),
