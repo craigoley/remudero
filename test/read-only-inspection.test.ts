@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { readOnlyInspectionCommand } from "../src/lib/read-only-inspection.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function fixture() {
@@ -89,7 +88,8 @@ test("read-only inspection help bypasses housekeeping without requiring configur
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test("read-only inspection rejects unsupported options, relative targets and missing archives", () => {
+test("read-only inspection rejects unsupported options, relative targets and missing archives", async () => {
+  const { readOnlyInspectionCommand } = await import("../src/lib/read-only-inspection.js");
   const f = fixture();
   try {
     assert.equal(readOnlyInspectionCommand(["--state-dir", "relative", "ledger-grep", "x"]), 2);
@@ -103,7 +103,8 @@ test("read-only inspection rejects unsupported options, relative targets and mis
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test("read-only inspection reports an exceptional reader failure without its private message", () => {
+test("read-only inspection reports an exceptional reader failure without its private message", async () => {
+  const { readOnlyInspectionCommand } = await import("../src/lib/read-only-inspection.js");
   const f = fixture();
   try {
     assert.equal(readOnlyInspectionCommand(["--state-dir", f.state, "skill", "effectiveness", "fixture"],
