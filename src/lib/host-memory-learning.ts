@@ -26,7 +26,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join, normalize } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -46,6 +46,7 @@ import {
   type WorkerClass,
 } from "./host-memory-ledger.js";
 import { isTestRunnerArgv } from "./test-file-admission.js";
+import { TEST_FILE_PEAK_BYTES, type TestFileSize } from "./test-slot.js";
 
 // ── the learning rule (pure) ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,8 @@ export interface PeakSample {
   workerClass: WorkerClass;
   peakMib: number;
   at: number;
+  /** Present only on file-child samples; whole-tree test peaks remain a separate population. */
+  testFile?: string;
 }
 
 export interface LearnedEstimate {
@@ -192,10 +195,12 @@ function parseSamples(text: string): PeakSample[] {
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown };
+      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown };
       const at = typeof row.at === "string" ? Date.parse(row.at) : NaN;
       if (!WORKER_CLASSES.includes(row.c as WorkerClass) || typeof row.p !== "number" || !Number.isFinite(at)) continue;
-      out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at });
+      if (row.f !== undefined && (row.c !== "test" || typeof row.f !== "string" || !row.f)) continue;
+      out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at,
+        ...(typeof row.f === "string" ? { testFile: testFileKey(row.f) } : {}) });
     } catch (error) {
       void error; // A torn line: one sample among many.
     }
@@ -203,20 +208,25 @@ function parseSamples(text: string): PeakSample[] {
   return out;
 }
 
-/** Keep the newest `keep` samples of each class, in file order. Pure. */
+/** Keep the newest `keep` samples per class and per test file, in file order. Pure. */
 export function compactSamples(samples: readonly PeakSample[], keep: number): PeakSample[] {
+  const counts = new Map<string, number>();
   const kept = new Set<PeakSample>();
-  for (const cls of WORKER_CLASSES) {
-    for (const s of samples.filter((x) => x.workerClass === cls).slice(-keep)) kept.add(s);
+  for (const s of [...samples].reverse()) {
+    const key = `${s.workerClass}:${s.testFile ?? ""}`;
+    const count = counts.get(key) ?? 0;
+    if (count < keep) kept.add(s);
+    counts.set(key, count + 1);
   }
   return samples.filter((s) => kept.has(s));
 }
 
 const lineOf = (s: PeakSample): string =>
-  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso() })}\n`;
+  `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso(),
+    ...(s.testFile ? { f: s.testFile } : {}) })}\n`;
 
 /** Record one measured tree peak for this instance. NEVER throws. */
-export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}): boolean {
+export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}, testFile?: string): boolean {
   try {
     if (!Number.isFinite(peakMib) || peakMib <= 0) return false;
     const path = instanceFile(opts);
@@ -225,7 +235,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
       mkdirSync(storeDir(opts), { recursive: true, mode: 0o700 });
       appendFileSync(target, line, { mode: 0o600 });
     });
-    append(path, lineOf({ workerClass, peakMib, at }));
+    append(path, lineOf({ workerClass, peakMib, at, ...(testFile ? { testFile: testFileKey(testFile) } : {}) }));
     cachedEstimates.delete(workerClass);
     const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
     if (size > PEAK_COMPACT_BYTES) {
@@ -240,7 +250,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
 }
 
 /** Every instance's samples of one class, from a bounded tail of each store file. A failure reads as no samples. */
-export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions = {}): PeakSample[] {
+export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions = {}, fileSamples = false): PeakSample[] {
   let names: string[];
   try {
     names = (opts.list ?? ((dir: string) => readdirSync(dir)))(storeDir(opts)).filter((name) => name.endsWith(".ndjson"));
@@ -252,12 +262,43 @@ export function readPeakSamples(workerClass: WorkerClass, opts: PeakStoreOptions
   for (const name of names) {
     try {
       const text = (opts.readTail ?? readFileTail)(join(storeDir(opts), name), PEAK_TAIL_BYTES);
-      out.push(...parseSamples(text).filter((s) => s.workerClass === workerClass));
+      out.push(...parseSamples(text).filter((s) => s.workerClass === workerClass && (s.testFile !== undefined) === fileSamples));
     } catch (error) {
       recordError(opts, "read", error);
     }
   }
   return out;
+}
+
+/** Repository test paths survive worktree and container prefixes in Node's absolute child argv. */
+export function testFileKey(path: string): string {
+  const key = normalize(path).replaceAll("\\", "/");
+  const at = key.lastIndexOf("/test/");
+  return at >= 0 ? key.slice(at + 1) : key;
+}
+
+export function recordTestFilePeak(path: string, peakMib: number, opts: PeakStoreOptions = {}): boolean {
+  return recordPeak("test", peakMib, opts, path);
+}
+
+/** File p90, otherwise the file population's p90, otherwise the one-sample 512 MiB prior. */
+export function testFileEstimates(selection: readonly string[], opts: PeakStoreOptions = {}): TestFileSize[] {
+  const now = (opts.clock ?? systemClock).now();
+  const samples = readPeakSamples("test", opts, true);
+  const prior = TEST_FILE_PEAK_BYTES / 1024 ** 2;
+  const tail = learnEstimate(samples, prior, now);
+  const byFile = new Map<string, PeakSample[]>();
+  for (const sample of samples) {
+    const group = byFile.get(sample.testFile!) ?? [];
+    group.push(sample);
+    byFile.set(sample.testFile!, group);
+  }
+  return [...new Set(selection.length ? selection.map(testFileKey) : ["<selection>"])].map((path) => {
+    const own = learnEstimate(byFile.get(path) ?? [], prior, now);
+    const estimate = own.samples ? own : tail;
+    return { path, bytes: estimate.estimateMib * 1024 ** 2, samples: estimate.samples,
+      basis: own.samples ? "file-p90" : tail.samples ? "class-tail" : "prior" };
+  });
 }
 
 const cachedEstimates = new Map<WorkerClass, { at: number; estimate: LearnedEstimate; typical: LearnedEstimate }>();
@@ -320,6 +361,7 @@ export interface NestedTestRun {
 export interface TrackHooks {
   /** A `node --test` runner appeared in this tree: open its reservation, or return undefined to leave it in this tree. */
   onTestRunner?: (pid: number) => NestedTestRun | undefined;
+  onTestFilePeak?: (path: string, peakMib: number) => void;
 }
 
 interface Tracked {
@@ -329,6 +371,7 @@ interface Tracked {
   hooks?: TrackHooks;
   /** Set on a test run found inside another tree: it ends when its runner's tree has exited. */
   nested?: NestedTestRun;
+  files?: Map<string, { path: string; peakMib: number }>;
 }
 
 function defaultSamplerPorts(): TreeSamplerPorts {
@@ -374,18 +417,23 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
   const ports = { ...defaultSamplerPorts(), ...overrides };
   const tracked = new Map<string, Tracked>();
   /** Per (pid, start): whether its argv is a test runner. Each process's argv is read once. */
-  const runnerMemo = new Map<string, boolean>();
+  const runnerMemo = new Map<string, { runner: boolean; file?: string }>();
   /** The runners a hook was already asked about, whatever it answered. */
   const asked = new Set<string>();
   let timer: unknown;
   let sampling = false;
 
-  const isRunner = (key: string, pid: number): boolean => {
+  const argvOf = (key: string, pid: number): { runner: boolean; file?: string } => {
     const known = runnerMemo.get(key);
     if (known !== undefined) return known;
-    let runner = false;
+    let facts: { runner: boolean; file?: string } = { runner: false };
     try {
-      runner = isTestRunnerArgv(ports.readFile(`/proc/${pid}/cmdline`).split("\0"));
+      const argv = ports.readFile(`/proc/${pid}/cmdline`).split("\0").filter(Boolean);
+      facts = { runner: isTestRunnerArgv(argv) };
+      if (!facts.runner && /^node(js)?$/.test(basename(argv[0] ?? ""))) {
+        const file = argv.at(-1);
+        if (file && /\.[cm]?[jt]sx?$/.test(file) && !file.startsWith("-")) facts.file = testFileKey(file);
+      }
     } catch (error) {
       void error; // Exited or unreadable: nothing proves a runner, so nothing is reserved for it.
     }
@@ -393,16 +441,30 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       runnerMemo.clear();
       asked.clear();
     }
-    runnerMemo.set(key, runner);
-    return runner;
+    runnerMemo.set(key, facts);
+    return facts;
   };
 
-  const peakOf = (members: readonly number[], skip: ReadonlySet<number>): number => {
+  const peakOf = (members: readonly number[], skip: ReadonlySet<number>, entry: Tracked,
+    rows: ReadonlyMap<number, ProcessListing["rows"][number]>): number => {
     let kb = 0;
     for (const pid of members) {
       if (skip.has(pid)) continue;
       try {
-        kb += Number(/^VmHWM:\s+(\d+)/m.exec(ports.readFile(`/proc/${pid}/status`))?.[1] ?? 0);
+        const hwm = Number(/^VmHWM:\s+(\d+)/m.exec(ports.readFile(`/proc/${pid}/status`))?.[1] ?? 0);
+        kb += hwm;
+        if (hwm > 0 && entry.hooks?.onTestFilePeak) {
+          const row = rows.get(pid)!;
+          const parent = rows.get(row.parent);
+          if (parent && argvOf(`${parent.pid}:${parent.start}`, parent.pid).runner) {
+            const key = `${pid}:${row.start}`;
+            const file = argvOf(key, pid).file;
+            if (file) {
+              entry.files ??= new Map();
+              entry.files.set(key, { path: file, peakMib: Math.max(entry.files.get(key)?.peakMib ?? 0, hwm / 1024) });
+            }
+          }
+        }
       } catch (error) {
         void error; // Exited between the listing and the read: it holds nothing now.
       }
@@ -434,7 +496,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         const key = `${pid}:${start}`;
         const owner = rootOwner.get(key);
         const nestedRoot = owner !== undefined && owner !== id;
-        if (!nestedRoot && !isRunner(key, pid)) continue;
+        if (!nestedRoot && !argvOf(key, pid).runner) continue;
         for (const member of treeMembers([{ pid, start }], listing)) inside.add(member);
         if (nestedRoot || asked.has(key)) continue;
         asked.add(key); // Asked once, whatever the hook answers.
@@ -446,11 +508,24 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         }
         if (!run) continue;
         const nestedId = `${id}>test:${key}`;
-        tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run });
+        tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run,
+          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak } });
         rootOwner.set(key, nestedId);
       }
     }
     return rootOwner;
+  };
+
+  const flushFiles = (entry: Tracked, live: ReadonlySet<string>): void => {
+    for (const [key, file] of entry.files ?? []) {
+      if (live.has(key)) continue;
+      entry.files!.delete(key);
+      try {
+        entry.hooks?.onTestFilePeak?.(file.path, file.peakMib);
+      } catch (error) {
+        void error; // Losing a file sample does not end tree measurement or admission.
+      }
+    }
   };
 
   const sampleNow = (): void => {
@@ -466,6 +541,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         return;
       }
       const startOf = new Map(listing.rows.map((row) => [row.pid, row.start]));
+      const rows = new Map(listing.rows.map((row) => [row.pid, row]));
       const rootOwner = adoptRunners(listing, startOf);
       // (2) Each tree's peak leaves out the members of every tracked tree rooted inside it, so a process counts once.
       const members = new Map([...tracked].map(([id, entry]) => [id, treeMembers(entry.roots, listing)]));
@@ -476,7 +552,8 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
           const owner = rootOwner.get(`${pid}:${startOf.get(pid)}`);
           if (owner !== undefined && owner !== id) for (const member of members.get(owner) ?? []) inner.add(member);
         }
-        const peak = peakOf(own, inner);
+        const peak = peakOf(own, inner, entry, rows);
+        flushFiles(entry, new Set(own.map((pid) => `${pid}:${startOf.get(pid)}`)));
         if (peak > 0) {
           entry.observed = true;
           entry.peakMib = Math.max(entry.peakMib, peak);
@@ -523,6 +600,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       sampleNow(); // Never throws: an unreadable listing or member is skipped inside it.
       const entry = tracked.get(id);
       tracked.delete(id);
+      if (entry) flushFiles(entry, new Set());
       stopIfIdle();
       return entry?.observed ? entry.peakMib : undefined;
     },
@@ -607,8 +685,11 @@ export function openLearnedReservation(
   const sampler = deps.sampler ?? sharedSampler();
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
-  const hooks: TrackHooks | undefined = input.workerClass === "test" ? undefined : {
-    onTestRunner: (pid) => openNestedTestRun(pid, { ...(input.root ? { root: input.root } : {}), ledger: deps.ledger, store }),
+  const hooks: TrackHooks = {
+    ...(input.workerClass === "test" ? {} : {
+      onTestRunner: (pid: number) => openNestedTestRun(pid, { ...(input.root ? { root: input.root } : {}), ledger: deps.ledger, store }),
+    }),
+    onTestFilePeak: (path, peak) => { recordTestFilePeak(path, peak, store); },
   };
   return {
     id: handle.id,
