@@ -40,7 +40,7 @@ test("W1-T7534: a letter-suffixed task id is dated and the cost-of-delay context
   assert.deepEqual(costOfDelayReadyRow("tree-sha", result.context), { key: "ready", plan_tree_sha: "tree-sha" });
 });
 
-test("W1-T7534: an undatable open task is unscored and the rest of the queue keeps its stride order", () => {
+test("W1-T7534: an undatable open task is imputed at age zero and the rest of the queue keeps its stride order", () => {
   const fresh = task("W1-T6200");
   const old = task("W1-T6201");
   const undatable = task("W1-T6202");
@@ -50,20 +50,20 @@ test("W1-T7534: an undatable open task is unscored and the rest of the queue kee
   const result = buildDispatchValueContext(tasks, history, new Set(tasks.map(t => t.id)), NOW, true, "seed", snapshot);
   assert.equal(result.kind, "ready", "one undatable task never refuses the whole context");
   const context = result.context;
-  assert.equal(context.stridePassByTaskId?.has(undatable.id), false);
-  assert.equal(context.costOfDelayByTaskId?.has(undatable.id), false);
+  // W1-T9323: undatable no longer means unscored — it is scored at age zero and named as imputed.
+  assert.equal(context.stridePassByTaskId?.has(undatable.id), true);
+  assert.equal(context.costOfDelayByTaskId?.has(undatable.id), true);
   assert.ok(context.stridePassByTaskId?.get(fresh.id)! > 0);
   assert.ok(context.stridePassByTaskId?.get(old.id)! > 0);
-  assert.deepEqual(context.costOfDelayUnscored, [undatable.id]);
+  assert.deepEqual(context.costOfDelayImputed, [undatable.id]);
+  assert.equal(context.costOfDelayUnscored, undefined);
+  assert.ok(context.stridePassByTaskId?.get(undatable.id)! > 0);
 
-  // The two dated tasks keep the order their own stride passes give, and the unscored one follows them.
-  const datedOnly = buildDispatchValueContext([old, fresh], history, new Set([old.id, fresh.id]), NOW, true, "seed", snapshot);
-  assert.equal(datedOnly.kind, "ready");
-  const scoredOrder = dispatchOrder([old, fresh], datedOnly.context).map(t => t.id);
-  assert.deepEqual(dispatchOrder(tasks, context).map(t => t.id), [...scoredOrder, undatable.id]);
-  assert.deepEqual([...context.stridePassByTaskId!].sort(), [...datedOnly.context.stridePassByTaskId!].sort());
+  // The ordering is total over all three tasks, each by its own stride pass.
+  const byPass = [...tasks].sort((a, b) => context.stridePassByTaskId!.get(a.id)! - context.stridePassByTaskId!.get(b.id)!);
+  assert.deepEqual(dispatchOrder(tasks, context).map(t => t.id), byPass.map(t => t.id));
 
   // The ready row names the gap, keyed once per plan tree.
-  assert.deepEqual(costOfDelayReadyRow("tree-sha", context), { key: "ready:tree-sha", plan_tree_sha: "tree-sha", unscored: [undatable.id] });
+  assert.deepEqual(costOfDelayReadyRow("tree-sha", context), { key: "ready:tree-sha", plan_tree_sha: "tree-sha", imputed: [undatable.id] });
   assert.notEqual(costOfDelayReadyRow("next-tree", context).key, costOfDelayReadyRow("tree-sha", context).key);
 });
