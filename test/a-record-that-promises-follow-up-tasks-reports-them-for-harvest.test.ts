@@ -37,7 +37,9 @@ test("W1-T8779: reported or filed follow-ups satisfy the promise", () => {
   const reported = "## Follow-ups\ntask: source-keyed child bundle store with atomic publication; — avoid duplicate builds\n";
   const filed = [{ id: "W1-T9999", title: "bounded heavy READY escalation", plan_refs: ["W1-T7729"] }];
   assert.deepEqual(unreportedFollowUps(promises, reported, filed), []);
-  assert.equal(review(reported, observation(promises, filed)).state, "success");
+  const satisfied = review(reported, observation(promises, filed));
+  assert.equal(satisfied.state, "success");
+  assert.equal(satisfied.criteria.length, criteria.length, "a satisfied structural guard invents no unexecuted proof or arm blocker");
   assert.deepEqual(unreportedFollowUps(promises, reported, [{ ...filed[0]!, plan_refs: ["W1-T7728"] }]), [promises[1]]);
 });
 

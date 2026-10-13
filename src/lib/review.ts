@@ -5155,9 +5155,9 @@ export function judgeReview(
   } else if (promiseObservation && promiseObservation.promised.length > 0) {
     const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
     const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
-    verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: missing.length === 0, floorMet: missing.length === 0,
-      reason: missing.length ? `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`
-        : "every promised follow-up is harvestable or named in a linked origin/main plan record", proof_exec: "not_executable" });
+    if (missing.length > 0) verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
+      proof_exec: "not_executable" });
   }
   const testTheater = detectTestTheater(evidence.diff);
 
