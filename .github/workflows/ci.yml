@@ -531,13 +531,11 @@ jobs:
           if-no-files-found: ignore
       - name: Collect the fold debt main's ceiling gate filed (W1-T7853)
         if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
-        continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/fold-debt"
           git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
       - name: Upload the fold debt main's ceiling gate filed (W1-T7853)
         if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: claude-md-fold-debt-main
@@ -1119,25 +1117,6 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then export BASE_SHA="$GATE_BASE"; fi
           npm run --silent claude-md-budget-ratchet
 
-      - name: Collect the fold debt this run filed (W1-T7853)
-        id: collect-fold-debt
-        if: always()
-        continue-on-error: true
-        run: |
-          mkdir -p "$RUNNER_TEMP/fold-debt"
-          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
-
-      - name: Upload the fold debt this run filed (W1-T7853)
-        id: upload-fold-debt
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: claude-md-fold-debt
-          path: ${{ runner.temp }}/fold-debt
-          if-no-files-found: ignore
-          retention-days: 14
-
       - name: jscpd-gate (duplication ceiling)
         id: jscpd-gate
         if: steps.classify.outputs.class == 'SOURCE'
@@ -1282,6 +1261,23 @@ jobs:
           else
             node scripts/baseline-monotonic-check.mjs
           fi
+
+      - name: Collect the fold debt this run filed (W1-T7853)
+        id: collect-fold-debt
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/fold-debt"
+          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
+
+      - name: Upload the fold debt this run filed (W1-T7853)
+        id: upload-fold-debt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-md-fold-debt
+          path: ${{ runner.temp }}/fold-debt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Report each gate's result under its own required check-run name (checks API — W1-T4399 design (i))
         if: always()
