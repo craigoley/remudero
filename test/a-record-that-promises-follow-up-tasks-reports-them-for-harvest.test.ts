@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { promisedFollowUps, unreportedFollowUps, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps } from "../src/lib/promised-follow-ups.js";
 import { judgeReview, observePromisedFollowUps, recoverPromisedFollowUpReports, preparePromisedReviewDecision, reviewDecisionDigest, reviewInputDigest, REVIEW_ENGINE_REVISION, type PromisedFollowUpObservation } from "../src/lib/review.js";
 import { parseFollowups } from "../src/lib/worker.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -55,6 +55,19 @@ test("task designs carry their own promise owner and unrelated rationale is igno
   const taskPath = "plan/tasks.d/W1-T9000-fixture.yaml";
   const yaml = '- id: W1-T9000\n  rationale: "Follow-up tasks this record files: is prose"\n  design: |\n    Follow-up tasks this record files:\n    - source-keyed child bundle store\n';
   assert.deepEqual(promisedFollowUps([taskPath], () => yaml), [{ path: taskPath, taskId: "W1-T9000", text: "source-keyed child bundle store" }]);
+});
+
+test("malformed promise task sources and filing identities are refused", () => {
+  const taskPath = "plan/tasks.d/W1-T9000-fixture.yaml";
+  for (const yaml of ["null", "{}", "[null]", "[[]]"]) {
+    assert.throws(() => promisedFollowUps([taskPath], () => yaml), /not a task list/);
+    assert.throws(() => followUpPlanRecords(yaml), /not a task list/);
+  }
+  assert.throws(() => promisedFollowUps([taskPath], () => '- design: "Follow-up tasks this record files:"'), /no id/);
+  for (const yaml of ['- id: 123\n  title: bad', '- id: W1-T9000\n  title: 123', '- id: W1-T9000\n  title: bad\n  plan_refs: bad', '- id: W1-T9000\n  title: bad\n  plan_refs: [123]']) {
+    assert.throws(() => followUpPlanRecords(yaml), /malformed/);
+  }
+  assert.deepEqual(followUpPlanRecords('tasks:\n- id: W1-T9000\n  title: good\n  rationale: 123\n  prompt: 123'), [{ id: "W1-T9000", title: "good", plan_refs: undefined, rationale: undefined, prompt: undefined }]);
 });
 
 test("quoted examples, fenced code and similarly worded prose are not promises", () => {
