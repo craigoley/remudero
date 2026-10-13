@@ -200,6 +200,12 @@ export interface IdleLaneLastRecord {
   dispatchable: number;
 }
 
+/** One ledger line as a row, or the reason it is not one — the reason is carried, never dropped. */
+function parseLedgerLine(line: string): { row: Record<string, unknown> } | { error: string } {
+  try { return { row: JSON.parse(line) as Record<string, unknown> }; }
+  catch (reason) { return { error: reason instanceof Error ? reason.message : String(reason) }; }
+}
+
 /**
  * W1-T8235: the newest `lane.idle_changed` row in the ledger lines, or undefined. The row's own `at_ms` places it;
  * a row without one falls back to its `ts`. A row that cannot be placed in time is skipped, never guessed at.
@@ -208,9 +214,9 @@ export function lastIdleLaneRecord(lines: readonly string[]): IdleLaneLastRecord
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!line.includes("lane.idle_changed")) continue;
-    let row: Record<string, unknown>;
-    try { row = JSON.parse(line) as Record<string, unknown>; }
-    catch (reason) { void reason; continue; } // a torn line is not a record
+    const parsed = parseLedgerLine(line);
+    if ("error" in parsed) continue; // a torn line is not a record
+    const row = parsed.row;
     if (row.step !== "lane.idle_changed") continue;
     const atMs = typeof row.at_ms === "number" ? row.at_ms : typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
     if (!Number.isFinite(atMs) || typeof row.idle_slots !== "number") continue;
