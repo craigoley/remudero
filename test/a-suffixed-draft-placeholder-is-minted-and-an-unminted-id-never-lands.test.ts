@@ -17,8 +17,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DRAFT_PLACEHOLDER_IN_TEXT_RE, materializeDraftTaskIds, type DraftTaskIdMintDeps } from "../src/lib/inbox.js";
-import { MINTED_TASK_ID_RE } from "../src/lib/task-linter.js";
+// The two shapes are read off the module namespaces, so this file still LOADS at a base without them and its tests
+// fail there rather than the whole file refusing to link.
+import * as inbox from "../src/lib/inbox.js";
+import { materializeDraftTaskIds, type DraftTaskIdMintDeps } from "../src/lib/inbox.js";
+import * as taskLinter from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
@@ -190,6 +193,8 @@ test("W1-T9292: materialization refuses a fragment that still holds an unminted 
 });
 
 test("W1-T9292: the placeholder and minted-id shapes accept what they name and refuse what they do not", () => {
+  const { DRAFT_PLACEHOLDER_IN_TEXT_RE } = inbox;
+  const { MINTED_TASK_ID_RE } = taskLinter;
   assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("-> NEW-1A, W1-T5"), true);
   assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("depends_on: [NEW-1b]"), true);
   assert.equal(DRAFT_PLACEHOLDER_IN_TEXT_RE.test("-> W1-T9167, RENEW-1"), false);
