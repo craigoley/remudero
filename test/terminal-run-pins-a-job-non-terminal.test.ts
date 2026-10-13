@@ -268,9 +268,12 @@ test("W1-T2340 producer: jobs are fetched ONLY for runs that already concluded",
     },
     calls,
   );
-  const obs = fetchWorkflowRunObservations("o", "r", "HEAD1", fetch);
+  const cache = new Map();
+  const suspects = new Set<string>();
+  fetchWorkflowRunObservations("o", "r", "HEAD1", fetch, cache, suspects);
+  const obs = fetchWorkflowRunObservations("o", "r", "HEAD1", fetch, cache, suspects);
 
-  assert.equal(calls.length, 2, "one listing + one jobs call for the ONE concluded run");
+  assert.equal(calls.length, 4, "per pass, one listing + one jobs call for the ONE concluded run");
   assert.ok(calls.some((c) => c.includes("actions/runs?head_sha=HEAD1")));
   assert.ok(calls.some((c) => c.includes("actions/runs/11/jobs")));
   assert.ok(!calls.some((c) => c.includes("actions/runs/22/jobs")), "the unconcluded run costs nothing");
@@ -280,7 +283,7 @@ test("W1-T2340 producer: jobs are fetched ONLY for runs that already concluded",
   assert.equal(obs[1]!.conclusion, undefined);
   assert.equal(obs[1]!.jobs, undefined, "not [] — that would read as 'nothing was scheduled'");
 
-  // And the whole point: this observation trips the predicate.
+  // And the whole point: once a second read confirms it, this observation trips the predicate.
   assert.ok(stalledRunReason(obs));
 });
 
@@ -290,7 +293,7 @@ test("W1-T2340 producer: the measured stalled head costs five calls, a healthy p
   const stalled = recordingFetch(
     {
       "actions/runs?head_sha=STALLED": {
-        workflow_runs: four.map((id) => ({ id, conclusion: "startup_failure" })),
+        workflow_runs: four.map((id) => ({ id, run_attempt: 1, conclusion: "startup_failure" })),
       },
       "actions/runs/11/jobs": { jobs: [{ status: "completed" }, { status: "completed" }] },
       "actions/runs/22/jobs": { jobs: [{ status: "completed" }, { status: "completed" }] },
@@ -299,8 +302,13 @@ test("W1-T2340 producer: the measured stalled head costs five calls, a healthy p
     },
     stalledCalls,
   );
-  const obs = fetchWorkflowRunObservations("o", "r", "STALLED", stalled);
+  const cache = new Map();
+  const suspects = new Set<string>();
+  const first = fetchWorkflowRunObservations("o", "r", "STALLED", stalled, cache, suspects);
   assert.equal(stalledCalls.length, 5, "1 listing + 4 concluded runs — the measured head's shape");
+  assert.equal(stalledRunReason(first), undefined, "one read of a running job is a suspicion, not yet a stall");
+  const obs = fetchWorkflowRunObservations("o", "r", "STALLED", stalled, cache, suspects);
+  assert.equal(stalledCalls.length, 7, "the re-read costs the listing and the one unsettled run");
   assert.equal(obs.flatMap((o) => o.jobs ?? []).length, 6, "six jobs between them, as measured");
   assert.ok(stalledRunReason(obs), "and it is reported stalled");
 
@@ -367,9 +375,39 @@ test("a concluded run attempt's jobs are read once across sweep passes and a re-
   assert.equal(calls.filter((c) => c.includes("/jobs")).length, 1, "the second pass spends no jobs read on a concluded attempt");
   assert.deepEqual(second, first, "and observes exactly what the first pass read");
   attempt = 2;
-  const rerun = fetchWorkflowRunObservations("o", "r", "H", fetch, cache);
+  const suspects = new Set<string>();
+  fetchWorkflowRunObservations("o", "r", "H", fetch, cache, suspects);
   assert.equal(calls.filter((c) => c.includes("/jobs")).length, 2, "a re-run is a new attempt and is read afresh");
+  const rerun = fetchWorkflowRunObservations("o", "r", "H", fetch, cache, suspects);
+  assert.equal(calls.filter((c) => c.includes("/jobs")).length, 3, "and a job still running is never cached");
   assert.deepEqual(rerun[0]!.jobs, [{ status: "queued" }]);
+});
+
+test("a job read running once inside a concluded run, then settled, never reads stalled (#11239)", () => {
+  // #11239 and #9482: a pending head escalated as "stalled, not pending" while every job of every concluded
+  // run read `completed` when looked at again. One read of the jobs listing can trail the runs listing.
+  const cache = new Map();
+  const suspects = new Set<string>();
+  const calls: string[] = [];
+  let status = "in_progress";
+  const fetch = (args: string[]): unknown => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (path.includes("head_sha=")) return { workflow_runs: [{ id: 41, run_attempt: 1, conclusion: "success" }, { id: 42, run_attempt: 1, conclusion: null }] };
+    return { jobs: [{ status: "completed" }, { status }] };
+  };
+  const first = fetchWorkflowRunObservations("o", "r", "H", fetch, cache, suspects);
+  assert.equal(first[0]!.jobs, undefined, "the first running read is 'could not check'");
+  assert.equal(stalledRunReason(first), undefined);
+  assert.equal(cache.size, 0, "and is never cached as the run's final jobs");
+
+  status = "completed";
+  const second = fetchWorkflowRunObservations("o", "r", "H", fetch, cache, suspects);
+  assert.deepEqual(second[0]!.jobs, [{ status: "completed" }, { status: "completed" }]);
+  assert.equal(stalledRunReason(second), undefined, "the job settled, so nothing was ever stalled");
+  assert.equal(suspects.size, 0, "a settled attempt is no longer suspected");
+  fetchWorkflowRunObservations("o", "r", "H", fetch, cache, suspects);
+  assert.equal(calls.filter((c) => c.includes("/jobs")).length, 2, "the settled list is cached from then on");
 });
 
 test("the concluded-run jobs cache stays bounded by evicting its oldest attempt", () => {
