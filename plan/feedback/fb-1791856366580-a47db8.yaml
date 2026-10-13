@@ -9,6 +9,14 @@ raw: >-
   the target repo the way learnings already do.
 
 
+  DEPENDS ON the tasks drafted from submission keys
+  nanoclaw-2026-10-13/prompt-surface-covers-injected-skills and
+  nanoclaw-2026-10-13/skill-conformance-discovery. A consumer repo's skill must
+  not reach a worker prompt until injected skills are a gated prompt surface and
+  every injected skill is checked by the discovery test. Do not build before
+  both merge.
+
+
   WHAT NANOCLAW DOES (OBSERVED): each agent group selects its own skills,
   layered over the shared set (container.json skills;
   src/container-runner.ts:1416-1455).
