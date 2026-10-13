@@ -36,10 +36,10 @@ function harness(t: TestContext, overrides: ProbeDeps = {}) {
 
 test("W1-T6354: helper files are never probed as tests", async (t) => {
   const h = harness(t);
-  const candidates = baseReproductionFiles([{ name: "ci", logTail:
-    `/checkout/${FILE}:10:1\nfile:///checkout/${HELPERS[0]}:20:2\n${HELPERS[1]}:30:3` }]);
-  assert.deepEqual(candidates, [FILE, ...HELPERS]);
-  const results = await h.build()(PR, candidates, MAIN);
+  // W1-T7848: the candidates drop helpers too, so a helper never grades the set unrunnable; the probe still refuses them.
+  assert.deepEqual(baseReproductionFiles([{ name: "ci", logTail:
+    `/checkout/${FILE}:10:1\nfile:///checkout/${HELPERS[0]}:20:2\n${HELPERS[1]}:30:3` }]), [FILE]);
+  const results = await h.build()(PR, [FILE, ...HELPERS], MAIN);
   assert.deepEqual(results.map(({ file, outcome }) => ({ file, outcome })), [{ file: FILE, outcome: "passes" }]);
   assert.deepEqual(h.executions, [FILE]);
   assert.equal(h.reads.length, 2);
