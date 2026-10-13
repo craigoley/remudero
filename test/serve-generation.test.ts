@@ -45,7 +45,7 @@ test("readiness reports each criterion and is 503 until the board snapshot is co
   const real = createServer((req, res) => res.end(req.headers.authorization === "Bearer read-token" ? "real route" : "no token"));
   const socketPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ready-`)), "gen.sock");
   const plan = { tasks: [{ id: "W1-T1" }], byId: new Map() } as never;
-  const priv = await listenReadiness(real, socketPath, () => [planLoadedProbe(() => plan, "abc123"), githubAuthProbe(() => true), boardComputedProbe(() => boardDone)], "read-token");
+  const priv = await listenReadiness(real, socketPath, () => [planLoadedProbe(() => plan, "abc123"), githubAuthProbe(() => true), boardComputedProbe({ isReady: () => boardDone })], "read-token");
   try {
     const before = await overSocket(socketPath, "/v1/ready");
     assert.equal(before.status, 503);
