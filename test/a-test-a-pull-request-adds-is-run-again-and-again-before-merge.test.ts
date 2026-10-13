@@ -207,7 +207,7 @@ test("shard 1 runs the guard mutation before the flake screen, and the job stamp
   const ci = parse(text).jobs.ci as { steps: { name?: string; id?: string; run?: string; env?: Record<string, string> }[] };
   const at = (needle: string) => ci.steps.findIndex((s) => s.run?.includes(needle));
   const stamp = ci.steps.findIndex((s) => s.id === "admission");
-  assert.match(ci.steps[stamp]!.run!.split("\n")[0]!, /^echo "started_ms=\$\(date \+%s%3N\)" >> "\$GITHUB_OUTPUT"$/);
+  assert.equal(ci.steps[stamp]!.run!.split("\n")[0]!, `echo "started_ms=$(node -p 'Date.now()')" >> "$GITHUB_OUTPUT"`);
   // A step OUTPUT, never GITHUB_ENV: the guard mutation replays the admission body inside the real job,
   // and each replay appended its own stamp to the job's GITHUB_ENV, so the screen read the last one (#11308).
   assert.doesNotMatch(text, /RMD_JOB_STARTED_MS=/, "no step writes the stamp where a later step can rewrite it");
