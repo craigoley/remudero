@@ -10,8 +10,30 @@
 import { checkCommitMessage, CONVENTIONAL_LIMITS, fitConventionalTitle, normalizeSubjectCase } from "./commit-message.js";
 import type { FixProgressInput, FixProgressJudge } from "./fix-progress-judge.js";
 
-/** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line. */
-export interface CheckpointStop { round: number; subject: string; remaining?: string }
+/** One stop on a checkpoint tip: its 1-based ordinal, the checkpoint subject and its `remaining` line.
+ *  `workingTree` is the round's uncommitted diff stat (W1-T9030): a harness-owned build never commits, so
+ *  without it the judge reads an unmoved tip as "no recorded progress". */
+export interface CheckpointStop { round: number; subject: string; remaining?: string; workingTree?: string }
+
+/** Who wrote the tip a round ended on, and whether the round itself moved HEAD. */
+export interface RoundTip { tipAuthor: "worker" | "harness"; headMoved: boolean; unfinished: boolean }
+
+/**
+ * W1-T9030: a round is judged by what it DID, not by the tip's subject. A tip whose head is the one recorded
+ * before the round was written by the harness (the restore merge, an earlier checkpoint) and is never the
+ * worker's stop: with its completion line (`finishedByReport`) the round is finished. Only a wip-shaped tip the
+ * round itself moved HEAD to is a worker checkpoint stop. An unreadable head counts as moved, the old behaviour.
+ */
+export function classifyRoundTip(input: {
+  tipSubject: string | undefined; headBefore: string | undefined; headNow: string | undefined;
+  finishedByReport: boolean; reportOpenedPr: boolean;
+}): RoundTip {
+  const headMoved = input.headBefore === undefined || input.headNow === undefined || input.headBefore !== input.headNow;
+  const tipAuthor = headMoved ? "worker" : "harness";
+  const wipTip = input.tipSubject !== undefined && isWipSubject(input.tipSubject);
+  const unfinished = wipTip && !input.reportOpenedPr && (headMoved || !input.finishedByReport);
+  return { tipAuthor, headMoved, unfinished };
+}
 
 /** Whether the harness resumes the worker again, and why. */
 export type CheckpointResumeDecision =
@@ -23,7 +45,10 @@ export const CHECKPOINT_RESUME_BACKSTOP = 8;
 
 /** The judge's input for checkpoint stops: each stop is a round whose "red" is its remaining work. */
 export function checkpointProgressInput(stops: readonly CheckpointStop[], headSha: string): FixProgressInput {
-  const red = (s: CheckpointStop) => [`checkpoint remaining: ${s.remaining ?? "(not recorded)"}`];
+  const red = (s: CheckpointStop) => [
+    `checkpoint remaining: ${s.remaining ?? "(not recorded)"}`,
+    ...(s.workingTree ? [`uncommitted work this round: ${s.workingTree}`] : []),
+  ];
   let identical = 0;
   for (let i = 1; i < stops.length; i++) {
     if ((stops[i]!.remaining ?? "") === (stops[i - 1]!.remaining ?? "")) identical++;
