@@ -24,12 +24,11 @@
  * Each producer closing its own issue on recovery is W1-T8866's; this garden is the backstop for the
  * residue no producer owns.
  */
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghIssueGatewayAsync, splitConcatenatedJsonPages, type AsyncIssueGateway } from "./escalate.js";
 import { captureFeedback, feedbackEntryPath } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
@@ -39,6 +38,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Mount } from "./mounts.js";
 import { installPolicyPath } from "./policy.js";
 import type { spawnWorker } from "./worker.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 export const ISSUE_REVALIDATION_VERDICT_STEP = "issue_revalidation.verdict";
 export const ISSUE_REVALIDATION_PASS_STEP = "issue_revalidation.pass";
@@ -49,7 +49,8 @@ export const ISSUE_REVALIDATION_ACTION_FAILED_STEP = "issue_revalidation.action_
 export const ISSUE_REVALIDATION_MIN_INTERVAL_MS = 60 * 60 * 1000;
 /** A still-true issue gets a dated refresh comment at most this often. */
 export const STILL_TRUE_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
-/** Model judgements per pass: each is a spawn, so a large backlog drains over several passes. */
+/** PRIMARY CONTROL: model judgements per pass. Each is a spawn, so a large backlog drains over several
+ *  passes instead of spending an unbounded number of spawns in one; a healthy backlog is that large. */
 export const MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS = 10;
 /** A READ-MODEL issue is resolved only on at least this many consecutive clean consistency runs. */
 export const READ_MODEL_CLEAN_RUNS = 6;
@@ -325,7 +326,7 @@ export interface IssueRevalidationSummary {
 
 /** Resolved verdicts with no citation are not evidence: they read as unknown. */
 function normalise(v: RevalidationVerdict): RevalidationVerdict {
-  return v.verdict === "resolved" && !v.citation?.trim()
+  return v.verdict === "resolved" && (v.citation ?? "").trim() === ""
     ? { verdict: "unknown", reason: `resolved without a citation (${v.reason})` }
     : v;
 }
@@ -528,7 +529,7 @@ export function livenessVerdictFromOverseerState(
   return {
     verdict: "resolved",
     reason: `the overseer holds no unhealthy episode for the ${gardener} gardener`,
-    citation: `gardener-overseer.json, written ${new Date(stateMtimeMs).toISOString()}, has no episode for ${gardener}`,
+    citation: `gardener-overseer.json, written ${fixedClock(stateMtimeMs).iso()}, has no episode for ${gardener}`,
   };
 }
 
@@ -630,15 +631,14 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   const clock = opts.clock ?? systemClock;
   const readText = opts.readText ?? ((args: string[]) => ghTextAsync(args));
   const issues = opts.issues ?? ghIssueGatewayAsync(opts.owner, opts.repo);
-  const runGit = opts.runGit ?? ((args: string[]) =>
-    execFileSync("git", ["-C", opts.repoRoot, ...args], { encoding: "utf8", timeout: 60_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }));
+  const runGit = opts.runGit ?? ((args: string[]) => hostWorktreeGit(opts.repoRoot, args, { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }));
   const readLedgerRows = opts.readLedgerRows ?? ((steps: readonly string[], since: string) => {
     const read = readLedgerUnionRecordsSync(opts.stateDir, { step: steps, since, rotationWindowMs: ISSUE_REVALIDATION_LEDGER_WINDOW_MS, minRotations: 1 });
     if (!read.ok) throw new Error(`issue-revalidation ledger union unreadable: ${read.unread.join(", ") || "incomplete"}`);
     return read.rows;
   });
   const repoArg = `${opts.owner}/${opts.repo}`;
-  const sinceIso = () => new Date(clock.now() - ISSUE_REVALIDATION_LEDGER_WINDOW_MS).toISOString();
+  const sinceIso = () => fixedClock(clock.now() - ISSUE_REVALIDATION_LEDGER_WINDOW_MS).iso();
   let ownRows: Array<Record<string, unknown>> | undefined;
   const rows = () => (ownRows ??= readLedgerRows([ISSUE_REVALIDATION_VERDICT_STEP, "read_model.consistency"], sinceIso()));
   let listed: RevalidationIssue[] = [];
@@ -658,16 +658,14 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     hasReferent: opts.hasReferent,
     livenessVerdict: (gardener) => {
       const path = overseerStatePath(opts.stateDir);
-      let state: { episodes?: Record<string, { kind?: string; since?: string }> } | undefined;
-      let mtime: number | undefined;
       try {
-        mtime = statSync(path).mtimeMs;
-        state = JSON.parse(readFileSync(path, "utf8")) as typeof state;
-      } catch {
-        // deliberate: an unreadable overseer state is an unknown verdict (livenessVerdictFromOverseerState), never resolved.
-        state = undefined;
+        const mtime = statSync(path).mtimeMs;
+        const state = JSON.parse(readFileSync(path, "utf8")) as { episodes?: Record<string, { kind?: string; since?: string }> };
+        return livenessVerdictFromOverseerState(gardener, state, mtime, clock.now());
+      } catch (e) {
+        // An unreadable overseer state is an unknown verdict, never a resolved one.
+        return { verdict: "unknown", reason: `the overseer's state could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})` };
       }
-      return livenessVerdictFromOverseerState(gardener, state, mtime, clock.now());
     },
     readModelVerdict: (taskId) => readModelVerdictFromRows(taskId, rows()),
     priorVerdicts: () => priorVerdictsFromRows(rows()),
@@ -686,13 +684,14 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       }
       const steps = [...new Set(listed.flatMap((i) => evidenceNames(i)).filter((n) => /^[a-z][a-z_]+\.[a-z_.]+$/.test(n)))];
       try {
-        stepRows ??= steps.length === 0 ? [] : readLedgerRows(steps, new Date(clock.now() - 48 * 60 * 60 * 1000).toISOString());
+        stepRows ??= steps.length === 0 ? [] : readLedgerRows(steps, fixedClock(clock.now() - 48 * 60 * 60 * 1000).iso());
         for (const name of evidenceNames(issue).filter((n) => steps.includes(n))) {
           const mine = stepRows.filter((r) => r.step === name);
           const newest = mine.map((r) => String(r.ts)).sort().pop();
           facts.push(`ledger step ${name}: ${mine.length} row(s) in the last 48 h${newest ? `, newest ${newest}` : ""}`);
         }
       } catch (e) {
+        // An unread ledger is told to the judge as such, so it cannot read silence as "no rows".
         facts.push(`the ledger could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})`);
       }
       return { facts };

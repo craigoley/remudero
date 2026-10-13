@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +16,7 @@ import {
   type RevalidationVerdict,
 } from "../src/lib/issue-revalidation-garden.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 13, 12);
@@ -276,18 +276,16 @@ test("the production ports read GitHub, the overseer, the ledger and origin/main
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}issue-revalidation-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
-  const repoRoot = join(root, "repo");
   mkdirSync(stateDir, { recursive: true });
   // A real repository with origin/main, so the evidence port's default git really shells out.
+  const repo = gitRepo({ kind: "issue-revalidation-repo" });
+  t.after(() => repo.cleanup());
+  const repoRoot = repo.dir;
   mkdirSync(join(repoRoot, "src", "lib"), { recursive: true });
   writeFileSync(join(repoRoot, "src", "lib", "widget.ts"), "export const widget = 'stale.widget';\n");
-  const git = (...args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8" });
-  git("init", "-q");
-  git("config", "user.email", "test@example.invalid");
-  git("config", "user.name", "test");
-  git("add", ".");
-  git("commit", "-q", "-m", "seed");
-  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("add", ".");
+  repo.git("commit", "-q", "-m", "widget");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   // The ledger the default union reader opens: one prior verdict and the read-model runs.
   const ledger = [
     { ts: at(-2), step: ISSUE_REVALIDATION_VERDICT_STEP, issue_number: 2, verdict: "still-true", issue_updated_at: at(-100) },
