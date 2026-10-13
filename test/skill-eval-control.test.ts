@@ -21,7 +21,7 @@ test("eval malformed clocks and shutdown windows fail closed without a zero-capa
   }
   for (const clock of [{ ...fixedClock(0), now: () => NaN }, { ...fixedClock(0), now: () => { throw new Error("clock EIO"); } }]) {
     const control = createSkillEvalControl({ finishByMs: 1000, shutdownReserveMs: 1, clock })!;
-    assert.equal(control.checkpoint(), false);assert.equal(control.signal.reason, "eval-deadline-observation-unavailable");control.dispose();
+    assert.equal(control.checkpoint(), false);assert.match(control.signal.reason, /^eval-deadline-observation-unavailable: /);control.dispose();
   }
 });
 test("eval operator cancellation propagates once and disposal detaches only its own listener", async () => {
