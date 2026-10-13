@@ -38,7 +38,7 @@ function history() {
   return rows.reverse(); // Archive ordering must not change the measurements.
 }
 
-async function rig(options: { rows?: string[]; unreadable?: boolean; self?: "path" | "scope" } = {}) {
+async function rig(options: { rows?: string[]; unreadable?: boolean; self?: "path" | "scope" | "install" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t8927-"));
   const path = join(dir, "tasks.yaml");
   writeFileSync(path, "- id: W1-T8825\n  title: holdout replay\n  repo: remudero\n  type: implement\n  status: queued\n  files: [src/fixture.ts]\n");
@@ -50,7 +50,7 @@ async function rig(options: { rows?: string[]; unreadable?: boolean; self?: "pat
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const freshness = options.self ? { ...stale, changes: [{ sha: stale.newSha,
     subject: options.self === "scope" ? "fix(daemon): refresh loop" : "fix: refresh loop",
-    files: options.self === "path" ? ["src/lib/daemon.ts"] : ["src/lib/worker.ts"],
+    files: options.self === "path" ? ["src/lib/daemon.ts"] : options.self === "install" ? ["package-lock.json"] : ["src/lib/worker.ts"],
   }] } : stale;
   const run = runDaemon(loadPlan(path), {
     now: () => new Date(now), refreshMerged: () => () => false,
@@ -112,6 +112,11 @@ test("W1-T8927: a run far from its PR or past its estimate still yields", async 
       const decision = h.rows.findLast((row) => row.step === "daemon.restart_yield_asked");
       assert.ok(decision);
       assert.equal(decision.fields.reason, phase === "implementing" ? "yield_is_cheaper" : "estimate_elapsed");
+      assert.equal(decision.fields.phase, phase);
+      assert.equal(decision.fields.remaining_ms, (phase === "implementing" ? 62 : 5) * minute);
+      assert.equal(decision.fields.yield_cost_ms, 62 * minute);
+      assert.equal(decision.fields.remaining_samples, 3);
+      assert.equal(decision.fields.yield_samples, 3);
       h.advance(1);
       assert.equal(h.boundary("preopen_gate"), stale, "a yielded lane cannot regain a holdout");
     } finally { await h.close(); }
@@ -121,7 +126,8 @@ test("W1-T8927: a run far from its PR or past its estimate still yields", async 
 test("W1-T8927: no history or a self-scoped change keeps every run yielding", async () => {
   for (const opts of [{ rows: [] }, { rows: ["torn", "null"] }, { unreadable: true },
     { rows: history().filter((raw) => JSON.parse(raw).step === "run.phase" || JSON.parse(raw).step === "pr.opened") },
-    { self: "path" as const }, { self: "scope" as const }]) {
+    { rows: history().filter((raw) => JSON.parse(raw).step === "verdict" || JSON.parse(raw).step === "run.start") },
+    { self: "path" as const }, { self: "scope" as const }, { self: "install" as const }]) {
     const h = await rig(opts);
     try {
       assert.ok(h.boundary("preopen_gate"));
@@ -131,6 +137,22 @@ test("W1-T8927: no history or a self-scoped change keeps every run yielding", as
       assert.equal(decision.fields.reason, "self" in opts ? "self_scoped_change" : "no_history");
     } finally { await h.close(); }
   }
+});
+
+test("W1-T8927: an unmeasured phase yields even when other phases have cheap remaining work", async () => {
+  const h = await rig();
+  try {
+    assert.equal(h.boundary("recon"), stale);
+    const decision = h.rows.find((row) => row.step === "daemon.restart_yield_asked");
+    assert.ok(decision);
+    assert.equal(decision.fields.phase, "recon");
+    assert.equal(decision.fields.reason, "no_history");
+    assert.equal(decision.fields.remaining_ms, null);
+    assert.equal(decision.fields.remaining_samples, 0);
+    assert.equal(decision.fields.yield_cost_ms, 62 * minute);
+    assert.equal(decision.fields.yield_samples, 3);
+    assert.equal(h.boundary("preopen_gate"), stale);
+  } finally { await h.close(); }
 });
 
 test("W1-T8927: a later phase cannot extend the original holdout deadline", async () => {
@@ -183,6 +205,18 @@ test("W1-T8927: boot reads compressed, plain and live history before choosing a 
     writeFileSync(join(dir, "ledger.2026-10-12T23-00-00Z.ndjson.gz"), "invalid gzip");
     assert.throws(() => readRestartHistoryLines(dir, epoch), /restart history unreadable/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T8927: a repeated start of the yielded run is not its resumption", () => {
+  const rows = [
+    { age: 80, step: "verdict", run_id: "yielded", reason: "freshness_yield" },
+    { age: 79, step: "run.start", run_id: "yielded" },
+    { age: 18, step: "run.start", run_id: "resumed" },
+  ].map(({ age, ...fields }) => JSON.stringify({
+    ts: new Date(epoch - age * minute).toISOString(), task_id: "repeated", ...fields,
+  }));
+  assert.deepEqual(restartWorkHistory(rows, epoch).yieldCost, { ms: 62 * minute, samples: 1 });
+  assert.deepEqual(restartWorkHistory(rows.slice(0, 2), epoch).yieldCost, { ms: undefined, samples: 0 });
 });
 
 test("W1-T8927: even medians and historical phase receipts retain measured durations", () => {

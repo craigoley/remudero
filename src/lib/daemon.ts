@@ -256,7 +256,7 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
     if (Number.isFinite(at) && at >= since && at <= nowMs) rows.push({ row, at });
   }
   rows.sort((a, b) => a.at - b.at);
-  const yields = new Map<string, number>();
+  const yields = new Map<string, { at: number; run: string }>();
   const phases = new Map<string, Map<string, number>>();
   const gaps: number[] = [];
   const durations = new Map<string, number[]>();
@@ -264,11 +264,13 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
     const run = row.run_id as string;
     const task = typeof row.task_id === "string" ? row.task_id : undefined;
     if (row.step === "run.start" && task) {
-      const yieldedAt = yields.get(task);
-      yields.delete(task);
-      if (yieldedAt !== undefined && at > yieldedAt) gaps.push(at - yieldedAt);
+      const yielded = yields.get(task);
+      if (yielded && yielded.run !== run) {
+        yields.delete(task);
+        if (at > yielded.at) gaps.push(at - yielded.at);
+      }
     }
-    if (row.step === "verdict" && row.reason === "freshness_yield" && task) yields.set(task, at);
+    if (row.step === "verdict" && row.reason === "freshness_yield" && task) yields.set(task, { at, run });
     const phase = row.step === "run.phase" ? row.waiting_on
       : row.step === "recon.done" ? "implementing"
       : row.step === "implement.done" ? "preopen_gate"
