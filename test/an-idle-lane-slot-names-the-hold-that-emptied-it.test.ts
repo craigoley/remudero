@@ -205,7 +205,7 @@ test("W1-T8235: the gap across a restart is charged to restart", async () => {
     readLedgerLines: () => [previous],
     checkCostGovernor: () => (++reads % 2 === 0 ? { deferred: true, observedDayCostUsd: 9, ceilingUsd: 5 } : undefined),
     checkStop: () => (sleeps >= 2 ? "operator stop" : undefined),
-    log: (step, extra) => rows.push({ step, extra: extra ?? {} }),
+    log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra: extra ?? {} }),
   } as unknown as DaemonDeps, { laneCount: 3 });
   const charged = rows.filter((r) => r.step === "lane.idle_summary")
     .reduce((n, r) => n + (r.extra.slot_minutes_by_cause as Record<string, number>).restart, 0);
@@ -233,7 +233,7 @@ test("W1-T8235: a hold change writes one lane.idle_changed row", async () => {
     sleep: async () => { sleeps++; nowMs += 5 * MIN; },
     checkCostGovernor: () => (++reads % 2 === 0 ? { deferred: true, observedDayCostUsd: 9, ceilingUsd: 5 } : undefined),
     checkStop: () => (sleeps >= 4 ? "operator stop" : undefined),
-    log: (step, extra) => rows.push({ step, extra: extra ?? {} }),
+    log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra: extra ?? {} }),
   } as unknown as DaemonDeps, { laneCount: 3 });
   const held = rows.filter((r) => r.step === "daemon.cost_governor").length;
   assert.ok(held >= 3, `the governor held several ticks, got ${held}`);
