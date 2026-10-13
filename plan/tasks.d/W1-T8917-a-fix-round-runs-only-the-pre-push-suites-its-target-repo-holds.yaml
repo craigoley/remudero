@@ -12,7 +12,7 @@
   plan_refs: [W1-T7182, W1-T5702, W1-T4693, W1-T8379]
   files: [src/run-task.ts, test/a-fix-round-runs-only-the-pre-push-suites-its-target-repo-holds.test.ts]
   status: queued
-  priority: 1
+  priority: 0.9 # operator-2026-10-13: every console fix round refused since 10-12 17:55Z (10/10 census checks, ENOENT scripts/affected-reach-baseline.json); 23 commit_refused
   attempts: 0
   rationale: |
     OBSERVED 2026-10-12 to 10-13 on remudero-console #2072 (CONSOLE-T124), console ledger
