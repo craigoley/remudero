@@ -8156,11 +8156,17 @@ function changedSymbols(lines: readonly DiffLine[]): Map<string, Set<string>> {
     files.add(file);
     symbols.set(name, files);
   };
+  const calls = new Map<string, { add: Set<string>; del: Set<string> }>();
   for (const l of lines) {
     if (l.kind !== "add" && l.kind !== "del") continue;
     const d = parseDef(l.text);
     if (d) add(d.name, l.file);
-    for (const name of calledNames(l.text)) add(name, l.file);
+    const fileCalls = calls.get(l.file) ?? { add: new Set<string>(), del: new Set<string>() };
+    calls.set(l.file, fileCalls);
+    for (const name of calledNames(l.text)) fileCalls[l.kind].add(name);
+  }
+  for (const [file, fileCalls] of calls) {
+    for (const name of fileCalls.add) if (fileCalls.del.has(name)) add(name, file);
   }
   return symbols;
 }
