@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { DaemonFreshness } from "../src/lib/daemon.js";
+import type { DaemonFreshness, RestartBoundary, RestartBoundaryContext } from "../src/lib/daemon.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
-import { ciWaitFreshness, runTask } from "../src/run-task.js";
+import { ciWaitFreshness, restartLatchDetail, runTask } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -27,9 +27,10 @@ function worker(text: string, isError = false): WorkerResult {
 
 async function fixture(t: TestContext, options: {
   ci?: boolean;
-  latch?: () => Stale | undefined;
+  latch?: RestartBoundary;
   atGate?: () => void;
   recycle?: () => string | undefined;
+  gateSuccess?: boolean;
 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t8198-"));
   const origin = gitRepo({ bare: true });
@@ -47,6 +48,8 @@ async function fixture(t: TestContext, options: {
   t.mock.method(Date, "now", () => now);
   const branch = `run-D-${now}`;
   const gh = ghShim([
+    { when: "pulls?", stdout: "[]" },
+    { when: "api --method POST repos/", stdout: JSON.stringify({ html_url: PR, number: 1 }) },
     { when: "pr view", stdout: JSON.stringify({ headRefName: branch, body: "Remudero-Task: D" }) },
     { when: "/pulls/1", stdout: JSON.stringify({ number: 1, state: "open", merged: false, merged_at: null, head: { sha: HEAD } }) },
     { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "queued" }] }) },
@@ -77,6 +80,7 @@ async function fixture(t: TestContext, options: {
     restartAtWorkerBoundary: options.latch,
     externalWaitFreshness: ownRead,
     externalWaitRecycle: options.recycle,
+    handOffAtPrOpen: options.gateSuccess,
     readHeadShaForProvenance: () => HEAD,
     spawn: async (args) => {
       if (++calls === 1) return worker("RECON REPORT\nOBSERVED: fixture\n");
@@ -89,7 +93,8 @@ async function fixture(t: TestContext, options: {
     preopenGate: async () => {
       gates++;
       options.atGate?.();
-      return { kind: "fail", failedSteps: ["fixture"], durationMs: 1 };
+      return options.gateSuccess ? { kind: "pass", durationMs: 1 }
+        : { kind: "fail", failedSteps: ["fixture"], durationMs: 1 };
     },
   }));
   const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
@@ -170,4 +175,49 @@ test("W1-T8198: a clear latch still yields a worker boundary to recycle PAUSE", 
   assert.equal(h.rows.find(({ step }) => step === "run.freshness_handoff")?.trigger, "recycle");
   assert.equal(h.rows.find(({ step }) => step === "run.freshness_handoff")?.detail, RECYCLE);
   assert.equal(h.ownReads, 0);
+});
+
+test("W1-T8927: run-task supplies the phase and run identity at each restart boundary", async (t) => {
+  const seen: RestartBoundaryContext[] = [];
+  const h = await fixture(t, { latch: (context) => { assert.ok(context); seen.push(context); return undefined; } });
+  assert.equal(h.gates, 1);
+  assert.equal(h.outcome.verdict, "failed");
+  assert.deepEqual(seen.map((context) => context.waitingOn), ["preopen_gate", "preopen_gate"]);
+  const start = h.rows.find((row) => row.step === "run.start");
+  assert.ok(start);
+  assert.ok(seen.every((context) => context.runId === start.run_id));
+  assert.deepEqual(h.rows.filter((row) => row.step === "run.phase").map((row) => row.waiting_on),
+    ["recon", "implementing", "implementing", "preopen_gate", "preopen_gate", "preopen_gate"]);
+  assert.equal(h.rows.some((row) => row.step === "run.freshness_handoff"), false);
+});
+
+test("W1-T8927: the watchdog reads the same phase-aware latch without bypassing a holdout", () => {
+  let phase = "implementing";
+  const seen: RestartBoundaryContext[] = [];
+  const detail = restartLatchDetail((context) => {
+    assert.ok(context);
+    seen.push(context);
+    return phase === "preopen_gate" ? undefined : LATCH;
+  }, () => ({ waitingOn: phase, runId: "D-watch" }));
+  assert.equal(detail?.(), `daemon restart latched: ${LATCH.oldSha.slice(0, 9)}..${LATCH.newSha.slice(0, 9)}`);
+  phase = "preopen_gate";
+  assert.equal(detail?.(), undefined);
+  assert.deepEqual(seen, [{ waitingOn: "implementing", runId: "D-watch" }, { waitingOn: "preopen_gate", runId: "D-watch" }]);
+});
+
+test("W1-T8927: a holdout continues through the gate and push to its opened PR", async (t) => {
+  const seen: RestartBoundaryContext[] = [];
+  const h = await fixture(t, { gateSuccess: true, latch: (context) => {
+    assert.ok(context);
+    seen.push(context);
+    return context.waitingOn === "ci" ? LATCH : undefined;
+  } });
+  assert.equal(h.outcome.verdict, "handed_off", JSON.stringify(h.rows.slice(-5)));
+  assert.equal(h.outcome.prUrl, PR);
+  assert.equal(h.gates, 1);
+  assert.equal(h.calls, 2);
+  const opened = h.rows.findIndex((row) => row.step === "pr.opened");
+  assert.ok(opened >= 0);
+  assert.equal(h.rows.slice(0, opened).some((row) => row.step === "run.freshness_handoff"), false);
+  assert.deepEqual(seen.map((context) => context.waitingOn), ["preopen_gate", "pushing", "ci"]);
 });
