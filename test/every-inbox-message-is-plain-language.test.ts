@@ -58,7 +58,7 @@ const LIVE = [
 
 const CLEAN: PlainInboxMessage = {
   headline: "A planned task needs you to check it",
-  whatHappened: "This task has waited a long time for a person to check it.",
+  whatHappened: "This task has waited a long time for a manual check.",
   whatWeNeed: "Decide whether the fleet should go ahead or drop it.",
   ifNothingHappens: "The task stays blocked.",
   options: [

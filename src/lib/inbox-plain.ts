@@ -18,9 +18,8 @@ import { checkOperatorMessage } from "./operator-message.js";
  * escalations. This module gives every inbox item a plain message, written once and stored, with
  * the raw summary kept for the console's Details.
  *
- * WHAT IS CHECKED, AND WHAT IS NOT. {@link checkPlainMessage} asks two mechanical questions: are
- * the standard's four parts present ({@link checkOperatorMessage}), and is the plain text free of
- * MACHINE TOKENS — text a program wrote for a program (see {@link machineTokens}). It never scores
+ * WHAT IS CHECKED, AND WHAT IS NOT. {@link checkPlainMessage} checks the standard's four parts,
+ * machine text, and fleet framing against the source summary. It never scores
  * readability, counts sentence length, or judges tone: the standard rules those out ("no
  * readability score, no word-count gate, and no sentence-length threshold"). The headline's
  * 15-word bound and the two-to-three options are the decision-card shape the operator directed,
@@ -151,7 +150,20 @@ export function isNonAnswer(line: unknown): boolean {
   return NON_ANSWER_PATTERNS.some((re) => re.test(line));
 }
 
-export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
+const HARNESS_GLOSSARY: Readonly<Record<string, string>> = {
+  lane: "work queue", gate: "review step", sweep: "review pass",
+  shard: "task record", rung: "stage", ratchet: "cost check",
+};
+const HARNESS_TERMS = /\b(?:lanes?|gates?|sweeps?|shards?|rungs?|ratchets?)\b/i;
+const SOURCE_PEOPLE = /\b(?:developers?|engineers?|people|persons?|workers?|humans?)\b/i;
+const PEOPLE_TIME = /\b(?:developers?|engineers?|people|persons?|workers?|working hours|work hours|productivity|human time)\b/i;
+const DEPLOYMENT = /\b(?:deploy(?:ment|ments|ing|ed|s)?|production)\b/i;
+
+function templateKind(id: string): string {
+  return inboxKind(id).split("/").at(-1)!;
+}
+
+export function checkPlainMessage(m: PlainInboxMessage, proposal?: { id: string; summary: string }): PlainCheckResult {
   const problems: string[] = [];
   const parts = checkOperatorMessage({
     speaker: INBOX_SPEAKER,
@@ -172,6 +184,26 @@ export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
   if (!card) problems.push("not a decision card: headline over 15 words, a question as the ask, or not two or three options");
   const texts = [m.headline, m.whatHappened, m.whatWeNeed, m.ifNothingHappens, ...m.options.flatMap((o) => [o.label, o.consequence])];
   for (const t of texts) for (const token of machineTokens(t)) problems.push(`machine text: ${token}`);
+  if (proposal && !SOURCE_PEOPLE.test(proposal.summary) && texts.some((t) => PEOPLE_TIME.test(t))) {
+    problems.push("people's time is not in the source; describe the fleet's machine and CI time");
+  }
+  if (proposal && !DEPLOYMENT.test(proposal.summary) && texts.some((t) => DEPLOYMENT.test(t))) {
+    problems.push("deployment or production framing is not in the source; state the actual merge, review or workflow situation");
+  }
+  const headline = m.headline.trim().toLowerCase();
+  const picksLabel = m.options.some((o) => {
+    const label = o.label.trim().toLowerCase();
+    return label !== "" && headline.startsWith(label) && !/[a-z0-9]/i.test(headline.charAt(label.length));
+  });
+  if (picksLabel || /(?:^|[;.!?—]\s*)(?:approve|reject|release|decline|keep|do not)\b/i.test(headline)) {
+    problems.push("the headline picks an option; state the situation and leave the choice to the operator");
+  }
+  for (const [part, text] of [["headline", m.headline], ["what-happened", m.whatHappened]] as const) {
+    if (HARNESS_TERMS.test(text)) problems.push(`harness term in ${part}; use the plain glossary wording`);
+  }
+  if (proposal && TEMPLATES[templateKind(proposal.id)] && /^(?:review the original record|the fleet has an item for you to look at|the item still needs your review|the item needs your review)[.!]?$/i.test(headline)) {
+    problems.push("placeholder headline for a kind with a template; state this kind's actual situation");
+  }
   return { ok: problems.length === 0, problems };
 }
 
@@ -188,6 +220,18 @@ function daysWaiting(summary: string): string {
 }
 
 type Template = (summary: string) => Omit<PlainInboxMessage, "source" | "options"> & { options?: PlainOption[] };
+
+function plainEvidence(text: string): string {
+  let plain = text.replace(/https?:\/\/\S+/g, "");
+  for (const [, pattern] of MACHINE_TOKEN_PATTERNS) plain = plain.replace(new RegExp(pattern.source, "g"), "");
+  for (const [term, meaning] of Object.entries(HARNESS_GLOSSARY)) {
+    plain = plain.replace(new RegExp(`\\b${term}s?\\b`, "gi"), meaning);
+  }
+  return plain.replace(/\bci-friction\b/gi, "build cost")
+    .replace(/\bPR-(minutes?|hours?)\b/gi, "fleet CI $1")
+    .replace(/\bretro cycles?\b/gi, "review rounds")
+    .replace(/\s+/g, " ").trim();
+}
 
 const FLEET_WORK_OPTIONS: PlainOption[] = [
   { label: "Let the fleet handle it", consequence: "The fleet decides whether to fix it, merge it with similar work, or close it.", intent: "keep" },
@@ -214,6 +258,44 @@ const TEMPLATES: Record<string, Template> = {
     whatHappened: "The record requests an operator ruling; this summary does not verify the question or its current status.",
     whatWeNeed: "Read the recorded question and confirm its scope before deciding.",
     ifNothingHappens: "The question stays open and the work waiting on the ruling stays parked.",
+  }),
+  "machine-judge": (summary) => {
+    const filer = /was filed by the (.+?) gardener/.exec(summary)?.[1];
+    const reason = plainEvidence(/stays parked for you:\s*([\s\S]*?)(?:\n\n|$)/.exec(summary)?.[1] ?? "");
+    return {
+      headline: "A task is parked for a risk decision",
+      whatHappened: `${filer ? `The ${plainEvidence(filer)} automated reviewer filed this task. ` : "The record requests a risk decision. "}${reason ? `The risk reviewer parked it because: ${reason}` : "This summary does not verify the reason it was parked."}`,
+      whatWeNeed: "Review the recorded risk and decide whether the task may proceed or needs changes.",
+      ifNothingHappens: "The task stays parked and the problem it targets remains.",
+    };
+  },
+  "board-review": (summary) => {
+    const hours = /has sat open ([\d.]+)h/.exec(summary)?.[1];
+    const ask = /unhandled escalation: "([\s\S]*?)"/.exec(summary)?.[1];
+    return {
+      headline: hours ? "A proposed change has been waiting for review" : "A proposed change has an unanswered decision",
+      whatHappened: hours ? `The review record reports that a proposed change has waited ${hours} hours.`
+        : ask ? `The review record has an unanswered request: ${plainEvidence(ask)}`
+          : "The review record reports an unanswered request whose question could not be read.",
+      whatWeNeed: "Check the current evidence and answer the recorded review request.",
+      ifNothingHappens: "The review request stays unresolved and the proposed change keeps waiting.",
+    };
+  },
+  "guard-retirement": (summary) => {
+    const rounds = /zero times for (\d+) consecutive retro cycles/i.exec(summary)?.[1];
+    return {
+      headline: "An unused protective check is proposed for removal",
+      whatHappened: rounds ? `The record reports that a protective check has not fired for ${rounds} consecutive review rounds. Removing it still needs a separate reviewed change.`
+        : "The record proposes removing a protective check; this summary does not verify its usage history.",
+      whatWeNeed: "Check whether the protection is still needed before deciding on its removal.",
+      ifNothingHappens: "The protective check remains in place and the removal request stays open.",
+    };
+  },
+  "standing-debt": (summary) => ({
+    headline: "A recorded problem remains unresolved",
+    whatHappened: `The fleet recorded an unresolved problem: ${plainEvidence(summary.split("\n")[0]!)}`,
+    whatWeNeed: "Review the evidence and decide whether to address the recorded problem.",
+    ifNothingHappens: "The recorded problem remains and its effects continue.",
   }),
   adoption: fleetFinding(
     "A feature was added to the code some time ago, but nothing uses it yet.",
@@ -256,11 +338,11 @@ const UNKNOWN_TEMPLATE: Template = () => ({
   ifNothingHappens: "The item stays parked and the work behind it waits.",
 });
 
-/** The kinds that have a written template (every kind seen live on 2026-09-22). */
+/** The kinds that have a written template, including every operator kind seen live. */
 export const TEMPLATED_KINDS: readonly string[] = Object.keys(TEMPLATES);
 
 export function plainTemplate(proposal: { id: string; summary: string }): PlainInboxMessage {
-  const t = (TEMPLATES[inboxKind(proposal.id)] ?? UNKNOWN_TEMPLATE)(proposal.summary);
+  const t = (TEMPLATES[templateKind(proposal.id)] ?? UNKNOWN_TEMPLATE)(proposal.summary);
   return { ...t, options: t.options ?? ASK_OPTIONS, source: "template" };
 }
 
@@ -269,6 +351,11 @@ export function plainTemplate(proposal: { id: string; summary: string }): PlainI
 function writerContext(proposal: { id: string; summary: string }, retryProblems: string[]): string {
   return [
     "Write for a busy person who does not read code. Use short, everyday words and active voice.",
+    "The reader is the operator of an autonomous software fleet.",
+    "PR-minutes, rounds and hours measure the fleet's machine and CI time, never people's time unless the source names people.",
+    "A merge, arm, review or workflow change is not a deployment unless the source mentions deployment or production.",
+    "The headline states the situation; never tell the operator which option to choose or use a placeholder headline.",
+    `Glossary: ${Object.entries(HARNESS_GLOSSARY).map(([term, meaning]) => `${term} = ${meaning}`).join("; ")}. Use the plain wording in the headline and what happened.`,
     "Do NOT include code, file names, file paths, task ids, PR numbers, commands, or internal names.",
     "Say what happened and what the person should decide; the raw details are shown separately.",
     'Give every option an "intent": approve (go ahead), decline (close it), reframe (ask for a different proposal or clearer proof), reply (ask a question) or keep (leave it as it is).',
@@ -304,7 +391,7 @@ async function askWriter(
     options: card.options,
     source: "writer",
   };
-  const check = checkPlainMessage(message);
+  const check = checkPlainMessage(message, proposal);
   return check.ok ? { message, problems: [] } : { message: null, problems: check.problems };
 }
 
@@ -327,7 +414,7 @@ export async function writePlainMessage(
 export type PlainStore = Record<string, PlainInboxMessage>;
 
 export function plainSourceFingerprint(proposal: { id: string; summary: string }): string {
-  return createHash("sha256").update(JSON.stringify(["inbox-plain-v3", proposal.id, proposal.summary])).digest("hex");
+  return createHash("sha256").update(JSON.stringify(["inbox-plain-v4", proposal.id, proposal.summary])).digest("hex");
 }
 
 export function plainStorePath(stateDir: string): string {
@@ -356,7 +443,7 @@ function currentStoredMessage(proposal: { id: string; summary: string }, store: 
     options: stored.options,
   });
   if (!shape || typeof stored.ifNothingHappens !== "string") return undefined;
-  return checkPlainMessage(stored).ok ? stored : undefined;
+  return checkPlainMessage(stored, proposal).ok ? stored : undefined;
 }
 
 /** Legacy or changed-source messages remain in the store but cannot be rendered as current. */
