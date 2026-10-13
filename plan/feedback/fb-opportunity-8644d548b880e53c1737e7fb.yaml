@@ -1,0 +1,11 @@
+id: fb-opportunity-8644d548b880e53c1737e7fb
+ts: 2026-10-13T00:00:18.284Z
+raw: |-
+  Opportunity-Key: craigoley/remudero/standing-debt:6
+  {"source":"standing-debt","key":"standing-debt:6","repo":"craigoley/remudero","observedAt":"2026-10-12T23:59:52.298Z","anchor":"MASTER-PLAN.md#standing-debt-6","availability":"available","freshness":"fresh","population":{"affected":1,"denominator":18,"unit":"open debt entries"},"impact":{"value":51,"unit":"cycles of dwell"},"remedy":"`blocked_budget`\nrows must carry the limit that fired and the reading it fired at (P44) — **AGE: 51 cycles**.","authority":"machine","related":{}}
+  Draft one bounded task through the normal triage and machine-filing judge, with author_class: machine. Preserve origin: standing-debt:6 and the exact Opportunity-Key line on the task. Establish executable acceptance before filing.
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+submission_key: craigoley/remudero/standing-debt:6
