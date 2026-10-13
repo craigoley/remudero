@@ -1,0 +1,125 @@
+- id: W1-T9100
+  title: "THE CI-FRICTION HAND-FIX READ PAGES ONLY WHAT CHANGED SINCE ITS LAST READ — readCiFrictionHandFixes re-walks every closed PR updated in the last 14 days (2,840 on 2026-10-13, 29 pages of full PR objects, about 54 MB) each time its fixed 10-minute cache lapses, about 30 times a day, though a new hand fix can only arrive with a new commit on origin/main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the hand-fix read keeps a cursor and refreshes on need; it spans the reader (ci-friction-gardener.ts), its new test and the W1-T5300 tests that pin the old TTL
+  band_meaning: span
+  origin: "found 2026-10-13 by an operator session watching the core daemon container; operator standing direction: fix at root, lean into automation and efficiency"
+  plan_refs: [W1-T5300, W1-T4435, W1-T5114, W1-T2323, W1-T3297]
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts
+    - test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts
+  status: queued
+  priority: 1.5  # operator session 2026-10-13: ~870 REST page reads and ~1.6 GB of PR JSON a day, for a list that changes by a few rows between reads
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced, in the core daemon's state (~/rmd-state2/state).
+      - LEDGER UNION, 2026-10-10..13: the 80 dated .ndjson.gz rotations plus the live ledger.ndjson (no plain
+        rotated .ndjson files exist). Positive control, same pass: 7,436 `garden.pass` rows, present in all 80 files.
+        191 are `name: ci-friction` (2026-10-09T23:20Z to 2026-10-13T12:10Z), every one `exit: 0`; executionMs median
+        105 s, p90 166 s, max 390 s.
+      - INVENTORY READS: 138 `ci-friction.scorecard` rows carry `hand_fixes` in the same window, so 138 passes read the
+        inventory, which calls `readCiFrictionHandFixes` once per child (`handFixes ??=` in the `ci-friction` case of
+        `buildRegisteredGarden`). Replaying those 138 times against the 600,000 ms cache rule: 107 of them paid the
+        crawl, 30.3 a day, median 27 minutes apart.
+      - PAGES PER CRAWL: the loop stops on the first page shorter than 100 rows, or whose last row was updated before
+        the 14-day window. One GitHub search read at 12:40:25Z (`is:pr is:closed updated:>=2026-09-29T12:50Z`) returned
+        total_count 2,840 with `incomplete_results: false`, so today's crawl is 29 pages. Cross-check: the cache file
+        `ci-friction-hand-fixes.json` was written at 12:08:06.164Z by the pass that began executing at 12:06:48.9Z, so
+        that crawl plus the pass's ledger and plan reads took at most 77 s. At the 1,500 ms shared read gap
+        (`DEFAULT_GH_PACE_MIN_GAP_MS`) that is no more than 51 page reads, which rules out a 90-page crawl for that pass.
+      - BYTES: `board_gateway.fetch_bytes` for a 30-row closed delta read 562,169 bytes on 2026-10-13T11:44Z, about
+        18.7 KB a PR. So one crawl moves about 54 MB, and 30 crawls move about 1.6 GB and about 870 REST reads a day.
+      - THE ANSWER IT CARRIES: the cache holds 434 hand fixes merged since 2026-09-29T13:15Z.
+    WHERE IT RUNS, AND WHAT IT DOES NOT DO:
+      - NOT ON THE DAEMON LOOP. The pass runs in a `rmd garden run ci-friction` child (`childGardenPassSpawn`, W1-T5114).
+        Control: 3,408 `daemon.alive` rows in the same union, every one carrying `sync_spawn_top`. They name 25+ callers
+        (plan.ts `runGit` 398 times, deployer.ts 231, worktree-git.ts 217 ...) and never `readCiFrictionHandFixes`. The one
+        ci-friction entry is the due probe's `cheapFingerprint` git call (7,069 ms once), which is not this read.
+      - WHAT IT COSTS THE DAEMON INDIRECTLY: each page goes through `ghExec`, so `applyGhReadCadence` stamps the shared
+        read slot. The daemon's own synchronous gh reads that land during a crawl wait out the 1.5 s gap. The child also
+        holds one of the two garden slots (`daemonGardenPassSpawn`) for the whole crawl, so other gardens queue behind it.
+    WHY, READ on origin/main c08ec7f61 (symbols, not lines):
+      - `readCiFrictionHandFixes` (src/lib/ci-friction-gardener.ts) reuses the cache only while
+        `clock.now() - Date.parse(cached.asOf) < 600_000`. Past that it pages
+        `pulls?state=closed&sort=updated&direction=desc&per_page=100&page=N` from page 1 to the window's edge. The
+        cache's `byPr` saves the `git diff-tree` per PR, but it saves no GitHub read.
+      - A merged closed PR's `updated_at` keeps moving: branch deletions, label edits and comments touch it. So the
+        window holds far more PRs than the 434 hand fixes in it, and the crawl gets longer as the fleet merges faster.
+      - The precedent for the fix is in the repo already. `fetchBoardPrsRest`'s cold half (src/lib/open-prs-rest.ts,
+        W1-T2323) walks the same newest-updated-first order and stops at the first row it already holds with the same
+        `updated_at`. Steady state is one short page.
+    NOT COVERED ELSEWHERE: swept plan/ and src/ on origin/main and all 338 open origin heads for
+    readCiFrictionHandFixes, ci-friction-hand-fixes, "hand-fix PR list", findingSubject, fleet_lane.decided,
+    ratifyCliGateway and two prose forms. Control: main reads 44 hits. No head reads more than main, and the only
+    head that edits nearby files (run-W1-T9065) edits fleet-lane.ts, not this reader.
+    THE 11:58Z "page=90" SIGHTING IS NOT ATTRIBUTED TO THIS READER. The crawl above is 29 pages, and that minute sits
+    inside the 11:53:18Z boot's `daemon.boot_gate.deferred` window for `gardens`. Other full closed-PR walks are named
+    under note.
+  design: |
+    No new bound, no TTL and no timer.
+    1. A CURSOR, AND A WALK THAT STOPS AT IT. The cache gains `cursor`, the newest `updated_at` the last read saw, and
+       `mainSha`, the origin/main sha that read was made against. A read with a valid cache for this repository pages
+       newest-updated-first as today, but stops at the first page whose last row is older than `cursor` (`<`, so rows
+       updated in the same second are read again, which is harmless). The rows it reads are classified as today. The
+       result is MERGED into the cached fixes by PR number, so a re-read PR replaces its own entry, and the merged set
+       is pruned to the 14-day window by `merged_at`. `byPr` is kept and pruned with it. A missing, unreadable or
+       other-repository cache, or one without a cursor (every cache written before this change), takes today's full
+       window walk once and writes a cursor.
+    2. REFRESH ON NEED, NOT ON A CLOCK. A hand fix is a merged PR, so it reaches origin/main as a commit, and the
+       reader already needs that commit locally for `git diff-tree`. So the read is due only when
+       `readOriginMainSha(repoRoot)` (src/lib/inbox.ts, a ref-file read with no git spawn) differs from the cache's `mainSha`. While it is unchanged, the cached fixes are
+       returned, pruned to the window at this pass's clock, with `source: "cache"` and no gh call. An unreadable
+       origin/main sha makes the read due, never skipped. Remove the `600_000` literal.
+    3. FAILURE STAYS AS TODAY. A failed page throws inside the try, so the pass reads `unmeasured` with the reason, and
+       the cache and its cursor are left as they were, never advanced past rows that were not read. The read stays in
+       the garden child; nothing moves onto the daemon loop.
+    Inject the origin/main reader the way `run` is injected, so tests need no git repo for the gate. Tests go in
+    test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts, with `test(` titles verbatim as in the proofs
+    below. Drive `readCiFrictionHandFixes` with a fake `run` that serves numbered pages and records every gh argv, a
+    fixed Clock, and a temp state dir. Update test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts only where it
+    pins the old TTL.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts"
+    - claim: "with a cursor, a read stops at the first page older than the cursor and merges the new hand fixes into the cached ones"
+      proof: 'grep: test("W1-T9100: a read with a cursor stops at the cursor and merges into the cached fixes" in test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts'
+    - claim: "an unchanged origin/main sha answers from the cache with no gh call, however old the cache is"
+      proof: 'grep: test("W1-T9100: an unchanged origin/main answers from the cache with no gh call" in test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts'
+    - claim: "merged fixes and their file lists are pruned to the 14-day window by merged_at"
+      proof: 'grep: test("W1-T9100: merged fixes are pruned to the window" in test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts'
+    - claim: "a cache with no cursor takes one full window walk and writes a cursor"
+      proof: 'grep: test("W1-T9100: a cache with no cursor walks the window once and writes one" in test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts'
+    - claim: "a failed page leaves the cache and its cursor unchanged and reads unmeasured"
+      proof: 'grep: test("W1-T9100: a failed page leaves the cursor where it was" in test/the-ci-friction-hand-fix-read-pages-only-what-changed.test.ts'
+    - claim: "the reader keeps a cursor in its cache"
+      proof: "grep: cursor in src/lib/ci-friction-gardener.ts"
+  falsifier: |
+    Keep the walk running to the window's edge and the cursor test records every page the fake serves, not one.
+    Keep the 600,000 ms rule and the unchanged-main test makes a gh call once the fixed clock passes ten minutes.
+    Replace the cached fixes instead of merging, and the cursor test loses the hand fix only the cache held. Advance
+    the cursor before the walk succeeds, and the failure test finds it moved.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union and state, with no numeric pass mark:
+    `ci-friction.scorecard` `hand_fixes.count` matches what a full walk would find (healthy shape: the same count as
+    the last full-walk value, moving only as fixes merge or age out); `ci-friction` `garden.pass` executionMs (healthy
+    shape: lower than the 105 s median of 2026-10-10..13); `ci-friction.hand_fixes_unmeasured` rows (healthy shape:
+    none that were not there before).
+    OTHER CLOSED-PR READERS, CHECKED FOR THE SAME FULL-CRAWL SHAPE. They are follow-ups, not part of this task:
+      - `retroShippedGithubGatewayAsync` (src/run-task.ts) loads a missed board page with `fetchBoardPrsRestAsync(...,
+        undefined, half)`. That is no `known` index, so every closed-half load walks every closed PR (about 113 pages at
+        11,334 PRs) until a short page. It is the likeliest source of the page=90 sighting, NOT VERIFIED. Candidate
+        follow-up: seed it from the board snapshot's closed rows, as the daemon's board gateway already does.
+      - `readRunBranchClosedPrsOutput` (src/run-task.ts, the drain's W1-T1207 read) is 8 pages a drain pass by a fixed
+        `RUN_BRANCH_CLOSED_PR_MAX_PAGES`, and status.ts `listPullsByState("closed", 1000)` is 10. Both are bounded, but by
+        fixed caps. Candidate follow-up: answer both from the board's incremental closed index.
+      - coverage-improvement.ts `mergedPullsRestArgs` is one page with no pagination, so it is not a crawl.
+        head-rehome.ts and main-health-rung.ts send `PATCH ... -f state=closed` to close one PR, which is a write, not a
+        list read.
+    ASIDE, NOT IN THIS TASK: the ci-friction due probe's `cheapFingerprint` runs a synchronous git call on the daemon
+    loop (7,069 ms once in the 3,408 `daemon.alive` rows above).
