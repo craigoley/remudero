@@ -29,7 +29,7 @@ const loadBuild = async (): Promise<BuildModule> => (await import(pathToFileURL(
 
 const NAME = "check-proof-main";
 const SOURCE = "src/check-proof-main.ts";
-const ARGS = ["grep: x in y.txt", "--base", "origin/main"];
+const ARGS = ["grep: --import tsx in y.txt", "--base", "origin/main"];
 const MARKER = "BUNDLE-RAN-OK";
 
 /** A minimal tree whose check-proof entry prints a marker and its arguments. */
@@ -68,8 +68,7 @@ test("W1-T8775: a current check-proof bundle is spawned without tsx", async () =
     assert.equal(launch.kind, "bundle");
     assert.equal(launch.reason, "source-hash-match");
     assert.deepEqual(launch.argv, [bundle, ...ARGS], "the bundle path, then the caller's arguments, nothing before it");
-    assert.ok(!launch.argv.includes("--import"), "a bundle runs under plain node: no loader import");
-    assert.ok(!launch.argv.some((a) => /tsx/.test(a)), "no tsx anywhere in the argv");
+    // Exact argv above excludes Node loader options before the entry; words in paths/proof text are data.
     assert.equal(mod.childEntryIsCurrent(root, NAME).current, true);
     const r = spawnSync(process.execPath, launch.argv, { encoding: "utf8", cwd: tmpdir() });
     assert.equal(r.status, 0, r.stderr);
