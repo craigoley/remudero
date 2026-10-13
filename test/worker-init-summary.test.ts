@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
-import { INIT_INSPECTION_LIMIT, INIT_SERVER_NAME_LIMIT, INIT_TOOL_NAME_LIMIT,
-  workerInitSummaryFromMessage } from "../src/lib/worker-init-summary.js";
 
 async function collect(events: unknown[]) {
   return collectWorkerResult((async function* () {
@@ -43,7 +41,8 @@ test("malformed init fields remain partial and never become a no-connections cla
   assert.equal(row.mcpToolNames.inputEntries, null);
 });
 
-test("SDK inventory rejects secret-like and path names without storing rejected values", () => {
+test("SDK inventory rejects secret-like and path names without storing rejected values", async () => {
+  const { workerInitSummaryFromMessage } = await import("../src/lib/worker-init-summary.js");
   const raw = { type: "system", subtype: "init", mcp_servers: [null, { name: "ok" },
     { name: "https://private.example" }, { name: "ghp_secret" }, { name: "sk-secret" },
     { name: "eyJprivate" }, { name: "X".repeat(32) }],
@@ -57,7 +56,9 @@ test("SDK inventory rejects secret-like and path names without storing rejected 
   assert.equal(JSON.stringify(summary).includes("secret"), false);
 });
 
-test("SDK init parsing bounds work and retained inventory independently, reporting partial coverage", () => {
+test("SDK init parsing bounds work and retained inventory independently, reporting partial coverage", async () => {
+  const { INIT_INSPECTION_LIMIT, INIT_SERVER_NAME_LIMIT, INIT_TOOL_NAME_LIMIT,
+    workerInitSummaryFromMessage } = await import("../src/lib/worker-init-summary.js");
   const bounded = workerInitSummaryFromMessage({ type: "system", subtype: "init",
     mcp_servers: Array.from({ length: INIT_INSPECTION_LIMIT + 20 }, (_, i) => ({ name: `server-${i}` })),
     tools: Array.from({ length: INIT_INSPECTION_LIMIT + 20 }, (_, i) => `mcp__server__tool-${i}`) })!;
@@ -70,6 +71,7 @@ test("SDK init parsing bounds work and retained inventory independently, reporti
 });
 
 test("system status, assistant messages and a repeated init cannot replace the first inventory", async () => {
+  const { workerInitSummaryFromMessage } = await import("../src/lib/worker-init-summary.js");
   for (const event of [null, 0, { type: "assistant", subtype: "init" }, { type: "system", subtype: "status" }])
     assert.equal(workerInitSummaryFromMessage(event), undefined);
   const result = await collect([{ type: "system", subtype: "init", mcp_servers: [{ name: "first" }], tools: [] },
