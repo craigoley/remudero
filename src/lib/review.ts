@@ -4839,8 +4839,10 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
   let incomplete = false;
   try {
+    for (const liveOnly of [true, false]) {
     for await (const row of openLedgerUnion(dirname(args.ledgerPath), {
       step: "report.followups", dedupe: false, signal: controller.signal,
+      ...(liveOnly ? { throughRotation: "" } : {}),
       onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
     })) {
       if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
@@ -4853,6 +4855,12 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         entries.set(JSON.stringify(entry), entry);
         if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
       }
+    }
+    const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    if (unreportedFollowUps(observation.promised,
+      followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
+      return { ...observation, harvested: found, harvestCorpusComplete: !liveOnly && !incomplete };
+    }
     }
     const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
@@ -4870,17 +4878,18 @@ export async function preparePromisedReviewDecision(args: {
   task: { id: string; sourcePath?: string }; ledgerPath: string; prUrl: string;
 }): Promise<{ decisionDigest: string; judge: (evidence: ReviewEvidence) => Promise<ReviewVerdict> }> {
   const input = structuredClone(args.input);
+  const { headCheckoutDir, ledgerPath, prUrl } = args, task = { ...args.task };
   const sources = await observePromisedFollowUps({
-    diff: input.diff, headSha: input.headSha, headCheckoutDir: args.headCheckoutDir, task: { ...args.task },
+    diff: input.diff, headSha: input.headSha, headCheckoutDir, task,
   });
   const observation = await recoverPromisedFollowUpReports(sources, {
-    ledgerPath: args.ledgerPath, taskId: args.task.id, prUrl: args.prUrl, implementationReport: input.implementationReport,
+    ledgerPath, taskId: task.id, prUrl, implementationReport: input.implementationReport,
   });
   return {
     decisionDigest: reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation }),
     judge: evidence => judgeReviewAsync([...input.acceptance], {
       ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
-      headCheckoutDir: args.headCheckoutDir, promisedFollowUpObservation: observation,
+      headCheckoutDir, promisedFollowUpObservation: observation,
     }),
   };
 }
