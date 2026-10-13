@@ -2168,10 +2168,6 @@ export function tryFetchReviewReuseFacts(
   }
 }
 
-/** W1-T9047 — no default bound: past 25, a refreshed head got a full LLM review for want of one
- *  compare. The open-PR listing already bounds the orphaned set. */
-export const REVIEW_REUSE_HYDRATION_CAP = Number.POSITIVE_INFINITY;
-
 /** One orphaned PR the reuse hydrator asks about. `headRefName` orders fleet heads first under a cap. */
 export interface ReviewReuseHydrationTarget {
   number: number;
@@ -2194,15 +2190,15 @@ export function reviewReuseHydrationOrder<T extends ReviewReuseHydrationTarget>(
  *  spend a compare on every open PR every pass — GitHub's SECONDARY limit counts request CADENCE,
  *  not volume, so a per-pass fan-out over the full board is precisely the shape that trips it while
  *  `rate_limit` still reads full. Only a PR whose review was orphaned by a push can reach the reuse
- *  rows at all, so only those are asked about. W1-T9047: by default every one of them is asked
- *  about ({@link REVIEW_REUSE_HYDRATION_CAP}). */
+ *  rows at all, so only those are asked about. W1-T9047: by default ALL of them, uncapped: past 25,
+ *  a refreshed head got a full LLM review for want of one compare. */
 export function hydrateReviewReuseFacts(
   owner: string,
   repo: string,
   targetBranch: string,
   orphanedPrs: readonly ReviewReuseHydrationTarget[],
   fetch: GhApiFetcher,
-  cap: number = REVIEW_REUSE_HYDRATION_CAP,
+  cap: number = Number.POSITIVE_INFINITY,
   /** Per-PR failure reason, forwarded from {@link tryFetchReviewReuseFacts}. */
   onUnreadable?: (prNumber: number, reason: string) => void,
   /** W1-T9047 — each PR a cap left unasked. Its review cannot be reused this pass. */
@@ -2217,7 +2213,7 @@ export function* hydrateReviewReuseFactsSteps(
   targetBranch: string,
   orphanedPrs: readonly ReviewReuseHydrationTarget[],
   fetch: GhApiFetcher,
-  cap: number = REVIEW_REUSE_HYDRATION_CAP,
+  cap: number = Number.POSITIVE_INFINITY,
   onUnreadable?: (prNumber: number, reason: string) => void,
   onPastCap?: (prNumber: number, cap: number) => void,
 ): GhReadSteps<Map<number, ReviewReuseFacts>> {
