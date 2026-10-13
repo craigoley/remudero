@@ -60,6 +60,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "flow-remedy",
   // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
   "fix-lane",
+  // W1-T5420: append the formerly separate knowledge starter; existing registered slots stay unchanged.
+  "knowledge",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

@@ -1,0 +1,85 @@
+id: fb-1791856944992-903702
+ts: 2026-10-13T02:02:24.993Z
+raw: >-
+  Found while landing the NanoClaw comparison entries, 2026-10-13. It is an
+  adjacent defect, not a NanoClaw idea. It cost this interactive session its
+  whole scratchpad mid-run.
+
+
+  OBSERVED (Claude Code web session, uid 0, at origin/main efd226b50):
+
+  - While scripts/preflight-author.mjs ran in a worktree, the entire
+  /tmp/claude-0/-home-user-remudero tree was deleted at about 01:54Z and then
+  recreated empty. That tree is Claude Code's own per-session scratch root for
+  this checkout. It held the session's scratch files, a research clone, the
+  running preflight's log and every background-task output.
+
+  - This container's /tmp persists across sessions (files in /tmp/claude-0 date
+  from 2026-09-30), so that slug directory's own mtime was about 13 days old.
+
+  - Mechanism: sweepStaleWorkerScratch (src/lib/worker-scratch.ts:180-226) reaps
+  every directory ONE level under claudeScratchRoot() = /tmp/claude-<uid> whose
+  OWN mtime is older than maxAgeMs. It is called with the 4 h ceiling from
+  worktreeRemove and worktreeRemoveAsync (src/lib/worker.ts:5750, 5757) and with
+  the 24 h default at daemon boot (src/run-task.ts:39767).
+
+  - A slug directory's own mtime changes only when a direct child is added or
+  removed. So a LIVE session's slug reads as stale while files deep inside are
+  minutes old.
+
+  - Reproduced without deleting anything: the real sweep, with real reads and a
+  recording rmSync, on the real root, would remove
+  /tmp/claude-0/-zz-scratch-probe. That probe directory had an mtime 306 min old
+  and held a file written 6 min earlier.
+
+  - The boot rung right after it says the opposite rule for review clones:
+  "Ownership is decided by CONTENT ... never a name glob: these roots are shared
+  with another application and other sessions" (src/run-task.ts, the same
+  daemonBoot callback).
+
+
+  INFERRED:
+
+  - Which test or preflight step reached a real worktreeRemove with the real
+  root is not identified.
+  test/every-worktree-remove-runs-through-the-hardened-git-leaf.test.ts alone
+  did not.
+
+  - Any host where an interactive Claude Code session shares a uid and a tmp
+  root with the daemon or the test suite is exposed. That covers a Mac with
+  /tmp/claude-<uid>, and a long-lived container like this one.
+
+  - DECISIONS.md 2026-09-16 records a session's scratch being "wiped three
+  times". This may be that cause.
+
+
+  ASK:
+
+  1. The sweep reaps only what rmd owns: a slug that derives from an rmd worker
+  cwd (worktree roots and probe dirs, via scratchSlugForCwd's inverse or a
+  marker file rmd writes), or one whose NEWEST entry, found by a bounded walk,
+  is older than the ceiling. Never the bare top-directory mtime.
+
+  2. The test suite pins CLAUDE_CODE_TMPDIR to a per-process directory in
+  test/setup, so no test can sweep the real root.
+
+  3. A test plants an aged slug directory holding a fresh file under a fake root
+  and asserts it is kept, plus an aged and empty one that is removed.
+
+
+  FALSIFIER: revert to the top-directory mtime test. The
+  aged-directory-with-fresh-file fixture is removed, and the test fails.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/scratch-sweep-spares-live-sessions
+thread_id: null

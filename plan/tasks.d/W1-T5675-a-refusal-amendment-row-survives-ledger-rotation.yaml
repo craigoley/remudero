@@ -10,8 +10,8 @@
   origin: "operator session 2026-10-04: watch log, REFUSAL_AMENDMENT_STEP is read to decide but not retained"
   plan_refs: [W1-T4838, W1-T5531, W1-T209]
   files: [src/lib/ledger.ts, test/a-refusal-amendment-row-survives-ledger-rotation.test.ts]
-  status: queued
-  priority: 3
+  status: blocked
+  retirement: closed  # satisfied by main: #9478 (dcaa71cd0, W1-T5958) added "refusal_amendment.drafted" to DECISION_RELEVANT_LEDGER_STEPS; run-W1-T5675-1791511898600 changed only its test, which passes 1/1 on d3a775a7a and fails without that entry (issue #10218)
   attempts: 0
   rationale: |
     READ 2026-10-04 on origin/main 284015b9. `noPrVerdictRowsFromLedger` (src/lib/refusal-amendment.ts)

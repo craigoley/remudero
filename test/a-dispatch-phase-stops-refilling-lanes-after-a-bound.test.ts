@@ -88,9 +88,9 @@ test("a dispatch phase refills through the bound, drains admitted lanes, then re
       "the bound must leave A and C running");
     await settle("C", minute);
     assert.equal(started.length, 7, "another freed lane is held while A still runs");
-    assert.equal(steps.at(-1)?.step, "dispatch.lane_refill_held");
-    assert.equal(steps.at(-1)?.extra?.reason, "phase bound");
-    assert.equal(steps.at(-1)?.extra?.phase_age_ms, bound + minute + 1);
+    assert.equal(steps.filter(({ step }) => step !== "lane.idle_changed").at(-1)?.step, "dispatch.lane_refill_held");
+    assert.equal(steps.filter(({ step }) => step !== "lane.idle_changed").at(-1)?.extra?.reason, "phase bound");
+    assert.equal(steps.filter(({ step }) => step !== "lane.idle_changed").at(-1)?.extra?.phase_age_ms, bound + minute + 1);
     assert.equal(tick, 1, "the next tick waits for the last admitted lane");
     await settle("A", 4 * minute);
     assert.deepEqual(started.slice(7), ["H", "I", "J"].map((id) => ({ id, tick: 2, generation: 2 })),

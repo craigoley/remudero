@@ -124,8 +124,8 @@ test("W1-T3529: runReview does not re-derive the target from a bare repo name", 
   const src = readRunTaskSource();
   const runReviewStart = src.indexOf("async function runReview(args:");
   assert.notEqual(runReviewStart, -1, "runReview must still be present");
-  const judgeCall = src.indexOf("const computed = await judgeReviewAsync(criteria, {", runReviewStart);
-  assert.notEqual(judgeCall, -1, "runReview must still await judgeReviewAsync");
+  const judgeCall = src.indexOf("const computed = await preparedDecision.judge({", runReviewStart);
+  assert.notEqual(judgeCall, -1, "runReview must still await the prepared judgeReviewAsync");
   const evidence = src.slice(judgeCall, src.indexOf("});", judgeCall));
   assert.match(evidence, /target: \{ owner, repo \},/);
   assert.doesNotMatch(evidence, /repo\.split|prUrl|parseOwnerRepo/, "runReview must not reconstruct target from another string");
@@ -144,7 +144,7 @@ test("W1-T3529: the fix-rung path still relies on its existing runReview owner/r
 test("W1-T3529: every pre-existing judgeReview evidence field remains in the runReview call", () => {
   const src = readRunTaskSource();
   const runReviewStart = src.indexOf("async function runReview(args:");
-  const judgeCall = src.indexOf("const computed = await judgeReviewAsync(criteria, {", runReviewStart);
+  const judgeCall = src.indexOf("const computed = await preparedDecision.judge({", runReviewStart);
   const evidence = src.slice(judgeCall, src.indexOf("});", judgeCall));
   for (const field of [
     "diff",

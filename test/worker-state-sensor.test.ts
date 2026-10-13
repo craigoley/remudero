@@ -29,6 +29,7 @@ import {
 import {
   buildWorkerStateSensor,
   capWorkerTailLines,
+  dispatchStreamObserver,
   ledgerPathFor,
   runWorkerTailSweepRung,
   sweepStaleWorkerTails,
@@ -228,6 +229,85 @@ test("buildWorkerStateSensor appends bounded structured activity with tool timin
   assert.equal(activity[2]?.tool_duration_ms, 2_500);
   assert.equal(activity[2]?.tool_outcome, "success");
   assert.equal(activity[2]?.event_kind, "message");
+});
+
+// Operator ruling 2026-10-13: each tool call is numbered and carries a bounded signature, never its raw input.
+test("worker.activity numbers every tool call from 0, counting up per run", () => {
+  const root = tmpRoot("worker-activity-index");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-index", taskId: "task-index", root });
+  sensor.observer({ kind: "working", tsMs: 1, text: "first I read" });
+  sensor.observer({ kind: "tool-executing", tsMs: 2, toolName: "Read" });
+  sensor.observer({ kind: "message", tsMs: 3, toolOutcome: "success" });
+  sensor.observer({ kind: "tool-executing", tsMs: 4, toolName: "Bash" });
+  sensor.observer({ kind: "tool-executing", tsMs: 5, toolName: "Grep" });
+  const activity = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  const toolRows = activity.filter((line) => line.event_kind === "tool-executing");
+  assert.deepEqual(toolRows.map((line) => line.tool_call_index), [0, 1, 2]);
+  assert.ok(activity.filter((line) => line.event_kind !== "tool-executing").every((line) => !("tool_call_index" in line)));
+
+  const nextRun = buildWorkerStateSensor({ ledgerPath, runId: "run-index-2", taskId: "task-index", root });
+  nextRun.observer({ kind: "tool-executing", tsMs: 6, toolName: "Read" });
+  const nextRows = readLedgerLines(ledgerPath).filter((line) => line.run_id === "run-index-2" && line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.deepEqual(nextRows.map((line) => line.tool_call_index), [0], "a new run counts from 0 again");
+});
+
+test("a tool-executing worker.activity row carries the bounded tool_signature and never the raw tool input", () => {
+  const root = tmpRoot("worker-activity-signature");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const worktree = join(root, "wt");
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-signature", taskId: "task-signature", root });
+  const curl = 'curl -H "Authorization: Bearer s3cret-token" https://example.com/private';
+  sensor.observer({ kind: "tool-executing", tsMs: 1, toolName: "Bash", toolUseId: "tu-1", toolInput: { command: curl }, cwd: worktree });
+  sensor.observer({ kind: "tool-executing", tsMs: 2, toolName: "Read", toolInput: { file_path: join(worktree, "src", "a.ts") }, cwd: worktree });
+  sensor.observer({ kind: "tool-executing", tsMs: 3, toolName: "Edit", toolInput: { file_path: "/etc/hosts" }, cwd: worktree });
+  sensor.observer({ kind: "tool-executing", tsMs: 4, toolName: "Bash", toolInput: { command: "'unterminated" }, cwd: worktree });
+  sensor.observer({ kind: "tool-executing", tsMs: 5, text: "[tool_use]" });
+  const toolRows = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.deepEqual(toolRows.map((line) => line.tool_signature), ["Bash:curl", "Read:src/a.ts", "Edit:<outside>", undefined, undefined]);
+  assert.deepEqual(toolRows.map((line) => line.tool_call_index), [0, 1, 2, 3, 4], "an unreadable input still counts as a call");
+  const ledgerText = readFileSync(ledgerPath, "utf8");
+  for (const leaked of ["s3cret", "example.com", "Authorization", "/etc/hosts", "tu-1"]) {
+    assert.equal(ledgerText.includes(leaked), false, `the ledger must never carry ${leaked}`);
+  }
+});
+
+test("collectWorkerResult carries a tool_use block's id and input, and a tool_result's id, on the stream event", async () => {
+  const events: WorkerStreamEvent[] = [];
+  async function* stream(): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "tu-9", name: "Bash", input: { command: "npm test" } }] } };
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu-9", is_error: false }] } };
+    yield { type: "assistant", message: { content: [{ type: "tool_use", name: "TodoWrite" }] } };
+    yield { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s", total_cost_usd: 0, num_turns: 2, permission_denials: [] };
+  }
+  await collectWorkerResult(stream(), { childEnvKeys: [], streamObserver: (event) => events.push(event), now: () => 1 });
+  const [toolUse, toolResult, bare] = events;
+  assert.equal(toolUse?.toolUseId, "tu-9");
+  assert.deepEqual(toolUse?.toolInput, { command: "npm test" });
+  assert.equal(toolResult?.toolUseId, "tu-9");
+  assert.equal(toolResult?.toolOutcome, "success");
+  assert.equal(bare?.kind, "tool-executing");
+  assert.equal("toolUseId" in (bare ?? {}), false, "a block with no id carries none");
+  assert.equal("toolInput" in (bare ?? {}), false, "a block with no input carries none");
+});
+
+test("dispatchStreamObserver stamps the spawn's cwd, so the sensor records a repo-relative tool_signature end to end", async () => {
+  const root = tmpRoot("worker-activity-dispatch");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const worktree = join(root, "wt");
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-dispatch", taskId: "task-dispatch", root });
+  const observer = dispatchStreamObserver(sensor.observer, { cwd: worktree }, () => undefined);
+  async function* stream(): AsyncGenerator<unknown> {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "tu-1", name: "Bash", input: { command: `cd ${worktree} && node --test test/x.test.ts` } }] } };
+    yield { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s", total_cost_usd: 0, num_turns: 1, permission_denials: [] };
+  }
+  await collectWorkerResult(stream(), { childEnvKeys: [], streamObserver: observer, now: () => 1 });
+  const row = readLedgerLines(ledgerPath).find((line) => line.event_kind === "tool-executing");
+  assert.equal(row?.tool_signature, "Bash:node --test test/x.test.ts");
+  const seen: WorkerStreamEvent[] = [];
+  dispatchStreamObserver((event) => seen.push(event), { cwd: worktree }, () => undefined)({ kind: "message", tsMs: 1, cwd: "/own" });
+  dispatchStreamObserver((event) => seen.push(event), {}, () => undefined)({ kind: "message", tsMs: 2 });
+  assert.deepEqual(seen.map((event) => event.cwd), ["/own", undefined], "an event's own cwd wins; no spawn cwd stamps none");
 });
 
 test("E5: a same-millisecond burst of SDK heartbeats ledgers exactly one worker.activity row", async () => {

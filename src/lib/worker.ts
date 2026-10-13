@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -3421,6 +3422,12 @@ export interface WorkerStreamEvent {
    * design note iv). */
   text?: string;
   toolName?: string;
+  /** A `tool_use` block's `id` and raw `input` (the id again on the tool_result's event). In memory only: the sensor
+   * reduces the input to a bounded `toolStepSignature` and never ledgers it. */
+  toolUseId?: string;
+  toolInput?: unknown;
+  /** The spawn's cwd, stamped by run-task.ts's spawn observers: the root a tool signature's path is made relative to. */
+  cwd?: string;
   toolOutcome?: "success" | "error";
   workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro";
   provider?: string;
@@ -3747,12 +3754,14 @@ export async function collectWorkerResult(
               opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
-              const toolName = (block as { name?: string }).name;
+              const { name: toolName, id: toolUseId, input: toolInput } = block as { name?: string; id?: unknown; input?: unknown };
               opts.streamObserver?.({
                 kind: "tool-executing",
                 tsMs: nowFn(),
                 text: toolName ? `[tool_use: ${toolName}]` : "[tool_use]",
                 ...(toolName ? { toolName } : {}),
+                ...(typeof toolUseId === "string" ? { toolUseId } : {}),
+                ...(toolInput === undefined ? {} : { toolInput }),
                 turnsSoFar,
               });
               observedThisMessage = true;
@@ -3766,13 +3775,14 @@ export async function collectWorkerResult(
         const content = (msg.message as { content?: unknown })?.content;
         const toolResult = Array.isArray(content)
           ? content.find((block) => block && (block as { type?: string }).type === "tool_result") as
-              | { is_error?: boolean; isError?: boolean }
+              | { is_error?: boolean; isError?: boolean; tool_use_id?: unknown }
               | undefined
           : undefined;
         opts.streamObserver?.({
           kind: "message",
           tsMs: nowFn(),
           turnsSoFar,
+          ...(typeof toolResult?.tool_use_id === "string" ? { toolUseId: toolResult.tool_use_id } : {}),
           ...(toolResult
             ? { toolOutcome: toolResult.is_error === true || toolResult.isError === true ? "error" : "success" }
             : {}),
@@ -4219,18 +4229,7 @@ export interface FollowupEntry {
  * own why. An absent section returns `null`, and a line naming none of the three types is skipped silently rather than
  * failing the whole report (W1-T105). */
 export function parseFollowups(text: string): FollowupEntry[] | null {
-  // `(?![\s\S])` is TRUE end-of-string, unaffected by the /m flag the leading `^` needs. TRAP: a bare `$` under /m matches
-  // before EVERY newline, so the lazy body would stop at the section's first line instead of running to its end.
-  const section = text.match(/^[ \t]*##[ \t]*Follow-ups[ \t]*\n([\s\S]*?)(?=\n[ \t]*##[ \t]|(?![\s\S]))/im);
-  if (!section) return null;
-  const entries: FollowupEntry[] = [];
-  const lineRe = /^[ \t]*(?:[-*][ \t]*)?(research|task|action)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
-  let m: RegExpExecArray | null;
-  while ((m = lineRe.exec(section[1]))) {
-    const followupText = m[2].trim();
-    if (followupText) entries.push({ type: m[1].toLowerCase() as FollowupEntry["type"], text: followupText });
-  }
-  return entries.length > 0 ? entries : null;
+  return parseHarvestableFollowUps(text);
 }
 
 /** Append a QUESTION to the durable side-channel store, `plan/questions.ndjson` — one JSON object per line, so it is diffable,

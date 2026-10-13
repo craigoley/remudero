@@ -145,9 +145,9 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
     .filter((l) => l.includes("changedFiles(walkDiff(") && !/^\s*(\/\/|\*|\/\*)/.test(l)).length;
   assert.equal(
     callSites,
-    5,
+    6,
     "known: judgeReview (planOnly + bodyContradictsDiff + detectInstrumentEntanglement), " +
-      "checkOneConcern, checkDocsAwareness, planOnlyDiff, reviewScopeContext. A 6th call site must state its verdict change.",
+      "checkOneConcern, checkDocsAwareness, planOnlyDiff, reviewScopeContext, observePromisedFollowUps. A 7th call site must state its verdict change.",
   );
   // THE 4th CALL SITE, AND ITS VERDICT CHANGE: NONE. W1-T2472's `planOnlyDiff` is the same
   // plan-only question `judgeReview` already answers, exposed for a caller that must ask it
@@ -169,6 +169,17 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
     src,
     /export function reviewScopeContext[\s\S]*?const diffFiles = changedFiles\(walkDiff\(diff\)\);[\s\S]*?widenedFiles: scopeViolationFiles\(diffFiles, declaredFiles\)/,
   );
+  // THE 6th CALL SITE: promise observation uses the same deletion-complete walk,
+  // then reads only ADRs still present at the exact head. A deleted ADR supplies
+  // no current promise blob; a present missing declaration or unreadable source
+  // contributes failure/UNKNOWN through the bound review observation, not scope.
+  const observerStart = src.indexOf("export async function observePromisedFollowUps(");
+  const observerEnd = src.indexOf("const followUpReport =", observerStart);
+  assert.ok(observerStart > -1 && observerEnd > observerStart);
+  const observer = src.slice(observerStart, observerEnd);
+  assert.match(observer, /const paths = changedFiles\(walkDiff\(args\.diff\)\)\.filter/);
+  assert.match(observer, /\["ls-tree", "--name-only", headSha, "--", \.\.\.paths\]/);
+  assert.match(observer, /promisedFollowUps\(present,/);
   // detectInstrumentEntanglement takes the SAME list by argument rather than re-walking, so
   // it is a consumer that this regex cannot see — pinned separately.
   //
