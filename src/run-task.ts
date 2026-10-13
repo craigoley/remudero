@@ -202,7 +202,7 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
-import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
+import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
@@ -37716,6 +37716,21 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "knowledge": {
+      // Preserve knowledge's open-PR reuse, review and assertion-refresh ports in the child,
+      // rather than reducing it to the generic garden workspace and losing those semantics.
+      const d: GardenerDeps<GardenWorkspace> = {
+        ...deps("knowledge"),
+        openWorkspace: () => knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+      };
+      return withDue(async () => {
+        try {
+          await runKnowledgeGardenPass(d);
+        } catch (e) {
+          log("knowledge.gardener_failed", { error: String((e as Error)?.message ?? e) });
+        }
+      }, () => gardenPassDue(knowledgeGardenSpec(d), d));
+    }
     case "plan": {
       const d = deps("plan");
       const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
@@ -39470,14 +39485,6 @@ export async function daemonCommand(
         livenessPulse: true,
         ...(target.isSelf
           ? {
-              knowledgeGardener: {
-                stateDir: join(config.root, "state"),
-                repoRoot,
-                openWorkspace: () =>
-                  knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJsonAsync),
-                log,
-              },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
                 // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
