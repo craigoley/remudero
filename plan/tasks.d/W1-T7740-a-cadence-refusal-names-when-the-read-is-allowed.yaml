@@ -1,0 +1,48 @@
+- id: W1-T7740
+  title: "A GITHUB READ REFUSED BY THE CADENCE FLOOR NEVER SAYS WHEN IT WILL BE ALLOWED, SO AN OPERATOR SESSION RE-ISSUES IT EARLY — hooks/deny-floor.sh prints how long ago the last read was, never the earliest allowed time, and offers no sanctioned bounded wait; one operator session hit 30 hook refusals and 18 wrapper refusals at 7-179 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what a cadence refusal tells the caller, and one sanctioned way to wait it out
+  band_meaning: span
+  origin: "operator session 2026-10-10 retro, finding 1"
+  plan_refs: [W1-T3275, W1-T3297, W1-T4085]
+  files: [hooks/deny-floor.sh, scripts/gh-when-eligible.mjs, test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REFILED 2026-10-12 from its only surviving copy: the original filing commit lived only in ~/rmd-work/core, which a
+    janitor pass removed on 2026-10-11 (W1-T8861 fixes that). Ownership rechecked on main d616a6794: still unowned.
+    READ 2026-10-10 at origin/main 8d58dc58b.
+    The refusal: hooks/deny-floor.sh rule 9 prints `deny-floor: blocked - a read-shaped \`gh\` call <age>s after the last
+    one (floor <window>s, W1-T3275)` and tells the caller to stop. It never prints the earliest time a read will be
+    admitted. Its W1-T1066 rule refuses any command whose text pairs a repeat construct with `gh`, and the harness blocks
+    a foreground `sleep`.
+    OBSERVED in one operator session (ad70cd9f, 2026-10-09/10):
+    - 30 hook refusals at ages 7-179 s;
+    - 18 refusals by the session's own cadence wrapper at ages 31-179 s, against 27 reads that ran on 2026-10-10.
+    - Nearly every refusal was a re-issue a few seconds early, because nothing named the target instant.
+    - Two of the session's commands only MENTIONED `gh` (a time guard that skipped the call) and still moved the shared
+      stamp, because the hook decides from the command text. The session then misreported its own stamps as another
+      process's contention.
+    - Separately, the W1-T1066 rule refused a heredoc that merely wrote YAML prose containing both words.
+    OWNERSHIP: W1-T3275 (the floor), W1-T3297 (the transport's advisory line), W1-T4085 (the app-token bucket) and
+    W1-T1066 are merged; none names the eligible instant or provides a bounded wait.
+  design: |
+    1. Every rule-9 refusal also prints `next eligible at <ISO-8601 UTC>`: the stamp's mtime plus the window. The
+       existing wording is unchanged.
+    2. scripts/gh-when-eligible.mjs `-- <gh args>` performs ONE bounded wait: it sleeps in-process until the shared stamp
+       is at least the floor old (never longer than one window), then execs `gh` with the given arguments.
+       - It never waits a second window: if another process stamps meanwhile, it exits 75 naming the new eligible instant.
+       - deny-floor admits it as a single read (no shell repetition, exactly one gh call).
+    3. Document both in the rule-9 comment block.
+  acceptance:
+    - claim: "a cadence refusal names the instant the next read is allowed, and the bounded waiter makes exactly one read after waiting at most one window"
+      proof: 'grep: test("W1-T7740: a cadence refusal names when the read is allowed" in test/a-cadence-refusal-names-when-the-read-is-allowed.test.ts'
+  falsifier: |
+    Remove the `next eligible at` printf: the refusal test fails. Let the waiter wait across two windows: its bounded-wait
+    case (a fake clock, with the stamp refreshed mid-wait) fails.

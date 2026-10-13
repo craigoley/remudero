@@ -1,0 +1,68 @@
+- id: W1-T8868
+  title: "THE ESCALATION JUDGE CAN ONLY SAY DELIVER OR DEMOTE, AND MOST PRODUCERS NEVER ASK IT — ~60 bare escalate/tryEscalate sites bypass escalateWithJudge, the judge has no auto-resolve outcome, and the reversible executors that could act (feedback replyTo, a plan-only proof amendment, one re-kick, applyDefaultAnswer) are unwired: every new escalation is triaged into auto-resolve-with-a-reversible-action, digest-only, or needs-the-operator"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high  # Rule 19: one concern — who decides whether an escalation needs the operator; the executors themselves already exist
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: a risk judge decides what actually needs the operator and what can be auto-resolved, without unnecessary risk"
+  plan_refs: [W1-T3167, W1-T3401, W1-T4677, W1-T2273, W1-T8864, W1-T8866, W1-T100]
+  files: [src/lib/escalate.ts, src/lib/escalation-triage.ts, src/lib/sweep.ts, src/run-task.ts, plan/policy.yaml, test/an-escalation-is-triaged-before-it-reaches-the-operator.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8.
+    OBSERVED (code):
+    - `escalateWithJudge` → `judgeEscalation` returns `EscalationJudgeDecision` = deliver | demote, fails open to deliver,
+      and exempts MANUAL/GRILL (`isEscalationJudgeExempt`). It is called only from the fix-rung sites and `escalateBlock`.
+      About 60 `escalate`/`tryEscalate` calls across 22 files skip it (gardener-overseer, read-model-consistency, pr-open
+      stale-proof, escalation-catalogue, 12 in sweep.ts).
+    - `runStaleEscalationRejudge` (W1-T3167) and `applyDefaultAnswer`/`undoDefaultAnswer` (escalate.ts) have no
+      production caller.
+    - `escalation-precision.ts`'s `escalationClassTier` is computed only inside /v1/escalation/mark-handled; no producer
+      reads it.
+    - `risk-judge.ts` judges merges and filings, never escalations. Its `machine-filing-judge.ts` use is the precedent for
+      a judge releasing an action.
+    OBSERVED (ledger, 48 h): 84 distinct escalations opened; 34 `escalation.judged`, all deliver, 0 demotions.
+    OBSERVED (GitHub, 2026-10-12): 53 open. In the latest 100 closed, the fleet closed 92, but only where a task or PR
+    referent merged or closed.
+  design: |
+    OVERLAP NOTE: W1-T100 (queued, monolith) also declares src/lib/sweep.ts and src/run-task.ts. It routes blocked_ci to the
+    ci-log fix path and does not decide whether an escalation needs the operator, so the two concerns are distinct.
+    1. src/lib/escalation-triage.ts: `triageEscalation(escalation, evidence)` → one of:
+       - `auto_resolve { action }`, where action is drawn from a CLOSED set of reversible executors:
+         - `feedback_reply` (POST /v1/feedback replyTo; for a triage GRILL whose ALREADY_DECIDED citation
+           `unresolvedCitationGrill` proved missing, and whose recommendation is file-as-task);
+         - `plan_amendment_pr` (a plan-only proof-amendment PR for a stale-proof refusal; reuse
+           proof-amendment/refusal-amendment drafting);
+         - `rekick_once` (one re-dispatch for a block whose failure is new since the last strike; at most once per head or
+           contract revision);
+         - `apply_default` (`applyDefaultAnswer` with undo, for a question with a recommendation past its seen window);
+       - `digest` (the precision tier says the operator rarely acts on this class);
+       - `deliver` (needs the operator).
+       Deterministic rules decide first. The model judge (the existing escalation_judge mount) decides only the remainder,
+       and only between digest and deliver: the model never picks an action.
+    2. Route every escalate/tryEscalate through `triageEscalation` (one wrapper; producers unchanged except the call).
+       MANUAL and HARD_STOP are always `deliver` (never auto-resolved, never digested). An unreadable input or a failure
+       means `deliver`.
+    3. GUARDRAILS:
+       - ship in SHADOW (policy `escalationTriage.mode: shadow`), ledgering `escalation.triaged` with the would-be outcome
+         while still delivering;
+       - in act mode, an auto_resolve keeps the issue open labelled fleet-notice until the action's effect is observed,
+         then closes it with the evidence;
+       - every action writes an audit row and remains undoable (reopen, undoDefaultAnswer, decline the PR);
+       - at most 5 auto-resolves per pass.
+    4. Wire `runStaleEscalationRejudge` into the sweep through the same triage (demote stays the only model-chosen move).
+  acceptance:
+    - claim: "every escalation path is triaged; deterministic rules pick a reversible auto-resolve action only from the closed set, the model only chooses digest or deliver, MANUAL/HARD_STOP and any failure deliver, and shadow mode ledgers the outcome while still delivering"
+      proof: 'grep: test("W1-T8868: an escalation is triaged before it reaches the operator" in test/an-escalation-is-triaged-before-it-reaches-the-operator.test.ts'
+    - claim: "the escalation entry points call the triage"
+      proof: 'grep: triageEscalation( in src/lib/escalate.ts'
+  falsifier: |
+    Let the model's verdict select an auto_resolve action: the test's "model never picks an action" case fails. Route a
+    MANUAL escalation through auto_resolve: the MANUAL case fails. Skip triage for tryEscalate: the bare-producer fixture
+    is delivered untriaged and the test fails.

@@ -1,0 +1,65 @@
+- id: W1-T8920
+  title: "THE FAST GATE RUNS ONLY THE STEPS ITS TARGET REPO HOLDS — in a consumer repo the pre-open gate cannot even start (spawn <worktree>/bin/rmd ENOENT, so every console build is unmeasured) and core's fast gate pointed at it fails 24 of 26 steps as SCRIPT MISSING or a missing core runner"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the pre-open gate's spawn and the fast gate's step loop; core-repo behaviour must stay byte-identical
+  band_meaning: span
+  origin: "operator session 2026-10-13: forensics on remudero-console CONSOLE-T124's build (operator: file the fixes in parallel)"
+  plan_refs: [W1-T2653, W1-T4108, W1-T8917]
+  files: [src/lib/ci-parity.ts, src/lib/preopen-gate.ts, test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12/13, remudero-console builds, console ledger (/mnt/rmd/remudero-console-state/state):
+    (1) THE HARNESS GATE NEVER RUNS FOR A CONSUMER BUILD. Every console implement.preopen_gate row is
+        result "unmeasured", e.g. 2026-10-12T23:03:25Z CONSOLE-T124: reason
+        "spawn /home/node/Remudero/worktrees/run-CONSOLE-T124-1791844256841/bin/rmd ENOENT" (also CONSOLE-T122
+        00:31Z, CONSOLE-T124 00:32Z 10-13: 3 of 3). src/lib/preopen-gate.ts defaultRunGate execFiles
+        join(cwd, "bin", "rmd"); a consumer worktree has no bin/rmd, so the gate #10552 added to stop PRs opening
+        with reds a fast gate names in seconds is silently absent for every consumer repo.
+    (2) CORE'S STEP TABLE FAILS IN A CONSUMER TREE. CONSOLE-T124's build worker ran the fast gate the only way it
+        could (`node --import tsx/esm src/run-task.ts --repo-root <worktree> preflight --fast` from the harness
+        checkout) and got "2 passed / 26 failed", identical across three runs at one head
+        (state/runs/CONSOLE-T124-1791844256841.tail lines 264–266, 324, 366, 397): "24 of 26 FAIL because rmd
+        preflight --fast's step table (jscpd, depcruise, every census:* step, a commitlint binary, an importable tsx
+        package, scripts/census-precheck.mjs, a test/ directory) belongs to the remudero daemon/fleet tool repo".
+        In runPreflightFast (src/lib/ci-parity.ts ~3655) a FAST_GATE_STEPS script absent from the target's
+        package.json returns ok:false "SCRIPT MISSING — … this step did not run", and the runner:"rule-checks" and
+        runner:"census-precheck" steps run repo-local core files (scripts/list-rule-suites.mjs,
+        scripts/census-precheck.mjs). That is right for core, where a missing script is a regression
+        (test/preflight-fast-mode.test.ts pins it), and wrong for a consumer, where those steps do not exist.
+    The worker spent three turns re-running and triaging the 24 reds, and the noise hid the one real finding
+    (emitter-checks on its wip: commits).
+  design: |
+    1. src/lib/ci-parity.ts runPreflightFast: decide once whether `repoRoot` is the harness's own repo (the one the
+       step table describes: e.g. its package.json "name" equals the harness's, or scripts/list-rule-suites.mjs is
+       present; pick one and name it). In the harness's own repo every step runs exactly as today, SCRIPT MISSING
+       stays a failure. In any other repo, a step whose npm script is absent from the target's package.json, or
+       whose runner file is absent from the target tree, is SKIPPED: ok true, detail
+       `SKIPPED — <job>: "<script>" is core's step and this repo does not define it`, and the summary lists the
+       skipped steps with their reasons. A step whose script the consumer DOES define runs as today.
+    2. src/lib/preopen-gate.ts defaultRunGate: when <worktree>/bin/rmd is absent, run the harness's own rmd
+       (the checkout the daemon runs from) as `preflight --fast --repo-root <worktree>`, so a consumer build is
+       gated on the steps that apply to it instead of being unmeasured. A core worktree keeps spawning its own
+       bin/rmd as today.
+    NOT IN SCOPE: the emitter-checks step reading a worker's wip: checkpoint commits (a separate finding), and
+    W1-T8917's fix-round census check (the same consumer-vs-core shape in the fix lane).
+  acceptance:
+    - claim: "in a consumer-repo tree, core-only fast-gate steps are skipped with a named reason, never failed as SCRIPT MISSING"
+      proof: 'grep: test("W1-T8920: a consumer repo skips core-only fast-gate steps and names why" in test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts'
+    - claim: "in the harness's own repo a missing fast-gate script is still a failure, unchanged"
+      proof: 'grep: test("W1-T8920: the harness repo still fails a missing fast-gate script" in test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts'
+    - claim: "the pre-open gate measures a consumer build through the harness's rmd instead of reporting it unmeasured"
+      proof: 'grep: test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd" in test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts'
+  falsifier: |
+    Run runPreflightFast on a fixture shaped like remudero-console (package.json with only its own scripts, no
+    scripts/list-rule-suites.mjs, no scripts/census-precheck.mjs). At origin/main the core-only steps report ok:false
+    SCRIPT MISSING / runner failures; with the change they report SKIPPED with a reason and the result is not a
+    failure. Run it on the harness repo's own root with a package.json missing "claims": at origin/main and after,
+    that step still fails SCRIPT MISSING. Call runPreopenGate on a worktree with no bin/rmd: at origin/main it is
+    unmeasured with "ENOENT"; after, it runs the harness rmd with --repo-root and returns pass or fail.

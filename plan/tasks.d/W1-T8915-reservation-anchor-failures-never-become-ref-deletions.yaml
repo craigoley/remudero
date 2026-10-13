@@ -1,0 +1,72 @@
+- id: W1-T8915
+  title: Reservation anchor failures never become ref deletions or false held IDs
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.1
+  budget_usd: 15
+  risk: high
+  band_meaning: blast-radius
+  origin: operator#2026-10-12-console-followup-filing-failure
+  plan_refs: [W1-T509, W1-T3100, W1-T7727, W1-T2552]
+  files: [src/lib/task-id-reservation.ts, test/task-id-reservation.test.ts, test/next-task-id-reserve.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    During console follow-up filing, next-task-id printed RESERVED from a read-only cross-user
+    checkout although the named reservation ref was absent. Real local commit-tree failed with
+    insufficient permission. Current gitRemoteRefReserver.mintAnchor discards Git command status
+    and returns trimmed stdout, including empty. attempt then constructs source:destination;
+    an empty source is Git ref-delete syntax, and a success-shaped result can report a held ID
+    without a reservation. No evidence established that another holder was actually deleted.
+    Do not infer that outcome or change filesystem permissions to hide this defect.
+
+    An isolated actual-module reproduction on main 2b8c62f1 returns an empty anchor without
+    throwing after failed commit-tree; it permits no remote operation. A writable owned clone
+    produces a real anchor and verified reservation. W2552 killed a different empty-anchor
+    hypothesis in an older credential failure; W7727 guards pause anchors, not task-id allocation.
+    Fresh main and every open PR head were swept with plan/source positive controls. The failure
+    can corrupt shared reservation authority, so risk is high for blast radius, not file span.
+  design: |
+    Invalid or missing reservation anchors refuse before any remote push.
+    Check both hash-object and commit-tree results, nonempty valid repository object identity,
+    and meaningful diagnostic reason. The creation method must not return an unusable anchor.
+    Independently guard attempt against empty, whitespace and malformed supplied anchors before
+    constructing any refspec or invoking push, including the injected-anchor seam. An unsafe
+    source may never become delete syntax. Do not relax namespace permission or freshness checks.
+
+    Failed anchor creation never prints RESERVED or records successful ownership.
+    Exercise the actual default reserver through the CLI command boundary. Preserve local Git
+    failure distinctions such as unwritable object database, missing identity, failed tree hash
+    and malformed success-shaped stdout. No paid worker, task record, reservation success or
+    misleading unreachable-network diagnosis may follow an anchor-production failure.
+
+    An existing foreign reservation survives every invalid-anchor attempt.
+    Use a disposable real bare remote with a pre-existing foreign reservation and the actual
+    push adapter. Verify its exact anchor remains, no deletion-shaped command was invoked and
+    normal valid creation/collision/holder reporting still work. Use native reservation formats;
+    synthetic fake Git outputs must become syntactically real test-only object IDs, not a
+    test-only guard bypass. Audit direct callers and relevant reservation/CLI census suites.
+
+    The fix preserves ordinary claim policy and needs no credential or permission change.
+    Do not chmod/chown a user checkout, delete/reclaim another holder, force push, waive gates,
+    alter allocation bands, disable cooldowns, erase the original failure receipt or call an
+    unverified printed ID held. Independent remote ref and parsed holder checks remain required
+    before any operator filing. Keep genuine successful reservations durable on later failures.
+  acceptance:
+    - claim: The default allocator refuses failed or malformed Git anchor creation before any push
+      proof: 'unit test: W1-T8915: failed reservation anchor creation refuses before any push'
+    - claim: Invalid supplied anchors cannot delete an existing foreign reservation
+      proof: 'unit test: W1-T8915: invalid reservation anchors preserve a real foreign remote ref'
+    - claim: The real CLI reports refusal rather than RESERVED on local anchor failure
+      proof: 'unit test: W1-T8915: reservation CLI never reports held after local anchor failure'
+    - claim: Valid creation collision reporting and holder attribution retain their native behavior
+      proof: 'unit test: W1-T8915: valid reservation creation collisions and holders remain governed'
+  falsifier: |
+    Delete anchor-production checks and the attempt guard separately. Their real boundary tests
+    must fail, restored head pass. Require literal proof selection, complete TAP, native author
+    and caller/census checks, same committed-tree instrumented diff coverage, actual stored-body
+    parsing, governed current-head review and required hosted gates. Do not use live remote
+    deletion as a falsifier; the disposable bare-remote control is the authorized test surface.
