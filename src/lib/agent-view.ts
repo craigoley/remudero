@@ -86,7 +86,7 @@ type AgentAnalytics = { asOf: string; analytics?: NavBadgeAnalytics; console: An
 function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string | undefined {
   const agent = snapshot?.consoleV1?.operatorAgent;
   const lists = [snapshot?.consoleV1?.metrics, snapshot?.routingTelemetry?.buckets, agent?.outcomes?.classes, agent?.decisions?.classes, agent?.capacity?.measurements];
-  if (!agent?.proof || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
+  if (agent === undefined || agent === null || agent.proof === null || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
   if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
   if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object"))) return "malformed committed proposal analytics";
   return undefined;

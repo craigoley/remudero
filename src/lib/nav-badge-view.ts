@@ -123,7 +123,7 @@ type DetailObservation = { now: number; sourceRepository?: string; sourceInstanc
 type EvidenceTerm = Pick<GeneratedProposalEvidence, "key" | "value" | "unit">;
 type DetailTerms = { proposalText: string; reasoning: string; source: string; values: EvidenceTerm[]; window?: { start: string; end: string }; invalid?: boolean };
 
-/** Publication budgets; these never change the engine's rank arithmetic or visibility policy. */
+/** PRIMARY CONTROL: publication budgets, separate from rank arithmetic and visibility policy. */
 export const AGENT_RECORD_LIMITS = { rows: 100, label: 160, id: 512, text: 600, reasoning: 1400, bytes: 65_536 } as const;
 
 function safeDetailText(value: unknown, max: number): value is string {
