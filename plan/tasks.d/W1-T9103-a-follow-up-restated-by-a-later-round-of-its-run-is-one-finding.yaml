@@ -1,23 +1,41 @@
 - id: W1-T9103
-  title: "A FOLLOW-UP RESTATED BY A LATER ROUND OF ITS OWN RUN IS ONE FINDING TO THE FLEET LANE — findingSubject reads only the proposal id, and a followup:DAEMON-<run>:<ts>:<i> id names no task or file, so a run's restatements never meet in the MERGE step and each is filed: DAEMON-1789988067712's two follow-ups to #6382 were decided `file` at 03:24Z and 03:35Z on 2026-10-13"
+  title: "A FOLLOW-UP RESTATED BY A LATER ROUND OF ITS OWN RUN IS ONE FINDING TO THE FLEET LANE, AND A SHARED TASK ID ALONE NO LONGER MERGES TWO — findingSubject reads only the proposal id, and a followup:DAEMON-<run>:<ts>:<i> id names no task or file, so a run's restatements never meet in the MERGE step and each is filed: DAEMON-1789988067712's two follow-ups to #6382 were decided `file` at 03:24Z and 03:35Z on 2026-10-13, while its kind|task subject folds every follow-up of one task into the oldest (40 of 63 in the registry)"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
-  risk: high  # Rule 19: one concern — the fleet lane's MERGE step sees a run's restated follow-ups as one subject; it spans the lane (fleet-lane.ts), its production judge port (run-task.ts) and the new test
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the fleet lane's MERGE step merges two follow-ups only when they ask the same thing; it spans the lane (fleet-lane.ts), its production judge port (run-task.ts), the new test and the W1-T4089 test that pins the task-id merge
   band_meaning: span
-  origin: "found 2026-10-13 by an operator session reading fleet_lane.decided repeats; operator standing direction: fix at root, lean into automation"
+  origin: "found 2026-10-13 by an operator session reading fleet_lane.decided repeats; operator standing direction: fix at root, lean into automation; amended 2026-10-13 on the operator's ruling that a shared task id alone no longer merges"
   plan_refs: [W1-T4089, W1-T2458, W1-T2619, W1-T9065, W1-T9041]
   files:
     - src/lib/fleet-lane.ts
     - src/run-task.ts
     - test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts
+    - test/the-fleet-triages-its-own-findings.test.ts
   status: queued
-  priority: 2  # duplicate filings stay latent while W1-T9065's self-sync refusal stops most approves; they file twice once it lands
+  priority: 1.5  # operator ruling 2026-10-13: the task-id merge is now a visible loss — 40 distinct operator asks declined as merged
   attempts: 0
   rationale: |
+    OPERATOR RULING, 2026-10-13, VERBATIM: "Merge only real duplicates — same task id alone no longer merges. Two
+    follow-ups merge only when they share a file path or the LLM judge (already used for restatements in W1-T9103)
+    rules they ask the same thing; distinct asks stay separate items." This amendment carries it. It turns this
+    record's former note aside (the kind|task subject) into design step 4 below.
+    THE TASK-ID MERGE, RE-READ 2026-10-13 on origin/main 535a172e6 and on host remudero (read-only, niced):
+      - `findingSubject` (src/lib/fleet-lane.ts) returns kind|task for any id holding a `<P>-T<n>` task id. A task
+        run's follow-up id is `followup:<run_id>:<ts>:<index>` (retro.ts `mineFollowups`), and its run id names the
+        task, so every follow-up of ANY run of one task shares one subject. The MERGE step in `triageFleetLaneSteps`
+        keeps the oldest per subject and declines the rest with "Folded into an older finding about the same thing",
+        whatever each one asks.
+      - REGISTRY (state/inbox-proposals.json, 1,208 proposals, 179 `followup:`, the same totals as below, so the file
+        read is the one measured): 63 follow-ups name a task id, over 23 tasks. 59 of them sit in 19 tasks with more
+        than one, so 40 are beyond each task's keeper and are declined as merged on the task id alone.
+      - test/the-fleet-triages-its-own-findings.test.ts pins it on purpose: "W1-T4089: two findings with the same
+        subject become one task" asserts `findingSubject("followup:W1-T3999:research")` equals
+        `findingSubject("followup:W1-T3999:ci")` ("same kind, same task") and that a pass merges the second into the
+        first. The ruling changes that design choice, so this task changes that test.
     OBSERVED 2026-10-13 on host remudero, read-only and niced, in the core daemon's state (~/rmd-state2/state).
       - LEDGER: the 12 rotations dated 2026-10-13 plus the live ledger.ndjson hold 36 `fleet_lane.decided` rows
         (23:45Z on 10-12 to 11:18Z). Three proposals appear to repeat a run. Each pair is two DIFFERENT proposal ids,
@@ -62,6 +80,7 @@
     no head reads more than main.
   design: |
     No new bound and no word-overlap cutoff. A model judges sameness, and only for pairs the structure already pairs.
+    Steps 1 to 3 cover a run's restatements; step 4 applies the same rule to follow-ups that share only a task id.
     1. A FOLLOW-UP'S SOURCE. For a `followup:` proposal whose id gives `findingSubject` no subject, the lane reads the
        run id and PR URL from the minted summary, in `routeFollowupsToRegistry`'s shape ("— from <task> (run <run>,
        <pr>)"). Reuse the shape `stripMintedFollowupAffix` (followup-dedup-census.ts) already parses rather than a
@@ -80,6 +99,18 @@
        "same", the lane keeps the LATER report's finding, which was written with more of the run's evidence, and
        declines the earlier through the existing `decide(..., "merge", { into })` and `panel.proposal_declined` path
        with the plain merge reason. A pair where one member is already decided is not re-judged.
+    4. A SHARED TASK ID IS A CANDIDATE, NOT A MERGE (operator ruling 2026-10-13). For a `followup:` proposal, the
+       kind|task subject no longer merges by itself. Two open follow-ups whose ids name the same task, from different
+       report rows (any run of that task), are a candidate pair, judged exactly as in steps 2 and 3: the same first
+       repo path in their texts merges them with no judge call, otherwise the `sameFinding` port decides, with the
+       verdict stored once per ordered pair in `fleet-lane-decisions.json`. "distinct" and "unavailable" leave both
+       as separate items; on "same" the later report's finding is kept. Entries of one report row stay distinct
+       here too. Other kinds keep today's subject: a non-follow-up id such as `proof-debt:<task>` is one finding per
+       task by construction, and the path and codeql-quality subjects are untouched.
+       Change "W1-T4089: two findings with the same subject become one task" in
+       test/the-fleet-triages-its-own-findings.test.ts, citing the ruling in a comment that contains "operator ruling
+       2026-10-13": its two same-task follow-ups, whose texts share no path and which no judge calls the same, now
+       stay two items (no merge, and the drafted one is filed). Its same-file and different-kind assertions stay.
     Tests go in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts, with `test(` titles verbatim as in
     the proofs below. Drive `triageFleetLaneAsync` over a fixture state dir (inbox-classified.json,
     inbox-proposals.json, inbox-drafts.json, an empty store) and ledger, with a fake `sameFinding` that records its
@@ -95,22 +126,27 @@
       proof: 'grep: test("W1-T9103: entries of one report row stay distinct" in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts'
     - claim: "a stored verdict is not asked again, and an unavailable judge leaves the pair unmerged with a row"
       proof: 'grep: test("W1-T9103: a pair is judged once and an unavailable judge merges nothing" in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts'
+    - claim: "two follow-ups naming one task whose texts share no path, and which the judge calls distinct, stay two items"
+      proof: 'grep: test("W1-T9103: two distinct asks naming one task stay two items" in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts'
+    - claim: "two follow-ups naming one task and the same first file path merge into the later one without a judge call"
+      proof: 'grep: test("W1-T9103: two asks naming one task and one file merge" in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts'
+    - claim: "the W1-T4089 test no longer pins the task-id merge, and cites the ruling"
+      proof: "grep: operator ruling 2026-10-13 in test/the-fleet-triages-its-own-findings.test.ts"
     - claim: "the lane names an unavailable sameness judgement"
       proof: 'grep: fleet_lane\.sameness_unavailable in src/lib/fleet-lane.ts'
   falsifier: |
     Leave `findingSubject` reading only the id, and the path test files both #6382 rounds, as the ledger shows at
     03:24Z and 03:35Z. Compare entries of one report row, and the #6562 pair is offered to the judge. Drop the stored
-    verdict, and the once-only test sees the fake judge called on every pass.
+    verdict, and the once-only test sees the fake judge called on every pass. Keep the kind|task subject merging
+    follow-ups, and the distinct-asks test sees the second ask declined as merged into the first.
   note: |
     EFFECT, measured after the merge sha deploys, from the core ledger union, with no numeric pass mark:
     `fleet_lane.decided` `merge` rows whose `into` is a `followup:DAEMON-*` id (healthy shape: present for the 25
     cross-row pairs that the judge or path rule calls one); repeat `file` decisions for one run and PR across report
-    rows (healthy shape: none); `fleet_lane.sameness_unavailable` rows (healthy shape: rare).
-    ASIDE, NOT IN THIS TASK, FOR AN OPERATOR RULING: the kind|task subject merges EVERY follow-up of any run of one task
-    into its oldest, whatever it says. In the registry that is 63 follow-ups over 23 tasks, 40 beyond each keeper. The
-    existing test/the-fleet-triages-its-own-findings.test.ts pins it ("same kind, same task"), so it is a W1-T4089
-    design choice, not a defect this task may change. Moving such follow-ups to the source-and-sameness rule above
-    would stop distinct findings being declined as merged.
+    rows (healthy shape: none); `fleet_lane.sameness_unavailable` rows (healthy shape: rare); `fleet_lane.decided`
+    `merge` rows between two follow-ups of one task (healthy shape: only where a path or a "same" verdict joins them,
+    far fewer than the 40 the task-id merge declined).
+    RULED 2026-10-13 (see rationale): the former aside on the kind|task subject is now design step 4.
     ASIDE: preventing the duplicate where it is minted (`mineFollowups` comparing a candidate with its own run's
     earlier entries) is the upstream follow-up. The lane fix comes first because it also covers the restatements
     already in the registry.
