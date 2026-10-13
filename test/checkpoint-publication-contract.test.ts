@@ -98,7 +98,7 @@ test("checkpoint prompt and continuation agree with local range and hosted title
   assert.match(contract, /`chore\(checkpoint\): <what>`/);
   const messages = commitMessageContractLines().join("\n");
   assert.match(messages, /HOSTED.*PR TITLE/);
-  assert.match(messages, /LOCAL.*branch commit range/);
+  assert.ok(messages.includes("  LOCAL preflight/preflight-author check the branch commit range, not only a title:"), "a contradictory title-only line must not pass by merely mentioning the range");
   assert.match(messages, /commitlint applies its configured ignore rules/);
   assert.match(messages, /emitter-checks validates non-merge commits/);
   assert.doesNotMatch(messages, /never block a merge/);

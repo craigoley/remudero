@@ -85,7 +85,7 @@ test("grep: remudero-context in src/lib/compaction.ts", () => {
 test("the commit message contract states the title-only commitlint scope", () => {
   const text = commitMessageContractLines().join("\n");
   assert.match(text, /HOSTED.*PR TITLE/, "must distinguish the hosted check");
-  assert.match(text, /LOCAL.*branch commit range/, "local range validation is not title-only");
+  assert.ok(text.includes("  LOCAL preflight/preflight-author check the branch commit range, not only a title:"), "local range validation is not title-only, even when a contradictory line mentions the same words");
   assert.match(text, /commitlint applies its configured ignore rules/);
   assert.match(text, /emitter-checks validates non-merge commits/);
   assert.match(text, /squash-merges\s+every PR/i, "must state WHY: squash-merge means branch commits never reach main");
