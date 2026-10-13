@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.13
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:coverage-shard (5/8)"
@@ -16,7 +16,7 @@
   acceptance:
     - claim: "the harness no longer spends a fix round on check:coverage-shard (5/8)"
       proof: "grep: test(\"W1-T5585: check:coverage-shard (5/8) is prevented, not retried\" in test/check-coverage-shard-5-8.test.ts"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-shard (5/8)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  note: "WITHDRAWN 2026-10-13 by operator ruling: priced by a defect, not friction. measureGateFireRates summed the wall time of every run, green or red, so this cause is the shard's runtime with no round behind it; #11228 prices a gate on its red runs per check family, so this per-leg key is no longer priced. Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-shard (5/8)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:coverage-shard (5/8) cost 2489 PR minute(s) (seven-day half-life) across 74 fix round(s) on 261 pull request(s).
 

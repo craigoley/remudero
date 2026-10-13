@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "flow-blocker:own-red:required checks red"
@@ -16,7 +16,7 @@
   acceptance:
     - claim: "own-red:required checks red is cleared by its owner without manual intervention"
       proof: "grep: test(\"W1-T5984: flow-own-red-required-checks-red clears without a person\" in test/flow-own-red-required-checks-red.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  note: "WITHDRAWN 2026-10-13 by operator ruling: priced by a defect. flow-remedy's isFleet missed the bare remudero-fleet login GraphQL returns for mergedBy, so fleet merges read as failed blocker episodes and inflated this cause; #11221 fixes it, and the gardener re-files any real cause from corrected pricing. Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
   rationale: |
     own-red:required checks red cost 12.19 PR-hours; owner fix-lane
     Owner fix-lane failed to clear eligible episodes.
