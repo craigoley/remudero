@@ -1,0 +1,59 @@
+- id: W1-T8945
+  title: "A HARNESS CHECKPOINT COMMIT NEVER FAILS THE PRE-OPEN GATE, AND THE GATE RE-RUNS AFTER ITS REPAIR — a resumed build's branch still carries the harness's own legacy `wip:` checkpoint commits, the gate's commitlint and emitter-checks steps lint the whole origin/main..HEAD range and refuse them, and the repaired work is never gated again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the pre-open gate's commit-range steps and the implement flow's gate/repair sequence
+  band_meaning: span
+  origin: "operator session 2026-10-13: PR-flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-13/RESULTS.md); operator: go with all of your recommendations"
+  plan_refs: [W1-T8920, W1-T8198, W1-T7806, W1-T8139]
+  files: [src/lib/commit-message.ts, src/run-task.ts, test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts, test/preflight.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08..12 (PR-flow re-measure, core ledger implement.preopen_gate): 63 fail / 52 pass /
+    2 unmeasured, and ALL 36 commitlint failures follow a checkpoint handoff. 75% of build tasks now need more than
+    one start, so most builds reach the gate on a resumed branch.
+    (1) THE GATE LINTS THE HARNESS'S OWN COMMITS. The fast gate's commitlintStep and emitterChecksStep
+        (src/lib/commit-message.ts) lint every commit in DEFAULT_PREFLIGHT_RANGE origin/main..HEAD. A resumed
+        branch carries the harness's own checkpoint commits. #11190 (08b718046, 2026-10-13 00:52Z) made NEW
+        checkpoints `chore(checkpoint): …`, which pass both checks, but branches already carry legacy ones and keep
+        them: run-W1-T7728-1791855668728 holds e20264025 "wip: yield at worker" (10-11) and 9e0f4a099
+        "wip: yield at daemon restart" (00:05Z 10-13); run-W1-T8825-* hold bcb4facb2 "wip: yield at daemon
+        restart". `wip:` fails commitlint (exit 1) and checkCommitMessage (type-enum). So after #11190 was live
+        (core booted on 111ec5470 at 01:07Z, which contains it) the gate still failed commitlint,emitter-checks
+        for W1-T7728 at 01:01Z and 02:15Z and for W1-T8825 at 01:42Z, each answered by an
+        implement.preopen_continued repair worker that cannot fix history it must not rewrite. CI itself lints only
+        the PR title (commitlint.config.mjs: "Individual commits on the branch are not linted"); the squash merge
+        discards these commits, so the gate refuses work CI and the merge would both accept.
+    (2) THE GATE NEVER RE-RUNS. src/run-task.ts (the pre-open block after implement.continued, ~20408–20441)
+        runs the gate once, hands a failure to one repair worker (implement.preopen_continued), then opens the PR
+        without gating the repaired tree, so a repair that did not fix the named step is invisible until CI.
+  design: |
+    1. src/lib/commit-message.ts: commitlintStep and emitterChecksStep skip commits whose subject is a harness
+       checkpoint, recognised by the existing isWipSubject (src/lib/unfinished-checkpoint.ts: `chore(checkpoint)`,
+       legacy `wip:`, `wip(<scope>):` and `<type>(wip):`), and name each skipped commit in the step detail. Every
+       other commit in the range is linted exactly as today. commitlint keeps CI's binary and config; lint the kept
+       commits one message at a time (stdin) or via an explicit list, whichever keeps the `--config` CI uses.
+    2. src/run-task.ts: after implement.preopen_continued returns without error, run the gate once more and log it as
+       implement.preopen_gate with `after_repair: true`. The PR then opens as today whatever that second result is
+       (no new hold); a second failure is recorded with its steps so the fix lane and the operator can see what the
+       repair did not fix.
+    NOT IN SCOPE: rewriting or squashing existing checkpoint commits; W1-T8920's consumer-repo step skipping.
+  acceptance:
+    - claim: "a branch with a legacy wip: checkpoint commit followed by a conventional worker commit passes the gate's commit-range steps"
+      proof: 'grep: test("W1-T8945: a legacy wip checkpoint commit does not fail the commit-range steps" in test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts'
+    - claim: "a non-checkpoint malformed commit in the same range still fails both steps"
+      proof: 'grep: test("W1-T8945: a malformed worker commit still fails the commit-range steps" in test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts'
+    - claim: "after a repair worker the gate runs again and its result is ledgered with after_repair"
+      proof: 'grep: test("W1-T8945: the pre-open gate re-runs after its repair worker" in test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts'
+  falsifier: |
+    In a gitRepo() fixture branch from main add "wip: yield at daemon restart" then "feat(x): real work". At origin/main
+    commitlintStep and emitterChecksStep both return ok:false naming the wip commit; with the change both return ok:true
+    and name the skipped checkpoint. Replace the feat commit with "bad subject without type": both still fail. Drive the
+    implement flow with an injected preopenGate that fails once: at origin/main it is called once; with the change it is
+    called twice and the second implement.preopen_gate row carries after_repair: true.
