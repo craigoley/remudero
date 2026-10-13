@@ -1,0 +1,27 @@
+- id: W1-T9168
+  title: Update mounts.yaml tier invariants for validateMounts
+  repo: remudero
+  depends_on:
+    - NEW-1A
+    - NEW-1B
+    - W1-T5
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/mounts.yaml
+  acceptance:
+    - claim: mounts.yaml includes tier invariant for validateMounts
+      proof: "grep: validateMounts entry in src/lib/mounts.yaml"
+    - claim: symbol-no-caller rule enforced for validateMounts in mounts.yaml
+      proof: "grep: symbol-no-caller rule in src/lib/mounts.yaml"
+  origin: architect
+  rationale: >-
+    From the 2026-10-13 proposal on adoption:symbol-no-caller:src/lib/mounts.ts:validateMounts,
+    ratified via rmd approve:
+  
+    adoption-debt: "validateMounts" (symbol-no-caller) in src/lib/mounts.ts has shipped since
+    2026-07-14T19:06:21-04:00 with no adopter found — no reference to `validateMounts` outside its
+    own definition in src/lib/mounts.ts (rmd measurement-cadence's adoption report).
