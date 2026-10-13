@@ -17,7 +17,11 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "deploy", "mac", "tmp-reclaim.sh");
-const HOURS_AGO = (h: number) => new Date(Date.now() - h * 3600_000);
+// The script judges age with `find -mmin`, against the OS clock a child reads — one
+// scripts/clock-shift.mjs cannot move — so the stamps `age()` touches are dated from that same
+// clock, a real `date`, never from this process's `Date.now()`.
+const osNowMs = () => Number(spawnSync("date", ["+%s"], { encoding: "utf8" }).stdout.trim()) * 1000;
+const HOURS_AGO = (h: number) => new Date(osNowMs() - h * 3600_000);
 const WEEKS_AGO = HOURS_AGO(20 * 24);
 
 const sh = (cwd: string, ...args: string[]) => {

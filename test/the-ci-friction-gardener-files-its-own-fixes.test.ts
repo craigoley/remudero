@@ -310,6 +310,9 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
     }),
     log: () => {},
     seed: 1,
+    // The pass runs at its own last round, as above. Unpinned, the trend row is stamped by the
+    // wall clock and the `| 2026-` count below reads 0 from 2027-01-01T00:00Z on.
+    clock: clockFromMillisFn(() => Date.parse("2026-09-24T04:25:00.000Z")),
   };
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => [

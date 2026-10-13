@@ -1025,7 +1025,7 @@ test("W1-T4770: the installer leaves exactly one cleanup crontab entry", () => {
     assert.equal(entries().length, 1, "the hand-made line is replaced, not joined");
     assert.equal(
       entries()[0],
-      `7 */6 * * * RMD_CLEANUP_WORKTREE_ROOTS=/mnt/scratch/worktrees:/home/craigoleyagent/rmd-work ${cleanup} >> ${join(root, "home", "host-cleanup.log")} 2>&1`,
+      `7 */6 * * * RMD_CLEANUP_WORKTREE_ROOTS=/mnt/scratch/worktrees:/home/craigoleyagent/rmd-work RMD_CLEANUP_LIVE_CHECKOUTS=/home/craigoleyagent/rmd-mint:/home/craigoleyagent/rmd-op ${cleanup} >> ${join(root, "home", "host-cleanup.log")} 2>&1`,
     );
     assert.match(readFileSync(table, "utf8"), /backup/, "unrelated entries survive");
 
@@ -1070,7 +1070,7 @@ test("the root janitor worktree roots remain configurable in its installed cron 
     assert.equal(installed.status, 0, installed.stderr);
     assert.equal(
       readFileSync(table, "utf8").trim(),
-      `7 */6 * * * RMD_CLEANUP_WORKTREE_ROOTS=${roots} ${cleanup} >> ${join(root, "home", "host-cleanup.log")} 2>&1`,
+      `7 */6 * * * RMD_CLEANUP_WORKTREE_ROOTS=${roots} RMD_CLEANUP_LIVE_CHECKOUTS=/home/craigoleyagent/rmd-mint:/home/craigoleyagent/rmd-op ${cleanup} >> ${join(root, "home", "host-cleanup.log")} 2>&1`,
     );
     assert.equal(run([], env, root).status, 0, "the exact configured cron entry must pass drift check");
   } finally {

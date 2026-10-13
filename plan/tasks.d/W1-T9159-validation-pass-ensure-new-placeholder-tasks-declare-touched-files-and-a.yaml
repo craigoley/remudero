@@ -1,0 +1,25 @@
+- id: W1-T9159
+  title: "Validation pass: ensure new placeholder tasks declare touched files and at least one acceptance proof"
+  repo: remudero
+  depends_on:
+    - W1-T9158
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - plan/notes/ratification-W1-T9159.md
+  acceptance:
+    - claim: "W1-T9159 validates placeholders: touched files are listed and at least one acceptance proof exists with quoted fields"
+      proof: "grep: W1-T9159 in plan/tasks.yaml"
+  origin: "architect"
+  rationale: >-
+    From the 2026-09-27 follow-up on W1-T3116-1790492944985, ratified via rmd approve:
+  
+    follow-up harvest [research]: Read `src/lib/daemon.ts`'s existing cadence/scheduling
+    primitives (e.g. how other daemon-lifetime rungs like PR reconciliation are scheduled) before
+    designing the new controller's hook point, so it reuses the existing scheduler rather than
+    inventing a second one — needed to satisfy design (ii)/(v)'s "one scheduler" constraint. —
+    from W1-T3116 (run W1-T3116-1790492944985)

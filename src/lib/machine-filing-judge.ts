@@ -151,16 +151,76 @@ export function shardRelPath(task: Pick<Task, "sourcePath">): string | undefined
   return m?.[1];
 }
 
-/** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the
- *  operator's escalation rule and the family's record as evidence. */
-export function machineJudgeInput(task: Task, record: FamilyTrackRecord): RiskJudgeInput {
+/** How much of a record's `note:` and `rationale:` the judge is shown, in characters (W1-T9042).
+ *  PRIMARY CONTROL: it fires on a healthy long rationale by design and states its cut; the evidence line counts all. */
+export const MACHINE_JUDGE_EVIDENCE_CAP = 4000;
+
+/** `text` cut to `cap` characters at a line boundary, with the cut stated; a lone longer line is cut mid-line. */
+function boundedAtLine(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  const lines = text.split("\n");
+  let shown = "";
+  for (const line of lines) {
+    const next = shown === "" ? line : `${shown}\n${line}`;
+    if (next.length > cap) break;
+    shown = next;
+  }
+  const how = shown === "" ? ((shown = text.slice(0, cap)), "mid-line") : "at a line boundary";
+  return `${shown}\n[cut ${how}: ${shown.length} of ${text.length} characters shown; the rest is in the record]`;
+}
+
+/** The record's own repo root, from its shard's `sourcePath` (`<root>/<plan>/tasks.d/<file>`), or undefined. */
+function shardRepoRoot(task: Pick<Task, "sourcePath">): string | undefined {
+  return task.sourcePath === undefined || shardRelPath(task) === undefined ? undefined : dirname(dirname(dirname(task.sourcePath)));
+}
+
+/** One line of facts the harness computes from the record, so the judge need not take the filer's word:
+ *  the PRs and round/PR counts its `note:`/`rationale:` cite (counted over the whole text, not only the
+ *  bounded part shown), whether each declared file exists at the base the plan was read from, and each
+ *  proof's dialect. */
+function machineEvidenceLine(task: Task, pathExists: ((path: string) => boolean) | undefined): string {
+  const narrative = [task.note ?? "", task.rationale ?? ""].join("\n");
+  const prs = [...new Set([...narrative.matchAll(/(?:(?<![\w&])#|\/pull\/)(\d+)\b/g)].map((m) => `#${m[1]}`))];
+  const counts = [...new Set([...narrative.matchAll(/\b\d[\d,]*\s+(?:PRs?|pull requests?|rounds?)\b/gi)].map((m) => `"${m[0]}"`))];
+  const files = task.files ?? [];
+  const absent = pathExists === undefined ? [] : files.filter((f) => !pathExists(f));
+  const dialects = [...new Set((task.acceptance ?? []).map((c) => /^\s*(unit test|grep|demonstration):/i.exec(c.proof ?? "")?.[1]?.toLowerCase() ?? "prose"))];
+  return [
+    "EVIDENCE (computed by the harness from the record, not written by the filer):",
+    `note/rationale cites ${prs.length} distinct PR reference(s)${prs.length > 0 ? ` (${prs.slice(0, 12).join(", ")}${prs.length > 12 ? ", …" : ""})` : ""}`,
+    counts.length > 0 ? `and states ${counts.slice(0, 12).join(", ")};` : "and states no round or PR count;",
+    pathExists === undefined
+      ? "declared files: not checked (no base checkout in hand);"
+      : `${files.length - absent.length} of ${files.length} declared file(s) exist at the base${absent.length > 0 ? `; absent: ${absent.join(", ")}` : ""};`,
+    `proof dialects: ${dialects.length > 0 ? dialects.join(", ") : "(no proof declared)"}.`,
+  ].join(" ");
+}
+
+/** The record's `note:` and `rationale:`, as filed and bounded, then the {@link machineEvidenceLine}. */
+function machineEvidence(task: Task, pathExists: ((path: string) => boolean) | undefined): string {
+  const filed = [
+    task.note?.trim() ? `note (as filed): ${task.note.trim()}` : undefined,
+    task.rationale?.trim() ? `rationale (as filed):\n${task.rationale.trim()}` : undefined,
+  ].filter((s): s is string => s !== undefined);
+  const shown = filed.length > 0 ? `${boundedAtLine(filed.join("\n"), MACHINE_JUDGE_EVIDENCE_CAP)}\n` : "";
+  return `${shown}${machineEvidenceLine(task, pathExists)}`;
+}
+
+/** The judge's input: the record as {@link buildFilingRiskJudgeInput} renders it, plus the operator's
+ *  escalation rule, the family's record, and the evidence the record carries (W1-T9042, 2026-10-13: 14 of
+ *  15 model verdicts escalated for missing evidence the record's `rationale:` already held). `pathExists`
+ *  defaults to the record's own checkout, read from its shard's path. */
+export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExists?: (path: string) => boolean): RiskJudgeInput {
+  const root = shardRepoRoot(task);
+  const exists = pathExists ?? (root === undefined ? undefined : (p: string) => existsSync(join(root, p)));
   // Judged AS IT WOULD DISPATCH: shown `verify: human`, the judge counted on a person who, on
   // proceed, is never asked (measured 2026-09-29: "verify: human is set, giving a human checkpoint").
   const base = buildFilingRiskJudgeInput({ ...task, verify: "auto" });
+  const description = `${base.change.description}\n${machineEvidence(task, exists)}`;
   return {
     ...base,
     // Stated first, in the operator's words: the judge's generic framing leans LOW on a defect title.
-    change: { ...base.change, description: `OPERATOR ESCALATION RULE: ${MACHINE_JUDGE_ESCALATE_ONLY_IF}\n\n${base.change.description}` },
+    change: { ...base.change, description: `OPERATOR ESCALATION RULE: ${MACHINE_JUDGE_ESCALATE_ONLY_IF}\n\n${description}` },
     gatesState: { ...base.gatesState, author_class: task.author_class ?? "operator", escalate_only_if: MACHINE_JUDGE_ESCALATE_ONLY_IF },
     planContext: {
       ...base.planContext,

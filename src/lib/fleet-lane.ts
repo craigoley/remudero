@@ -4,15 +4,18 @@ import { promisify } from "node:util";
 import { isPromiseLike } from "./gardener.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
-import { replayBandMeaningRefusals } from "./inbox-replay.js";
+import { replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { readLedgerUnionRecords, readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
  * lib/fleet-lane.ts (W1-T4089) — the fleet triages its own findings.
@@ -51,6 +54,14 @@ export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   /** Hand one drafted finding to the ordinary approve flow (`rmd approve`, detached). */
   approve: (proposalId: string) => void;
   clock?: Clock;
+  /** W1-T9065: whether this process's gateway is still running that hand-off; absent, a hand-off with no rows is left alone. */
+  handoffInFlight?: (proposalId: string) => boolean;
+  /** W1-T9065: origin/main's sha now, so a repeated unrecorded failure waits for main to move. */
+  originMainSha?: () => string | Promise<string>;
+  isPidAlive?: (pid: number) => boolean;
+  /** W1-T9041: names a band-replay proposal no re-draft could clear (`escalateReplayStranded`); absent, the replay
+   *  still writes its row, undelivered. */
+  escalateReplayStranded?: (stranded: ReplayStranded) => void;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -228,7 +239,14 @@ export function fleetLaneStorePath(stateDir: string): string {
   return `${stateDir}/fleet-lane-decisions.json`;
 }
 
-export type DecisionStore = Record<string, { decision: FleetLaneDecision; ts: string }>;
+/** W1-T9065: a `file` decision's hand-off is `pending` until a row settles it; one that exited with no
+ *  outcome row keeps `unrecorded` (the sha it failed at, and how often in a row) and no longer holds. */
+export type DecisionStore = Record<string, {
+  decision: FleetLaneDecision;
+  ts: string;
+  handoff?: "pending";
+  unrecorded?: { sha?: string; count: number };
+}>;
 
 /** Every decision the lane has made. An unreadable store THROWS: read as empty, every finding would
  *  be decided again — the defect this store replaces — so the pass fails loudly instead. */
@@ -240,7 +258,11 @@ export function readFleetLaneStore(stateDir: string): DecisionStore {
 function decide(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
   const reason = PLAIN_REASON[decision];
   if (machineTokens(reason).length > 0) throw new Error(`fleet-lane: reason for ${decision} is not plain`);
-  store[proposalId] = { decision, ts: (deps.clock ?? systemClock).iso() };
+  const unrecorded = store[proposalId]?.unrecorded;
+  store[proposalId] = {
+    decision, ts: (deps.clock ?? systemClock).iso(),
+    ...(decision === "file" ? { handoff: "pending" as const, ...(unrecorded ? { unrecorded } : {}) } : {}),
+  };
   writeAtomic(fleetLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
   appendPanelLedger(deps.ledgerPath, "fleet_lane.decided", proposalId, ORIGIN, { decision, reason, ...extra });
 }
@@ -254,21 +276,87 @@ export interface FleetLanePass {
   classificationAgeMs?: number;
 }
 
+/** W1-T9065: the rows that settle a hand-off, written by the approve child or its gateway. */
+const HANDOFF_OUTCOME_STEPS: ReadonlySet<string> = new Set(["ratify.approved", "ratify.approve_refused", "approve.error", "self_sync.refused", "ratify.handoff_failed"]);
+const HANDOFF_STEPS = [...HANDOFF_OUTCOME_STEPS, "ratify.cli_started", "ratify.cli_exited"];
+type HandoffRows = (ledgerPath: string, since: string) => Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
+
 /** One pass over the fleet lane. Pure over its deps except for the ledger rows and approve calls. */
 export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
-  return runStepsSync(triageFleetLaneSteps(deps));
+  return runStepsSync(triageFleetLaneSteps(deps, (path, since) => readLedgerUnionRecordsSync(dirname(path), { since, step: HANDOFF_STEPS }).rows));
 }
 
 export function triageFleetLaneAsync(deps: FleetLaneDeps<number | Promise<number>>): Promise<FleetLanePass> {
-  return runStepsAsync(triageFleetLaneSteps(deps));
+  return runStepsAsync(triageFleetLaneSteps(deps, (path, since) => readLedgerUnionRecords(dirname(path), { since, step: HANDOFF_STEPS })));
 }
 
-function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): Steps<FleetLanePass> {
+/**
+ * W1-T9065 — A HAND-OFF THAT LEFT NO OUTCOME IS A RECORDED FAILURE. The lane used to count every
+ * `rmd approve` it spawned as filed and hold the finding a day, though 1,171 of them died at the
+ * self-sync guard writing no row. Each pending hand-off is read against the ledger union since its
+ * decision: an outcome row settles it; a child that exited (an exit row, or a dead recorded pid, or a
+ * gateway this process no longer runs) without one writes `fleet_lane.approve_unrecorded` and frees
+ * the finding. A running one is left alone.
+ */
+function* settleHandoffs(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, readRows: HandoffRows, withinDay: (ts: string) => boolean): Steps<void> {
+  const pending = Object.entries(store).filter(([, d]) => d.handoff === "pending" && withinDay(d.ts));
+  if (pending.length === 0) return;
+  const since = pending.map(([, d]) => d.ts).sort()[0]!;
+  const rows = yield* step(() => readRows(deps.ledgerPath, since));
+  const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+  let changed = false;
+  for (const [id, entry] of pending) {
+    const mine = rows.filter((r) => r.task_id === id && typeof r.ts === "string" && r.ts >= entry.ts);
+    const gateway = (name: string) => mine.filter((r) => r.step === name && r.verb === "approve").at(-1);
+    if (mine.some((r) => HANDOFF_OUTCOME_STEPS.has(String(r.step)))) {
+      store[id] = { decision: entry.decision, ts: entry.ts };
+      changed = true;
+      continue;
+    }
+    const exited = gateway("ratify.cli_exited");
+    const started = gateway("ratify.cli_started");
+    if (!exited) {
+      const inFlight = deps.handoffInFlight?.(id);
+      if (inFlight === true) continue;
+      // A started child with a live pid is still running; with no start row, only a gateway that says it
+      // is no longer running here (a restart lost it before the spawn) proves the hand-off is over.
+      if (started ? isPidAlive(Number(started.pid)) : inFlight === undefined) continue;
+    }
+    changed = true;
+    const fate = exited ?? started ?? {};
+    const sha = typeof fate.sha === "string" ? fate.sha : undefined;
+    const count = sha !== undefined && entry.unrecorded?.sha === sha ? entry.unrecorded.count + 1 : 1;
+    store[id] = { decision: entry.decision, ts: entry.ts, unrecorded: { ...(sha ? { sha } : {}), count } };
+    appendPanelLedger(deps.ledgerPath, "fleet_lane.approve_unrecorded", id, ORIGIN, {
+      code: exited ? exited.code ?? null : null, signal: exited?.signal ?? null, log: fate.log ?? null, sha: sha ?? null, count,
+    });
+  }
+  if (changed) writeAtomic(fleetLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
+}
+
+/** A hand-off that failed unrecorded frees its finding, unless it failed twice at the sha main still reads. */
+function* releasedHandoffs(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore): Steps<Set<string>> {
+  const failed = Object.entries(store).filter(([, d]) => d.decision === "file" && d.handoff === undefined && d.unrecorded !== undefined);
+  let mainSha: string | undefined;
+  if (failed.some(([, d]) => d.unrecorded!.count >= 2)) {
+    try {
+      mainSha = yield* step(() => deps.originMainSha?.());
+    } catch {
+      // deliberate: an unreadable main is not a moved main, so a repeated failure keeps waiting.
+      mainSha = undefined;
+    }
+  }
+  return new Set(failed.filter(([, d]) => d.unrecorded!.count < 2 || (mainSha !== undefined && mainSha !== d.unrecorded!.sha)).map(([id]) => id));
+}
+
+function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
-  // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace.
+  // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace. W1-T9041:
+  // each pass also re-lints its open entries' cached drafts, re-offering what a lint change cleared.
   replayBandMeaningRefusals({
     stateDir: deps.stateDir, ledgerPath: deps.ledgerPath, clock: deps.clock,
     classificationStates: () => readClassificationSnapshot(deps.stateDir)?.states,
+    escalate: deps.escalateReplayStranded,
   });
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
@@ -283,7 +371,10 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): S
   // A merge is final (the finding is declined). A file is retried after a day if the finding is
   // still open — `rmd approve` refuses one that is not ready, and that must not strand it.
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
-  const decidedIds = new Set(Object.entries(store).filter(([, d]) => d.decision === "merge" || withinDay(d.ts)).map(([id]) => id));
+  yield* settleHandoffs(deps, store, readRows, withinDay);
+  const released = yield* releasedHandoffs(deps, store);
+  const unrecorded = (id: string) => store[id]?.handoff === undefined && store[id]?.unrecorded !== undefined;
+  const decidedIds = new Set(Object.entries(store).filter(([id, d]) => d.decision === "merge" || (withinDay(d.ts) && !released.has(id))).map(([id]) => id));
   const open = proposals.filter(
     (p: Proposal) =>
       inboxOwner(p) === "fleet" &&
@@ -312,7 +403,7 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): S
   }
 
   // FILE: drafted findings, oldest of the most common kind first, at the fleet's own pace.
-  const filedToday = Object.values(store).filter((d) => d.decision === "file" && withinDay(d.ts)).length;
+  const filedToday = Object.entries(store).filter(([id, d]) => d.decision === "file" && withinDay(d.ts) && !unrecorded(id)).length;
   const room = Math.max(0, (yield* step(() => deps.mergedLastDay())) - filedToday);
   const kindCount = new Map<string, number>();
   for (const p of survivors) kindCount.set(inboxKind(p.id), (kindCount.get(inboxKind(p.id)) ?? 0) + 1);

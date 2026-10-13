@@ -490,6 +490,11 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
   assert.ok(fields.worker_duration_ms! >= 0, "a real spawn's duration is never negative");
   const { worker_duration_ms: _workerDurationMs, ...fieldsWithoutDuration } = fields;
   assert.deepEqual(fieldsWithoutDuration, {
+    sdk_init_summary: {
+      schema: "sdk-init-summary-v1", state: "unavailable", source: null,
+      serverNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+      mcpToolNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+    },
     model: "claude-opus-4",
     // W1-T2572: `usageStream()`'s assistant message carries no `model` field, so the
     // provider reported nothing this call could attribute a served model to — an

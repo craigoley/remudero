@@ -111,11 +111,14 @@ test("the actual daily CLI retains CI guard decisions in its existing bounded so
   const root = mkdtempSync(join(tmpdir(), "rmd-ci-deferrals-"));
   try {
     const state = join(root, "state"), out = join(root, "out");mkdirSync(state, { mode: 0o700 });
-    const now = Date.now();
-    const row = receipt({ ts: new Date(now - 1000).toISOString(), sweep_input_as_of: new Date(now - 2000).toISOString() });
-    writeFileSync(join(state, "ledger.ndjson"), JSON.stringify(row) + "\n", { mode: 0o600 });
     const env = { ...process.env };
     for (const key of ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "AZURE_API_KEY"]) delete env[key];
+    // The CLI ages the row on ITS clock, which a clock-shift probe never moves (scripts/clock-shift.mjs TRAP): read
+    // "now" from a sibling child, which is this process's Date.now() on the real clock.
+    const now = Number(spawnSync(process.execPath, ["-e", "process.stdout.write(String(Date.now()))"], { env, encoding: "utf8" }).stdout);
+    assert.ok(Number.isSafeInteger(now) && now > 0, `child clock read: ${now}`);
+    const row = receipt({ ts: new Date(now - 1000).toISOString(), sweep_input_as_of: new Date(now - 2000).toISOString() });
+    writeFileSync(join(state, "ledger.ndjson"), JSON.stringify(row) + "\n", { mode: 0o600 });
     const child = spawnSync(process.execPath, ["--import", "tsx", "scripts/private-routing-daily-review.mjs",
       "--source", "core=" + state, "--out-dir", out], { cwd: join(import.meta.dirname, ".."), env, encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);

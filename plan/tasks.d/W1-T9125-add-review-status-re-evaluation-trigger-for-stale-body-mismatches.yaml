@@ -1,0 +1,27 @@
+- id: W1-T9125
+  title: Add review status re-evaluation trigger for stale body mismatches
+  repo: remudero
+  depends_on:
+    - W1-T9124
+    - W1-T256
+    - W1-T77
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/review.ts
+    - src/lib/daemon.ts
+  acceptance:
+    - claim: remudero-review is automatically re-posted when PR body changes and previous status is FAILURE
+      proof: "unit test: PR body edit triggers new remudero-review status check"
+    - claim: Review re-evaluation logic is called by daemon on body change
+      proof: "grep: reEvaluateReview( in src/lib/daemon.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-09-15 follow-up on https://github.com/craigoley/remudero/pull/5662, ratified via
+    rmd approve:
+  
+    risk raised to high due to spanning daemon and review concerns (Rule 19).

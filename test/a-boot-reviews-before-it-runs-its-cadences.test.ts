@@ -12,10 +12,18 @@ import type { RunResult } from "../src/run-task.js";
 // every iteration-top cadence ran on tick 1 ahead of the first full pass: first `sweep.pass` p50 8.1 / p90
 // 20.0 min after `daemon.boot`. Tick 1 now runs a light pass at once, then holds the cadences and the
 // garden fan-out until the first full pass settles or BOOT_CADENCE_GATE_BOUND_MS passes.
+// W1-T9072: the gate holds those cadences, not dispatch. Tick 1 dispatches at once, so the fixture's first lane is
+// still in flight when the gate opens, and the cadences run at the next iteration top, before the second task.
 
 const YAML = `
 - id: A
   title: a
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: B
+  title: b
   repo: remudero
   type: implement
   depends_on: []
@@ -42,12 +50,16 @@ async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs
   let nowMs = 0;
   let sleeps = 0;
   const merged = new Set<string>();
+  let gateOpened!: () => void;
+  const opened = new Promise<void>((resolve) => (gateOpened = resolve));
   const summary = await daemon.runDaemon(
     fixturePlan(),
     {
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         events.push("dispatch");
+        // W1-T9072: tick 1's lane runs until the gate opens, so the cadences come after it, never beside it.
+        if (id === "A") await opened;
         merged.add(id);
         return okResult(id);
       },
@@ -86,9 +98,12 @@ async function bootOnce(firstPass: Promise<void>, opts: { bootCadenceGateBoundMs
         if (++sleeps === 1 && opts.phaseWakeBeforeBoot) return;
         await new Promise<void>((resolve) => setTimeout(resolve, 5));
       },
-      log: (step, extra = {}) => lines.push({ step, extra }),
+      log: (step, extra = {}) => {
+        lines.push({ step, extra });
+        if (step === "daemon.boot_gate.opened") gateOpened();
+      },
     },
-    { max: 1, pollIntervalMs: 5, ...opts },
+    { max: 2, pollIntervalMs: 5, ...opts },
   );
   return { events, lines, summary };
 }
@@ -102,7 +117,7 @@ test("a boot admits its review-only pass before a phase clock that wakes ahead o
   assert.equal(events[0], "light-pass:review-only", `review-only admission is ordered, not won by a timer (saw ${events.join(", ")})`);
   assert.ok(events.includes("first-pass-settled"), "positive control: the full sweep also ran");
   assert.ok(events.indexOf("review-admitted") < events.indexOf("measurement"));
-  assert.deepEqual(summary.merged, ["A"], "the boot still dispatches");
+  assert.deepEqual(summary.merged, ["A", "B"], "the boot still dispatches");
 });
 
 test("a pending boot review does not serialize the background full sweep", async () => {
@@ -143,14 +158,16 @@ test("W1-T5720: a boot's light pass and review admission run before any tick-1 c
   // The first light pass releases the first full pass a little later, so a cadence that did not wait would be seen first.
   const { events, lines, summary } = await bootOnce(firstPass, { bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 60_000 },
     () => setTimeout(() => releaseFirstPass?.(), 30));
-  assert.deepEqual(summary.merged, ["A"], "the boot still dispatches");
+  assert.deepEqual(summary.merged, ["A", "B"], "the boot still dispatches");
   const first = (e: string): number => events.indexOf(e);
   assert.ok(first("light-pass:review-only") >= 0, `fixture: a light pass ran (saw ${events.join(", ")})`);
-  for (const cadence of ["measurement", "retro", "garden", "dispatch"]) {
+  // W1-T9072: dispatch is no longer in this list. It runs on tick 1 without waiting for the first full pass.
+  for (const cadence of ["measurement", "retro", "garden"]) {
     assert.ok(first(cadence) >= 0, `fixture: ${cadence} ran (saw ${events.join(", ")})`);
     assert.ok(first("review-admitted") < first(cadence), `the boot's review admission precedes ${cadence} (saw ${events.join(", ")})`);
     assert.ok(first("first-pass-settled") < first(cadence), `${cadence} waits for the first full pass (saw ${events.join(", ")})`);
   }
+  assert.ok(first("review-admitted") < first("dispatch"), `the boot's review admission still precedes dispatch (saw ${events.join(", ")})`);
   assert.equal(events[0], "light-pass:review-only", `the boot's light pass runs with no initial sleep (saw ${events.join(", ")})`);
   const deferred = lines.filter((l) => l.step === "daemon.boot_gate.deferred").map((l) => l.extra.cadence);
   assert.deepEqual(deferred, ["gardens", "checkMeasurementCadence", "checkRetroTrigger"], "each deferral names its cadence");

@@ -1,0 +1,62 @@
+- id: W1-T9092
+  title: "THE DAEMON IS STALE ONLY WHEN CODE ITS OWN PROCESS LOADS CHANGED — MATERIAL_ADVANCE_PATHS starts the staleness clock for any src/ change and upper_age then restarts it within about 30 minutes (9 of 17 freshness boots on 2026-10-12/13), whether or not the daemon loads the file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what counts as a material advance for the daemon process
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T79, W1-T2964, W1-T2965, W1-T4945, W1-T6093, W1-T8396, W1-T8171, W1-T9091]
+  files: [src/lib/daemon-closure.ts, src/lib/self-sync.ts, src/run-task.ts, test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    ADR 0007 decision B.1 and B.2; it also answers "upper_age restarts for immaterial changes".
+    MEASURED: ~/Remudero-notes/flow-remeasure-2026-10-13b/boots-classified.txt, 17 freshness boots in 24 h, 9 released
+    by `upper_age`. READ on origin/main 5f8d3f178: `daemonFreshnessFromService` (src/lib/self-sync.ts) calls an advance
+    material through `advanceIsMaterial`, a prefix list (`MATERIAL_ADVANCE_PATHS` = src/, bin/, package.json,
+    package-lock.json, tsconfig.json); a material advance starts the staleness clock (`observeFreshnessAdvance`,
+    src/lib/daemon.ts) and `coalesceFreshnessRestart` (src/lib/deploy-judge.ts) releases at `upper_age` once age pressure
+    reaches half the threshold.
+    The prefix list over-approximates by design; the import closure of the process's own entry is the measured
+    version. While the entry is src/run-task.ts that closure is nearly all of src/, so the effect grows when the narrow
+    daemon entry lands; the mechanism needs no change then because it reads the running entry.
+    NOTE: src/lib/self-sync.ts is in BAKED_RUNTIME_SOURCE_PATHS, so this PR rebuilds the image once.
+    OVERLAP: lint-plan reports W1-T79 (CLI self-freshness at entry) as sharing src/lib/self-sync.ts and src/run-task.ts.
+    That is the whole-file surface only: W1-T79 is the operator CLI's ff-pull at entry; this task changes what the
+    daemon process counts as a material advance. Neither supersedes the other.
+  design: |
+    1. New src/lib/daemon-closure.ts, `daemonProcessClosure(gitText, sha, entry)`:
+       - the static-import closure from `entry` over `buildAffectedSuitesGraph`'s `directImports`, read with one
+         `git grep` per sha as `importClosureAt` does (src/run-task.ts, W1-T8396);
+       - plus the named data edges (`namedDependencies`) of closure modules, except edges to child entries the daemon
+         spawns (`CHILD_ENTRIES` sources, scripts it executes), whose code arrives at spawn;
+       - plus package.json, package-lock.json, tsconfig.json and bin/rmd.
+       `entry` is the module the running process started from (process.argv[1] relative to the repo root), so the
+       closure narrows by itself when the entry does. Memoized per (sha, entry).
+    2. Materiality: an advance is material when a changed path is in the closure at the old sha or the new sha. An
+       unreadable closure is material (fails toward restarting, as `advanceIsMaterial` does today).
+    3. Only a material advance starts the staleness clock or reaches `decideFreshnessRestart`. An immaterial one is
+       ledgered as `daemon.freshness_not_stale` arm `immaterial` with `basis: "closure"` and the count of changed paths
+       outside it. Weighting inside the closure is unchanged.
+    4. Oracle: a test builds an esbuild metafile for the same entry (esbuild is installed) and asserts the closure
+       contains every metafile input.
+    5. The PR replays main's last 7 days: material advances under the prefix list against under the closure.
+  acceptance:
+    - claim: "a changed source file outside the daemon entry's closure is immaterial and starts no staleness clock"
+      proof: 'grep: test("W1-T9092: a change outside the daemon closure starts no staleness clock" in test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts'
+    - claim: "a data file a closure module reads is material"
+      proof: 'grep: test("W1-T9092: a data file a closure module reads is material" in test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts'
+    - claim: "an unreadable closure reads as material"
+      proof: 'grep: test("W1-T9092: an unreadable closure is material" in test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts'
+    - claim: "the closure contains every esbuild metafile input of the same entry"
+      proof: 'grep: test("W1-T9092: the closure contains every metafile input" in test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts'
+    - claim: "the daemon's freshness wiring reads the process closure"
+      proof: 'grep: daemonProcessClosure( in src/run-task.ts'
+  falsifier: |
+    Keep `advanceIsMaterial`'s prefix list: the first test's source file that no closure module imports starts the
+    clock.
