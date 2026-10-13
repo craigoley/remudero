@@ -1,30 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BAKEOFF_CANDIDATES, rankBakeoff, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "../src/lib/inbox-bakeoff.js";
-import type { DraftSpawn, Proposal } from "../src/lib/inbox.js";
+import { inboxDraftExampleFragmentYaml, type DraftSpawn, type Proposal } from "../src/lib/inbox.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 const PROPOSALS: Proposal[] = ["P1", "P2", "P3"].map((id) => ({ id, summary: `summary of ${id}`, evidenceAnchors: [{ description: "x", pattern: "landed" }] }));
 
+/** A draft the push floor's repo facts accept (W1-T9039): the drafter's own example names paths that exist. */
 function draftFor(id: string): string {
   return [
     "=== FRAGMENT START ===",
-    "- id: W1-T900",
-    "  title: drafted candidate",
-    "  repo: remudero",
-    "  depends_on: []",
-    "  type: implement",
-    "  verify: auto",
-    "  risk: high",
-    "  band_meaning: span",
-    "  files: [src/lib/x.ts, test/x.test.ts]",
-    "  origin: feedback#P1",
-    "  acceptance:",
-    '    - claim: "the drafted candidate does the thing"',
-    '      proof: "unit test: test/x.test.ts"',
-    "  status: queued",
+    inboxDraftExampleFragmentYaml(),
     "=== FRAGMENT END ===",
-    `STAMP: - ${id} (plan) — RATIFIED 2026-07-21 -> W1-T900.`,
+    `STAMP: - ${id} (plan) — RATIFIED 2026-07-21 -> NEW-1.`,
   ].join("\n");
 }
 

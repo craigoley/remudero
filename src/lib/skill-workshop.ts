@@ -413,6 +413,8 @@ export interface StageSkillDraftResult {
   backfilled?: boolean;
   /** The staged entry's Procedure named fewer behavioral steps, so this call replaced it. */
   refreshed?: boolean;
+  /** An unstamped legacy payload differed from the newly scanned draft and was replaced before stamping. */
+  legacyReplaced?: boolean;
   /** The entry already carried its file but no staged-at stamp; this call stamped it and changed nothing else. */
   stamped?: boolean;
   reason?: string;
@@ -462,6 +464,7 @@ export function stageSkillDraft(
   let alreadyStaged = false;
   let backfilled = false;
   let refreshed = false;
+  let legacyReplaced = false;
   let stamped = false;
   updateProposalRegistry(
     registryPath,
@@ -470,6 +473,7 @@ export function stageSkillDraft(
       alreadyStaged = false;
       backfilled = false;
       refreshed = false;
+      legacyReplaced = false;
       stamped = false;
       const existing = current.findIndex((p) => p.id === id);
       const skillFile = { name: draft.name, markdown: draft.markdown };
@@ -481,13 +485,15 @@ export function stageSkillDraft(
         // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
         // Compare behavioral steps: removed outcome-only bullets do not count as lost procedure.
         const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
-        if (stored && skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length) {
+        legacyReplaced = stored !== undefined && skillFileStagedAtMs(current[existing].skillFileStagedAt) === null &&
+          (stored.name !== skillFile.name || stored.markdown !== skillFile.markdown);
+        if (stored && (legacyReplaced || skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length)) {
           refreshed = true;
           return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
         }
         if (stored && skillFileStagedAtMs(current[existing].skillFileStagedAt) !== null) return null; // already staged with its file — never a duplicate write
         if (stored) {
-          // Staged before the stamp existed: stamp it now, the conservative (later) instant.
+          // Identical to the scanned draft: stamp it now, the conservative (later) instant.
           stamped = true;
           return current.map((p, i) => (i === existing ? { ...p, skillFileStagedAt } : p));
         }
@@ -506,9 +512,12 @@ export function stageSkillDraft(
     alreadyStaged,
     ...(backfilled ? { backfilled: true } : {}),
     ...(refreshed ? { refreshed: true } : {}),
+    ...(legacyReplaced ? { legacyReplaced: true } : {}),
     ...(stamped ? { stamped: true } : {}),
     reason: backfilled
       ? "already staged; skill file backfilled"
+      : legacyReplaced
+        ? "already staged; legacy text replaced with scanned draft before stamping"
       : refreshed
         ? "already staged; procedure refreshed with more steps"
         : stamped
@@ -777,6 +786,8 @@ export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
 export interface SkillEffectivenessCohort {
   observed_eligible_runs: number;
   terminal_runs: number;
+  /** Worker-terminal rows whose shipment can still resolve; never treat these as observed non-merges. */
+  pending_merge_runs: number;
   merged_runs: number;
   harmful_terminal_runs: number;
   outcomes: Record<string, number>;
@@ -789,7 +800,7 @@ export interface SkillEffectivenessReport {
   task_type: string;
   horizon: number;
   status: SkillEffectivenessStatus;
-  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison";
+  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison" | "pending-shipment";
   selected: SkillEffectivenessCohort;
   control: SkillEffectivenessCohort;
   harm_outcomes: readonly string[];
@@ -806,6 +817,7 @@ const stringArray = (value: unknown): string[] =>
 const emptyCohort = (): SkillEffectivenessCohort => ({
   observed_eligible_runs: 0,
   terminal_runs: 0,
+  pending_merge_runs: 0,
   merged_runs: 0,
   harmful_terminal_runs: 0,
   outcomes: {},
@@ -858,6 +870,7 @@ export function buildSkillEffectivenessReport(
       cohort.terminal_runs++;
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
       if (outcome === "merged") cohort.merged_runs++;
+      if (outcome === "handed_off" || outcome === "blocked_ci") cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
     }
     return cohort;
@@ -871,6 +884,9 @@ export function buildSkillEffectivenessReport(
     selected.terminal_runs < SKILL_EFFECTIVENESS_HORIZON || control.terminal_runs < SKILL_EFFECTIVENESS_HORIZON;
   const selectedMergeRate = selected.terminal_runs === 0 ? 0 : selected.merged_runs / selected.terminal_runs;
   const controlMergeRate = control.terminal_runs === 0 ? 0 : control.merged_runs / control.terminal_runs;
+  // Identification bounds, not confidence intervals: pending work can all merge or all remain unmerged.
+  const selectedMergeUpper = selected.terminal_runs === 0 ? 0 : (selected.merged_runs + selected.pending_merge_runs) / selected.terminal_runs;
+  const controlMergeUpper = control.terminal_runs === 0 ? 0 : (control.merged_runs + control.pending_merge_runs) / control.terminal_runs;
 
   let status: SkillEffectivenessStatus;
   let basis: SkillEffectivenessReport["basis"];
@@ -883,12 +899,15 @@ export function buildSkillEffectivenessReport(
   } else if (selected.harmful_terminal_runs > 0) {
     status = "RETIRE-CANDIDATE";
     basis = "named-harm-signal";
-  } else if (selectedMergeRate <= controlMergeRate) {
+  } else if (selectedMergeUpper <= controlMergeRate) {
     status = "RETIRE-CANDIDATE";
     basis = "not-better-than-control";
-  } else {
+  } else if (selectedMergeRate > controlMergeUpper) {
     status = "REVIEW-CANDIDATE";
     basis = "favorable-comparison";
+  } else {
+    status = "INSUFFICIENT EVIDENCE";
+    basis = "pending-shipment";
   }
 
   return {
@@ -914,6 +933,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
   const renderCohort = (name: string, cohort: SkillEffectivenessCohort): string =>
     `${name}: observed_eligible_runs=${cohort.observed_eligible_runs}; terminal_runs=${cohort.terminal_runs}; ` +
     `merged_runs=${cohort.merged_runs}; harmful_terminal_runs=${cohort.harmful_terminal_runs}; ` +
+    `pending_merge_runs=${cohort.pending_merge_runs}; ` +
     `outcomes=${renderOutcomes(cohort.outcomes)}`;
   return [
     `### rmd skill effectiveness — ${report.skill_name} (${report.task_type})`,
@@ -923,6 +943,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     renderCohort("selected", report.selected),
     renderCohort("control", report.control),
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
+    "shipment comparison: best/worst-case bounds over handed_off and blocked_ci runs; overlapping possibilities are insufficient evidence. These are not confidence intervals or deployment/live-benefit claims.",
     report.assignment === "randomized"
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
         "selected is every other eligible run (intent to treat)."
@@ -978,6 +999,9 @@ function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsD
     return `skill '${report.skill_name}' is not approved and opted in under ${approvedSkillsDir}`;
   }
   if (report.status === "INSUFFICIENT EVIDENCE") {
+    if (report.basis === "pending-shipment") {
+      return `pending shipment: selected=${report.selected.pending_merge_runs}, control=${report.control.pending_merge_runs}; merge-rate bounds overlap`;
+    }
     return (
       `below horizon: selected terminal_runs=${report.selected.terminal_runs}, ` +
       `control terminal_runs=${report.control.terminal_runs}, horizon=${report.horizon}`
