@@ -2996,6 +2996,7 @@ import {
 } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
+import { toolStepSignature } from "./lib/tool-step-signature.js";
 
 /** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
  * The catch arm must publish the values captured by the worker, rather than re-reading policy
@@ -3345,8 +3346,11 @@ export const WORKER_STATE_LEDGER_STEP = "worker.state";
 /** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
  *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
  *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
- *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
- *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
+ *  timing/outcome, and heartbeat cadence. A tool-executing row adds `tool_call_index` (from 0, per
+ *  run) and `tool_signature`, the {@link toolStepSignature} of at most 120 characters: a Bash
+ *  program and subcommand, or a file tool and its repo-relative path. A row never carries a prompt,
+ *  a raw tool argument, a flag value, or tool output. It is diagnostic telemetry only and must
+ *  never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -3465,12 +3469,13 @@ export function attributeWorkerStreamEvent(
 /** The stream observer one dispatch spawn hands its worker: enrich, attribute to the spawn's assignment, then forward. */
 export function dispatchStreamObserver(
   base: WorkerStreamObserver,
-  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider">,
+  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider"> & { cwd?: string },
   assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
 ): WorkerStreamObserver {
   return (event) => {
     const current = assignment();
-    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(event, spawn, current), current));
+    const located = spawn.cwd && !event.cwd ? { ...event, cwd: spawn.cwd } : event;
+    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(located, spawn, current), current));
   };
 }
 
@@ -3679,6 +3684,7 @@ export function buildWorkerStateSensor(args: {
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
   let lastActivityKey: string | undefined;
+  let nextToolCallIndex = 0;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -3728,7 +3734,9 @@ export function buildWorkerStateSensor(args: {
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
     const eventAt = new Date(event.tsMs).toISOString();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
+    const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
+      const toolSignature = event.toolName ? toolStepSignature(event.toolName, event.toolInput, event.cwd ?? "") : undefined;
       const activityRow = {
         run_id: args.runId,
         task_id: args.taskId,
@@ -3749,6 +3757,8 @@ export function buildWorkerStateSensor(args: {
         ...(event.kind === "tool-executing"
           ? {
               tool_name: toolName ?? "unknown",
+              tool_call_index: toolCallIndex,
+              ...(toolSignature ? { tool_signature: toolSignature } : {}),
               ...(lastWorkerText ? { tool_reason: boundedWorkerTelemetryText(lastWorkerText) } : {}),
               tool_started_at: eventAt,
             }
@@ -8625,7 +8635,7 @@ async function runReview(args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
