@@ -14,55 +14,17 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { assertBrowserTeardownSources, trackedBrowserTestSources } from "./lib/browser-test-corpus.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-/** This file's own path, relative to the repo root — excluded from the sweep below, since its
- * prose necessarily names the very call it is policing. */
-const SELF = "test/serve-browser-teardown.test.ts";
-
-/** Every test file that calls `chromium.launch()`. Derived by READING the tree rather than
- * hardcoding, so a seventh browser-driving suite added later is held to the same contract
- * automatically instead of quietly opting out of it. */
-function browserLaunchingTestFiles(): string[] {
-  const out = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", "chromium.launch(", "test"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
-  return out
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && l !== SELF)
-    .sort();
-}
-
 test("every browser-launching test file awaits the launch PROMISE in teardown, never the resolved handle", () => {
-  const files = browserLaunchingTestFiles();
   // W1-T4563 retired the daemon's in-process console with the eleven suites that drove it in a
   // browser, and W1-T4566 deleted dashboard-loads; three remain (the corpus control this floor exists for).
-  assert.ok(files.length >= 3, `expected at least the three known browser suites (W1-T4566 deleted dashboard-loads), found ${files.length}`);
-  for (const f of files) {
-    const src = readFileSync(join(REPO_ROOT, f), "utf8");
-    assert.match(
-      src,
-      /browserPromise = chromium\.launch\(/,
-      `${f}: chromium.launch() must be assigned to browserPromise SYNCHRONOUSLY, so teardown can see it`,
-    );
-    assert.match(
-      src,
-      /const launched = await browserPromise;\s*\n\s*await launched\?\.close\(\);/,
-      `${f}: teardown must await the launch promise and close what it resolves to`,
-    );
-    assert.doesNotMatch(
-      src,
-      /after\(async \(\) => \{\s*\n\s*(?:if \(browser\) )?await browser\.close\(\);/,
-      `${f}: closing the resolved handle is the leak -- it is still undefined when teardown fires on a zero-match filter`,
-    );
-  }
+  assertBrowserTeardownSources(trackedBrowserTestSources(REPO_ROOT));
 });
 
 /** Env for a nested `node --test`, with the parent runner's own marker REMOVED.
