@@ -36,44 +36,10 @@ import { join } from "node:path";
 import { systemClock } from "./clock.js";
 import { WORKER_HEAP_TIMEOUT_MS, type TrackedWorker, type WorkerThread } from "./worker-heaps.js";
 
-export interface MemoSize { entries: number; approx_bytes: number }
+import type { MemoSize } from "./ledger-union.js";
 
 export type DaemonMemoSizes = Record<"dispatchSelectionLedgerUnion" | "terminalUnionScans" |
   "mergeLogEvidenceByRoot" | "dispatchFilingCache" | "baseReproductionHostCache", MemoSize>;
-
-/** Serialized payload bytes, including nested Maps/Sets; an estimate, not a V8 heap measurement. */
-export function approximateMemoBytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value, (_key, item) =>
-    item instanceof Map ? [...item] : item instanceof Set ? [...item] : item) ?? "");
-}
-
-/** Account at insertion/replacement/deletion, so the heartbeat never walks retained history. */
-export function createSizedMemo<K, V>(measure: (key: K, value: V) => MemoSize = (key, value) =>
-  ({ entries: 1, approx_bytes: approximateMemoBytes([key, value]) + 64 })) {
-  const stored = new Map<K, { value: V; size: MemoSize }>();
-  let entries = 0;
-  let bytes = 0;
-  const remove = (key: K): boolean => {
-    const prior = stored.get(key);
-    if (!prior) return false;
-    entries -= prior.size.entries;
-    bytes -= prior.size.approx_bytes;
-    return stored.delete(key);
-  };
-  return {
-    get: (key: K): V | undefined => stored.get(key)?.value,
-    set(key: K, value: V): void {
-      const size = measure(key, value);
-      remove(key);
-      stored.set(key, { value, size });
-      entries += size.entries;
-      bytes += size.approx_bytes;
-    },
-    delete: remove,
-    keys: () => stored.keys(),
-    size: (): MemoSize => ({ entries, approx_bytes: bytes }),
-  };
-}
 
 /** The heartbeat fields. Every `_bytes` field is an integer byte count. */
 export interface DaemonMemoryFields {

@@ -1143,7 +1143,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1828,7 +1828,7 @@ import {
   inFlightReviewCount,
   readIdleLightCadence,
 } from "./lib/sweep.js";
-import { createSizedMemo, sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {

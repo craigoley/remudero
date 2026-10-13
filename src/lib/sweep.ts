@@ -89,8 +89,7 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
-import { createSizedMemo } from "./daemon-memory-telemetry.js";
+import { createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
