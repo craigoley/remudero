@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { loadDefaultPolicy } from "./policy.js";
-import { breMetacharsIn } from "./task-linter.js";
+import { breMetacharsIn } from "./bre-metachars.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { grepOnlyBaseTargets, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./proof-base-stale.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
