@@ -8,7 +8,9 @@
   type: implement
   verify: auto
   risk: low
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T9168 — It depends on W1-T5, which will never be built.
   attempts: 0
   files:
     - src/lib/mounts.yaml
