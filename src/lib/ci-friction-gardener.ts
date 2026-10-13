@@ -6,6 +6,7 @@ import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
+import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
@@ -1022,10 +1023,12 @@ export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
   return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
 }
 
-/** The slug a drafted shard's filename and its regression test share. Equal names are what make the
- *  test the shard's OWN falsifier to the sizing rule, so a remedy is one owner file plus its test. */
+/** Shard and regression share a slug; cause words must not classify that regression as a rule suite.
+ *  The full cause stays in origin and evidence, including when its filename needs a neutral hash. */
 export function ciFrictionShardStem(key: string): string {
-  return kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  const stem = kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  return RULE_SUITE_NAME_RE.test(stem)
+    ? `ci-friction-remedy-${createHash("sha256").update(key).digest("hex").slice(0, 16)}` : stem;
 }
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. It names the
