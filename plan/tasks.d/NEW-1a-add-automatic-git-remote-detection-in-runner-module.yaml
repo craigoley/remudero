@@ -1,0 +1,26 @@
+- id: NEW-1a
+  title: Add automatic git remote detection in runner module
+  repo: remudero
+  depends_on:
+    - W1-T60
+    - W1-T77
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
+  
+    spans runner and sweep concerns
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/runner.ts
+    - test/rmd-sweep-runs-the-pr-terminal-rung.test.ts
+    - src/lib/sweep.ts
+  acceptance:
+    - claim: runner can detect git remote when remote.origin.url is unset
+      proof: "unit test: runner detects remote when remote.origin.url is unset"
+    - claim: sweep calls the new detection routine
+      proof: "grep: detectGitRemote( in src/lib/sweep.ts"
+  origin: architect
