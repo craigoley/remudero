@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
 import {parse} from 'yaml';
+import {ghShim} from './helpers/gh-shim.js';
 // @ts-expect-error — trusted metadata producer is plain ESM outside tsconfig roots.
 import {runSecurityMergeProducer} from '../scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
@@ -46,17 +47,17 @@ test('security producer workflow always checks out trusted main with no credenti
 });
 test('security producer real CLI transport shells out, publishes exact-head metadata and preserves API failure as UNKNOWN',t=>{
  const dir=mkdtempSync(join(tmpdir(),'rmd-security-transport-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
- const eventPath=join(dir,'event.json'),calls=join(dir,'calls.ndjson');
+ const eventPath=join(dir,'event.json');
  writeFileSync(eventPath,JSON.stringify({repository,pull_request:{number:1,head:{sha:head}}}));
- writeFileSync(join(dir,'gh'),`#!${process.execPath}\nconst fs=require('node:fs');const a=process.argv.slice(2);fs.appendFileSync(process.env.RMD_FIXTURE_CALLS,JSON.stringify(a)+'\\n');
- if(a.includes('POST')){if(process.env.RMD_FIXTURE_FAILURE==='post')process.exit(1);process.stdin.resume();process.stdin.on('end',()=>console.log('{}'));}
- else if(process.env.RMD_FIXTURE_FAILURE==='read')process.exit(1);
- else console.log(JSON.stringify(a.some(x=>x.includes('/files?'))?[{filename:'docs/a.md'}]:${JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}));\n`,{mode:0o700});
- const env={...process.env,PATH:dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'pull_request_target',GITHUB_RUN_ID:'1',RMD_FIXTURE_CALLS:calls};
+ const shim=ghShim([{when:'POST',stdout:'{}'},{when:'/files?',stdout:JSON.stringify([{filename:'docs/a.md'}])},
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}]);
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const env={...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'pull_request_target',GITHUB_RUN_ID:'1'};
  const command=new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname;
- const run=(failure:string)=>spawnSync(process.execPath,[command],{env:{...env,RMD_FIXTURE_FAILURE:failure},encoding:'utf8',timeout:10000});
- const good=run('');assert.equal(good.status,0,good.stderr);assert.equal(JSON.parse(good.stdout).results[0].decision.state,'not-applicable');
- assert.ok(readFileSync(calls,'utf8').includes('/statuses/'+head));
- const unavailable=run('read');assert.equal(unavailable.status,1);assert.equal(JSON.parse(unavailable.stdout).results[0].decision.state,'unknown');
- assert.equal(run('post').status,1,'failed publication cannot claim success');
+ const run=()=>spawnSync(process.execPath,[command],{env,encoding:'utf8',timeout:10000});
+ const good=run();assert.equal(good.status,0,good.stderr);assert.equal(JSON.parse(good.stdout).results[0].decision.state,'not-applicable');
+ assert.ok(shim.calls().some(call=>call.includes('/statuses/'+head)));
+ shim.addRoute({when:'POST',exit:1});assert.equal(run().status,1,'failed publication cannot claim success');
+ shim.addRoute({when:'GET',exit:1});
+ const unavailable=run();assert.equal(unavailable.status,1);assert.equal(JSON.parse(unavailable.stdout).results[0].decision.state,'unknown');
 });
