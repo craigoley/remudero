@@ -1497,7 +1497,8 @@ function* mergeDirectAfterPreflightSteps(
       return { outcome: "direct-merged", directMergePreflight: evidence };
     }
     deps.say(`automerge.direct_merge_failed: ${msg2} — ${prUrl}`);
-    return { outcome: "direct-merge-failed", directMergePreflight: evidence };
+    // W1-T8620: GitHub's refusal text rides the result, so the ledger rows carry the reason.
+    return { outcome: "direct-merge-failed", error: msg2, directMergePreflight: evidence };
   }
 }
 

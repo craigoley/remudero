@@ -45,6 +45,7 @@ const SHARED_PROOF_FRAGMENT = `
   type: implement
   verify: auto
   risk: high
+  band_meaning: span
   status: queued
   attempts: 0
   origin: architect

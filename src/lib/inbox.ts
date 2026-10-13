@@ -1874,8 +1874,13 @@ function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintV
   return out;
 }
 
-/** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
- *  violation, so it drives a redraft rather than being cached as NOT-READY. */
+export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
+  riskTransition: Object.freeze({ baseTask: undefined }),
+  proofSelfPath: "block",
+} as const);
+
+/** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link DRAFT_FILING_LINT_OPTIONS} (W1-T8714), a new
+ *  task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
 export function lintDraftedFragment(
   fragmentYaml: string,
   proposalId: string,
@@ -1891,7 +1896,7 @@ export function lintDraftedFragment(
   }
   const violations: DraftLintViolation[] = [];
   for (const task of tasks) {
-    violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
+    violations.push(...filingBlockers(lintTask(task, { ...DRAFT_FILING_LINT_OPTIONS, knownRepos }).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, directoryExists));
     violations.push(...draftAbsenceProofViolations(task));
   }
@@ -3276,7 +3281,7 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
   return carried;
 }
 
-/** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
+/** Repair only mechanical filing failures (proofs, sizing, W1-T8714's undeclared band). Ranges keep all other bytes. */
 export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
   | { ok: true; fragmentYaml: string }
   | { ok: false; reason: string } {
@@ -3316,9 +3321,13 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
       }
     }
 
-    if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
-      const risk = fields.get("risk", true);
-      const band = fields.get("band_meaning", true);
+    const band = fields.get("band_meaning", true);
+    const risk = fields.get("risk", true);
+    if (task.risk === "high" && task.band_meaning === undefined && isScalar(risk) && risk.range) {
+      const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
+      const insertAt = endOfLine < 0 ? fragmentYaml.length : endOfLine + 1;
+      edits.push({ start: insertAt, end: insertAt, text: `${endOfLine < 0 ? "\n" : ""}  band_meaning: span\n` });
+    } else if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
       if (isScalar(risk) && risk.range) {
         edits.push({ start: risk.range[0], end: risk.range[1], text: "high" });
         if (isScalar(band) && band.range) {
@@ -3343,10 +3352,7 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
   const violations: DraftLintViolation[] = [];
   try {
     for (const task of parseTasksFromYaml(repaired, `approve ${proposalId}`)) {
-      violations.push(...filingBlockers(lintTask(task, {
-        riskTransition: { baseTask: undefined },
-        proofSelfPath: "block",
-      }).violations, undefined, true));
+      violations.push(...filingBlockers(lintTask(task, DRAFT_FILING_LINT_OPTIONS).violations, undefined, true));
     }
   } catch (error) {
     return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
