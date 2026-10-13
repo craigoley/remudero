@@ -64,9 +64,9 @@ const PAYLOAD_7608: RatificationPayload = {
 /** A well-formed one-task draft: the canonical example with its own title, claim, file and repo. */
 function draftFor(proposalId: string, title: string, file: string, repo = "remudero"): { fragmentYaml: string; stampLine: string } {
   const fragmentYaml = inboxDraftExampleFragmentYaml()
-    .replace("Tighten the empty-input guard in parseWidget", title)
-    .replaceAll("parseWidget rejects an empty input instead of throwing a raw TypeError", `${title} holds under the fixture`)
-    .replace("src/lib/widget.ts", file)
+    .replace("Tighten the empty-input guard in parseTasksFromYaml", title)
+    .replaceAll("parseTasksFromYaml rejects an empty input instead of throwing a TypeError", `${title} holds under the fixture`)
+    .replace("src/lib/plan.ts", file)
     .replace("repo: remudero", `repo: ${repo}`);
   return { fragmentYaml, stampLine: `- ${proposalId} (${title}) — RATIFIED 2026-09-28 -> NEW-1.` };
 }
@@ -77,7 +77,8 @@ test("#7608's shape in a batch is refused before anything is minted or written �
   writeFileSync(join(wt, "MASTER-PLAN.md"), masterPlan, "utf8");
   // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
   mkdirSync(join(wt, "src", "lib"), { recursive: true });
-  const valid = { proposalId: "P-VALID", ...draftFor("P-VALID", "Rotate the quux ledger for the batch fixture", "src/lib/quux.ts") };
+  writeFileSync(join(wt, "src", "lib", "ledger.ts"), ""); // W1-T9039: the module the draft edits exists
+  const valid = { proposalId: "P-VALID", ...draftFor("P-VALID", "Rotate the quux ledger for the batch fixture", "src/lib/ledger.ts") };
   const materialized: string[] = [];
   assert.throws(
     () =>
@@ -135,6 +136,8 @@ async function drive(opts: {
   // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
   mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
   writeFileSync(join(seed.dir, "src", "lib", ".gitkeep"), "");
+  // W1-T9039: the push floor's call-site check reads the worktree, so the modules the drafts edit exist.
+  for (const module of ["ledger.ts", "relint.ts"]) writeFileSync(join(seed.dir, "src", "lib", module), "");
   // The repo rule's names come from the checkout's own fleet registry, as they do in production.
   copyFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), join(seed.dir, ".remudero", "daemon-instances.yaml"));
   seed.git("add", "-A");
@@ -214,10 +217,10 @@ test("a batch approve refuses a fragment the single lane refuses: nothing is min
   const d = await drive({
     ids: ["P-GOOD", "P-BADREPO"],
     drafts: {
-      "P-GOOD": draftFor("P-GOOD", "Rotate the quux ledger for the batch fixture", "src/lib/quux.ts"),
+      "P-GOOD": draftFor("P-GOOD", "Rotate the quux ledger for the batch fixture", "src/lib/ledger.ts"),
       // Well-formed in every way the readiness classification reads, so it reaches the gateway;
       // only the repo rule, which needs the checkout's registry, refuses it.
-      "P-BADREPO": draftFor("P-BADREPO", "Index the zorble registry for the batch fixture", "src/lib/zorble.ts", "master-plan"),
+      "P-BADREPO": draftFor("P-BADREPO", "Index the zorble registry for the batch fixture", "src/lib/relint.ts", "master-plan"),
     },
     routes: BATCH_ROUTES,
   });
@@ -237,8 +240,8 @@ test("a valid batch's PR lists only the files it wrote — MASTER-PLAN.md only w
     const d = await drive({
       ids: ["P-ALPHA", "P-BETA"],
       drafts: {
-        "P-ALPHA": draftFor("P-ALPHA", "Rotate the quux ledger for the batch fixture", "src/lib/quux.ts"),
-        "P-BETA": draftFor("P-BETA", "Index the zorble registry for the batch fixture", "src/lib/zorble.ts"),
+        "P-ALPHA": draftFor("P-ALPHA", "Rotate the quux ledger for the batch fixture", "src/lib/ledger.ts"),
+        "P-BETA": draftFor("P-BETA", "Index the zorble registry for the batch fixture", "src/lib/relint.ts"),
       },
       masterPlan: withBullet ? "# MASTER PLAN\n\n- P-ALPHA (open)\n" : "# MASTER PLAN\n\nfixture\n",
       routes: BATCH_ROUTES,
@@ -283,10 +286,10 @@ async function driveJoin(patch: GhShimRoute): Promise<Drive & { priorBranch: str
   const lazy: GhShimRoute[] = [];
   const d = await drive({
     ids: ["P-JOIN"],
-    drafts: { "P-JOIN": draftFor("P-JOIN", "Index the zorble registry for the join fixture", "src/lib/zorble.ts") },
+    drafts: { "P-JOIN": draftFor("P-JOIN", "Index the zorble registry for the join fixture", "src/lib/relint.ts") },
     prior: (seed) => {
       seed.git("checkout", "--quiet", "-b", priorBranch);
-      const shard = draftFor("P-FIRST", "Rotate the quux ledger for the join fixture", "src/lib/quux.ts").fragmentYaml.replace("NEW-1", "W1-T50");
+      const shard = draftFor("P-FIRST", "Rotate the quux ledger for the join fixture", "src/lib/ledger.ts").fragmentYaml.replace("NEW-1", "W1-T50");
       writeFileSync(join(seed.dir, PRIOR_SHARD), shard);
       seed.git("add", "-A");
       seed.git("commit", "--quiet", "-m", "chore(plan): ratify P-FIRST via rmd approve");

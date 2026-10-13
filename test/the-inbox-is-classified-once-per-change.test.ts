@@ -89,7 +89,7 @@ function fragment(taskId: string, deps: string[]): string {
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/drafted-${taskId.toLowerCase()}.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the drafted task does its thing"
       proof: "unit test: drafted ${taskId} does its thing"

@@ -53,11 +53,10 @@ export function allWorkerUnfixable(violations: ReadonlyArray<RelintViolation>): 
 /**
  * The doctrine block a redraft prompt carries — ONE copy, shared by every lane.
  *
- * Extracted VERBATIM from `inboxDraftRelintPrompt`, which is now composed from it. The two
- * paragraphs below are the only guidance that is genuinely per-CHECK rather than per-lane: what a
- * `[call-site]` violation means and why the open paren matters, and how to resolve a `[sizing]`
- * (Rule 19) violation via the #588 merits test. A second copy of either is the exact duplication
- * this repo has paid for twice.
+ * Extracted VERBATIM from `inboxDraftRelintPrompt`, which is now composed from it. The paragraphs
+ * below are the only guidance that is genuinely per-CHECK rather than per-lane: `[call-site]` and
+ * its open paren, `[proof-grep-already-true]` (W1-T9039), and a `[sizing]` (Rule 19) violation's
+ * #588 merits test. A second copy of any is the exact duplication this repo has paid for twice.
  */
 export function relintGuidanceLines(violations: ReadonlyArray<RelintViolation>): string[] {
   return [
@@ -65,6 +64,8 @@ export function relintGuidanceLines(violations: ReadonlyArray<RelintViolation>):
     ...violations.map((v) => `  - [${v.check}] ${v.message}`),
     "",
     "For a [call-site] violation (impl-DO): the task CREATES a src/ module or ADDS an export to one and no criterion proves anything CALLS it. Eleven modules have merged green and unreached — console-freshness.ts shipped 111 lines with 83 lines of tests that serve.ts never imported, and the bug it fixed is still on screen. Add a criterion whose proof is 'grep: <symbol>( in <the src file that calls it>'. THE OPEN PAREN IS THE WHOLE POINT: 'grep: foo in x.ts' passes on a COMMENT mentioning foo, which is how a proof once exited 0 against entirely unbuilt work; 'grep: foo( in x.ts' can only be satisfied by something shaped like a call. The path must be a DIFFERENT src file from the new module or export — a module calling itself, or a test calling it, proves nothing about whether the program reaches it.",
+    "",
+    "For a [proof-grep-already-true] violation: the grep already matches on the base tree, so it proves nothing the task changes and can never fail at base. Make it grep for text the change ADDS — a new symbol, call or message — or prove the behaviour with a unit test. Declare kind: guard only when keeping existing text unchanged is the point.",
     "",
     "For a [sizing] (Rule 19) violation apply the #588 MERITS TEST: does that task's acceptance assert ONE cross-file invariant that is unsatisfiable piecewise (a single test needing all its files together)? If YES — raise that task to risk:high AND declare band_meaning: span on the line after it (W1-T8714: approve refuses a risk:high task that declares no band), and record the one-line rationale in the task. Declare band_meaning: blast-radius instead only for a change dangerous regardless of span (a boot script, an auth path, a merge arm). If NO — DECOMPOSE it into one task per subsystem with an explicit depends_on spine preserving order, budgets resized per piece, every resulting task keeping the same origin: provenance. Keep every proof executable ('unit test: <path or exact test-title substring>' or 'grep: <pattern> in <path>').",
   ];

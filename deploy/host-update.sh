@@ -288,6 +288,17 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
     echo "host-update: scratch mounts ${SCRATCH_NOTE}"
     [ -n "${SCRATCH_MKDIR_LINE}" ] && printf -v SCRATCH_MKDIR_LINE '  mkdir -p%s   # the scratch binds, owned by you, before docker run\n' "${SCRATCH_MKDIR_LINE}"
   fi
+  # W1-T9071: the same Codex sessions bind the recycle and the rendered rmd-relaunch add, once this
+  # state dir's stopped-window copy made it ready.
+  CODEX_SESSIONS_LINE=""
+  CODEX_SESSIONS_LIB="$(dirname "$0")/codex-sessions-mount.sh"
+  if [ -n "${CODEX_MOUNT_LINE}" ] && [ -r "${CODEX_SESSIONS_LIB}" ]; then
+    . "${CODEX_SESSIONS_LIB}"
+    if codex_sessions_plan "${STATE_DIR}"; then
+      printf -v CODEX_SESSIONS_LINE '    -v %s:%s \\\n' "${CODEX_SESSIONS_SRC}" "${CODEX_SESSIONS_DEST}"
+    fi
+    echo "host-update: codex sessions ${CODEX_SESSIONS_NOTE}"
+  fi
   # ── THE PRINTED PATH IS CHECKED BEFORE IT IS PRINTED ───────────────────────────────────────
   # MEASURED 2026-08-12, and this is the failure being fixed: on the Azure host `${HOME}/rmd-state`
   # holds a ledger that STOPS ON AUG 8 (100,330 bytes) while `${HOME}/rmd-state2` is live
@@ -474,7 +485,7 @@ ${SCRATCH_MKDIR_LINE}
     -e RMD_OPENWEIGHT_API_KEY="\${RMD_OPENWEIGHT_API_KEY:-}" \\
     -e RMD_FOUNDRY_CLAUDE_ENDPOINT="\${RMD_FOUNDRY_CLAUDE_ENDPOINT:-}" \\
     -e RMD_FOUNDRY_CLAUDE_API_KEY="\${RMD_FOUNDRY_CLAUDE_API_KEY:-}" \\
-${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+${CODEX_MOUNT_LINE}${CODEX_SESSIONS_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
 ${DAEMON_SCRATCH_LINES}    ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target

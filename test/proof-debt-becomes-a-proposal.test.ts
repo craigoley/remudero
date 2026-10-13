@@ -78,7 +78,7 @@ const CLEAN_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"

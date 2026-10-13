@@ -36,6 +36,7 @@ function worktree(): string {
   fs.writeFileSync(join(root, "MASTER-PLAN.md"), "# Master plan\n");
   // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
   fs.mkdirSync(join(root, "src", "lib"), { recursive: true });
+  fs.writeFileSync(join(root, "src", "lib", "plan.ts"), ""); // W1-T9039: the module the draft edits exists
   return root;
 }
 
@@ -155,7 +156,7 @@ test("W1-T5541: the writer fills null rationale and preserves surrounding author
 test("W1-T5541: every task in a fragment carries prose and file-only grep proofs still file", () => {
   const root = worktree();
   const source = { ...proposal, originatingItemId: undefined };
-  fs.writeFileSync(join(root, "evidence.txt"), "concrete evidence\n");
+  fs.writeFileSync(join(root, "evidence.txt"), "evidence pending\n"); // W1-T9039: an already-true grep is refused
   const first = parse(fragment)[0];
   first.files = ["evidence.txt"];
   first.acceptance[0].proof = "grep: concrete evidence in evidence.txt";
