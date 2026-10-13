@@ -1,0 +1,22 @@
+- id: W1-T9157
+  title: "GROUND: decompose ratification placeholders for W1-T3187 follow-up (docs scope)"
+  repo: remudero
+  depends_on:
+    - W1-T9156
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/ratification/NEW-PLACEHOLDER-README.md
+  acceptance:
+    - claim: "This W1-T9157 placeholder complements W1-T9156 and reserves space for related docs changes."
+      proof: "grep: W1-T9157 in docs/ratification/NEW-PLACEHOLDER-README.md"
+  origin: "architect"
+  rationale: >-
+    From the 2026-09-27 follow-up on W1-T3187-1790474289117, ratified via rmd approve:
+  
+    follow-up harvest [research]: Locate the current product console’s escalation renderer and
+    disposition state, because the task record’s named renderer is absent from this checkout. —
+    from W1-T3187 (run W1-T3187-1790474289117)
