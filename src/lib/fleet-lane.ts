@@ -12,7 +12,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { AttentionJudgment } from "./inbox-responder.js";
-import { replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
+import { readBandMeaningReplayStore, replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -353,6 +353,23 @@ function* releasedHandoffs(deps: FleetLaneDeps<number | Promise<number>>, store:
   return new Set(failed.filter(([, d]) => d.unrecorded!.count < 2 || (mainSha !== undefined && mainSha !== d.unrecorded!.sha)).map(([id]) => id));
 }
 
+/** W1-T9324: when the band replay last dropped or re-offered each proposal's draft, in ms; empty with no readable store. */
+function replayReofferTimes(stateDir: string): Map<string, number> {
+  const out = new Map<string, number>();
+  let replay;
+  try {
+    replay = readBandMeaningReplayStore(stateDir);
+  } catch {
+    // deliberate: an unreadable replay store releases nothing, so the lane holds exactly as it did before the replay.
+    return out;
+  }
+  for (const [id, entry] of Object.entries(replay?.proposals ?? {})) {
+    const times = [entry.reofferedAt, entry.invalidatedAt].map((t) => (t === undefined ? Number.NaN : Date.parse(t))).filter(Number.isFinite);
+    if (times.length > 0) out.set(id, Math.max(...times));
+  }
+  return out;
+}
+
 function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
   // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace. W1-T9041:
@@ -378,7 +395,15 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
   yield* settleHandoffs(deps, store, readRows, withinDay);
   const released = yield* releasedHandoffs(deps, store);
   const unrecorded = (id: string) => store[id]?.handoff === undefined && store[id]?.unrecorded !== undefined;
-  const decidedIds = new Set(Object.entries(store).filter(([id, d]) => d.decision === "merge" || (withinDay(d.ts) && !released.has(id))).map(([id]) => id));
+  const reoffered = replayReofferTimes(deps.stateDir);
+  // W1-T9324: a `file` decision older than the replay's re-offer judged a draft the replay dropped, so it holds nothing.
+  const staleDecision = (id: string, ts: string) => {
+    const at = reoffered.get(id);
+    return at !== undefined && Date.parse(ts) < at;
+  };
+  const decidedIds = new Set(
+    Object.entries(store).filter(([id, d]) => d.decision === "merge" || (withinDay(d.ts) && !released.has(id) && !staleDecision(id, d.ts))).map(([id]) => id),
+  );
   const open = proposals.filter(
     (p: Proposal) =>
       inboxOwner(p) === "fleet" &&
