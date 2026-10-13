@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import fs, { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { captureHeavyNewBuildStartupGate, HEAVY_READY_STARTUP_FILENAME, readHeav
 import { reserveHeavyNewBuilds, releaseHeavyNewBuilds } from "../src/lib/heavy-build-reservation.js";
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-ready-startup-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rmd-ready-startup-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, HEAVY_READY_STARTUP_FILENAME), ready = join(dir, "ready");
   mkdirSync(ready, { mode: 0o700 });
@@ -100,16 +100,41 @@ test("startup sidecar descriptor-close errors are UNKNOWN, not fatal startup or 
 
 test("startup sidecar default location is captured once and absence writes no files", t => {
   let opened: string | undefined;
-  t.mock.method(fs, "lstatSync", (path: fs.PathLike) => { opened = String(path); throw Object.assign(new Error("absent"), { code: "ENOENT" }); }); syncBuiltinESMExports();
+  t.mock.method(fs, "openSync", (path: fs.PathLike) => { opened = String(path); throw Object.assign(new Error("absent"), { code: "ENOENT" }); }); syncBuiltinESMExports();
   try {
     const gate = captureHeavyNewBuildStartupGate(() => assert.fail("no logging when absent"), {}, { env: {} });
     assert.ok(opened?.endsWith("/" + HEAVY_READY_STARTUP_FILENAME)); assert.equal(gate(), undefined); assert.equal(gate(), undefined);
   } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
 
-test("startup sidecar disappearing after a positive lstat is UNKNOWN and never disabled", t => {
+test("startup sidecar disappearing after descriptor observation is UNKNOWN and never disabled", t => {
   const f = fixture(t); f.publish();
-  t.mock.method(fs, "openSync", () => { throw Object.assign(new Error("disappeared after observation"), { code: "ENOENT" }); }); syncBuiltinESMExports();
+  const read = fs.readSync; let removed = false;
+  t.mock.method(fs, "readSync", (fd: number, buffer: Uint8Array, offset: number, length: number, position: number) => {
+    if (!removed) { removed = true; unlinkSync(f.path); }
+    return read(fd, buffer, offset, length, position);
+  }); syncBuiltinESMExports();
   try { assert.equal(readHeavyReadyStartupFile(f.path).state, "unavailable"); }
   finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("startup sidecar supported reads open before any path stat and retain every descriptor guard", t => {
+  const f = fixture(t); f.publish(); const calls: string[] = [], open = fs.openSync, stat = fs.lstatSync;
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => { calls.push("open"); return open(...args); });
+  t.mock.method(fs, "lstatSync", (...args: Parameters<typeof fs.lstatSync>) => { calls.push("stat"); return stat(...args); }); syncBuiltinESMExports();
+  try { assert.deepEqual(readHeavyReadyStartupFile(f.path), { state: "configured", dir: f.ready }); assert.equal(calls[0], "open", "no pre-open path check/use race"); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test("startup sidecar unsupported hosts disable absence but never open present or unreadable evidence", t => {
+  const absent = fixture(t), present = fixture(t), platform = Object.getOwnPropertyDescriptor(process, "platform");
+  present.publish();
+  assert.ok(platform); Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  t.mock.method(fs, "openSync", () => { throw new Error("unsupported host must never open a checked path"); }); syncBuiltinESMExports();
+  try {
+    assert.deepEqual(readHeavyReadyStartupFile(absent.path), { state: "absent" });
+    assert.deepEqual(readHeavyReadyStartupFile(present.path), { state: "unavailable", reason: "safe startup reads unavailable" });
+    t.mock.method(fs, "lstatSync", () => { throw new Error("metadata unavailable"); }); syncBuiltinESMExports();
+    assert.deepEqual(readHeavyReadyStartupFile(present.path), { state: "unavailable", reason: "metadata unavailable" });
+  } finally { Object.defineProperty(process, "platform", platform); t.mock.restoreAll(); syncBuiltinESMExports(); }
 });
