@@ -32,6 +32,58 @@ function world(t: {after(fn: () => void): void}, rows: BoardPrRest[] = [pr(1)], 
   return { root, state, cache };
 }
 
+test("repository flow consumes canonical caller-owned fix receipts without invented aliases", async t => {
+  const { fixWorkerReceipt } = await import("../src/run-task.js");
+  const emitted = (url: string, round: string) => fixWorkerReceipt(
+    async () => { throw new Error("this correlation test must never spawn a paid worker"); },
+    () => { throw new Error("joining caller metadata must not write a live ledger"); },
+    `fixture-worker-${round}`, {}, { prUrl: url, roundId: round },
+  ).joinFields();
+  const first = { ts: iso(now - 1000), step: "fix.dispatch", head_sha: "b".repeat(40), ...emitted(pr(1).url, "one") };
+  const second = { ...first, ...emitted(pr(1).url, "two"), head_sha: "c".repeat(64) };
+  assert.equal(first.repair_pr_url, pr(1).url);
+  assert.equal(first.repair_round_id, "one");
+  assert.equal(Object.hasOwn(first, "pr_number"), false);
+  assert.equal(Object.hasOwn(first, "round_id"), false);
+  const { root, state } = world(t, [pr(1)], [first, second]);
+  // Raw replay across each canonical retained form must not inflate either identity.
+  writeFileSync(join(state, "ledger.replay.ndjson"), JSON.stringify(first) + "\n");
+  writeFileSync(join(state, "ledger.replay.ndjson.gz"), gzipSync(JSON.stringify(second) + "\n"));
+  const { captureRepositoryFlow } = await load();
+  const result = await captureRepositoryFlow(root, state, repository, fixedClock(now));
+  assert.equal(result!.sources.observedRepairIdentities, 2);
+  assert.equal(result!.windows[0]!.summary.repairedPrs, 1);
+  assert.equal(result!.windows[0]!.summary.repairRounds, 2);
+  assert.equal(result!.windows[0]!.summary.repairReasons.unknown, 2);
+  assert.equal(result!.windows[0]!.buckets.at(-1)!.repairRounds, 2);
+  assert.equal(result!.notCollected.repairLatency, "required-current-head recovery evidence not collected");
+});
+
+test("repository flow refuses conflicting canonical aliases incomplete receipts and invalid head lengths", async t => {
+  const { repairReceiptFields } = await import("../src/lib/repair-cost-evidence.js");
+  const canonical = (url = pr(1).url, round = "one") => ({ ts: iso(now - 1000), step: "fix.dispatch",
+    head_sha: "b".repeat(40), ...repairReceiptFields({ prUrl: url, roundId: round }) });
+  const rows = [canonical(),
+    { ...canonical(), pr_url: pr(1).url, pr_number: 1, round_id: "one" },
+    canonical("https://github.com/other/repo/pull/1"),
+    { ...canonical(), pr_url: "https://github.com/other/repo/pull/1" },
+    { ...canonical(), pr_number: 99 },
+    { ...canonical(), round_id: "different" },
+    { ...canonical(), repository: "other/repo" },
+    { ...canonical(), repo: "other/repo" },
+    { ...canonical(), repair_round_id: undefined, round_id: "legacy", pr_url: pr(1).url, pr_number: 1 },
+    { ...canonical(), repair_pr_url: undefined, round_id: "legacy", pr_url: pr(1).url, pr_number: 1 },
+    { ...canonical(), repair_round_id: "x".repeat(161) },
+    { ...canonical(), head_sha: "b".repeat(41) },
+    { ...canonical(), head_sha: "b".repeat(63) }];
+  const { root, state } = world(t, [pr(1)], rows);
+  const result = await (await load()).captureRepositoryFlow(root, state, repository, fixedClock(now));
+  assert.equal(result!.sources.observedRepairIdentities, 1, "only the real identity and its agreeing alias survive");
+  assert.equal(result!.windows[0]!.summary.repairedPrs, 1);
+  assert.equal(result!.windows[0]!.summary.repairRounds, 1);
+  assert.ok(result!.gaps.includes("repair rows without exact repository PR head and round were excluded"));
+});
+
 test("W1-T8684: repository throughput preserves PR event clocks and unique delivery credit", async t => {
   const { captureRepositoryFlow } = await load();
   const rows = [pr(1), pr(2), pr(3, { headRefName: "codex/plan", body: "names W1-T42 only" }),
