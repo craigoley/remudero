@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/daemon.ts
     - test/a-live-handoff-receipt-keeps-its-run-branch.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator console graph approval 2026-10-12; automated flow and self improvement"
   plan_refs: [W1-T5904, W1-T7421, W1-T8533, W1-T8667]
   files: [src/lib/repository-flow.ts, src/lib/open-prs-rest.ts, src/lib/board-snapshot-cache.ts, src/lib/analytics-view.ts, src/lib/read-model-worker.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/repository-flow.test.ts, test/repository-flow-cached-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The operator approved per-repository throughput, PR repair load, first-pass success,

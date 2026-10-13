@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/lib/base-reproduction.ts
     - test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

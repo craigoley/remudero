@@ -146,6 +146,8 @@ export interface DecisionSummary {
   decision: string;
   /** 2-3 labelled choices, each with a one-line consequence. */
   options: DecisionSummaryOption[];
+  /** Optional (W1-T8829): what happens if nobody decides; escalation and triage omit it. */
+  if_nothing_happens?: string;
 }
 
 const DECISION_SUMMARY_MAX_HEADLINE_WORDS = 15;
@@ -182,7 +184,11 @@ export function validateDecisionSummary(x: unknown): DecisionSummary | null {
     label: opt.label.trim(),
     consequence: opt.consequence.trim(),
   }));
-  return { headline, what_happened: (o.what_happened as string).trim(), decision, options };
+  const card: DecisionSummary = { headline, what_happened: (o.what_happened as string).trim(), decision, options };
+  if (isBoundedString(o.if_nothing_happens, 300) && !(o.if_nothing_happens as string).includes("\n")) {
+    card.if_nothing_happens = (o.if_nothing_happens as string).trim();
+  }
+  return card;
 }
 
 /** What a decision-summary rung reads to write its plain-language card — free-text context
@@ -229,6 +235,7 @@ export function buildDecisionSummaryPrompt(input: SummarizeInput): string {
     '{"headline": string (<=15 words), "what_happened": string (1-2 sentences),',
     ' "decision": string (an IMPERATIVE instruction, never a question),',
     ' "options": [{"label": string, "consequence": string (one line)}, ...] (2-3 entries)}',
+    'When the item below asks for it, add one more key, "if_nothing_happens": string (one line).',
     "",
     "ITEM:",
     input.context,

@@ -82,6 +82,18 @@ export interface PlainCheckResult {
   problems: string[];
 }
 
+/** W1-T8829 — a consequence line that is about reading the summary, or says only that no decision is
+ *  made, tells the operator nothing about waiting. */
+const NON_ANSWER_PATTERNS: readonly RegExp[] = [
+  /\b(?:view|viewing|viewed|read|reading|opening)\b[^.]*\bsummary\b/i,
+  /\bno (?:decision|change|action)s?\b[^.]*\b(?:is|are) (?:made|recorded|taken)\b/i,
+];
+
+export function isNonAnswer(line: unknown): boolean {
+  if (typeof line !== "string") return false;
+  return NON_ANSWER_PATTERNS.some((re) => re.test(line));
+}
+
 export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
   const problems: string[] = [];
   const parts = checkOperatorMessage({
@@ -91,6 +103,9 @@ export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
     consequenceOfInaction: m.ifNothingHappens,
   });
   for (const part of parts.missing) problems.push(`missing ${part}`);
+  if (isNonAnswer(m.ifNothingHappens)) {
+    problems.push("the if-nothing-happens line says nothing about what happens if nobody decides; state the real consequence of waiting");
+  }
   const card = validateDecisionSummary({
     headline: m.headline,
     what_happened: m.whatHappened,
@@ -135,13 +150,13 @@ const TEMPLATES: Record<string, Template> = {
     headline: "The record requests a manual check",
     whatHappened: `The record asks for a manual check and reports a wait of ${daysWaiting(summary)}. This summary does not verify the task's current status.`,
     whatWeNeed: "Review the original question and current evidence before deciding.",
-    ifNothingHappens: "No decision is made here. Check the current task for any blocked work.",
+    ifNothingHappens: "The task stays blocked until someone checks it.",
   }),
   ruling: () => ({
     headline: "The record requests an operator ruling",
     whatHappened: "The record requests an operator ruling; this summary does not verify the question or its current status.",
     whatWeNeed: "Read the recorded question and confirm its scope before deciding.",
-    ifNothingHappens: "No decision is recorded by viewing this summary.",
+    ifNothingHappens: "The question stays open and the work waiting on the ruling stays parked.",
   }),
   adoption: fleetFinding(
     "A feature was added to the code some time ago, but nothing uses it yet.",
@@ -181,7 +196,7 @@ const UNKNOWN_TEMPLATE: Template = () => ({
   headline: "Review the original record",
   whatHappened: "A record is available, but this summary does not verify its current facts or requested action.",
   whatWeNeed: "Read the original details before making a decision.",
-  ifNothingHappens: "No decision or change is made by viewing this summary.",
+  ifNothingHappens: "The item stays parked and the work behind it waits.",
 });
 
 /** The kinds that have a written template (every kind seen live on 2026-09-22). */
@@ -199,6 +214,9 @@ function writerContext(proposal: { id: string; summary: string }, retryProblems:
     "Write for a busy person who does not read code. Use short, everyday words and active voice.",
     "Do NOT include code, file names, file paths, task ids, PR numbers, commands, or internal names.",
     "Say what happened and what the person should decide; the raw details are shown separately.",
+    'Also include the key "if_nothing_happens": one plain line saying what concretely happens if the person does nothing',
+    '(for example "the fix stays parked and the cost it targets continues", or "the task stays blocked").',
+    "Do not write that nothing is decided by reading the summary; say what waiting costs or leaves undone.",
     ...(retryProblems.length > 0 ? [`Your last answer was refused for: ${retryProblems.join("; ")}. Rewrite it without those.`] : []),
     "",
     `Item: ${proposal.summary}`,
@@ -222,8 +240,8 @@ async function askWriter(
     headline: card.headline,
     whatHappened: card.what_happened,
     whatWeNeed: card.decision,
-    // The decision card has no "if nothing happens" part; the kind's template states it.
-    ifNothingHappens: plainTemplate(proposal).ifNothingHappens,
+    // The writer states it (W1-T8829); a card without the line takes the kind's template.
+    ifNothingHappens: card.if_nothing_happens ?? plainTemplate(proposal).ifNothingHappens,
     options: card.options,
     source: "writer",
   };
@@ -250,7 +268,7 @@ export async function writePlainMessage(
 export type PlainStore = Record<string, PlainInboxMessage>;
 
 export function plainSourceFingerprint(proposal: { id: string; summary: string }): string {
-  return createHash("sha256").update(JSON.stringify(["inbox-plain-v2", proposal.id, proposal.summary])).digest("hex");
+  return createHash("sha256").update(JSON.stringify(["inbox-plain-v3", proposal.id, proposal.summary])).digest("hex");
 }
 
 export function plainStorePath(stateDir: string): string {

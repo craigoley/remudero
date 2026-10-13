@@ -64,6 +64,7 @@ import {
   notifyRecipient,
   providerRoutingOwnsHeadroom,
   resolveHeadroomEnabled,
+  resolveHeavyReadyDirectory,
   softBudgetThreshold,
   synthesisEffort,
   synthesisModel,
@@ -223,7 +224,7 @@ import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } fr
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
-import { checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
+import { checkpointCommitSubject, checkpointRemaining, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, renderPreopenGatePrompt, runPreopenGate, type PreopenGateResult } from "./lib/preopen-gate.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -3532,7 +3533,7 @@ export function watchDispatchSpawn(
         // The W1-T7697 checkpoint path (yieldAtWorkerBoundary): retain the disk work, push it, then release the lane.
         if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(cwd)) {
           const checkpoint = (seams.commit ?? commitWorkerEdits)(cwd, task.files ?? [],
-            `wip: yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
+            `${checkpointCommitSubject(`yield at ${trigger === "recycle" ? "container recycle" : trigger === "restart" ? "daemon restart" : "quiet worker"}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume\nfailed: none\n\nRemudero-Task: ${taskId}`,
             {}, task.acceptance, { checkpoint: true });
           // W1-T8008: a checkpoint keeps undeclared work too; only what git forces (markers, unresolved paths) refuses.
           if (!checkpoint.committed) {
@@ -3578,7 +3579,7 @@ export async function commitAndPushRestartCheckpoint(
   let undeclared: readonly string[] = [];
   if ((seams.hasUncommittedChanges ?? worktreeHasUncommittedChanges)(worktreePath)) {
     const checkpoint = commitWorkerEdits(worktreePath, task.files ?? [],
-      `wip: yield at ${waitingOn}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
+      `${checkpointCommitSubject(`yield at ${waitingOn}`)}\n\n[remudero-context]\ndecided: retain work for restart\nremaining: resume ${waitingOn}\nfailed: none\n\nRemudero-Task: ${taskId}`,
       {}, task.acceptance, { checkpoint: true });
     if (!checkpoint.committed) throw new Error(`restart checkpoint refused: ${checkpoint.reason ?? checkpoint.undeclared.join(", ")}`);
     undeclared = checkpoint.undeclared;
@@ -5285,7 +5286,7 @@ export async function restoreBoundaryCheckpoint(
       ...(probe.verdict === "unreadable" ? { reason: probe.reason } : {}), ...absence };
   }
   const merged = (await git(["commit-tree", probe.tree, "-p", checkpoint.headSha, "-p", mainSha, "-m",
-    `chore(wip): merge main into the restored checkpoint\n\nRemudero-Task: ${taskId}`])).trim();
+    `${checkpointCommitSubject("merge main into the restored checkpoint")}\n\nRemudero-Task: ${taskId}`])).trim();
   await git(["reset", "--hard", "--quiet", merged]);
   return { base: "main", headSha: merged, ...absence };
 }
@@ -13292,8 +13293,9 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
-    const censusSnapshotPath = fixHarnessOwnsGit ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
-    if (fixHarnessOwnsGit && !deps.writeFixCensusSnapshot) {
+    const fixCensusApplies = fixCensusAppliesToRepo(opts.reviewBase.repo, deps.log);
+    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
@@ -18329,6 +18331,30 @@ const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
 
+/** W1-T8918: core's census suites (census-precheck and the reach ratchet) measure core's own registry and shrink-only
+ *  baselines, so they run only for the harness's own repository. Decided by repository IDENTITY — the task's repo
+ *  against the repo the harness serves — never by whether a baseline file exists: a core branch that deletes
+ *  scripts/affected-reach-baseline.json must still be refused. A repo that is not core's is ledgered
+ *  `fix.census_check` "not-applicable" so the skip is visible. An unnamed repo or an unresolvable core identity
+ *  keeps the check (fail closed), and says why. */
+export function fixCensusAppliesToRepo(
+  repo: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  resolveSelf: () => { owner: string; repo: string } = resolveOwnerRepo,
+): boolean {
+  if (repo === undefined) return true;
+  let coreRepo: string;
+  try {
+    coreRepo = resolveSelf().repo;
+  } catch (error) {
+    log("fix.census_check", { outcome: "core-identity-unresolved", repo, reason: String(error) });
+    return true;
+  }
+  if (repo === coreRepo) return true;
+  log("fix.census_check", { outcome: "not-applicable", repo, core_repo: coreRepo });
+  return false;
+}
+
 export function writeFixCensusSnapshot(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -18786,7 +18812,7 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits ? writeFixCensusSnapshot(cwd, log) : undefined;
+    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? writeFixCensusSnapshot(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,
@@ -35752,6 +35778,7 @@ function queueGovernorGateFor(
   runId: string,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   now: () => number = Date.now,
+  readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
   const gate = (): QueueGovernorResult | undefined => {
@@ -35765,7 +35792,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount, readHeadroom: () => readMemoryHeadroomFraction(),
     });
     const result = checkQueueGovernor(owned, policy, {
-      pressure: productionFixPressure(policy.memoryFloorMib, ledgerPath),
+      pressure: readQueuePressure(policy.memoryFloorMib, ledgerPath),
       foreignOpenCount: foreign,
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
@@ -36405,6 +36432,7 @@ async function drainCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate. Production omits it
      *  and reads the real `/proc/meminfo` ({@link readAvailableMemoryMib}). */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -36608,7 +36636,7 @@ async function drainCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -36813,7 +36841,7 @@ async function drainCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync, productionProgressJudge: true }),
@@ -39161,6 +39189,7 @@ export async function daemonCommand(
     /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
      *  identical seam. Production omits it and reads the real `/proc/meminfo`. */
     readAvailableMemoryMib?: () => number;
+    readQueuePressure?: typeof productionFixPressure;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
      *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
      *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
@@ -39509,7 +39538,7 @@ export async function daemonCommand(
     return projected;
   });
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now);
+  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -40104,7 +40133,7 @@ export async function daemonCommand(
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
-        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: process.env.RMD_HEAVY_READY_DIR }),
+        checkHeavyNewBuild: deps.checkHeavyNewBuild ?? heavyNewBuildGate(log, { dir: resolveHeavyReadyDirectory(config) }),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
         // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an

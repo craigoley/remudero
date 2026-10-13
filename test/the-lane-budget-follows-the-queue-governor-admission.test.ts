@@ -143,6 +143,7 @@ test("the daemon wiring exposes the queue governor's admitting reading", async (
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       githubFactory: () => board,
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();

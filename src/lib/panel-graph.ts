@@ -105,7 +105,9 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
-import { inboxOwner } from "./inbox-owner.js";
+import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { writeAtomic } from "./fs-race-safe.js";
+import { judgementFamily } from "./machine-filing-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage, type PlainStore } from "./inbox-plain.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
@@ -122,7 +124,7 @@ import {
   createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
   type ThreadListClassification, type ThreadListRefreshSettled, type ThreadListSources,
 } from "./inbox-thread-list-view.js";
-import { appendThreadMessage, appendThreadReplyOnce, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
+import { appendThreadMessage, appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
 import {
   beginFragmentPass,
   cachedAnchorGrep,
@@ -1739,7 +1741,7 @@ export interface InboxDraftedTask {
 
 /** One READY-to-ratify proposal, as the panel renders it — the drafted task ids/titles ride
  *  along (never just the proposal id), so the operator sees exactly what APPROVE would file. */
-export interface InboxReadyItem {
+export interface InboxReadyItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -1751,7 +1753,7 @@ export interface InboxReadyItem {
 /** One proposal currently mid-draft (W1-T193): an Architect worker is running for it right now.
  *  `spawnedAt` lets a card render something during this legitimately multi-minute window,
  *  rather than looking broken (the liveness bar W1-T156 set). */
-export interface InboxDraftingItem {
+export interface InboxDraftingItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -1767,7 +1769,7 @@ export interface InboxDraftingItem {
  * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
  * and must never read as work in progress. Nothing here is actionable except restore.
  */
-export interface InboxDeclinedItem {
+export interface InboxDeclinedItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -1780,7 +1782,7 @@ export interface InboxDeclinedItem {
  *  PredicateFailure}[] `classifyProposal` computed, never a bare string, so an operator sees why
  *  without attempting an approve. A separate array from `ready`/`drafting`: presence here implies
  *  no affordance, so it never reintroduces the approval fatigue the ready-only list cured. */
-export interface InboxNotReadyItem {
+export interface InboxNotReadyItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -1792,7 +1794,7 @@ export interface InboxNotReadyItem {
 }
 
 /** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
-export interface InboxFleetItem {
+export interface InboxFleetItem extends InboxSender {
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -2140,24 +2142,105 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
+/** W1-T8825: what the sender stamp of one item is built from, all of it STORED (never a clock read). */
+export interface InboxProvenance {
+  /** A machine-judge item's filer family (the record's judgementFamily); absent for every other item. */
+  family?: string;
+  receivedAt: string | null;
+  /** The latest reframe / decline / restore row or thread message; absent when the item has none. */
+  lastActivityAt?: string;
+}
+
 export interface InboxStores {
   fleetDecisions: DecisionStore;
   plainMessages: PlainStore;
+  /** Per proposal id; absent from a store carried by a file written before senders were served. */
+  provenance?: Record<string, InboxProvenance>;
 }
 
-export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>): InboxStores {
+/** W1-T8825: the first time the inbox classified each proposal id, kept where ledger rotation cannot shed it. */
+export function inboxFirstSeenPath(stateDir: string): string {
+  return join(stateDir, "inbox-first-seen.json");
+}
+
+function readFirstSeen(stateDir: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(readFileSync(inboxFirstSeenPath(stateDir), "utf8")) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, at]) => typeof at === "string" && Number.isFinite(Date.parse(at)))) as Record<string, string>;
+  } catch {
+    // deliberate: no file, or a torn one, is "nothing recorded yet" - the next slow-lane pass records afresh.
+    return {};
+  }
+}
+
+/**
+ * Record nowIso as the first-seen instant of every id the store does not hold yet. Written by the slow lane
+ * only, never rewritten for an id it holds, and never pruned: an id that leaves and returns keeps its first time.
+ * Returns how many ids were added.
+ */
+export function recordInboxFirstSeen(stateDir: string, ids: Iterable<string>, nowIso: string): number {
+  const held = readFirstSeen(stateDir);
+  const added = [...new Set(ids)].filter((id) => held[id] === undefined);
+  if (added.length === 0) return 0;
+  for (const id of added) held[id] = nowIso;
+  writeAtomic(inboxFirstSeenPath(stateDir), JSON.stringify(held) + "\n");
+  return added.length;
+}
+
+const ACTIVITY_STEPS: ReadonlySet<string> = new Set(["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored"]);
+
+/** What the sender stamps are built from: the plan for a ruling, the ledger for verdict rows. */
+export interface InboxProvenanceEvidence {
+  plan?: Pick<Plan, "byId">;
+  ledgerLines?: ReadonlyArray<Record<string, unknown>>;
+}
+
+function inboxProvenance(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>, evidence: InboxProvenanceEvidence): Record<string, InboxProvenance> {
+  const stateDir = join(inboxRoot, "state");
+  const firstSeen = readFirstSeen(stateDir);
+  const threads = readAllThreads({ threadStorePath: inboxThreadStorePath(inboxRoot) });
+  const rowAt = new Map<string, string[]>();
+  for (const row of evidence.ledgerLines ?? []) {
+    if (typeof row.step !== "string" || !ACTIVITY_STEPS.has(row.step) || typeof row.task_id !== "string" || typeof row.ts !== "string") continue;
+    rowAt.set(row.task_id, [...(rowAt.get(row.task_id) ?? []), row.ts]);
+  }
+  const out: Record<string, InboxProvenance> = {};
+  for (const { id } of proposals) {
+    const judged = /^machine-judge:(.+)$/.exec(id);
+    const task = judged ? evidence.plan?.byId.get(judged[1]!) : undefined;
+    const messages = threads.status === "ok" ? (threads.threads.get(inboxThreadId(id)) ?? []) : [];
+    const lastActivityAt = latestInstant([
+      ...(rowAt.get(id) ?? []),
+      ...messages.map((m) => (Number.isFinite(m.ts) ? fixedClock(m.ts).iso() : null)),
+    ]);
+    out[id] = {
+      ...(task ? { family: judgementFamily(task) } : {}),
+      receivedAt: task?.risk_ruling?.judged_at ?? firstSeen[id] ?? null,
+      ...(lastActivityAt === null ? {} : { lastActivityAt }),
+    };
+  }
+  return out;
+}
+
+export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>, evidence: InboxProvenanceEvidence = {}): InboxStores {
   const stateDir = join(inboxRoot, "state");
   const ids = new Set(proposals.map((p) => p.id));
   const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
-  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))) };
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence) };
 }
 
 /** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
-export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { stores?: InboxStores }, inboxRoot: string) {
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { plan?: Pick<Plan, "byId">; stores?: InboxStores }, inboxRoot: string) {
   const { proposals, classifications, ledgerLines } = classified;
-  const stores = classified.stores ?? readInboxStores(inboxRoot, proposals);
+  const stores = classified.stores ?? readInboxStores(inboxRoot, proposals, { plan: classified.plan, ledgerLines });
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
   const plainStore = stores.plainMessages;
+  // W1-T8825: who sent each item and when, from stored instants only.
+  const senderOf = (id: string): InboxSender => {
+    const known = stores.provenance?.[id];
+    return inboxSender(id, { family: known?.family, receivedAt: known?.receivedAt ?? null, activity: [known?.lastActivityAt] });
+  };
 
   const ready: InboxReadyItem[] = [];
   const drafting: InboxDraftingItem[] = [];
@@ -2169,6 +2252,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
     if (classification.state === "ready") {
       ready.push({
+        ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: plainInboxMessage(proposal, plainStore),
@@ -2176,9 +2260,10 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
     } else if (classification.state === "drafting") {
-      drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
+      drafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
     } else if (classification.state === "declined") {
       declined.push({
+        ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: plainInboxMessage(proposal, plainStore),
@@ -2188,7 +2273,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       notReady.push({
-        proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
+        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
         state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
         resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
       });
@@ -2211,10 +2296,10 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     declined: operatorItems(declined),
   };
   const fleet: InboxFleetItem[] = [
-    ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
-    ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
-    ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
-    ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
+    ...ready.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
+    ...drafting.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
+    ...notReady.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
+    ...declined.map((i) => ({ from: i.from, receivedAt: i.receivedAt, lastActivityAt: i.lastActivityAt, groupKey: i.groupKey, proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
   ]
     .filter((i) => !isOperator(i))
     // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
