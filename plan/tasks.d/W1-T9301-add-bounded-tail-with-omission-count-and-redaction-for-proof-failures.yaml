@@ -9,7 +9,7 @@
   band_meaning: span
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=ec4dff9779044651
+  # backlog gardener: band=2 evidence=0d9f3aa9ba1062a9
   attempts: 0
   files:
     - src/lib/proofExecutor.ts
