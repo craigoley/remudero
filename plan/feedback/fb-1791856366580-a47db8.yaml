@@ -1,0 +1,60 @@
+id: fb-1791856366580-a47db8
+ts: 2026-10-13T01:52:46.585Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+  OPERATOR RULED 2026-10-13: "Layer per-repo skills". A consumer repo's own
+  .claude/skills are injected on top of core's for its tasks, so skills follow
+  the target repo the way learnings already do.
+
+
+  WHAT NANOCLAW DOES (OBSERVED): each agent group selects its own skills,
+  layered over the shared set (container.json skills;
+  src/container-runner.ts:1416-1455).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - src/run-task.ts:19939 loads injectable skills from join(repoRoot, ".claude",
+  "skills"), the ENGINE checkout.
+
+  - src/run-task.ts:19840 loads learnings from projectLearningsHome(repoDir),
+  commented "W1-T2506: follows the TARGET repo".
+
+  - So a remudero-site or remudero-console task gets core's skills and never its
+  own repo's.
+
+
+  ASK:
+
+  - For a task whose target repo differs from the engine checkout, inject the
+  target repo's applies-to skills in addition to the engine's. Use the same
+  applies-to and when-paths selection, and the same
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS budget.
+
+  - On a name collision the target repo's skill wins, and the skills.selection
+  row says so.
+
+  - skills.selection and skills.injected rows name each skill's source repo.
+
+  - Core tasks are unchanged (repoRoot equals repoDir).
+
+
+  FALSIFIER: a fixture target repo carries one applies-to: implement skill.
+  Revert to the repoRoot-only read and that skill is absent from the rendered
+  prompt.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/per-repo-skills
+thread_id: null
