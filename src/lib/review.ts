@@ -4801,7 +4801,7 @@ export async function observePromisedFollowUps(args: {
     if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
     const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
     const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
-    const promised = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
+    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
     if (taskPath !== undefined) {
       const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
       promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
