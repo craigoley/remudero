@@ -9,6 +9,7 @@ import type { Escalation } from "./escalate.js";
 import { slug } from "./feedback-docket.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghExec } from "./github-transport.js";
+import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlanFromYaml } from "./plan.js";
@@ -76,7 +77,7 @@ export interface LadderKind {
 }
 
 export const FLOW_LADDER: LadderKind = {
-  name: "flow-remedy", prefix: "flow-blocker", receiptStep: "flow.scorecard", escalatedStep: "flow.remedy_escalated", stem: "flow",
+  name: "flow-remedy", prefix: "flow-blocker", receiptStep: "flow-remedy.scorecard", escalatedStep: "flow.remedy_escalated", stem: "flow",
   title: a => `THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — ${a.price.key} cost ${a.price.hours.toFixed(2)} PR-hours`,
   commitTitle: cause => `chore(plan): draft a flow remedy for ${cause}`,
   claim: cause => `${cause} is cleared by its owner without manual intervention`,
@@ -171,12 +172,15 @@ const parseOrigin = (kind: LadderKind, origin: string) =>
 export const reasonClass = (reason: string) => reason.split(" — ")[0]!
   .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
   .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
-export const isFleet = (actor: string | undefined) => actor === "remudero-fleet[bot]" || actor === "app/remudero-fleet";
+/** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
+ *  `readOutcomes` asks GraphQL, so the bare login is the one a fleet merge actually carries (sweep's isFleetAppAuthor). */
+export const isFleet = (actor: string | undefined) =>
+  actor === "remudero-fleet[bot]" || actor === "app/remudero-fleet" || actor === "remudero-fleet";
 
 /** The ledger union the ladder reads: `steps` plus the kind's own receipt and escalation rows. */
 export function readLadderRecords(stateDir: string, kind: LadderKind, steps: readonly string[] = ["sweep.disposed"]): LedgerRecord[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
-    step: [...new Set([...steps, kind.receiptStep, kind.escalatedStep])], requireArchives: true, refuseIncomplete: true,
+    step: [...new Set([...steps, kind.receiptStep, kind.escalatedStep, PR_TERMINAL_STEP])], requireArchives: true, refuseIncomplete: true,
   });
   if (!read.ok) throw new Error(`${kind.stem} ledger union unreadable: ${read.unread.join(", ") || "missing or incomplete rotations"}`);
   return read.rows as LedgerRecord[];
@@ -348,7 +352,10 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   const candidates = priceEpisodes(episodes.filter(e => e.eligible), now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
   const ladder: Inventory["ladder"] = [];
   let next: FlowAction | undefined;
-  const receipts = new Set(records.filter(r => r.step === kind.receiptStep && typeof r.pr_url === "string" && /\/pull\/\d+$/.test(r.pr_url))
+  // A filing PR the sweep recorded closed unmerged (`pr.terminal`, W1-T5318) holds nothing: its cause drafts again.
+  const closedUnmerged = new Set(records.filter(r => r.step === PR_TERMINAL_STEP && r.state !== "merged").map(r => Number(r.pr_number)));
+  const receipts = new Set(records.filter(r => r.step === kind.receiptStep && typeof r.pr_url === "string" && /\/pull\/\d+$/.test(r.pr_url)
+      && !closedUnmerged.has(Number(/(\d+)$/.exec(r.pr_url)![1])))
     .map(r => (r.next as { origin?: string } | undefined)?.origin).filter((s): s is string => typeof s === "string"));
   const escalated = new Set(records.filter(r => r.step === kind.escalatedStep && typeof r.issue_url === "string").map(r => r.origin));
   for (const price of candidates.slice(0, 8)) {
