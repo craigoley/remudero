@@ -207,14 +207,15 @@ test("W1-T9153: two concurrent approves on one path and neither loses its cwd", 
   const { fx, branch, path, run } = resumableApprove("t9153-two", "P-T9153-TWO");
   const script = join(fx.scratch, "holder.mjs");
   writeFileSync(script, HOLDER_SCRIPT);
-  const env = { ...process.env };
-  // A child's coverage profile of the tmp script outlives the dir and empties the suite's lcov.
-  for (const key of ["NODE_TEST_CONTEXT", "NODE_OPTIONS", "NODE_V8_COVERAGE"]) delete env[key];
+  // A child's coverage profile of the tmp script outlives the dir and empties the suite's lcov. Node copies
+  // NODE_V8_COVERAGE back into any env object a spawn is handed, so it is unset by `env -u`, which execs node in place:
+  // the holder's pid is the spawned pid.
   const holderRunId = "APPROVE-P-T9153-TWO-1791000000001";
   const holder = spawn(
-    process.execPath,
-    ["--import", import.meta.resolve("tsx"), script, fx.repoDir, path, branch, holderRunId, new URL("../src/run-task.ts", import.meta.url).href],
-    { env, stdio: ["pipe", "pipe", "pipe"] },
+    "env",
+    ["-u", "NODE_TEST_CONTEXT", "-u", "NODE_OPTIONS", "-u", "NODE_V8_COVERAGE", process.execPath, "--import", import.meta.resolve("tsx"),
+      script, fx.repoDir, path, branch, holderRunId, new URL("../src/run-task.ts", import.meta.url).href],
+    { stdio: ["pipe", "pipe", "pipe"] },
   );
   let stderr = "";
   holder.stderr.on("data", (chunk) => void (stderr += String(chunk)));
