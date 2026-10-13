@@ -165,7 +165,7 @@ test("W1-T8514: a priority reservation releases on the measured backfill bound",
     { ids: ["C", "W"], released: ["holder_outran_history"] });
 });
 
-test("W1-T8514: a priority deferral logs dispatch\.deferred_for_priority with the waiting task and paths", { timeout: 5_000 }, async () => {
+test("W1-T8514: a priority deferral logs dispatch.deferred_for_priority with the waiting task and paths", { timeout: 5_000 }, async () => {
   const W = task("W", ["src/x.ts", "src/y.ts"], 1, ["B"]);
   const C = task("C", ["src/y.ts"], 2, ["B"]);
   const h = refillHarness([W, C], longRunHistory);
