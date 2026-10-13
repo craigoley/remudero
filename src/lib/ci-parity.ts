@@ -2837,6 +2837,23 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "composition, which the entry above records as a decision a build pass must not make unilaterally. If an operator " +
       "judges (a) satisfied, this row becomes an ADMITTED entry with `script: \"census:env-var-registry\"` and that measured ms.",
   ),
+  // W1-T7853: both rows are here because `censusPopulationDrift` refuses an undisclosed census-shaped file. One
+  // refusal row each, no behaviour.
+  refusedForPredicate(
+    "test/ci-filed-fold-debt-reaches-the-daemon.test.ts",
+    "a",
+    "W1-T7853's own suite. Its `git ls-files --others` is the ci.yml collect step's body, which it executes inside " +
+      "throwaway fixture repositories, and its readdirSync lists those fixtures' plan/feedback and a runner temp dir. " +
+      "It walks no tracked src/, test/ or scripts/ population and asserts no per-file property; the `src/` strings are " +
+      "its own import paths.",
+  ),
+  refusedForPredicate(
+    "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts",
+    "a",
+    "W1-T5522's light-gates fixture. The `ls-files` the recognizer sees is the pinned argv of the fold-debt collect " +
+      "step (W1-T7853), which it runs against stub tools in a temp dir; it walks no tracked population and asserts no " +
+      "per-file property. The `src/` strings are its own import paths.",
+  ),
 ];
 
 export const RULE_SUITE_NAME_RE = /(?:census|ratchet|baseline)/i;

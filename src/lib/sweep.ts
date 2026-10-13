@@ -280,6 +280,7 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
+import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -1473,6 +1474,8 @@ export interface BuildSweepEffectsDeps {
   productionProgressJudge?: boolean;
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
+  /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -1835,6 +1838,7 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -1895,6 +1899,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reconcileMainRunGaps",
   "readFleetState",
   "pullMutationVerdicts",
+  "pullFoldDebt",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -2039,6 +2044,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
+  | "pullFoldDebt"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -4496,6 +4502,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return rows;
       } catch (e) {
         log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+    },
+
+    // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
+    pullFoldDebt: async (ingested) => {
+      try {
+        const input = {
+          owner,
+          repo,
+          ingested,
+          settled: settledFoldDebtArtifacts,
+          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          root: repoRoot,
+          log,
+          land: deps.landFeedbackImpl,
+        };
+        return landFoldDebt(pullFoldDebtEntries(input), input);
+      } catch (e) {
+        log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
     },
@@ -12318,6 +12345,8 @@ export interface SweepDeps {
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
+  pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -15256,6 +15285,16 @@ export async function runSweep(
       if (pulled.length > 0) log("sweep.mutation_verdict_pull.ingested", { rows: pulled.length });
     } catch (e) {
       log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+    try {
+      for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
+      }
+    } catch (e) {
+      log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
 
