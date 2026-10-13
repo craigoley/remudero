@@ -3146,10 +3146,7 @@ export async function runDaemon(
   // last known count rather than guessing. One `lane.idle_summary` row per window.
   // W1-T8235: `busyLanes` is the lanes IN FLIGHT, not the tick's admitted count, and the sample is taken at every lane
   // change too (a lane frees, a refill starts, a refill is held or parked), not once per dispatching tick.
-  // `closeWindow: false` (a lane-change sample, taken inside the pool's refill decision) accounts and reports the change
-  // but leaves the hourly summary to the tick-level sample: a refusing sink there is contained as a phase fault, whereas
-  // inside a lane decision it would be a pool fault, and a failed emit (the account is rolled after it) would repeat.
-  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number, closeWindow = true): void => {
+  const sampleIdleLane = (busyLanes: number, selectionRan: boolean, dispatchable?: number): void => {
     if (dispatchable !== undefined) idleLaneDispatchable = dispatchable;
     const atMs = idleLaneClock.now();
     const before = idleLaneAccount.state;
@@ -3174,7 +3171,7 @@ export async function runDaemon(
         hold: after.hold,
       });
     }
-    if (closeWindow && atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
+    if (atMs - idleLaneAccount.windowStartMs >= IDLE_LANE_SUMMARY_WINDOW_MS) {
       emitLog("lane.idle_summary", { ...summarizeIdleLaneAccount(idleLaneAccount, atMs) });
       idleLaneAccount = rollIdleLaneWindow(idleLaneAccount, atMs);
     }
@@ -5846,7 +5843,7 @@ export async function runDaemon(
       for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
     };
     // W1-T8235: a lane change is a sample. The hold that emptied the slot is whichever step this lane's decision wrote.
-    const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true, undefined, false);
+    const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true);
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
       resetIdleLaneTick();
