@@ -138,6 +138,7 @@ test("filing refuses placeholders before writing and checks directories in the d
   const root = fs.mkdtempSync(join(tmpdir(), "rmd-t5660-"));
   try {
     fs.mkdirSync(join(root, "src", "lib"), { recursive: true });
+    fs.writeFileSync(join(root, "src", "lib", "plan.ts"), ""); // W1-T9039: the module the draft edits exists
     const before = `- ${PROPOSAL} (open)\n`;
     fs.writeFileSync(join(root, "MASTER-PLAN.md"), before);
     const payload = { proposalId: PROPOSAL, fragmentYaml: FRAGMENT, stampLine: STAMP };
