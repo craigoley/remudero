@@ -15,9 +15,10 @@ import { DECISION_RELEVANT_LEDGER_STEPS, rotateLedger } from "../src/lib/ledger.
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { loadPlan } from "../src/lib/plan.js";
 import {
-  INDEPENDENT_BLOCK_BASE_BACKOFF_MS, INDEPENDENT_BLOCK_RELEASED_STEP, buildLedgerIndex, independentBlockReleasesFrom,
+  INDEPENDENT_BLOCK_BASE_BACKOFF_MS, INDEPENDENT_BLOCK_RELEASED_STEP, buildLedgerIndex,
   independentFailureLatch, type IndependentBlockRelease, type StatusProjection,
 } from "../src/lib/status.js";
+import * as status from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { restoreBoundaryCheckpoint, runTask, type RunResult } from "./helpers/run-task-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -394,6 +395,10 @@ test("W1-T8676: each latch release is ledgered once", async () => {
     ["D", release("rd", "main_moved", { receiptRecorded: true })],
   ]);
   // The projection reader the daemon command wires: every task's projected release, and nothing else.
+  // Read off the namespace, so a checkout without the reader fails this test rather than the whole file's load.
+  const { independentBlockReleasesFrom } = status as unknown as {
+    independentBlockReleasesFrom: (p: ReadonlyMap<string, StatusProjection> | undefined) => ReadonlyMap<string, IndependentBlockRelease>;
+  };
   const projection = new Map<string, StatusProjection>([...releases].map(([id, r]) => [id, { independentBlockRelease: r } as StatusProjection]));
   projection.set("E", {} as StatusProjection);
   assert.deepEqual([...independentBlockReleasesFrom(projection).keys()], ["A", "B", "C", "D"]);
