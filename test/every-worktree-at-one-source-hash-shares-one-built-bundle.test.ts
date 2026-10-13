@@ -84,7 +84,7 @@ function makeTree(): string {
 }
 
 /** A fresh worktree at `from`'s source: the same tracked files, its own node_modules, and no dist/. */
-function freshWorktree(from: string): string {
+function freshTree(from: string): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-store-fresh-"));
   for (const p of ["src", "scripts", "package.json", "package-lock.json"]) cpSync(join(from, p), join(root, p), { recursive: true });
   mkdirSync(join(root, "node_modules"), { recursive: true });
@@ -115,8 +115,8 @@ const clean = (dirs: string[]): void => dirs.forEach((d) => rmSync(d, { recursiv
 
 test("W1-T8776: a fresh worktree at a stored source hash runs the stored bundle", async () => {
   const { store, hash, cleanup } = await filledStore();
-  const fresh = freshWorktree(cleanup[0]);
-  const corrupt = freshWorktree(cleanup[0]);
+  const fresh = freshTree(cleanup[0]);
+  const corrupt = freshTree(cleanup[0]);
   cleanup.push(fresh, corrupt);
   try {
     assert.equal(existsSync(join(fresh, OUT)), false, "the fresh worktree starts with no dist/");
@@ -156,7 +156,7 @@ test("W1-T8776: a fresh worktree at a stored source hash runs the stored bundle"
 
 test("W1-T8776: a worktree with changed source misses the store and runs tsx", async () => {
   const { store, cleanup } = await filledStore();
-  const changed = freshWorktree(cleanup[0]);
+  const changed = freshTree(cleanup[0]);
   cleanup.push(changed);
   try {
     writeFileSync(join(changed, "src", "lib", "added.ts"), "export const added = 1;\n");
@@ -184,8 +184,8 @@ test("W1-T8776: a worktree with changed source misses the store and runs tsx", a
 
 test("W1-T8776: a materialized bundle resolves its paths inside its own worktree", async () => {
   const { store, cleanup } = await filledStore();
-  const one = freshWorktree(cleanup[0]);
-  const two = freshWorktree(cleanup[0]);
+  const one = freshTree(cleanup[0]);
+  const two = freshTree(cleanup[0]);
   cleanup.push(one, two);
   try {
     for (const tree of [one, two]) {
@@ -240,6 +240,27 @@ test("W1-T8776: a source hash already stored is not rebuilt", async () => {
     assert.equal(rebuilt.kind, "built");
     assert.equal(calls.length, 2);
     assert.match(readFileSync(bundle, "utf8"), /STORE-FIXTURE/);
+
+    // A peer that completes a valid build of the same hash first keeps it: this owner's copy is discarded.
+    rmSync(join(store, hash), { recursive: true });
+    const peer = mkdtempSync(join(tmpdir(), "rmd-store-peer-"));
+    let peerIno = 0;
+    const racing: RunBuildScript = async (script, args, cwd) => {
+      const out = await runBuildScriptInChild(script, args, cwd);
+      if (args.includes("--out")) {
+        await runBuildScriptInChild(script, ["--root", main, "--out", join(peer, "b")], cwd);
+        cpSync(join(peer, "b"), join(store, hash), { recursive: true });
+        peerIno = statSync(bundle).ino;
+      }
+      return out;
+    };
+    try {
+      assert.equal((await buildIntoStore(main, { storeRoot: store, runScript: racing })).kind, "built");
+      assert.equal(statSync(bundle).ino, peerIno, "the peer's completed valid build was not overwritten");
+      assert.deepEqual(readdirSync(store).filter((n) => n.startsWith(".")), [], "the losing copy is removed");
+    } finally {
+      rmSync(peer, { recursive: true, force: true });
+    }
   } finally {
     clean([main, store]);
   }
@@ -247,8 +268,8 @@ test("W1-T8776: a source hash already stored is not rebuilt", async () => {
 
 test("W1-T8776: materialization isolates worktree writes from the store", async () => {
   const { store, hash, cleanup } = await filledStore();
-  const one = freshWorktree(cleanup[0]);
-  const two = freshWorktree(cleanup[0]);
+  const one = freshTree(cleanup[0]);
+  const two = freshTree(cleanup[0]);
   cleanup.push(one, two);
   try {
     assert.equal(materializeFromStore(one, store).outcome, "hit");
@@ -292,7 +313,7 @@ test("W1-T8776: invalid stored payloads safely miss before execution", async () 
     ];
     for (const [label, spoil, reason] of cases) {
       const manifest = readFileSync(join(stored, "manifest.json"));
-      const tree = freshWorktree(cleanup[0]);
+      const tree = freshTree(cleanup[0]);
       cleanup.push(tree);
       spoil();
       const launch = childEntryArgv(tree, NAME, SOURCE, [], undefined, { root: store });
@@ -303,7 +324,7 @@ test("W1-T8776: invalid stored payloads safely miss before execution", async () 
       writeFileSync(join(stored, "manifest.json"), manifest);
     }
     // Positive control: the restored store still hits.
-    const tree = freshWorktree(cleanup[0]);
+    const tree = freshTree(cleanup[0]);
     cleanup.push(tree);
     assert.equal(childEntryArgv(tree, NAME, SOURCE, [], undefined, { root: store }).reason, "store-hit");
   } finally {
@@ -340,7 +361,7 @@ test("W1-T8776: a build that fails or a tree without the build script leaves the
 
 test("W1-T8776: retention drops a stored hash no recent main revision and no live worktree uses", async () => {
   const { store, hash, cleanup } = await filledStore();
-  const live = freshWorktree(cleanup[0]);
+  const live = freshTree(cleanup[0]);
   cleanup.push(live);
   try {
     const idle = "a".repeat(64);

@@ -13,6 +13,7 @@ import {
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 
 interface Currency { current: boolean; reason: string; bundle?: string }
 interface StoredManifest { sourceHash?: unknown; entries?: unknown }
@@ -80,11 +81,14 @@ const bundleNames = (script: BuildScript, dir: string): string[] =>
   ((script.readChildEntryManifest(dir, ".") as StoredManifest).entries as { bundle: string }[]).map((e) => e.bundle);
 
 function touch(path: string): void {
-  const now = new Date();
+  const now = systemClock.date();
   utimesSync(path, now, now);
 }
 
-/** Rename `from` onto `to`. An occupied `to` is moved aside first; if a peer publishes in between, its copy stands. */
+/**
+ * Rename `from` onto `to`. An occupied `to` is moved aside first. A peer that publishes between the two renames makes
+ * the second one throw, which the callers read as a miss (tsx) or a failed build: never a half-published directory.
+ */
 function publishDir(from: string, to: string, aside: string): void {
   try {
     renameSync(from, to);
@@ -95,9 +99,6 @@ function publishDir(from: string, to: string, aside: string): void {
   renameSync(to, aside);
   try {
     renameSync(from, to);
-  } catch (err) {
-    // A peer published between the two renames; the caller re-checks what now stands.
-    if (!["ENOTEMPTY", "EEXIST"].includes(String((err as NodeJS.ErrnoException)?.code))) throw err;
   } finally {
     rmSync(aside, { recursive: true, force: true });
   }
@@ -175,7 +176,7 @@ export interface BuildIntoStoreOptions {
   liveTrees?: () => readonly string[];
   /** Seam for the child process; the default spawns plain node on the tree's own build script. */
   runScript?: RunBuildScript;
-  now?: () => number;
+  clock?: Clock;
 }
 
 const sourceHashFrom = (stdout: string): string | undefined => /^source hash ([0-9a-f]{64})$/m.exec(stdout)?.[1];
@@ -188,8 +189,8 @@ async function buildIntoStoreUnlogged(treeRoot: string, opts: BuildIntoStoreOpti
   const script = join(treeRoot, BUILD_SCRIPT);
   if (!existsSync(script)) return { kind: "skipped", reason: "tree-has-no-build-script" };
   const run = opts.runScript ?? runBuildScriptInChild;
-  const clock = opts.now ?? Date.now;
-  const started = clock();
+  const clock = opts.clock ?? systemClock;
+  const started = clock.now();
   // The tree's OWN script: sourceHash covers it, so only its recipe can produce a bundle the key vouches for.
   const hash = sourceHashFrom(await run(script, ["--root", treeRoot, "--hash"], treeRoot));
   if (!hash) return { kind: "failed", reason: "hash-unreadable" };
@@ -207,7 +208,7 @@ async function buildIntoStoreUnlogged(treeRoot: string, opts: BuildIntoStoreOpti
     const refusal = storedBuildRefusal(validator, temp, treeRoot, hash);
     if (refusal) return { kind: "failed", reason: `built-${refusal}`, hash };
     publishStored(validator, temp, stored, treeRoot, hash);
-    return { kind: "built", hash, ms: clock() - started, bytes: dirBytes(stored) };
+    return { kind: "built", hash, ms: clock.now() - started, bytes: dirBytes(stored) };
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -222,7 +223,7 @@ function publishStored(script: BuildScript, temp: string, stored: string, treeRo
 /** Retention after a build; a failure to prune is ledgered and changes nothing else. */
 function prune(opts: BuildIntoStoreOptions, log: StoreLog): void {
   try {
-    const removed = pruneChildEntryStore(opts.storeRoot, { liveTrees: opts.liveTrees?.() ?? [], now: (opts.now ?? Date.now)() });
+    const removed = pruneChildEntryStore(opts.storeRoot, { liveTrees: opts.liveTrees?.() ?? [], now: (opts.clock ?? systemClock).now() });
     if (removed.length) log("child_entry.store_pruned", { removed });
   } catch (err) {
     log("child_entry.store_prune_failed", { reason: errorText(err) });
@@ -276,7 +277,7 @@ function liveTreeHash(tree: string): string | undefined {
  */
 export function pruneChildEntryStore(
   storeRoot: string,
-  { liveTrees = [], now = Date.now(), idleMs = STORE_IDLE_MS }: { liveTrees?: readonly string[]; now?: number; idleMs?: number } = {},
+  { liveTrees = [], now = systemClock.now(), idleMs = STORE_IDLE_MS }: { liveTrees?: readonly string[]; now?: number; idleMs?: number } = {},
 ): string[] {
   const keep = new Set(liveTrees.map(liveTreeHash).filter((h): h is string => h !== undefined));
   const removed: string[] = [];
