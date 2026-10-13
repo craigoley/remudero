@@ -167,12 +167,18 @@ export function idleCapacityDetector(instance = "unknown"): FleetFlowDetector {
       if (isShort) lastLong = undefined;
       const named = source.find((r) => typeof r.instance === "string")?.instance;
       const where = typeof named === "string" ? named : instance;
+      const active = changesOf(source, nowMs).at(-1);
+      const activeHold = holdOf(active?.hold);
+      const activeKey = active && Number(active.idle_slots) > 0 && Number(active.dispatchable) > 0
+        ? JSON.stringify([active.cause, reasonOf(activeHold, String(active.cause)), setterOf(activeHold), active.idle_since_ms])
+        : undefined;
 
       const groups = new Map<string, Group>();
       for (const iv of intervalsOf(source, nowMs, nowMs - windowMs)) {
         const reason = reasonOf(iv.hold, iv.cause);
         const setter = setterOf(iv.hold);
         const key = JSON.stringify([iv.cause, reason, setter, iv.sinceMs]);
+        if (isShort && key !== activeKey) continue;
         const group = groups.get(key) ?? { cause: iv.cause, reason, setter, slotMinutes: 0, sinceMs: iv.sinceMs, dispatchable: 0 };
         group.slotMinutes += ((iv.endMs - iv.startMs) / MS_PER_MINUTE) * iv.slots * scale;
         group.sinceMs = Math.min(group.sinceMs, iv.sinceMs);
@@ -230,8 +236,11 @@ export async function evaluateIdleCapacityDetectors(input: FleetFlowInput) {
   const memory: IdleMemory = store.detectors["idle-capacity"] ?? { history: [], emitted: [] };
   const history = [...memory.history];
   let summaryEndMs = memory.summaryEndMs ?? -Infinity;
-  const summaries = rows.filter((r) => r.step === "lane.idle_summary" && r.partial !== true)
-    .map((row) => ({ row, end: typeof row.window_end_ms === "number" ? row.window_end_ms : rowMs(row) }))
+  const summaries = rows.filter((r) => r.step === "lane.idle_summary" && r.partial !== true &&
+    typeof r.window_start_ms === "number" && Number.isFinite(r.window_start_ms) &&
+    typeof r.window_end_ms === "number" && Number.isFinite(r.window_end_ms) &&
+    r.window_end_ms - r.window_start_ms >= policy.longMs)
+    .map((row) => ({ row, end: Number(row.window_end_ms) }))
     .filter((s) => Number.isFinite(s.end) && s.end <= since && s.end > summaryEndMs)
     .sort((a, b) => a.end - b.end);
   for (const { row, end } of summaries) {
