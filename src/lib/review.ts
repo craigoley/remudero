@@ -2,6 +2,8 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -18,7 +20,8 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -65,7 +68,7 @@ export type PostableReviewState = ReviewState;
  *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
-export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v2";
+export const REVIEW_ENGINE_REVISION = "promised-followups-snapshot-v3";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
 
@@ -87,6 +90,7 @@ export interface ReviewDecisionDigestInput {
   /** The full implement report is material only when supplied: preserving omission keeps legacy
    * digest identities stable, while a current worker refusal cannot replay a prior clean verdict. */
   implementationReport?: string;
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   body?: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -112,6 +116,12 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     diff: input.diff,
     report: input.report,
     ...(input.implementationReport !== undefined ? { implementationReport: input.implementationReport } : {}),
+    ...(input.promisedFollowUpObservation !== undefined &&
+      (input.promisedFollowUpObservation.state === "unknown" || input.promisedFollowUpObservation.promised.length > 0)
+      ? { promisedFollowUps: input.promisedFollowUpObservation.state === "unknown" ? { state: "unknown" }
+        : { state: "complete", promised: input.promisedFollowUpObservation.promised,
+          unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords),
+          harvested: input.promisedFollowUpObservation.harvested ?? [] } } : {}),
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
@@ -433,6 +443,11 @@ export type ReportSubstituteCause =
   | { kind: "fetch-failed" };
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
+export type PromisedFollowUpObservation =
+  | { state: "complete"; headSha?: string; baseSha?: string; promised: PromisedFollowUp[]; planRecords: FollowUpPlanRecord[];
+      harvested?: HarvestableFollowUp[]; harvestCorpusComplete?: boolean }
+  | { state: "unknown"; reason: string };
+
 export interface ReviewEvidence {
   /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
    *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
@@ -454,6 +469,8 @@ export interface ReviewEvidence {
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
   implementationReport?: string;
+  /** One awaited, exact-head/base observation, also included in the review decision identity. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** True when `report` is NOT the PR body (W1-T1100): `runTaskBody` (run-task.js) substitutes the worker's own chat
    *  text after a failed body read, so an outage degrades to judging the narrative rather than stalling the review.
    *  TRAP: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
@@ -538,6 +555,8 @@ export interface UnwiredAdvisory {
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
 export interface ReviewVerdict {
   state: ReviewState;
+  /** Provenance of the structural promise check; absent on an unchanged no-promise review. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
   /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
@@ -4754,6 +4773,135 @@ export function reviewScopeContext(
   };
 }
 
+/** Observe promises before decision claiming. Git reads are awaited, bounded and pinned to two immutable objects. */
+export async function observePromisedFollowUps(args: {
+  diff: string; headSha: string; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string };
+  runGit?: (args: string[], stdin?: string) => Promise<string>;
+}): Promise<PromisedFollowUpObservation> {
+  const empty: PromisedFollowUpObservation = { state: "complete", promised: [], planRecords: [] };
+  const paths = changedFiles(walkDiff(args.diff)).filter(path => /^docs\/adr\/[^/]+\.md$/.test(path));
+  const taskPath = args.task.sourcePath?.match(/(?:^|[:/])(plan\/tasks(?:\.yaml|\.d\/[^/]+\.ya?ml))$/)?.[1];
+  if (paths.length === 0 && args.task.sourcePath === undefined) return empty;
+  if (!args.headCheckoutDir) return { state: "unknown", reason: "promise source requires the exact PR-head checkout" };
+  const deadline = performance.now() + 45_000;
+  const runGit = async (argv: string[]): Promise<string> => {
+    if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
+    if (args.runGit) return await args.runGit(argv);
+    return await hostWorktreeGitAsync(args.headCheckoutDir!, argv, {
+      maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
+  };
+  try {
+    if (args.task.sourcePath !== undefined && taskPath === undefined) throw new Error("promise task source path is unavailable");
+    const [headSha, baseSha] = (await runGit(["rev-parse", "HEAD", "origin/main"])).trim().split("\n");
+    if (headSha !== args.headSha || !/^[a-f0-9]{40}$/.test(baseSha ?? "")) throw new Error("promise source is not the exact head/pinned origin/main");
+    const present = paths.length ? (await runGit(["ls-tree", "--name-only", headSha, "--", ...paths])).trim().split("\n").filter(Boolean) : [];
+    if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
+    const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
+    const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
+    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
+    if (taskPath !== undefined) {
+      const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
+      promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
+    }
+    if (promised.length === 0) return empty;
+    const corpus = (await runGit(["ls-tree", "-r", "--name-only", baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"])).trim().split("\n").filter(Boolean);
+    let matching = "";
+    if (corpus.length) {
+      try { matching = await runGit(["grep", "-l", "-F", "-e", args.task.id, baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"]); }
+      catch (error) { if ((error as { code?: unknown }).code !== 1) throw error; }
+    }
+    const filingPaths = matching.trim().split("\n").filter(Boolean).map(line => {
+      const prefix = `${baseSha}:`;
+      if (!line.startsWith(prefix) || !corpus.includes(line.slice(prefix.length))) throw new Error("promise filing query escaped its pinned corpus");
+      return line.slice(prefix.length);
+    });
+    if (filingPaths.length > 256) throw new Error("promise filing corpus exceeds its bounded read limit");
+    const planRecords: FollowUpPlanRecord[] = [];
+    for (const path of filingPaths) planRecords.push(...followUpPlanRecords(await runGit(["show", `${baseSha}:${path}`])));
+    if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
+    const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
+    return { state: "complete", headSha, baseSha, promised: unique,
+      planRecords: planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId))) };
+  } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
+}
+
+const followUpReport = (entries: readonly HarvestableFollowUp[]): string =>
+  `## Follow-ups\n${entries.map(entry => `${entry.type}: ${entry.text}`).join("\n")}\n`;
+
+/** Recover a cold review's missing transcript from exact task/PR history. An available current report is authoritative. */
+export async function recoverPromisedFollowUpReports(observation: PromisedFollowUpObservation, args: {
+  ledgerPath: string; taskId: string; prUrl: string; implementationReport?: string;
+}): Promise<PromisedFollowUpObservation> {
+  if (observation.state === "unknown" || args.implementationReport !== undefined || observation.promised.length === 0 ||
+      unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
+  let incomplete = false;
+  try {
+    const stateDir = dirname(args.ledgerPath);
+    if (resolve(args.ledgerPath) !== resolve(ledgerLivePath(stateDir))) throw new Error("promise harvest path is not the union's live ledger");
+    // The shared union deliberately tolerates absent state/live files. That is not
+    // evidence of an empty harvest; prove the directory exists before inferring absence.
+    const names = readdirSync(stateDir);
+    if (!names.includes(LEDGER_FILENAME)) incomplete = true;
+    else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
+    for (const liveOnly of [true, false]) {
+    for await (const row of openLedgerUnion(stateDir, {
+      step: "report.followups", dedupe: false, signal: controller.signal,
+      ...(liveOnly ? { throughRotation: "" } : {}),
+      onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
+    })) {
+      if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
+      if (!Array.isArray(row.entries)) { incomplete = true; continue; }
+      for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
+        if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
+          incomplete = true; continue;
+        }
+        const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
+        entries.set(JSON.stringify(entry), entry);
+        if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
+      }
+    }
+    const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    if (unreportedFollowUps(observation.promised,
+      followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
+      return { ...observation, harvested: found, harvestCorpusComplete: !liveOnly && !incomplete };
+    }
+    }
+    const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
+    if (incomplete && unreportedFollowUps(observation.promised, report, observation.planRecords).length > 0) {
+      return { state: "unknown", reason: "promise harvest corpus is unreadable or malformed; absence is unproved" };
+    }
+    return { ...observation, harvested, harvestCorpusComplete: !incomplete };
+  } catch (error) { return { state: "unknown", reason: `promise harvest unavailable: ${String(error)}` }; }
+  finally { clearTimeout(timer); }
+}
+
+/** One immutable preparation binds the promise observation to both claiming and judging. */
+export async function preparePromisedReviewDecision(args: {
+  input: ReviewDecisionDigestInput; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string }; ledgerPath: string; prUrl: string;
+}): Promise<{ decisionDigest: string; judge: (evidence: ReviewEvidence) => Promise<ReviewVerdict> }> {
+  const input = structuredClone(args.input);
+  const { headCheckoutDir, ledgerPath, prUrl } = args, task = { ...args.task };
+  const sources = await observePromisedFollowUps({
+    diff: input.diff, headSha: input.headSha, headCheckoutDir, task,
+  });
+  const observation = await recoverPromisedFollowUpReports(sources, {
+    ledgerPath, taskId: task.id, prUrl, implementationReport: input.implementationReport,
+  });
+  return {
+    decisionDigest: reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation }),
+    judge: evidence => judgeReviewAsync([...input.acceptance], {
+      ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
+      headCheckoutDir, promisedFollowUpObservation: observation,
+    }),
+  };
+}
+
 /** IMPLEMENTATION-SHAPED (W1-T458 design (ii)): `src/` or `test/` only. Narrowing to these two prefixes is what turns
  *  the raw "touches ANY declared path" false-positive rate — 52%, inflated by plan filings and docs PRs — into the
  *  honest ~11% the advisory-not-refusal call rests on. */
@@ -5036,6 +5184,19 @@ export function judgeReview(
       criterionRefusals[i],
     ),
   );
+  const promiseObservation = evidence.promisedFollowUpObservation ??
+    (diffFiles.some(path => /^docs\/adr\/[^/]+\.md$/.test(path))
+      ? { state: "unknown" as const, reason: "promise source was not observed" } : undefined);
+  if (promiseObservation?.state === "unknown") {
+    verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: promiseObservation.reason, proof_exec: "cannot_evaluate", loadError: promiseObservation.reason });
+  } else if (promiseObservation && promiseObservation.promised.length > 0) {
+    const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
+    const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
+    if (missing.length > 0) verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
+      proof_exec: "not_executable" });
+  }
   const testTheater = detectTestTheater(evidence.diff);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s doc. `!planOnly` is the
@@ -5218,6 +5379,8 @@ export function judgeReview(
 
   return {
     state,
+    ...(promiseObservation !== undefined && (promiseObservation.state === "unknown" || promiseObservation.promised.length > 0)
+      ? { promisedFollowUpObservation: promiseObservation } : {}),
     cannotEvaluate,
     ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,

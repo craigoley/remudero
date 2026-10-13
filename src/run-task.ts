@@ -1400,6 +1400,7 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   renderSkillsPart,
+  SKILL_FIX_TASK_TYPE,
   skillsInjectedEvent,
   skillWithheldForRun,
   stageSkillDrafts,
@@ -1509,6 +1510,7 @@ import {
   reviewEvidenceStrength,
   claimReviewDecision,
   reviewDecisionDigest,
+  preparePromisedReviewDecision,
   reviewTaskIdEvidenceAsync,
   bodyReviewContractDigest,
   reviewContractDigest,
@@ -3007,6 +3009,7 @@ import {
 } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
+import { toolStepSignature } from "./lib/tool-step-signature.js";
 
 /** Preserve the watchdog's measured abandonment evidence when the advisory reviewer fails.
  * The catch arm must publish the values captured by the worker, rather than re-reading policy
@@ -3356,8 +3359,11 @@ export const WORKER_STATE_LEDGER_STEP = "worker.state";
 /** One bounded, structured row per observed stream event. Unlike `worker.state` (transitions),
  *  this carries `turns_so_far` whenever the stream event supplies it, keeping the running count
  *  visible during a spawn. It gives the console a real tool name, a bounded rationale, tool
- *  timing/outcome, and heartbeat cadence without exposing prompts, tool arguments, or tool
- *  output. It is diagnostic telemetry only and must never become a dispatch decision input. */
+ *  timing/outcome, and heartbeat cadence. A tool-executing row adds `tool_call_index` (from 0, per
+ *  run) and `tool_signature`, the {@link toolStepSignature} of at most 120 characters: a Bash
+ *  program and subcommand, or a file tool and its repo-relative path. A row never carries a prompt,
+ *  a raw tool argument, a flag value, or tool output. It is diagnostic telemetry only and must
+ *  never become a dispatch decision input. */
 export const WORKER_ACTIVITY_LEDGER_STEP = "worker.activity";
 
 /**
@@ -3476,12 +3482,13 @@ export function attributeWorkerStreamEvent(
 /** The stream observer one dispatch spawn hands its worker: enrich, attribute to the spawn's assignment, then forward. */
 export function dispatchStreamObserver(
   base: WorkerStreamObserver,
-  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider">,
+  spawn: Pick<SpawnWorkerArgs, "model" | "mountProvider"> & { cwd?: string },
   assignment: () => Pick<WorkerSelectionAssignment, "id" | "requested" | "selected"> | undefined,
 ): WorkerStreamObserver {
   return (event) => {
     const current = assignment();
-    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(event, spawn, current), current));
+    const located = spawn.cwd && !event.cwd ? { ...event, cwd: spawn.cwd } : event;
+    base(attributeWorkerStreamEvent(enrichWorkerStreamEvent(located, spawn, current), current));
   };
 }
 
@@ -3690,6 +3697,7 @@ export function buildWorkerStateSensor(args: {
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
   let lastActivityKey: string | undefined;
+  let nextToolCallIndex = 0;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -3739,7 +3747,9 @@ export function buildWorkerStateSensor(args: {
     const toolEnded = activeTool !== undefined && event.kind !== "tool-executing";
     const eventAt = new Date(event.tsMs).toISOString();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
+    const toolCallIndex = event.kind === "tool-executing" ? nextToolCallIndex++ : undefined;
     try {
+      const toolSignature = event.toolName ? toolStepSignature(event.toolName, event.toolInput, event.cwd ?? "") : undefined;
       const activityRow = {
         run_id: args.runId,
         task_id: args.taskId,
@@ -3760,6 +3770,8 @@ export function buildWorkerStateSensor(args: {
         ...(event.kind === "tool-executing"
           ? {
               tool_name: toolName ?? "unknown",
+              tool_call_index: toolCallIndex,
+              ...(toolSignature ? { tool_signature: toolSignature } : {}),
               ...(lastWorkerText ? { tool_reason: boundedWorkerTelemetryText(lastWorkerText) } : {}),
               tool_started_at: eventAt,
             }
@@ -8280,7 +8292,7 @@ async function runReview(args: {
   prUrl: string;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
-  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number };
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
    *  best-effort REST compare against `main`; a test supplies a stub so it never reaches the
@@ -8493,9 +8505,11 @@ async function runReview(args: {
   const criteria = task.acceptance ?? [];
   const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
   const ownership = taskIdEvidence.ownership;
-  const decisionDigest = reviewDecisionDigest({
-    headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
+  const preparedDecision = await preparePromisedReviewDecision({
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
+    headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
+  const decisionDigest = preparedDecision.decisionDigest;
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -8636,7 +8650,7 @@ async function runReview(args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
@@ -8753,7 +8767,7 @@ async function runReview(args: {
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
-  const computed = await judgeReviewAsync(criteria, {
+  const computed = await preparedDecision.judge({
     diff,
     report,
     planLint,
@@ -11851,6 +11865,8 @@ export async function runFixRung(opts: {
     packageScripts?: Readonly<Record<string, string>>;
     /** W1-T5955: the round's branch claim — released at its `fix.done`, re-taken before reuse. */
     branchClaim?: FixRoundBranchClaim;
+    /** The approved skill tree the fix lane selects from; production reads the implement lane's. */
+    approvedSkillsDir?: string;
   };
 }): Promise<FixRungOutcome> {
   const roundRows: Record<string, unknown>[] = [];
@@ -12086,6 +12102,16 @@ export async function runFixRung(opts: {
       standInEscalates = false;
     }
   };
+  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
+  // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  const fixSkillSelection = observeSkillSelection(
+    loadInjectableSkills(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills")),
+    SKILL_FIX_TASK_TYPE,
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    opts.task.files,
+    (skillName) => skillWithheldForRun(opts.runId, skillName),
+  );
+  let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
@@ -13326,6 +13352,9 @@ export async function runFixRung(opts: {
       deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
+    // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
+    if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
+    fixSkillSelectionLogged = true;
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -13334,6 +13363,7 @@ export async function runFixRung(opts: {
         round: attempt,
         branch: opts.branch,
         evidence,
+        skillsPart: renderSkillsPart(fixSkillSelection.selected),
         // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
         // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
         // which of its own branch's out-of-scope paths are inherited, not re-derived a second way.
@@ -14341,6 +14371,7 @@ export async function runFixRung(opts: {
       prUrl: opts.prUrl,
       task: reviewTask,
       report: reviewReport,
+      implementationReport: workerTranscript(fixResult),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
       reviewInputBody,
@@ -21060,9 +21091,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       prUrl,
       task,
       report: reviewReport,
-      implementationReport: fullText(impl),
       reportIsSubstitute: reviewReportIsSubstitute,
       reportSubstituteCause: reviewReportSubstituteCause,
+      implementationReport: fullText(impl),
       settingsFile,
       config,
       budgetUsd,
