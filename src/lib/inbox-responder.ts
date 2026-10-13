@@ -12,6 +12,7 @@ import type { InboxClassification } from "./inbox.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
+  hasThreadEvent,
   inboxThreadId,
   inboxThreadIdentity,
   proposalIdOfThread,
@@ -234,9 +235,9 @@ export function markThreadRead(path: string, threadId: string, seq: number): voi
  *  backfilled, which can be after later messages, so each one is placed by its own time instead. */
 function inTimeOrder(stored: ThreadMessageView[]): ThreadMessageView[] {
   const events = stored.filter((m) => m.extra?.event).sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.seq - b.seq);
-  const ordered = stored.filter((m) => !m.extra?.event).sort((a, b) => a.seq - b.seq);
+  const ordered = stored.filter((m) => !hasThreadEvent(m.extra)).sort((a, b) => a.seq - b.seq);
   for (const event of events) {
-    const at = ordered.findIndex((m) => !m.extra?.event && (m.ts ?? 0) > (event.ts ?? 0));
+    const at = ordered.findIndex((m) => !hasThreadEvent(m.extra) && (m.ts ?? 0) > (event.ts ?? 0));
     ordered.splice(at === -1 ? ordered.length : at, 0, event);
   }
   return ordered;
@@ -295,7 +296,7 @@ export function listThreadViews(
   marks: ReadMarks,
 ): ThreadSummaryView[] {
   const views = items
-    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.some((m) => !m.extra?.event) ?? false)))
+    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.some((m) => !hasThreadEvent(m.extra)) ?? false)))
     .map((item) => {
       const { details: _details, messages: _messages, ...summary } = detailFor(item, threads.get(inboxThreadId(item.proposalId)) ?? [], marks);
       return summary;

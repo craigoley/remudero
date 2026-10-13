@@ -67,6 +67,11 @@ export interface ThreadEvent {
   key: string;
 }
 
+/** Whether a stored message is an operator action or fleet outcome ({@link appendThreadEvent}). */
+export function hasThreadEvent(extra: ThreadMessageExtra | undefined): boolean {
+  return extra !== undefined && extra.event !== undefined;
+}
+
 const OPERATOR_EVENT_KINDS: ReadonlySet<ThreadEventKind> = new Set(["reframed", "declined", "restored", "approved", "released"]);
 
 export interface ThreadMessageExtra {
@@ -226,7 +231,7 @@ export function appendThreadEvent(
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   if (current.messages.some((message) => message.extra?.event?.key === event.key)) return "existing";
   const operator = OPERATOR_EVENT_KINDS.has(event.kind);
-  if (operator && current.messages.some((message) => message.role === "reply" && !message.extra?.event && message.body.trim() === text.trim())) return "existing";
+  if (operator && current.messages.some((message) => message.role === "reply" && !hasThreadEvent(message.extra) && message.body.trim() === text.trim())) return "existing";
   appendThreadMessage(inboxThreadIdentity(proposalId), operator ? "reply" : "escalation", text, { ...deps, now: ts === undefined ? deps.now : () => ts }, { event });
   return "appended";
 }
