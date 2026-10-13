@@ -9,7 +9,7 @@
   risk: high
   band_meaning: span
   priority: 2
-  origin: operator#2026-10-13-separate-governed-corpus-repair
+  origin: "operator#2026-10-13-separate-governed-corpus-repair. Amended 2026-10-13 on operator direction (\"Fix 11201 and keep going\"): the two unit-test proofs a test-only change cannot discriminate are repointed at changed lines"
   plan_refs: [W1-T5857, W1-T8801, W1-T2732]
   rationale: |
     W8801 exact045eb76e5e/actual51ae52d1b6 native jUQFKD completed FAILED:
@@ -31,6 +31,20 @@
     inputs, not browser-source discovery. No new open-head corpus-reader diff exists.
     The two concerns are stable corpus membership and refusing unavailable real
     source evidence; the declared three-file span is explicit, not hidden by a rename.
+    AMENDMENT 2026-10-13, READ on origin/main 6bd844ddb and #11201's head 21efadde6. The build
+    (#11201) is red on proof-discrimination alone: both unit-test proofs pass at the head AND at
+    the merge base 7b8bbbfcf, so `rmd check-proof --base` grades them executed_stale (exit 5),
+    reproduced locally at 21efadde6. That is structural, not a defect in the build. W1-T3098's
+    buildBaseProofDir copies a PR's ADDED test/** files into the base worktree so a new test can
+    re-run against old SOURCE, and this task's whole change is test-only: the new suite and its
+    helper are both added under test/, so the base run executes the same code and passes. No
+    build can pass those two proofs, and a worker may not edit its own task's proofs (Rule 15).
+    Both are repointed at lines only the change adds, each checked with the gate's own command at
+    21efadde6 against 7b8bbbfcf: the reader's `git ls-files -z -- test` corpus boundary in the new
+    helper (exit 0, the file is absent at base), and the existing guard's delegation to the
+    composed default in test/serve-browser-teardown.test.ts (1 hit at head, 0 at base). The two
+    unit tests stay in the suite and keep running in CI as behaviour coverage. Claims, design,
+    files and the third proof are unchanged.
   design: |
     1. Extract a small test-only trackedBrowserTestSources reader into
        test/lib/browser-test-corpus.ts. Enumerate Git-tracked test/*.test.ts recursively
@@ -66,9 +80,9 @@
        services, live policy/config, scheduler, infrastructure, credentials or schedules.
   acceptance:
     - claim: The real reader includes tracked nested browser suites without traversing transient fixtures
-      proof: 'unit test: browser teardown corpus reads tracked nested tests without traversing transient fixtures'
+      proof: 'grep: "ls-files", "-z", "--", "test" in test/lib/browser-test-corpus.ts'
     - claim: Unavailable real source refuses without hiding a tracked browser regression
-      proof: 'unit test: browser teardown corpus refuses unavailable tracked sources without hiding a real regression'
+      proof: 'grep: assertTrackedBrowserTeardown(REPO_ROOT); in test/serve-browser-teardown.test.ts'
     - claim: Browser-source discovery has an explicit tracked test-corpus reader
       proof: 'grep: function trackedBrowserTestSources in test/lib/browser-test-corpus.ts'
   files: [test/serve-browser-teardown.test.ts, test/lib/browser-test-corpus.ts, test/browser-test-corpus.test.ts]
