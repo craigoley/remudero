@@ -1,5 +1,5 @@
 import {
-  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
@@ -1022,6 +1022,7 @@ import {
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   bodyWithFailingProofAtOpen,
+  checkProofLaunchArgv,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -15029,7 +15030,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
+      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -29494,6 +29495,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
     opts.knownRepos = knownRepos;
+    // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
+    // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
+    opts.addedTaskIds = newTaskIds ?? new Set<string>();
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
@@ -29787,6 +29791,8 @@ export interface PreflightProofsDeps {
   git?: (args: string[]) => string;
   /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }
 
 /**
@@ -29869,7 +29875,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      checkProofChildArgv(proof, mergeBase),
+      checkProofLaunchArgv(proof, mergeBase, deps.childRoot),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
