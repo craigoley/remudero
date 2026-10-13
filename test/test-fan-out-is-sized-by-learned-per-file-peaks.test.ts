@@ -84,7 +84,8 @@ test("W1-T9102: selection sizing sums the largest live file peaks and keeps a pr
 test("W1-T9102: the tree sampler records each file child's maximum once and excludes runner and helper peaks", (t) => {
   const fx = fixture(t);
   const procs = new Map([
-    [10, { parent: 1, start: "100", argv: ["node", "--test", "test/heavy.test.ts"], mib: 80 }],
+    [9, { parent: 1, start: "90", argv: ["node", "run-child.js"], mib: 180 }],
+    [10, { parent: 9, start: "100", argv: ["node", "--test", "test/heavy.test.ts"], mib: 80 }],
     [11, { parent: 10, start: "110", argv: ["node", "--import", "tsx", "/checkout/test/heavy.test.ts"], mib: 600 }],
     [12, { parent: 11, start: "120", argv: ["node", "test/helper.ts"], mib: 2000 }],
   ]);
@@ -100,28 +101,42 @@ test("W1-T9102: the tree sampler records each file child's maximum once and excl
     },
     setTimer: () => undefined, clearTimer: () => {},
   });
-  sampler.track("run", 10, { onTestFilePeak: (file, peak) => { recordTestFilePeak(file, peak, fx.store); } });
+  const reservation = openLearnedReservation({ workerClass: "fix", root: fx.dir, entryKind: "bundle" }, {
+    store: fx.store, sampler,
+    ledger: { location: () => ({ dir: join(fx.dir, "ledger"), scope: "local" }), log: () => {} },
+  });
+  t.after(() => reservation.releaseOccupancy());
+  reservation.bindRoot(9);
   procs.get(11)!.mib = 737;
   sampler.sampleNow();
   procs.delete(11);
   procs.delete(12);
   sampler.sampleNow();
-  sampler.finish("run");
+  procs.delete(10);
+  sampler.sampleNow();
+  reservation.releaseOccupancy();
   const file = testFileEstimates(["test/heavy.test.ts"], fx.store)[0]!;
   assert.equal(file.bytes, 737 * MiB);
   assert.equal(file.samples, 1, "one sample per file process, rather than one per timer tick");
   assert.equal(testFileEstimates(["test/helper.ts"], fx.store)[0]!.basis, "class-tail");
+  assert.equal(readPeakSamples("test", fx.store, true)[0]!.entryKind, undefined);
+  assert.deepEqual(readPeakSamples("test", fx.store).map((s) => [s.peakMib, s.entryKind]), [[2817, undefined]]);
+  assert.deepEqual(readPeakSamples("fix", fx.store).map((s) => [s.peakMib, s.entryKind]), [[180, "bundle"]]);
 });
 
 test("W1-T9102: store compaction preserves independent file histories without teaching the whole-run class", (t) => {
   const fx = fixture(t);
-  recordTestFilePeak("test/heavy.test.ts", 737, fx.store);
-  for (let i = 0; i < 140; i++) recordTestFilePeak("test/light.test.ts", 300, fx.store);
-  recordPeak("test", 8000, { ...fx.store, size: () => 2 * 1024 ** 2 });
+  const fileStore: PeakStoreOptions = { ...fx.store, entryKind: "tsx" };
+  recordTestFilePeak("test/heavy.test.ts", 737, fileStore);
+  assert.equal(readPeakSamples("test", fx.store, true)[0]!.entryKind, "tsx");
+  for (let i = 0; i < 140; i++) recordTestFilePeak("test/light.test.ts", 300, fileStore);
+  recordPeak("test", 8000, { ...fx.store, entryKind: "bundle", size: () => 2 * 1024 ** 2 });
   const samples = readPeakSamples("test", fx.store, true);
   assert.equal(samples.filter((s) => s.testFile === "test/light.test.ts").length, 128);
   assert.equal(samples.filter((s) => s.testFile === "test/heavy.test.ts").length, 1);
+  assert.ok(samples.every((s) => s.entryKind === "tsx"));
   assert.deepEqual(readPeakSamples("test", fx.store).map((s) => s.peakMib), [8000]);
+  assert.equal(readPeakSamples("test", fx.store)[0]!.entryKind, "bundle");
   assert.deepEqual(testFileEstimates(["test/heavy.test.ts", "test/light.test.ts"], fx.store).map((f) => f.bytes), [737 * MiB, 300 * MiB]);
 });
 

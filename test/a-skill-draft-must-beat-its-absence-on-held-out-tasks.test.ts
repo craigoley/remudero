@@ -89,6 +89,50 @@ const LIFTS = (_task: string, arm: string, trial: number): CorpusProofOutcome =>
 /** With-skill passes, without-skill fails. */
 const WITH_ONLY = (_task: string, arm: string): CorpusProofOutcome => (arm === "with-skill" ? "pass" : "fail");
 
+test("a malformed fixed eval control preserves the refusal reason and dispatches nothing", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), fleet = fakeFleet(LIFTS);
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 0 } });
+  assert.ok(run.state === "refused" && run.reason === "invalid-run-control" && run.dispatched === 0);
+  assert.ok(run.state === "refused" && run.detail.includes("invalid fixed eval deadline/shutdown reserve"));
+  assert.equal(fleet.built.length, 0);assert.equal(fleet.requests.length, 0);
+});
+
+test("a cancelled skill eval launches no further attempts and never certifies capacity release", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), source = new AbortController();
+  const fleet = fakeFleet(LIFTS, request => { assert.ok(request.signal);source.abort();return {}; });
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log,
+    control: { finishByMs: Date.now() + 10000, shutdownReserveMs: 100, signal: source.signal } });
+  assert.equal(run.state, "cancelled");if (run.state !== "cancelled") return;
+  assert.equal(fleet.requests.length, 1);assert.equal(fleet.graded.length, 0);assert.equal(fleet.cleaned.length, 1);
+  assert.equal(run.capacityReleaseAllowed, false);assert.equal(run.attempts[0]!.verdict, "unmeasurable");
+  assert.deepEqual(run.attempts[0]!.reasons, ["eval-cancelled"]);
+  assert.equal(fleet.rows.at(-1)!.row.termination, "unverified");
+});
+
+test("an expired skill eval control refuses new attempts while preserving the quiet and spend gates", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), fleet = fakeFleet(LIFTS);
+  const input = { selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 100 } };
+  assert.equal((await runSkillEval(input)).state, "cancelled");assert.equal(fleet.built.length, 0);
+  assert.equal((await runSkillEval({ ...input, argv: [] })).state, "refused");
+  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "up" }, headroom: HEADROOM } })).state, "refused");
+});
+
+test("skill eval cancellation during grading or failed cleanup is never an evaluated success", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected();
+  for (const phase of ["grading", "cleanup"] as const) {
+    const source = new AbortController(), fleet = fakeFleet(LIFTS, () => phase === "cleanup" ? { cleanup: () => { throw new Error("cleanup EIO"); } } : {});
+    const grade = (req: Parameters<typeof fleet.grade>[0]) => { if (phase === "grading") source.abort();return fleet.grade(req); };
+    const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+      grade, argv: CONFIRM, idle: IDLE, log: fleet.log,
+      control: { finishByMs: Date.now() + 10000, shutdownReserveMs: 100, signal: source.signal } });
+    assert.equal(run.state, "cancelled");assert.equal(fleet.requests.length, 1);
+    assert.ok(run.state === "cancelled" && run.capacityReleaseAllowed === false);
+  }
+});
+
 test("a skill eval passes a draft that lifts the with-skill pass rate, logs every attempt and the result, and cleans up every head", async () => {
   const { runSkillEval, SKILL_EVAL_STEPS } = await skillEval();
   const selection = await selected();
