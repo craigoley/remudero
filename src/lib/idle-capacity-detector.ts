@@ -1,4 +1,9 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fixedClock } from "./clock.js";
+import { writeAtomic } from "./fs-race-safe.js";
+import { evaluateFleetFlowDetectors, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "./ledger-union.js";
 import { IDLE_LANE_SUMMARY_WINDOW_MS } from "./idle-lane-accounting.js";
 import type {
   FleetFlowDetector,
@@ -43,6 +48,7 @@ interface Interval {
   slots: number;
   dispatchable: number;
   startMs: number;
+  sinceMs: number;
   endMs: number;
 }
 
@@ -55,13 +61,26 @@ function holdOf(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+function changesOf(rows: readonly FleetFlowRow[], nowMs: number): FleetFlowRow[] {
+  const changes = rows.filter((r) => r.step === "lane.idle_changed" && Number.isFinite(rowMs(r)) && rowMs(r) <= nowMs)
+    .sort((a, b) => rowMs(a) - rowMs(b));
+  let previous: string | undefined;
+  let sinceMs = 0;
+  return changes.map((row) => {
+    const hold = holdOf(row.hold);
+    const key = JSON.stringify([row.cause, reasonOf(hold, String(row.cause)), setterOf(hold)]);
+    if (key !== previous) {
+      sinceMs = typeof row.idle_since_ms === "number" && Number.isFinite(row.idle_since_ms)
+        ? Math.min(row.idle_since_ms, rowMs(row)) : rowMs(row);
+    }
+    previous = key;
+    return { ...row, idle_since_ms: sinceMs };
+  });
+}
+
 /** Each `lane.idle_changed` row holds until the next one; the last holds until `nowMs`. A row without a time is skipped. */
 function intervalsOf(rows: readonly FleetFlowRow[], nowMs: number, fromMs: number): Interval[] {
-  const changes = rows
-    .filter((row) => row.step === "lane.idle_changed")
-    .map((row) => ({ row, at: rowMs(row) }))
-    .filter((c) => Number.isFinite(c.at) && c.at <= nowMs)
-    .sort((a, b) => a.at - b.at);
+  const changes = changesOf(rows, nowMs).map((row) => ({ row, at: rowMs(row) }));
   const out: Interval[] = [];
   changes.forEach(({ row }, i) => {
     const startMs = Math.max(changes[i]!.at, fromMs);
@@ -69,7 +88,7 @@ function intervalsOf(rows: readonly FleetFlowRow[], nowMs: number, fromMs: numbe
     const slots = typeof row.idle_slots === "number" ? row.idle_slots : 0;
     const dispatchable = typeof row.dispatchable === "number" ? row.dispatchable : 0;
     if (typeof row.cause !== "string" || slots <= 0 || dispatchable <= 0 || endMs <= startMs) return;
-    out.push({ cause: row.cause, hold: holdOf(row.hold), slots, dispatchable, startMs, endMs });
+    out.push({ cause: row.cause, hold: holdOf(row.hold), slots, dispatchable, startMs, sinceMs: Number(row.idle_since_ms), endMs });
   });
   return out;
 }
@@ -109,13 +128,13 @@ function findingsOf(
 ): FleetFlowFinding[] {
   const out: FleetFlowFinding[] = [];
   for (const g of groups) {
-    const subject = `instance=${token(instance)} hold=${token(g.reason)} setter=${token(g.setter)}`;
+    const subject = `instance=${token(instance)} hold=${token(g.reason)} setter=${token(g.setter)} since=${fixedClock(g.sinceMs).iso()}`;
     const name = `idle-capacity:${g.cause}`;
     const measured = Math.round(g.slotMinutes * 100) / 100;
     const message = `since=${fixedClock(g.sinceMs).iso()} slot_minutes=${measured} dispatchable=${g.dispatchable} ` +
       `cause=${g.cause} reason=${JSON.stringify(g.reason)} — idle lane slots held by a named hold beyond the cause's own history`;
     const base = { name, subject, measured, bound: undefined, message };
-    // The cause's own population always learns; it judges once it has history.
+    // The cause's own population judges once it has history.
     out.push({ ...base, population: g.cause });
     // No history of its own yet: judged against the all-cause idle population instead of passing free.
     if (!hasOwnHistory(history, g.cause, policy)) out.push({ ...base, population: ALL_CAUSE_IDLE_POPULATION });
@@ -145,6 +164,7 @@ export function idleCapacityDetector(instance = "unknown"): FleetFlowDetector {
       // The short window confirms the RATE: its slot-minutes scaled to the long window, so both compare to one bound.
       const scale = policy.longMs / windowMs;
       const source = isShort ? lastLong!.rows : rows;
+      if (isShort) lastLong = undefined;
       const named = source.find((r) => typeof r.instance === "string")?.instance;
       const where = typeof named === "string" ? named : instance;
 
@@ -152,33 +172,98 @@ export function idleCapacityDetector(instance = "unknown"): FleetFlowDetector {
       for (const iv of intervalsOf(source, nowMs, nowMs - windowMs)) {
         const reason = reasonOf(iv.hold, iv.cause);
         const setter = setterOf(iv.hold);
-        const key = JSON.stringify([iv.cause, reason, setter]);
-        const group = groups.get(key) ?? { cause: iv.cause, reason, setter, slotMinutes: 0, sinceMs: iv.startMs, dispatchable: 0 };
+        const key = JSON.stringify([iv.cause, reason, setter, iv.sinceMs]);
+        const group = groups.get(key) ?? { cause: iv.cause, reason, setter, slotMinutes: 0, sinceMs: iv.sinceMs, dispatchable: 0 };
         group.slotMinutes += ((iv.endMs - iv.startMs) / MS_PER_MINUTE) * iv.slots * scale;
-        group.sinceMs = Math.min(group.sinceMs, iv.startMs);
+        group.sinceMs = Math.min(group.sinceMs, iv.sinceMs);
         group.dispatchable = iv.dispatchable;
         groups.set(key, group);
-      }
-      // A window the daemon just closed: its per-cause slot-minutes are the same population, and a hot one names
-      // its hold. A hold the live rows already cover is not counted twice.
-      for (const row of rows) {
-        const endMs = typeof row.window_end_ms === "number" ? row.window_end_ms : rowMs(row);
-        if (row.step !== "lane.idle_summary" || !Number.isFinite(endMs) || endMs <= nowMs - policy.longMs / 12 || endMs > nowMs) continue;
-        const holds = holdOf(row.holds);
-        for (const [cause, minutes] of Object.entries(holdOf(row.slot_minutes_by_cause) ?? {})) {
-          if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) continue;
-          const hold = holdOf(holds?.[cause]);
-          const reason = reasonOf(hold, cause);
-          const setter = setterOf(hold);
-          const key = JSON.stringify([cause, reason, setter]);
-          if (groups.has(key)) continue;
-          groups.set(key, {
-            cause, reason, setter, slotMinutes: minutes, dispatchable: 0,
-            sinceMs: typeof row.window_start_ms === "number" ? row.window_start_ms : endMs,
-          });
-        }
       }
       return findingsOf(groups.values(), where, history, policy);
     },
   };
+}
+
+interface IdleMemory {
+  history: FleetFlowHistory;
+  emitted: { name: string; subject: string; ts: number }[];
+  summaryEndMs?: number;
+  lastChange?: FleetFlowRow;
+}
+
+const idleReaders = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+
+/** W1-T8238: use completed summary windows as history; polling a live hold must never teach its own bound. */
+export async function evaluateIdleCapacityDetectors(input: FleetFlowInput) {
+  if (!input.detectors.some((d) => d.id === "idle-capacity")) return evaluateFleetFlowDetectors(input);
+  const policy = IDLE_CAPACITY_POLICY;
+  const since = input.nowMs - policy.longMs;
+  let rows: readonly FleetFlowRow[];
+  if (input.readRows) rows = await input.readRows(input.nowMs - policy.longMs * policy.maxSamples, input.nowMs);
+  else {
+    const inputs = [...new Set(input.detectors.flatMap((d) => [...d.inputs]))];
+    const key = JSON.stringify([input.stateDir, inputs]);
+    let memo = idleReaders.get(key);
+    if (!memo) {
+      const matches = (step: unknown) => typeof step === "string" && inputs.some((s) =>
+        s.endsWith("*") ? step.startsWith(s.slice(0, -1)) :
+          s.startsWith("*") ? step.endsWith(s.slice(1)) : step === s);
+      const literals = inputs.map((s) => s.replace(/^\*|\*$/g, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const pattern = new RegExp(`"step"\\s*:\\s*"[^"]*(?:${literals.join("|")})[^"]*"`);
+      memo = createLedgerRotationMemo((records) => records.filter((r) => matches(r.step)), { pattern });
+      idleReaders.set(key, memo);
+    }
+    const result = await readLedgerUnionRecordsMemoized(input.stateDir, memo, {
+      since: fixedClock(input.nowMs - policy.longMs * policy.maxSamples).iso(),
+      rotationWindowMs: policy.longMs * policy.maxSamples,
+      step: inputs.every((s) => !s.includes("*")) ? inputs : undefined,
+      refuseIncomplete: true,
+    });
+    if (!result.ok) throw new Error(`Idle-capacity ledger unreadable: ${result.unread.join(", ")}`);
+    rows = result.rows;
+  }
+  const path = join(input.stateDir, "fleet-flow-detectors.json");
+  const store = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { detectors: {} };
+  if (!store || !store.detectors || typeof store.detectors !== "object" || Array.isArray(store.detectors)) {
+    throw new Error(`Invalid fleet-flow history: ${path}`);
+  }
+  const memory: IdleMemory = store.detectors["idle-capacity"] ?? { history: [], emitted: [] };
+  const history = [...memory.history];
+  let summaryEndMs = memory.summaryEndMs ?? -Infinity;
+  const summaries = rows.filter((r) => r.step === "lane.idle_summary")
+    .map((row) => ({ row, end: typeof row.window_end_ms === "number" ? row.window_end_ms : rowMs(row) }))
+    .filter((s) => Number.isFinite(s.end) && s.end <= since && s.end > summaryEndMs)
+    .sort((a, b) => a.end - b.end);
+  for (const { row, end } of summaries) {
+    if (end <= summaryEndMs) continue;
+    const values = holdOf(row.slot_minutes_by_cause);
+    if (!values) continue;
+    const entries = Object.entries(values);
+    if (entries.length === 0 || entries.some(([, measured]) =>
+      typeof measured !== "number" || !Number.isFinite(measured) || measured < 0)) continue;
+    let total = 0;
+    for (const [population, value] of entries) {
+      const measured = value as number;
+      total += measured;
+      if (measured > 0) history.push({ population, measured, ts: end });
+    }
+    history.push({ population: ALL_CAUSE_IDLE_POPULATION, measured: total, ts: end });
+    summaryEndMs = end;
+  }
+  const learned = history.slice(-policy.maxSamples);
+  const changes = changesOf([...(memory.lastChange ? [memory.lastChange] : []), ...rows], input.nowMs);
+  const lastChange = changes.at(-1);
+  const carry = changes.filter((r) => rowMs(r) <= since).at(-1);
+  const source = [...rows.filter((r) => r.step !== "lane.idle_changed"), ...changes];
+  if (carry) source.push({ ...carry, at_ms: rowMs(carry), ts: fixedClock(since + 1).iso() });
+  store.detectors["idle-capacity"] = { ...memory, history: learned };
+  writeAtomic(path, JSON.stringify(store) + "\n");
+  const events = await evaluateFleetFlowDetectors({ ...input, readRows: () => source });
+  const next = JSON.parse(readFileSync(path, "utf8"));
+  next.detectors["idle-capacity"] = {
+    ...next.detectors["idle-capacity"], history: learned,
+    summaryEndMs: Number.isFinite(summaryEndMs) ? summaryEndMs : undefined, lastChange,
+  };
+  writeAtomic(path, JSON.stringify(next) + "\n");
+  return events;
 }

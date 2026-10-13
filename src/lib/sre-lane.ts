@@ -7,8 +7,8 @@ import { instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
-import { evaluateFleetFlowDetectors, type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
-import { idleCapacityDetector } from "./idle-capacity-detector.js";
+import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
@@ -315,7 +315,7 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
-  const flowRows = await evaluateFleetFlowDetectors({
+  const flowRows = await evaluateIdleCapacityDetectors({
     stateDir: deps.stateDir, nowMs: now, detectors: deps.detectors ?? SRE_LANE_DETECTORS,
     readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent,
   });
