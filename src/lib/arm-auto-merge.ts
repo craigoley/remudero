@@ -422,7 +422,7 @@ export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: stri
  *  shifts, and so the argv and the refusal are unit-testable without a live pull request. */
 export function mergeDirectViaRest(
   prUrl: string,
-  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe"; timeout?: number; maxBuffer?: number; killSignal?: NodeJS.Signals }) => unknown = execFileSync,
   securityRead?: (path: string) => unknown,
   expectedHead?: string,
 ): void {
@@ -431,7 +431,7 @@ export function mergeDirectViaRest(
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
   const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", ["api", path],
-    { encoding: "utf8", stdio: "pipe" })))), expectedHead);
+    { encoding: "utf8", stdio: "pipe", timeout: 15_000, maxBuffer: 2 << 20, killSignal: "SIGKILL" })))), expectedHead);
   exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
 }
 
