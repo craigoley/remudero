@@ -118,6 +118,7 @@ jobs:
       - name: Admit setup only for a shard with work
         id: admission
         run: |
+          echo "RMD_JOB_STARTED_MS=$(date +%s%3N)" >> "${GITHUB_ENV:-/dev/null}"
           : > admission-files.txt
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF}" ]; then
             if git fetch --no-tags origin "${GITHUB_BASE_REF}" && git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > admission-files.txt; then
@@ -492,8 +493,6 @@ jobs:
           mkdir -p "$FLAKE_RETRY_DIR"
           grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log" || : > "$FLAKE_RETRY_DIR/shard-${{ matrix.shard }}.log"
           exit "$CODE"
-      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
-        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Workflow guard mutation (W1-T3220 — a ci.yml skip guard that no test can distinguish turns a required check into a green no-op)
         run: |
           # NO EARLY `exit 0` IN THIS STEP, DELIBERATELY. The check below enumerates skip-shaped
@@ -502,14 +501,16 @@ jobs:
           # the coverage check. An if/else costs one line and enumerates as nothing.
           #
           # SHARD 1 ONLY, AND ONLY WHEN THE WORKFLOW ITSELF CHANGED. The guard population cannot
-          # move unless ci.yml does, and a full pass is ~4 minutes against ~1 minute with the
-          # baseline in place (MEASURED 2026-09-08, 14 guards over 35 ci.yml-reading suites), so
+          # move unless ci.yml does, and a full pass is ~14 minutes (shard 1 of #10400 and #10522 took
+          # 15.3 min, 2026-10-09/10; 43 guards over 100 ci.yml-reading suites at 2026-10-13), so
           # running it four times on every PR would buy nothing at four times the cost.
           if [ "${{ matrix.shard }}" = "1" ] && grep -qxF ".github/workflows/ci.yml" changed-files.txt; then
             node scripts/workflow-guard-mutation-ratchet.mjs
           else
             echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
           fi
+      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
+        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
