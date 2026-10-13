@@ -1,0 +1,42 @@
+id: fb-1791908319669-d9d257
+ts: 2026-10-13T16:18:39.669Z
+raw: >-
+  MAKE FLEET-OWNERSHIP DOCTRINE MECHANICALLY VISIBLE (observed 2026-10-13 at
+  a28c3d23a).
+
+
+  The rule in doctrine/plan-and-task-hygiene/leave-red-prs-to-the-fix-lane.md
+  says to leave a fleet-owned PR alone while a fix round is due or in flight.
+  CLAUDE.md states that a rule needing a gate gets a filed task. The hand-route
+  workflow can currently ignore the prose without a refusal at the write
+  boundary.
+
+
+  Evidence: PR #11225 amended W1-T8921's plan record while PR #11201's own fleet
+  fix round (277b273e4 at 02:49Z on 2026-10-13) was about to run. PR #11232
+  corrected the false record. This entry preserves that race evidence; it does
+  not amend either task or PR.
+
+
+  Ask governed triage to choose a mechanical refusal or warning for a hand-route
+  push or plan amendment touching a task or PR with a live
+  refs/rmd-dispatch/<id> claim or a recent fleet checkpoint. Define how to
+  identify the touched task, the ownership evidence, the warning/refusal
+  boundary, and the legitimate exhausted or escalated handoff. Leave contested
+  claims intact and do not disable fleet auto-merge.
+
+
+  Falsifier: a fixture with a live fleet owner exposes the conflict before a
+  hand-route write, an exhausted or explicitly handed-off lane remains available
+  to its authorized owner, unreadable evidence is reported distinctly from
+  absence, and a recent checkpoint does not permanently lock finished work.
+  Design and filing only; no enforcement is implemented in this PR.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

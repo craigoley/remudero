@@ -151,6 +151,16 @@ export function rotationStampIso(name: string): string | undefined {
   return m ? `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z` : undefined;
 }
 
+/** Exclusive cursor that keeps the first rotation cut at or after a row's earliest possible time. */
+export function rotationBeforeTime(names: readonly string[], timestamp: string): string {
+  const bound = Date.parse(timestamp);
+  if (!Number.isFinite(bound)) throw new Error(`invalid ledger rotation bound: ${timestamp}`);
+  return names.filter(name => {
+    const stamp = rotationStampIso(name);
+    return stamp !== undefined && Date.parse(stamp) < bound;
+  }).sort().at(-1) ?? "";
+}
+
 const MAX_PATTERN_LENGTH = 200;
 
 function sanitizeRegExp(pattern: string): string {
@@ -222,11 +232,13 @@ function readsAsValidMetadata(path: string, valid: (raw: unknown) => boolean, re
 function listedLedgerFiles(
   stateDir: string,
   fsDeps: Pick<LedgerGrepFsDeps, "readdirSync"> & Partial<Pick<LedgerGrepFsDeps, "readFileSync">>,
+  onUnreadDirectory?: (path: string, error: unknown) => void,
 ): { rotations: LedgerCorpusEntry[]; unclassified: string[]; auxiliary: LedgerAuxiliaryFile[] } {
   let names: string[];
   try {
     names = fsDeps.readdirSync(stateDir);
-  } catch {
+  } catch (error) {
+    onUnreadDirectory?.(stateDir, error);
     // deliberate: an absent or unreadable state directory is an empty corpus for best-effort readers.
     names = [];
   }
@@ -366,6 +378,8 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   onUnreadArchive?: (path: string) => void;
   /** A live read failure is not an empty corpus to an audited projection. Ordinary readers may omit this. */
   onUnreadLive?: (path: string) => void;
+  /** An unlisted directory cannot prove absence; a strict caller may rethrow the read error. */
+  onUnreadDirectory?: (path: string, error: unknown) => void;
   /** Metadata only: never pass the offending NDJSON text to an audit or public projection. */
   onMalformedRow?: (finding: LedgerMalformedRowFinding) => void;
   /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
@@ -479,7 +493,7 @@ export async function* openLedgerUnion(
   if (opts.dedupe === false && opts.dedupeWindowPerStep !== undefined) {
     throw new TypeError("openLedgerUnion: dedupe=false and dedupeWindowPerStep are contradictory");
   }
-  const { rotations } = listedLedgerFiles(stateDir, io);
+  const { rotations } = listedLedgerFiles(stateDir, io, opts.onUnreadDirectory);
   const livePath = ledgerLivePath(stateDir);
   const resumedRotations = opts.afterRotation === undefined
     ? rotations
