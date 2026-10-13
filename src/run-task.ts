@@ -3365,7 +3365,7 @@ export function buildEscalationTriageRuntime(
               { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
           const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
             reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
-          if (!result?.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
+          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
           return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
         },
         rekick_once: (e) => {

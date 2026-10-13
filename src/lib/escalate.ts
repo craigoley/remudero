@@ -1503,7 +1503,7 @@ function* triageRoute(
   };
   if (!execute) return deliverBecause(`no executor wired for ${action}`);
   if (cfg?.asyncExecutors && !allowAsyncJudge) return deliverBecause("action awaits the async sweep driver");
-  if (!cfg?.pass || !takeAutoResolve(cfg.pass)) return deliverBecause("auto-resolve cap for this pass is unavailable or spent");
+  if (cfg?.pass === undefined || !takeAutoResolve(cfg.pass)) return deliverBecause("auto-resolve cap for this pass is unavailable or spent");
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId, task_id: e.taskId, step: "escalation.auto_resolve_attempted",
     class: e.class, triage_action: action, head_sha: e.headSha, contract_revision: e.contractRevision,
@@ -1649,7 +1649,7 @@ export async function triageExistingEscalation(
     run_id: deps.runId, task_id: e.taskId, step: route.step, issue_url: url, ...route.extra,
   });
   const pending = route.pending;
-  if (!pending?.cfg.observe || !deps.issues.closeWithComment) return;
+  if (pending === undefined || pending.cfg.observe === undefined || !deps.issues.closeWithComment) return;
   const observed = await pending.cfg.observe(e, pending.action, pending.effect);
   if (!observed) return;
   await deps.issues.closeWithComment(url, `Action effect observed: ${observed}. Reopen to undo.`);

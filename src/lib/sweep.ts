@@ -21017,6 +21017,7 @@ export async function runStaleEscalationRejudge(
     try {
       evidence = deps.triage?.evidence?.(c.escalation) ?? {};
     } catch (err) {
+      // not erased: the unreadable evidence becomes a deliver verdict naming this error just below.
       evidenceError = String(err);
     }
     const first = triageEscalation(c.escalation, evidence);
