@@ -18,8 +18,24 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11344
+summary:
+  headline: CI-judge lane is missing cost data on 81% of worker calls
+  what_happened: Only 7 of 37 worker calls in the last 7 days recorded the cost
+    field, at 18.9% against a 90% floor. The gap has persisted and no baseline
+    explains it. This follow-up does not block any PR.
+  decision: Restore the cost field at the ci-judge ledger write site, or record a
+    reason this lane legitimately lacks it.
+  options:
+    - label: Restore the cost field
+      consequence: The ci-judge lane writes cost again, and coverage should recover
+        toward the 90% floor.
+    - label: Record a legitimate exemption
+      consequence: The lane is documented as not needing cost, and this gap entry
+        stops being flagged.
+    - label: Leave the gap open for now
+      consequence: The gardener keeps updating this entry in place, and the chronic
+        gap stays visible.
 expansion: null
 submission_key: null
 thread_id: null
