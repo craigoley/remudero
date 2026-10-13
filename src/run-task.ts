@@ -56486,7 +56486,7 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
     log: (step, extra = {}) => {
       const subject = (cmd === "approve" || cmd === "reframe") && rest[0] !== undefined ? rest[0] : "CLI";
       const row = {
-        run_id: `CLI-${Date.now()}`, task_id: subject, step, verb: cmd ?? "(none)", ...extra,
+        run_id: `CLI-${systemClock.now()}`, task_id: subject, step, verb: cmd ?? "(none)", ...extra,
         ...(extra.reason === "off-main" ? { detached: warned.includes("DETACHED HEAD") } : {}),
       };
       try {
