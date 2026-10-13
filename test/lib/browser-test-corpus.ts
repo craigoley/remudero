@@ -9,10 +9,11 @@ export type TestSourceRead = (path: string) => string;
 const SELF = "test/serve-browser-teardown.test.ts";
 
 function defaultTestCorpus(root: string): string {
-  const paths = execFileSync("grep", ["-rl", "-F", "--include=*.test.ts", "--", "chromium.launch(", "test"], {
+  // Git's index is the corpus boundary; transient fixture directories are not test sources.
+  // -z preserves spaces/newlines, and reading each tracked file below exposes missing bytes.
+  return execFileSync("git", ["ls-files", "-z", "--", "test"], {
     cwd: root, encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024,
   });
-  return paths.trim().split("\n").join("\0") + "\0";
 }
 
 /** Read current bytes, not HEAD blobs; an unavailable selected source cannot disappear as a match. */
