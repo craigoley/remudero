@@ -111,7 +111,10 @@ test("the actual daily CLI retains CI guard decisions in its existing bounded so
   const root = mkdtempSync(join(tmpdir(), "rmd-ci-deferrals-"));
   try {
     const state = join(root, "state"), out = join(root, "out");mkdirSync(state, { mode: 0o700 });
-    const now = Date.now();
+    // #11029: the CLI is a child, and scripts/clock-shift.mjs moves only THIS process's clock, so a row stamped with
+    // Date.now() read as 7 days in the future under the sweep and was dropped. Stamp it by the child's own clock.
+    const now = Number(spawnSync(process.execPath, ["-p", "Date.now()"], { encoding: "utf8" }).stdout);
+    assert.ok(Number.isSafeInteger(now), "the child's clock must be readable");
     const row = receipt({ ts: new Date(now - 1000).toISOString(), sweep_input_as_of: new Date(now - 2000).toISOString() });
     writeFileSync(join(state, "ledger.ndjson"), JSON.stringify(row) + "\n", { mode: 0o600 });
     const env = { ...process.env };
