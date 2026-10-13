@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
 // bindings off `node:fs` are non-configurable, so mocking them throws.
@@ -764,6 +764,7 @@ export interface InboxClassification {
 }
 
 export interface ReadinessContext {
+  clock?: Clock;
   /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into — resolves depends_on ids the
    *  fragment cites that already exist. */
   plan: Plan;
@@ -1117,13 +1118,33 @@ export function filingBlockers(
   return promoteIntroducedPlanOnlyDiagnostics(violations, base, newlyAdded).filter((v) => v.severity === "block");
 }
 
-/**
- * A ratification stamp names the proposal it ratifies and exactly the tasks it files. The stamp is
- * written into MASTER-PLAN.md verbatim, so a model-invented label becomes a permanent record: one
- * draft for proof-debt:W1-T4048 stamped "- P25 (MASTER-PLAN §7/P25) — RATIFIED" (#6791), and one
- * for proof-debt:W1-T3570 merged as "- P44 (…)" (#6789). Checked, not rewritten, because the
- * operator approves the stamp `rmd inbox` shows them.
- */
+/** W1-T8828: the model supplies a summary; the harness owns the stamp's identity, date and task list. */
+export function composeStampLine(
+  proposalId: string,
+  label: string,
+  fragmentIds: readonly string[],
+  clock: Clock = systemClock,
+): string {
+  const summary = (/\(([^()]*)\)/.exec(label)?.[1] ?? label)
+    .replace(/->[^\r\n]*/g, " ")
+    .replaceAll(proposalId, " ")
+    .replace(/\b[A-Za-z][A-Za-z0-9-]*:[A-Za-z0-9#_-]+\b/g, " ")
+    .replace(/\b(?:W\d+-T\d+[A-Za-z0-9-]*|NEW-\d+|P\d+)\b/gi, " ")
+    .replace(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/gi, " ")
+    .replace(/\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/g, " ")
+    .replace(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b/gi, " ")
+    .replace(/\b\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b/gi, " ")
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]m|Z|[+-]\d{2}:?\d{2})?/gi, " ")
+    .replace(/\bratified\b/gi, " ")
+    .replace(/[()\r\n\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,.;:/–—-]+|[\s,.;:/–—-]+$/g, "")
+    .slice(0, 120).trim();
+  const kind = proposalId.includes(":") ? proposalId.split(":")[0] : "proposal";
+  return `- ${proposalId} (${summary || kind}) — RATIFIED ${clock.date().toISOString().slice(0, 10)} -> ${fragmentIds.join(", ")}.`;
+}
+
+/** Guard the harness-composed stamp before the operator approves the line shown in the inbox. */
 export function stampLineViolations(proposalId: string, stampLine: string, fragmentIds: readonly string[]): DraftLintViolation[] {
   const out: DraftLintViolation[] = [];
   if (!stampLine.startsWith(`- ${proposalId} (`)) {
@@ -1313,6 +1334,7 @@ export function classifyProposal(
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
+    draft = { ...draft, stampLine: composeStampLine(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id), ctx.clock) };
     const { unmet, unobservable } = unmetOutsideDeps(ctx.plan, fragment.plan, ctx.isMerged, ctx.depsUnobservable);
     if (unmet.length > 0) {
       reasons.push({ predicate: "deps_merged", detail: `dep-unmet: ${unmet.join(", ")} not merged` });
@@ -1486,7 +1508,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "You are the REMUDERO ARCHITECT drafting a RATIFICATION CANDIDATE for one open plan proposal",
     "(MASTER-PLAN §7/P25). You ride a HIGHER tier than implement workers (G-17). You have NO",
     "Write/Edit/Bash tools — you cannot touch a file or run git. Your job ends when you have",
-    "printed the fragment + stamp below; the harness caches it and never commits it on your say-so.",
+    "printed the fragment + summary below; the harness caches it and never commits it on your say-so.",
     "",
     "=== THE PROPOSAL ===",
     `id: ${proposal.id}`,
@@ -1510,18 +1532,16 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "another proposal drafted in the same window. If a drafted task's depends_on points at ANOTHER",
     "task inside THIS SAME fragment, cite that task's placeholder (e.g. `depends_on: [NEW-1]`) —",
     "never a guessed real id. A depends_on on an EXISTING task already in plan/tasks.yaml above",
-    "stays that task's real W1-T id, unchanged. Use the SAME NEW-<n> placeholders in the stamp",
-    "line's task-id list below; `rmd approve` rewrites every placeholder to its real id together.",
+    "stays that task's real W1-T id, unchanged. The harness derives the stamp's task list from your fragment;",
+    "`rmd approve` rewrites every placeholder to its real id together.",
     "",
     "=== OUTPUT (exactly this shape, nothing else) ===",
     "Print ONE or more new tasks.yaml entries (schema v1 — id/title/repo/depends_on/type/verify/",
     "risk/status/attempts/acceptance/origin/files at minimum) between the two FRAGMENT markers below,",
     // W1-T509-adjacent, W1-T512: an absent or empty `files:` is fail-closed at dispatch — `overlappingPaths` reports
     // it as overlapping every candidate, so it can never batch.
-    "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
-    `exactly this shape: \`- ${proposal.id} (<one-line summary>) — RATIFIED <YYYY-MM-DD> -> <task ids>.\``,
-    `It opens with THIS proposal's id, ${proposal.id}, never another P-number, and its task-id list names`,
-    "every task in your fragment and nothing else, as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    "then STAMP: followed only by the one-line summary of the work, without dates, times or ids.",
+    "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
@@ -1544,7 +1564,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== EXAMPLE FRAGMENT START (illustrative only) ===",
     inboxDraftExampleFragmentYaml(),
     "=== EXAMPLE FRAGMENT END ===",
-    "STAMP: - EXAMPLE-P (illustrative example only) — RATIFIED 2026-01-01 -> NEW-1.",
+    "STAMP: illustrative example only",
     "",
     "Now draft YOUR OWN task(s) for THIS proposal, in that same shape, between the two REAL",
     "markers below:",
@@ -1552,7 +1572,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== FRAGMENT START ===",
     "<the new tasks.yaml entries as YAML — a list of task mappings>",
     "=== FRAGMENT END ===",
-    "STAMP: <the one-line ratification stamp>",
+    "STAMP: <the one-line summary>",
     "",
     `(run: ${runId})`,
   ].join("\n");
@@ -1561,6 +1581,12 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
 export interface ParsedDraft {
   fragmentYaml: string;
   stampLine: string;
+}
+
+function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
+  const fragment = safeParseFragment(draft.fragmentYaml, proposalId);
+  const ids = "error" in fragment ? [] : fragment.plan.tasks.map((task) => task.id);
+  return { ...draft, stampLine: composeStampLine(proposalId, draft.stampLine, ids, clock) };
 }
 
 const FRAGMENT_RE = /=== FRAGMENT START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT END ===/g;
@@ -1779,6 +1805,7 @@ export interface DraftSpawnContext {
 }
 
 export interface DraftRungDeps {
+  clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
   escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
@@ -1914,7 +1941,7 @@ export function lintDraftedFragment(
  *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
 export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
   return [
-    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp between the SAME literal markers as before:`,
+    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + one-line summary between the SAME literal markers as before:`,
     "",
     // W1-T4442: a redraft carries no copy of the original draft prompt, so the ONLY place it can
     // see the literal marker text it must reproduce is HERE. Naming "the FRAGMENT/STAMP marker
@@ -1923,7 +1950,8 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
     "=== FRAGMENT START ===",
     "<the corrected tasks.yaml entries as YAML — a list of task mappings>",
     "=== FRAGMENT END ===",
-    "STAMP: <the corrected one-line ratification stamp>",
+    "STAMP: <the corrected one-line summary>",
+    "The harness supplies the proposal id, UTC date and fragment task ids; the summary has no dates, times or ids.",
     "",
     ...relintGuidanceLines(violations),
     "",
@@ -1979,6 +2007,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         });
         parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
+        parsed = composeDraftStamp(proposal.id, parsed, deps.clock);
         violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
@@ -2013,8 +2042,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             });
             const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"));
             if (candidate) {
-              parsed = candidate;
-              violations = lintDraftedFragment(candidate.fragmentYaml, proposal.id, candidate.stampLine);
+              parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
+              violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
             }
           }
         } catch (error) {
