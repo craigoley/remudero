@@ -1,0 +1,66 @@
+- id: W1-T9030
+  title: "A BUILD IS NOT RESUMED FOR A TIP THE HARNESS WROTE — the implement loop judges 'unfinished' only by the tip commit's subject, so on a restored checkpoint the harness's own `chore(checkpoint): merge main into the restored checkpoint` commit makes every finished round look unfinished: 85% of 289 checkpoint stops since 2026-10-12 were that tip, and the 198 continuation rounds they caused cost 1,320 worker-minutes, 47% of all build worker time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the implement loop's resume decision in run-task.ts and the checkpoint helpers it reads
+  band_meaning: span
+  origin: "operator session 2026-10-13 (agree, go): worker-rounds diagnosis, ~/Remudero-notes/worker-rounds-2026-10-13/"
+  plan_refs: [W1-T7096, W1-T8676, W1-T8945, W1-T8927, W1-T8133, W1-T8834]
+  files: [src/run-task.ts, src/lib/unfinished-checkpoint.ts, test/a-build-is-not-resumed-for-a-tip-the-harness-wrote.test.ts, test/a-build-ending-on-a-wip-checkpoint-is-resumed-not-opened.test.ts, test/a-repeated-checkpoint-stop-is-resumed-only-when-the-judge-says-so.test.ts, test/checkpoint-publication-contract.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts]
+  status: queued
+  priority: 0.9 # operator-2026-10-13: 47% of build worker time since 10-12 is continuation rounds the harness's own restore-merge tip caused; each extra round is also a checkpoint yield point
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the Azure host (core ledger union 2026-10-12T00:31Z .. 2026-10-13T10:45Z, 182 core builds,
+    67 tasks; scripts and output in ~/Remudero-notes/worker-rounds-2026-10-13/):
+      - 289 implement.unfinished rows. 246 (85%) record a tip subject the HARNESS wrote, not the worker:
+        `chore(wip): merge main into the restored checkpoint` 134, `chore(checkpoint): merge main into the restored
+        checkpoint` 66, `wip: merge main into the restored checkpoint` 30, `wip: yield at checkpoint` 9, `chore(wip):
+        merge main Remudero-Assignment…` 7. The commit is made by the checkpoint restore (src/run-task.ts, the
+        `commit-tree … checkpointCommitSubject("merge main into the restored checkpoint")` call) before the worker runs.
+      - 198 implement.continued rounds followed those stops: 1,320 worker-minutes, 47% of the 2,804 worker-minutes all
+        builds spent (implement.done + implement.continued). 125 were claude rounds, 73 codex. Every one ended
+        `final_stop_reason: end_turn` / success — the worker was done.
+      - 217 checkpoint judge spawns ruled on these stops; the judge then reads "no recorded progress" ("Both rounds
+        were checkpoint-stops that completed without recording…", "Five consecutive rounds were checkpoint-stops…")
+        because the tip never moves — the worker's edits are uncommitted until the harness commits them.
+      - Worst case W1-T8008-1791773154398: 8 continuation rounds of 6–12 min each on the same
+        `wip: merge main into the restored checkpoint` tip, every round success.
+      - 3 of the 7 failed runs (W1-T8502, W1-T8927, W1-T8238: `worker error at implement.continued: error_codex`)
+        failed inside a continuation round that should not have run, and 41 freshness handoffs happened at a
+        checkpoint boundary these rounds created (W1-T8927 addresses the yield cost, not the extra rounds).
+    THE CAUSE: the loop after the implement worker (`for (;;) { const tipSubject = lastCommitSubject(worktreePath); if
+    (… !isWipSubject(tipSubject) …) break; …`) treats ANY wip/checkpoint-shaped tip as the worker's own checkpoint stop.
+    With the harness owning git (harnessCommitsImplement) the worker never commits, so on a resumed run the tip stays the
+    harness's restore-merge commit for every round, whatever the worker did.
+  design: |
+    1. A ROUND IS JUDGED BY WHAT IT DID. Record the worktree HEAD before each worker round (the first implement spawn and
+       every continuation). When HEAD did not move during the round, the tip subject is NOT evidence of an unfinished
+       stop: the round is finished when its REPORT carries the completion line its contract asks for (`COMMIT_MESSAGE:`
+       when the harness owns git, `PR_URL:` otherwise) — exactly the signal the loop already accepts via
+       parseReport(...).prUrl. Only a checkpoint-shaped tip the round itself created (HEAD moved to a commit whose subject
+       isWipSubject) is a worker checkpoint stop and resumes as today (first stop always, later stops by the judge).
+    2. A HARNESS-AUTHORED COMMIT IS NEVER THE WORKER'S STOP. The restore-merge commit (and any harness checkpoint commit
+       made before the round) is identified by the head recorded at restore / round start, not by its subject text — so
+       W1-T8945's checkpoint-subject changes cannot reopen the hole.
+    3. THE JUDGE SEES THE WORKING TREE. When a genuine worker checkpoint stop does go to the progress judge, its input
+       includes the round's uncommitted diff stat, so uncommitted progress is not read as "no recorded progress".
+    4. MEASURABLE. implement.unfinished gains `tip_author: "worker" | "harness"` and `head_moved: boolean`; a round that
+       is finished by its report on an unmoved harness tip logs `implement.finished_on_harness_tip` instead of
+       implement.unfinished, so the 85% share can be re-measured after deploy.
+  acceptance:
+    - claim: "a round that leaves the harness's restore-merge commit as the tip and reports its completion line is not resumed"
+      proof: 'grep: test("W1-T9030: a round that ends on the harness restore-merge tip with its completion line is not resumed" in test/a-build-is-not-resumed-for-a-tip-the-harness-wrote.test.ts'
+    - claim: "a worker's own checkpoint commit made during the round still resumes, first stop always"
+      proof: 'grep: test("W1-T9030: a checkpoint commit the round itself made still resumes" in test/a-build-is-not-resumed-for-a-tip-the-harness-wrote.test.ts'
+    - claim: "the unfinished row names whether the tip is the worker's or the harness's and whether HEAD moved"
+      proof: 'grep: test("W1-T9030: the unfinished row names the tip author and whether HEAD moved" in test/a-build-is-not-resumed-for-a-tip-the-harness-wrote.test.ts'
+  falsifier: |
+    Keep judging by tip subject alone and the first test fails: a restored-checkpoint fixture whose worker reports
+    `COMMIT_MESSAGE:` and leaves HEAD on the harness's restore-merge commit gets an implement.continued round. Treat
+    every unmoved-HEAD round as finished regardless of the report and the second test fails only if the worker's own
+    checkpoint commit is also ignored — the second test pins that a commit the round made still resumes.
