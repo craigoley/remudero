@@ -174,7 +174,7 @@ export function triageNeedsModel(e: TriageSubject, evidence: TriageEvidence = {}
 
 // ── Policy (plan/policy.yaml `escalationTriage:`) ──────────────────────────────────────────
 
-/** At most this many auto-resolves per pass (design guardrail). */
+/** BACKSTOP: at most this many auto-resolves per pass — the design guardrail; the parser clamps any policy value to it. */
 export const DEFAULT_MAX_AUTO_RESOLVES_PER_PASS = 5;
 
 export interface EscalationTriagePolicy {

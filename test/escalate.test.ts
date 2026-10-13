@@ -80,7 +80,8 @@ test("escalate opens a needs-human labeled issue and logs the ledger line", () =
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
   assert.match(issues.calls[0].title, /^\[BLOCKED\] W1-TX: two strikes exhausted$/);
 
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   assert.equal(lines.length, 1);
   assert.equal(lines[0].step, "escalation.issue_opened");
   assert.equal(lines[0].task_id, "W1-TX");
@@ -1689,7 +1690,8 @@ test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue wi
   assert.equal(comments[0].url, url);
   assert.equal(comments[0].body, "this class of storm always self-resolves");
 
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   // W1-T3166 added a SECOND row ahead of this one: `escalation.judged`, written on BOTH arms so
   // "has the judge ever run, and what did it decide" is answerable with one grep. The demotion row
   // below is unchanged; only its index moved.
@@ -1713,7 +1715,8 @@ test("escalateWithJudge: a deliver verdict opens a needs-human-labelled issue ex
 
   assert.equal(issues.calls.length, 1);
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   // W1-T3166: the judged row precedes the delivery row. THE DELIVER ARM IS LEDGERED TOO — a judge
   // that only leaves a trace when it demotes cannot be calibrated against what it let through.
   assert.equal(lines[0].step, "escalation.judged");
