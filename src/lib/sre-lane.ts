@@ -8,6 +8,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { evaluateFleetFlowDetectors, type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { idleCapacityDetector } from "./idle-capacity-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
@@ -18,7 +19,7 @@ import { readLedgerLines } from "./status.js";
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
