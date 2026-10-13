@@ -163,4 +163,6 @@ a SHA-256 digest per entry. A source hash names what a bundle was built from,
 not what the file now holds, so `childEntryIsCurrent` also checks the entry's
 name and source, the `<name>.mjs` filename, a canonical regular-file path,
 size and digest. A digest is integrity, not authenticity: the store is
-instance-owned. The `run-task.ts` check-proof call sites stay on tsx.
+instance-owned. The remaining `checkProofChildArgv` call sites stay on tsx:
+`src/run-task.ts` (two) and `src/lib/pr-open.ts`. Switching them is the open
+part of the first follow-up above.
