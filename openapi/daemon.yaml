@@ -8101,6 +8101,13 @@ components:
       required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, keys, requestsPerDay, requiredSamples, ready, reason]
       properties:
         view: {type: string}
+        qualificationGeneration:
+          type: string
+          maxLength: 160
+          description: "The current producer contract these counters qualify; older generations remain archived, not counted."
+        skipped: {type: integer, minimum: 0, description: "Samples refused because either matched producer or source was not ready."}
+        lastSkippedMs: {type: integer, minimum: 0}
+        lastSkipReason: {type: string}
         requests: {type: integer}
         firstRequestMs: {type: [integer, "null"]}
         samples: {type: integer}

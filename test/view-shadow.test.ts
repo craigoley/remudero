@@ -32,9 +32,11 @@ import {
   type ShadowEvidence,
   type ShadowLatest,
   type ShadowRequest,
+  type ViewShadowState,
 } from "../src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "../src/lib/views.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
+import { SPEC, violations } from "./helpers/openapi-strict.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -352,6 +354,86 @@ test("synthetic samples with no request traffic make readiness a day of sampling
   const persisted = shadowReadiness("now", { ...r, streakKeys: undefined }, clock.now());
   assert.equal(persisted.keys, 1, "a state stored before keys were counted owes one key's day");
   assert.equal("streakKeys" in persisted, false, "the key list stays in the store");
+});
+
+test("current generation shadow qualification preserves old history and requires its own matched day", (t) => {
+  const clock = steppedClock(), stateDir = scratch(t, "shadow-generation");
+  const db = openProjectorReadModel(stateDir, "core", clock);
+  closesFirst(t, "db closed", () => db.close());
+  const lease = acquireLease(db, { clock });
+  assert.ok(lease.ok);
+  const path = viewShadowPath(stateDir), generation = "operator-agent-records-v1", qualifications = { agent: generation };
+  const old: ViewShadowState = { requests: 7, firstRequestMs: T0 - 2 * DAY, samples: 3000, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 3000, streakSinceMs: T0 - 2 * DAY, lastRealMs: null, streakKeys: ["oldShape"] };
+  assert.equal(shadowReadiness("agent", old, T0).ready, true, "positive old-generation control is genuinely qualified");
+  writeFileSync(path, JSON.stringify({ agent: old }));
+  const make = () => createViewShadow({ clock, log: () => {}, evidence: () => NONE, qualifications, store: fileShadowStore(path, db, lease.lease) });
+  let shadow = make();
+  assert.deepEqual([shadow.readiness()[0]!.samples, shadow.readiness()[0]!.ready], [0, false], "boot cannot inherit old qualification");
+  const data = { recordVersion: generation, records: [] }, body = { data, asOf: null };
+  const sample = () => shadow.compare({ view: "agent", key: "newShape", requests: 0, legacy: { data, asOfMs: clock.now(), qualificationGeneration: generation }, body, qualificationGeneration: generation });
+  assert.deepEqual(sample().diffs, [], "equal current engine answers are not a fabricated diff");
+  let r = shadow.readiness()[0]!;
+  assert.deepEqual([r.samples, r.streakSamples, r.keys, r.ready, r.requiredSamples], [1, 1, 1, false, 1440]);
+  assert.equal(r.qualificationGeneration, generation);
+  for (const [legacyGeneration, bodyGeneration] of [[undefined, generation], [generation, undefined], ["old", generation], [generation, "old"]]) {
+    const refused = shadow.compare({ view: "agent", key: "newShape", requests: 0, legacy: { data, asOfMs: clock.now(), qualificationGeneration: legacyGeneration }, body, qualificationGeneration: bodyGeneration });
+    assert.match(refused.skipped!, /requires both matched producers/);
+  }
+  assert.equal(shadow.readiness()[0]!.samples, 1, "unknown and mixed-generation pairs never accrue samples");
+  assert.equal(shadow.readiness()[0]!.diffs.real, 0, "refusal does not simulate a real diff");
+  assert.deepEqual(violations(shadow.readiness()[0], SPEC.components.schemas.ViewShadowReadiness!), [], "actual mismatch diagnostics fit the declared schema");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).agent, old, "old qualified history is immutable");
+  shadow = make();
+  assert.equal(shadow.readiness()[0]!.samples, 1, "same-generation restart resumes its own receipt");
+  for (let i = 1; i < 1440; i++) { clock.advance(VIEW_SHADOW_SAMPLE_MS); sample(); }
+  assert.equal(shadow.readiness()[0]!.ready, false, "1440 samples still need their full elapsed day");
+  clock.advance(VIEW_SHADOW_SAMPLE_MS);
+  assert.equal(make().readiness()[0]!.ready, true, "same-generation persisted samples qualify at the unchanged native floor");
+  shadow = make();
+  shadow.compare({ view: "agent", key: "newShape", requests: 0, legacy: { data, asOfMs: clock.now() }, body });
+  assert.equal(shadow.readiness()[0]!.ready, false, "a mismatched producer refuses even an already-qualified generation");
+  assert.equal(shadow.readiness()[0]!.streakSamples, 1440, "refusal does not reset or manufacture differences");
+  sample();
+  assert.equal(shadow.readiness()[0]!.ready, true, "matched producer resumes its same-generation evidence");
+  const next = storedShadowReadiness(path, db, clock.now(), { agent: "next-contract" })[0]!;
+  assert.deepEqual([next.samples, next.ready], [0, false], "another contract cannot inherit this receipt either");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).agent, old);
+});
+
+test("worker generation binding qualifies first status build and preserves captured and peer provenance", (t) => {
+  const stateDir = scratch(t, "shadow-worker-generation"), clock = steppedClock();
+  writeFileSync(join(stateDir, "ledger.ndjson"), "");
+  switchViewsOn(stateDir, ["qualified"], "shadow");
+  const old: ViewShadowState = { requests: 7, firstRequestMs: T0 - 2 * DAY, samples: 3000, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 3000, streakSinceMs: T0 - 2 * DAY, lastRealMs: null, streakKeys: ["oldShape"] };
+  const path = viewShadowPath(stateDir), generation = "record-contract-v1";
+  writeFileSync(path, JSON.stringify({ qualified: old }));
+  const messages: ReadModelWorkerMessage[] = [];
+  const view: ReadModelView = { name: "qualified", version: 1, qualificationGeneration: generation, materialize: () => [{ key: "", data: { recordVersion: generation }, sources: [] }], legacy: (_key, now, data) => ({ data, asOfMs: now }) };
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], clock, oracle: "off", views: [view, readModelStatusView], post: (msg) => void messages.push(msg) });
+  closesFirst(t, "ticker released", () => ticker.release());
+  const status = () => messages.flatMap((msg) => msg.type === "body" && msg.entry.view === "read-model" ? [(msg.entry.body.data as { shadow: Array<{ samples: number; ready: boolean; qualificationGeneration?: string }> }).shadow[0]!] : []).at(-1)!;
+  ticker.tick();
+  assert.deepEqual([status().samples, status().ready, status().qualificationGeneration], [0, false, generation], "first status build cannot publish the older ready receipt");
+  const request = { view: "qualified", key: "", requests: 0 }, prepared = ticker.prepareShadow(request);
+  assert.equal(prepared?.paired?.qualificationGeneration, generation);
+  assert.equal(prepared?.paired?.legacy.qualificationGeneration, generation);
+  assert.equal(ticker.shadow(prepared!), true);
+  const current = () => Object.values(JSON.parse(readFileSync(path, "utf8")) as Record<string, ViewShadowState>).find((s) => s.qualificationGeneration === generation)!;
+  assert.equal(current().samples, 1);
+  const missing = { ...prepared!, paired: { ...prepared!.paired!, qualificationGeneration: undefined } };
+  ticker.shadow(missing);
+  assert.deepEqual([current().samples, current().skipped], [1, 1], "captured input cannot borrow the newer cached body's identity");
+  const entry = messages.flatMap((msg) => msg.type === "body" && msg.entry.view === "qualified" ? [msg.entry] : []).at(-1)!;
+  ticker.peer({ ...entry, qualificationGeneration: undefined });
+  ticker.shadow(request);
+  assert.deepEqual([current().samples, current().skipped], [1, 2], "an unqualified peer body cannot be relabeled by the current factory");
+  ticker.peer(entry);
+  ticker.shadow(request);
+  assert.equal(current().samples, 2, "matched peer provenance restores genuine sampling");
+  clock.advance(1_000);
+  ticker.tick();
+  assert.deepEqual([status().samples, status().ready, status().qualificationGeneration], [2, false, generation]);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).qualified, old);
 });
 
 test("the sampler passes one request per minute per key and counts the rest", () => {

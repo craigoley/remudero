@@ -41,6 +41,8 @@ import { viewKey, type ViewSource } from "./views.js";
 
 export const AGENT_VIEW_NAME = "agent";
 export const AGENT_VIEW_VERSION = 1;
+/** Qualification belongs to this projection, not earlier agent bodies with the same route version. */
+export const AGENT_QUALIFICATION_GENERATION = "operator-agent-records-v1";
 /** A part's time-dependent states (expiry, staleness) are recomputed at least this often with no new fact. */
 export const AGENT_CLOCK_MS = 60_000;
 
@@ -194,6 +196,7 @@ const PANEL_ROW = /"step":"panel\./;
 export function createAgentView<S extends { instance: string; tickedAt?: number }>(opts: AgentViewOptions<S>): {
   name: string;
   version: number;
+  qualificationGeneration: string;
   snapshotSourced: true;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: AgentViewData; sources: ViewSource[] }>;
@@ -213,6 +216,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   return {
     name: AGENT_VIEW_NAME,
     version: AGENT_VIEW_VERSION,
+    qualificationGeneration: AGENT_QUALIFICATION_GENERATION,
     // A committed analytics snapshot makes the proposals part due at once.
     snapshotSourced: true,
     prepare: ({ instances }, more) => slotsOf(instances).every((slot) => folds.advance(foldSlot(slot), more)),

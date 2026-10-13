@@ -439,7 +439,13 @@ evidence time. GET reads the committed body and its source envelope. Consumers m
 staleness even when a restored detail describes an observation that was fresh when generated.
 
 The additive body needs its own native qualification before runtime adoption. Historical parity counters for
-the old rank-only body are not a qualification receipt for these records. Preserve the existing shadow pairing,
+the old rank-only body are not a qualification receipt for these records. The agent producer declares
+`operator-agent-records-v1` as its qualification generation. Native shadow counters are isolated by this
+identity; older per-view counters and prior generations remain untouched in the same durable shadow store.
+Both matched producers must name the current generation before a sample counts. The worker persists body
+provenance beside the exact ETag in its existing meta table, and restores it without relabeling old bodies.
+Warm-boot `auto` resolution refuses missing or older-generation readiness before the first worker tick.
+The 24-hour duration, per-key cadence and measured-traffic floors are unchanged. Preserve the existing shadow pairing,
 fast comparator ownership, floors, 24-hour horizon and traffic multiplier. This source change authorizes no
 switch promotion, serve restart or console adoption; each requires its separate current-generation receipt.
 

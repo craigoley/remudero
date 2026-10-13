@@ -3381,6 +3381,12 @@ export interface components {
     /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a day of continuous sampling since the last one: at least one sample per minute for every key the streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured traffic is higher (the rule of three). */
     ViewShadowReadiness: {
       view: string;
+      /** The current producer contract these counters qualify; older generations remain archived, not counted. */
+      qualificationGeneration?: string;
+      /** Samples refused because either matched producer or source was not ready. */
+      skipped?: number;
+      lastSkippedMs?: number;
+      lastSkipReason?: string;
       requests: number;
       firstRequestMs: number | null;
       samples: number;
