@@ -168,6 +168,16 @@ test("W1-T9041: a push refused after its shards were written is not refiled", ()
   assert.equal(rows[0].outcome, "refused");
   assert.match(String(rows[0].reason), /preflight refused the approve push/);
   assert.equal(pass.complete, false, "a refused proposal is still open");
+
+  // A refused proposal whose cached draft lints clean is not re-offered: no lint change explains its refusal. Its
+  // judgement is recorded once, so a later lint that dirties it is a change.
+  const clean = fixture({ [PUSH_REFUSED]: { family: "followup", invalidatedAt: SEED, outcome: { outcome: "refused", at: at(339), reason: "push refused" } } });
+  clean.cacheDraft(PUSH_REFUSED);
+  assert.deepEqual(clean.pass(400).reoffered, []);
+  assert.deepEqual(clean.store().proposals[PUSH_REFUSED].outcome?.judged?.checks, []);
+  assert.deepEqual(clean.pass(401).reoffered, []);
+  clean.lintFor.set(PUSH_REFUSED, [sizing("NEW-1 spans three subsystems")]);
+  assert.deepEqual(clean.pass(402).reoffered, [{ proposalId: PUSH_REFUSED, reason: "violations changed" }]);
 });
 
 test("W1-T9041: a not-ready draft a lint change cleared is re-offered", () => {
