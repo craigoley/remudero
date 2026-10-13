@@ -16431,8 +16431,12 @@ export function buildRuleHeadlinesPart(
   enabled: boolean,
   sourcePath: string,
   readFile: (path: string) => string | undefined = readRuleSourceFileOrUndefined,
+  displayPath: string = sourcePath,
 ): string {
   if (!enabled) return "";
+  // `sourcePath` is where the file is READ from (an absolute worktree path at the real call site);
+  // `displayPath` is what the WORKER is told. The worker's cwd is its own worktree, so the
+  // repo-relative name is the one that resolves for it, and no prompt line names a foreign tree.
   const introLine =
     `- CLAUDE.md's rule headlines (progressive disclosure, W1-T2508) — headlines only, no ` +
     `bodies, so you know what exists without paying for what you don't need yet. ` +
@@ -16441,7 +16445,7 @@ export function buildRuleHeadlinesPart(
   if (raw === undefined) {
     const unreadable: RuleHeadline = {
       headline: "CLAUDE.md rule index",
-      body: ` (unavailable — could not read rule source ${sourcePath})`,
+      body: ` (unavailable — could not read rule source ${displayPath})`,
     };
     // Indented without its own bullet, like the index lines below: it continues the cited intro claim. As a
     // bullet it was an uncited claim, and the provenance gate refused every dispatch to a tree with no CLAUDE.md.
@@ -16461,9 +16465,9 @@ export function buildRuleHeadlinesPart(
   const migrated = rules.some((r) => parseRuleBodyPointer(r.body) !== undefined);
   const pointer = migrated
     ? `    Each headline's full body — the measurement that earned it — is a file under ` +
-      `doctrine/ in your own worktree, and ${sourcePath} names the exact path beside every ` +
+      `doctrine/ in your own worktree, and ${displayPath} names the exact path beside every ` +
       `headline. Read one when you are about to apply that rule precisely, or you doubt it.`
-    : `    Read a headline's full body from ${sourcePath} in your own worktree when you need it — ` +
+    : `    Read a headline's full body from ${displayPath} in your own worktree when you need it — ` +
       "this index carries headlines only.";
   return [introLine, ...indexLines, pointer].join("\n");
 }
@@ -19959,7 +19963,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const ruleHeadlinesEnabled = opts.maskRules
       ? false
       : opts.workerRuleHeadlinesEnabled ?? loadDefaultPolicy().values.workerRuleHeadlines.enabled;
-    const ruleHeadlinesPart = buildRuleHeadlinesPart(ruleHeadlinesEnabled, join(worktreePath, "CLAUDE.md"));
+    const ruleHeadlinesPart = buildRuleHeadlinesPart(
+      ruleHeadlinesEnabled,
+      join(worktreePath, "CLAUDE.md"),
+      undefined,
+      "CLAUDE.md",
+    );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
     // matchedLearnings already spends. Empty for every task until an operator approves a skill that
     // declares `applies-to:`, so today this changes no prompt by a single byte.
