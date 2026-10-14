@@ -1,0 +1,27 @@
+- id: W1-T9364
+  title: Add re-query of retro lane after serialization to ensure up-to-date state
+  repo: remudero
+  depends_on:
+    - W1-T9363
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/retro.ts
+  acceptance:
+    - claim: retro lane re-queries ledger after serialization
+      proof: "unit test: retro lane re-query returns latest state"
+  origin: architect
+  rationale: >-
+    From the 2026-09-23 follow-up on https://github.com/craigoley/remudero/pull/6905, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: two retro-sync PRs (this one, RETRO-1790206723101, and the
+    already-merged RETRO-1790205412691) computed mutually-exclusive "current R72" narratives from
+    the same merge-base and only one could land — worth checking whether the retro-dispatch lane
+    should serialize/re-query before starting a synthesis pass, per the racing-retro pattern the
+    ledger itself flags (P69-style poison-PR risk, but for retro-sync content collisions rather
+    than plan-file collisions). — from RETRO-1790206723101 (run DAEMON-1790206008025,
+    https://github.com/craigoley/remudero/pull/6905)
