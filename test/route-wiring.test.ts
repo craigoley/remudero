@@ -289,6 +289,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "POST /v1/provider-auth",
     "W1-T3960: server-owned provider-auth session lifecycle; projection and request validation are covered in test/provider-auth-sessions.test.ts and test/provider-auth-console.test.ts",
   ],
+  [
+    "POST /v1/automation/triggers/run",
+    "W1-T3956: journals to the daemon ledger through the serve-wired registry; manual-start acceptance and refusals over HTTP are covered in test/automation-trigger-registry.test.ts",
+  ],
+  [
+    "POST /v1/automation/triggers/activation",
+    "W1-T3956: pause/resume of a named trigger over HTTP, including the paused-start refusal, is covered in test/automation-trigger-replay.test.ts",
+  ],
+  [
+    "POST /v1/automation/triggers/replay",
+    "W1-T3956: replay idempotency and its 404/400 refusals over HTTP are covered in test/automation-trigger-replay.test.ts",
+  ],
 ]);
 
 const COVERED: ReadonlySet<string> = new Set([
