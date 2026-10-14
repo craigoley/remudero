@@ -1,0 +1,25 @@
+- id: W1-T9341
+  title: Update PR description to link to cash-actuals documentation
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/cash-actuals.md
+  acceptance:
+    - claim: PR description no longer contains duplicated cash summary and instead links to docs/forensics/cash-actuals.md
+      proof: "unit test: tests/pr_description_links_cash_actuals"
+  origin: architect
+
+  rationale: >-
+    From the 2026-09-17 follow-up on https://github.com/craigoley/remudero/pull/5907, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: `docs/forensics/cash-actuals.md` duplicates a short summary already
+    in the PR body; once this PR merges, consider trimming the PR-description forensics to just
+    point at the doc, so the measured numbers live in one place — out of scope for this CI-green
+    fix. — from PR-5907 (run DAEMON-1789651008429,
+    https://github.com/craigoley/remudero/pull/5907)

@@ -1,0 +1,91 @@
+- id: W1-T9307
+  title: "A DRAFT REPAIR NAMES ONLY CALLERS THE TREE HOLDS — the inbox draft's self-lint repair loop answers a `[call-site]` or `[proof-scope]` violation by inventing a caller file and adding it to `files:` (standing-debt:5's stamp reads \"Added src/app.ts to files to satisfy proof scope\"), because both remedy texts tell a drafter that cannot see the tree to name a caller and add the path"
+  repo: remudero
+  depends_on: [W1-T9062]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # the draft floor (inbox.ts), the shared relint remedy text (relint.ts) and two linter messages every filing lane reads (task-linter.ts)
+  band_meaning: span
+  origin: "operator session 2026-10-13 (clear the inbox; lean into automation): hand review of round-2 inbox redrafts, ~/Remudero-notes/inbox-brief-2026-10-13/apply-log.txt 20:37-20:57Z, redrafts/round3/ and raw-2037/"
+  plan_refs: [W1-T9062, W1-T9039, W1-T310, W1-T3814, W1-T267]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/relint.ts
+    - src/lib/task-linter.ts
+    - test/a-draft-repair-names-only-callers-the-tree-holds.test.ts
+    - test/call-site-rule.test.ts
+    - test/relint-loop.test.ts
+  status: queued
+  priority: 1 # operator-2026-10-13: every reframed draft is read by hand until drafts stop inventing paths
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 (classification 20:37:28Z, raw-2037/targets.txt). The standing-debt:5 redraft is a docs-only
+    recon task, yet it declares files [docs/recon/ownership-assertion-blocker-2026-10.md, src/app.ts] and a criterion
+    `grep: checkOwnership( in src/app.ts`. Neither src/app.ts nor checkOwnership( exists on main, and the harness-composed
+    stamp records the repair verbatim: "Added src/app.ts to files to satisfy proof scope". verify-human:W1-T216's redraft
+    did the same with src/ci-pipeline.ts and `runForgeAttack(` ("The forge attack runner is invoked by the CI pipeline").
+    WHY, READ on origin/main 017fe52a9 (symbols, not lines):
+      - `callSiteViolations` (src/lib/task-linter.ts) treats every declared src path the tree does not hold as a NEW
+        module, so an invented path in a recon task demands a call site. It then accepts as that call site any
+        `grep: <sym>( in src/<x>.ts` whose path is not in its own `created` set, including a path the tree does not
+        hold and the task never declared. A caller that does not exist satisfies the rule.
+      - The `[call-site]` paragraph of `relintGuidanceLines` (src/lib/relint.ts), pasted into every redraft by
+        `inboxDraftRelintPrompt` (src/lib/inbox.ts), says "Add a criterion whose proof is 'grep: <symbol>( in <the src
+        file that calls it>'" and that the path "must be a DIFFERENT src file". It never says the file must exist,
+        never names one, and never offers dropping the claim, so a drafter answering from the prompt invents one.
+      - `proofScopeViolations` (src/lib/task-linter.ts) escalates to block exactly when the proof's path is ABSENT at
+        head, and its remedy for that case is still "Add <path> to files:". The next redraft obeys and adds the
+        invented file, which is the stamp above.
+      - W1-T9062 (queued, not built) will refuse a declared path the tree does not hold, but it exempts a path declared
+        on a `CREATES: <path>` line. A drafter told to "add a caller" can declare that caller as CREATES and pass, so the
+        exemption must never let a new file stand as the call site.
+    RELATED, NOT DUPLICATED: W1-T9062 owns the path-existence floor, the CREATES allowance, parked-shard grounding and
+    the release-first draft. This task owns the repair loop's remedies and the call-site rule's caller. It depends on
+    W1-T9062 for the CREATES convention and its shared predicate, and because both edit src/lib/inbox.ts.
+  design: |
+    No new bound; the existing relint bound (MAX_RELINT_ATTEMPTS) is unchanged.
+    1. CALLERS COME FROM THE TREE. Add an exported `callSiteCandidates` in src/lib/relint.ts that, given the checkout
+       a draft is linted against and a symbol, returns the existing src/*.ts paths that already hold `<symbol>(` (git
+       grep on that checkout, the module itself excluded). For a new module with no known symbol it returns the task's
+       declared src files that exist in the tree. `inboxDraftRelintPrompt` (src/lib/inbox.ts) calls it for every
+       `[call-site]` violation and pastes the candidates beside the violation.
+    2. THE REMEDY OFFERS REAL PATHS OR A DROP, NEVER AN INVENTION. The `[call-site]` paragraph of `relintGuidanceLines`
+       and the `callSiteViolations` message say the calling file must EXIST in the tree today, name the candidates when
+       there are any, and say otherwise: a task that adds no src module (a recon or docs task) removes the src path
+       from `files:` and drops the claim; it never invents a caller file. `proofScopeViolations`, when the path is
+       absent at head, no longer says "Add <path> to files:". It says the path does not exist, and the fix is to name
+       an existing in-scope path or drop the criterion. The present-path message is unchanged.
+    3. A CALLER THE TREE DOES NOT HOLD IS NOT A CALL SITE. At the draft floor (`lintDraftedFragment`, and so readiness
+       through `blockingLintMessages`), a call-site-shaped proof (`grep: <sym>( in src/<x>.ts`) whose path the tree does
+       not hold blocks as `[draft-call-site-absent]`, and so does one whose path is declared on a W1-T9062 `CREATES:`
+       line. A new file can be the module under test; it is never the evidence that the program reaches it.
+       `callSiteViolations` counts a proof as a call site only when its path exists per `opts.moduleExists`, so the
+       plan-wide lint stops accepting an absent caller too (fixtures in test/call-site-rule.test.ts that relied on an
+       absent caller get a predicate that holds it).
+    4. THE REPAIR CANNOT CONVERGE ON AN INVENTION. Because (2) and (3) hold every round, a redraft that adds an absent,
+       non-CREATES caller to `files:` stays dirty under W1-T9062's path floor and this task's rule, and is cached
+       NOT-READY with the message after the bound, never READY.
+    Tests go in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts with the titles below verbatim. The
+    standing-debt:5 test replays that draft's two rounds through `runDraftRung` with a stub spawn: round 1 declares
+    the absent src/ownership.ts, and round 2 adds src/app.ts and `grep: checkOwnership( in src/app.ts`.
+  acceptance:
+    - claim: "a call-site proof naming a src path the tree does not hold blocks the draft at the floor"
+      proof: 'grep: test("W1-T9307: a call-site proof naming a path the tree does not hold blocks the draft" in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts'
+    - claim: "a path declared on a CREATES line never serves as the call site for a proof"
+      proof: 'grep: test("W1-T9307: a CREATES-declared path is never a call site" in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts'
+    - claim: "the call-site relint lists real callers found in the tree, and says to drop the claim when there are none"
+      proof: 'grep: test("W1-T9307: the call-site relint lists real callers from the tree and says drop the claim when there are none" in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts'
+    - claim: "the proof-scope remedy for a path absent at head never tells the drafter to add that path to files"
+      proof: 'grep: test("W1-T9307: a proof-scope remedy for an absent path never says add it to files" in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts'
+    - claim: "the standing-debt:5 repair that adds src/app.ts as an invented caller stays NOT READY"
+      proof: 'grep: test("W1-T9307: the standing-debt:5 repair that invents an app caller stays NOT READY" in test/a-draft-repair-names-only-callers-the-tree-holds.test.ts'
+    - claim: "the redraft prompt reaches the tree's callers through callSiteCandidates"
+      proof: "grep: callSiteCandidates( in src/lib/inbox.ts"
+  falsifier: |
+    Keep `callSiteViolations` accepting any path outside `created` and the first test fails: a fragment whose only call
+    proof greps src/app.ts in a fixture tree without it lints clean. Let a CREATES line exempt the caller and the second
+    fails. Restore the old `[call-site]` paragraph and the third fails on its candidate line. Restore "Add <path> to
+    files:" for an absent path and the fourth fails. Remove any one of the three and the standing-debt:5 replay reaches
+    a clean lint on round 2, so the fifth fails.

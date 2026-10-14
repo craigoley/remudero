@@ -12,7 +12,7 @@
   plan_refs: [W1-T7729, W1-T8775, W1-T5724]
   files: [scripts/build-child-entries.mjs, src/lib/child-entry-argv.ts, src/lib/child-entry-store.ts, src/run-task.ts, docs/adr/0006-precompiled-daemon-child-entries.md, test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
   status: queued
-  priority: 1 # operator-2026-10-13: ADR 0007 runs every build on this bundle; it is on the chain that offsets the new per-lane child memory
+  priority: 0.91 # operator-2026-10-13: the shared child-entry bundle store; until it lands the merged W1-T8775 memory cut does nothing (every check-proof child falls back to tsx, reason no-manifest). ADR 0007 runs every build on this bundle; it is on the chain that offsets the new per-lane child memory
   attempts: 0
   rationale: |
     ADR 0006 (Consequences): "A fresh worktree has no dist/, so until the shared store below exists, only children whose

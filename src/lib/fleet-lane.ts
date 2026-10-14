@@ -11,6 +11,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import type { AttentionJudgment } from "./inbox-responder.js";
 import { replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
@@ -124,7 +125,7 @@ export interface PersistedInboxContent extends ClassificationEvidence {
 export interface InboxAttentionEvidence {
   archiveLedger: "partial" | "unavailable";
   releases: Array<[taskId: string, receipt: string]>;
-  judges: Array<[taskId: string, judgement: { decision: string; reason: string }]>;
+  judges: Array<[taskId: string, judgement: AttentionJudgment]>;
 }
 
 function validAttentionEvidence(value: InboxAttentionEvidence | undefined, maxTasks: number): InboxAttentionEvidence | undefined {
@@ -133,7 +134,10 @@ function validAttentionEvidence(value: InboxAttentionEvidence | undefined, maxTa
     !Array.isArray(value.releases) || !Array.isArray(value.judges) || value.releases.length > maxTasks || value.judges.length > maxTasks) return undefined;
   const releasesValid = value.releases.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && typeof row[1] === "string" && row[1].length <= 512);
   const judgesValid = value.judges.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && row[1] && typeof row[1] === "object" &&
-    typeof row[1].decision === "string" && row[1].decision.length <= 64 && typeof row[1].reason === "string" && row[1].reason.length <= 300);
+    typeof row[1].reason === "string" && row[1].reason.length <= 300 &&
+    (row[1].state === "unclassified" || row[1].state === undefined && typeof row[1].decision === "string" && row[1].decision.length <= 64 ||
+      row[1].state === "judged" && ["needs_operator", "automate", "backlog"].includes(row[1].decision) &&
+      (row[1].at === null || typeof row[1].at === "string" && row[1].at.length <= 64)));
   return releasesValid && judgesValid ? value : undefined;
 }
 export interface PersistedInbox extends PersistedInboxContent {

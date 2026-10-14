@@ -238,7 +238,7 @@ export function operatorSpokeLast(comments: readonly RevalidationComment[], oper
   return operator > bot;
 }
 
-const ABSENCE = /\b0 row\(s\)|\bdoes not appear\b|\bnot present\b|\babsent\b|\bno (?:\w+ ){0,2}(?:rows?|records?|failures?|matches?|occurrences?)\b/i;
+const ABSENCE = /\b0 row\(s\)|\bdoes not appear\b|\babsence only\b|\bnot present\b|\babsent\b|\bno (?:\w+ ){0,2}(?:rows?|records?|failures?|matches?|occurrences?)\b/i;
 const PRESENCE = /\bmerged\b|\bappears on origin\/main\b|\b[1-9]\d* row\(s\)|\b[0-9a-f]{7,40}\b/i;
 
 /** A citation that shows only that something is MISSING. A zero is not a measurement: a misread name
@@ -565,6 +565,28 @@ export function livenessVerdictFromOverseerState(
   };
 }
 
+/** One commit on main, as `git log --format=MAIN_COMMIT_LOG_FORMAT` prints it. */
+export interface MainCommit { sha: string; committedAt: string; subject: string }
+export const MAIN_COMMIT_LOG_FORMAT = "%h%x09%cI%x09%s";
+export const ISSUE_REVALIDATION_COMMITS_PER_ISSUE = 5;
+
+export function parseMainCommitLog(text: string): MainCommit[] {
+  return text.split("\n").flatMap((line) => {
+    const [sha, committedAt, ...subject] = line.split("\t");
+    return sha && committedAt ? [{ sha, committedAt, subject: subject.join("\t") }] : [];
+  });
+}
+
+/** The commits (newest first, as git logs them) committed after the issue opened whose SUBJECT names it
+ *  — the present evidence a hand-filed issue's fix leaves, as #11264's "(#8429)" did (W1-T9308). A plan
+ *  filing works on an issue and never fixes it, and `#84290` does not name #8429. */
+export function commitsNamingIssue(issue: Pick<RevalidationIssue, "number" | "createdAt">, commits: readonly MainCommit[]): MainCommit[] {
+  const names = new RegExp(`#${issue.number}(?!\\d)`);
+  const opened = Date.parse(issue.createdAt);
+  return commits.filter((c) => Date.parse(c.committedAt) > opened && names.test(c.subject) && !c.subject.startsWith("chore(plan):"))
+    .slice(0, ISSUE_REVALIDATION_COMMITS_PER_ISSUE);
+}
+
 // ── The model judge's prompt and verdict ─────────────────────────────────────────────────────────
 
 export function buildIssueRevalidationPrompt(issue: RevalidationIssue, issueClass: IssueClass, evidence: JudgeEvidence): string {
@@ -573,6 +595,7 @@ export function buildIssueRevalidationPrompt(issue: RevalidationIssue, issueClas
     "The costly mistake is closing an issue whose condition is still true: WHEN IN DOUBT, ANSWER unknown.",
     "Answer resolved ONLY when the evidence below positively shows the condition is gone, and cite that evidence.",
     "Absence is not proof: a zero count or a name that does not appear never shows a fix. Cite something PRESENT.",
+    "A commit that names the issue shows work against it, not a fix: cite it only when its subject says the condition was removed.",
     "",
     `ISSUE #${issue.number} (${issueClass}), opened ${issue.createdAt}, last updated ${issue.updatedAt}`,
     `TITLE: ${issue.title}`,
@@ -677,6 +700,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   const rows = () => (ownRows ??= readLedgerRows([ISSUE_REVALIDATION_VERDICT_STEP, "read_model.consistency"], sinceIso()));
   let listed: RevalidationIssue[] = [];
   let stepRows: Array<Record<string, unknown>> | undefined;
+  let commits: MainCommit[] | undefined;
   return {
     policy: opts.policy ?? (() => loadIssueRevalidationPolicy()),
     operatorLogins: opts.operatorLogins,
@@ -685,6 +709,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     listOpenIssues: async () => {
       listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(opts.owner, opts.repo)));
       stepRows = undefined;
+      commits = undefined;
       return listed;
     },
     listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${repoArg}/issues/${n}/comments?per_page=100`, "--paginate"])),
@@ -734,6 +759,18 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       } catch (e) {
         // An unread ledger is told to the judge as such, so it cannot read silence as "no rows".
         facts.push(`the ledger could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})`);
+      }
+      try {
+        // One log per pass, from the oldest issue it judges.
+        const since = [...listed, issue].map((i) => i.createdAt).sort()[0]!;
+        commits ??= parseMainCommitLog(runGit(["log", "origin/main", `--since=${since}`, `--format=${MAIN_COMMIT_LOG_FORMAT}`]));
+        const naming = commitsNamingIssue(issue, commits);
+        facts.push(...(naming.length > 0
+          ? naming.map((c) => `commit ${c.sha} on origin/main names #${issue.number}: ${c.subject}`)
+          : [`no origin/main commit since the issue opened names #${issue.number} in its subject — absence only`]));
+      } catch (e) {
+        // An unread log is told as unread, so the judge cannot take it for "no commit names this issue".
+        facts.push(`main's commit log could not be read (${String((e as Error)?.message ?? e).slice(0, 120)})`);
       }
       return { facts };
     },

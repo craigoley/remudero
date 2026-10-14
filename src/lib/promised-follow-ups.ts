@@ -68,12 +68,16 @@ function promisedList(text: string): string[] {
   return [...new Set(out)];
 }
 
-/** Read only changed ADRs or task designs. A read/parse failure is not an empty measurement. */
-export function promisedFollowUps(files: readonly string[], readFile: (path: string) => string): PromisedFollowUp[] {
+/** Read only changed ADRs or task designs. A read/parse failure is not an empty measurement. When `readBase` is
+ * given, an ADR bullet whose normalized text is already on the base list was owed by the PR that added it, not by
+ * this one (W1-T9283); a path new at base reads as an empty list, and a throwing `readBase` is UNKNOWN, never empty. */
+export function promisedFollowUps(files: readonly string[], readFile: (path: string) => string, readBase?: (path: string) => string): PromisedFollowUp[] {
   const out: PromisedFollowUp[] = [];
   for (const path of [...new Set(files)]) {
     if (/^docs\/adr\/[^/]+\.md$/.test(path)) {
-      out.push(...promisedList(readFile(path)).map(text => ({ path, text })));
+      const head = promisedList(readFile(path));
+      const onBase = new Set(readBase ? promisedList(readBase(path)).map(normalized) : []);
+      out.push(...head.filter(text => !onBase.has(normalized(text))).map(text => ({ path, text })));
     } else if (/^plan\/tasks(?:\.yaml|\.d\/[^/]+\.ya?ml)$/.test(path)) {
       for (const record of taskRecords(readFile(path))) {
         if (typeof record.design !== "string") continue;
@@ -95,6 +99,6 @@ const namesPromise = (text: string, promise: string): boolean => {
 export function unreportedFollowUps(promised: readonly PromisedFollowUp[], report: string, records: readonly FollowUpPlanRecord[]): PromisedFollowUp[] {
   const entries = parseHarvestableFollowUps(report) ?? [];
   return promised.filter(promise => !entries.some(entry => namesPromise(entry.text, promise.text)) &&
-    !records.some(record => promise.taskId !== undefined && record.plan_refs?.includes(promise.taskId) &&
+    !records.some(record => promise.taskId !== undefined && (record.id === promise.taskId || record.plan_refs?.includes(promise.taskId)) &&
       [record.title, record.rationale ?? "", record.prompt ?? ""].some(text => namesPromise(text, promise.text))));
 }
