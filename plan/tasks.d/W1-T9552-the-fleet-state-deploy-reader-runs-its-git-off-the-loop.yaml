@@ -1,0 +1,63 @@
+- id: W1-T9552
+  title: "THE FLEET-STATE DEPLOY READER RUNS ITS GIT AND GH OFF THE DAEMON LOOP — the sweep's readFleetState builds its image and deploy rows from realDeployDeps, whose every git and gh call is one execFileSync (deployer.ts `exec`): 29.9 s attributed on core's loop in 6 h on 2026-10-14, about 4-5 s a pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — where the fleet-state reconciler's deploy facts are read; it runs in the sweep, on the daemon loop
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T4840, W1-T5996, W1-T6275, W1-T7747, W1-T5689, W1-T9544, W1-T9545, W1-T9549, W1-T9550, W1-T9554, W1-T9556]
+  files: [src/lib/sweep.ts, src/lib/deployer.ts, src/lib/state-reconciler.ts, test/the-fleet-state-deploy-reader-runs-its-git-off-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; `daemon.alive` rows streamed to
+    ~/Remudero-notes/sync-spawn-filing/). In the 38 rows of 15:14-21:14Z the `sync_spawn_top` entry
+    `<anonymous> (src/lib/deployer.ts:2254)`, command git, appears 7 times: 29.9 s, worst 5.2 s, about one per sweep
+    pass with a full reconcile. The earlier 15:38-19:39Z census (~/Remudero-notes/loopblock-0450/) gave 21 s.
+    WHO REACHES IT, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - That line is the `exec` closure in `realDeployDeps` (src/lib/deployer.ts):
+        `execFileSync(cmd, args, { encoding: "utf8" })`, through which every `git -C <install>` and gh call of the
+        deploy deps runs (`rev-parse`, `log -1 -- <baked paths>`, `rev-list --count`, `tag --list image/*` and a
+        `merge-base --is-ancestor` per tag, `remote get-url`, the workflow-run read).
+      - In the daemon process its caller is `buildSweepEffects`' `readFleetState` (src/lib/sweep.ts): an async effect
+        that builds `reader.deploy = realDeployDeps({...})` and calls `deployStateRows(reader, history, ...)`
+        (src/lib/state-reconciler.ts), whose rows read `newestBakedSha`, `imagePublished`, `imageBuildInFlight`,
+        `imageBakedCommitsBehind` and `imageRecycleManual` synchronously. `rmd deploy-run` (the watchdog tick) also
+        uses `realDeployDeps`, but in its own process.
+    OVERLAP: W1-T7747 (queued) converts `buildSweepEffects`' sync gh calls (the arm path and the direct calls it lists);
+    `readFleetState`'s deploy reader is not among them, and its design says other callers are filed separately. Both
+    edit src/lib/sweep.ts, in different effects.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    realDeployDeps, readFleetState and deployStateRows. Control: main reads 13 shards, all merged or blocked tasks about
+    the supervisor, deploy-run and the reconciler's history read; none changes the deploy reader's transport; no head
+    reads more than main.
+  design: |
+    No new bound; the same reads, the same rows, the same `reconcile.unreadable` outcomes.
+    1. An awaited deploy-fact read for the reconciler: `readDeployFactsAsync(opts)` in src/lib/deployer.ts runs the
+       same git and gh reads through `execFile` (promisified) and returns `{ newestBakedSha, imagePublished,
+       imageBuildInFlight, imageBakedCommitsBehind, imageRecycleManual }`, each `undefined` when its read fails, as the
+       sync getters do.
+    2. `readFleetState` awaits it once per pass and hands `deployStateRows` a reader whose getters return the snapshot.
+       Repairs that write (`dispatchImageBuild`, `requestDeploy`) are awaited through the same async exec.
+    3. `realDeployDeps` keeps its sync `exec` for `rmd deploy-run`, which runs in its own process.
+    Tests go in test/the-fleet-state-deploy-reader-runs-its-git-off-the-loop.test.ts, with `test(` titles verbatim as
+    in the proofs below, over a temp install repo with image tags, a PATH-stubbed `gh`, and the
+    `syncBuiltinESMExports` trap `startReadPlaneTelemetry` uses.
+  acceptance:
+    - claim: "the fleet-state deploy rows are built with sync spawns trapped and match the sync reader's rows"
+      proof: 'grep: test("W1-T9552: the fleet-state deploy rows build with sync spawns trapped and match the sync rows" in test/the-fleet-state-deploy-reader-runs-its-git-off-the-loop.test.ts'
+    - claim: "a slow git during the deploy read does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9552: a slow git during the deploy read does not delay a concurrent timer" in test/the-fleet-state-deploy-reader-runs-its-git-off-the-loop.test.ts'
+    - claim: "a failed deploy fact reads as unknown, as the sync getter does"
+      proof: 'grep: test("W1-T9552: a failed deploy fact reads as unknown" in test/the-fleet-state-deploy-reader-runs-its-git-off-the-loop.test.ts'
+    - claim: "the sweep's fleet-state effect awaits the deploy facts"
+      proof: 'grep: readDeployFactsAsync in src/lib/sweep.ts'
+  falsifier: |
+    Keep `readFleetState` on `realDeployDeps`: with execFileSync, spawnSync and execSync trapped to throw, the first
+    test's image and deploy rows are missing (`newestBakedSha` reads undefined), and with a git stub that sleeps the
+    second test's setInterval records no tick until the rows return.
