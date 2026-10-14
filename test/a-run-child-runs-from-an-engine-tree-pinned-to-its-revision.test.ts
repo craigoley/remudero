@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gitRepo } from "./helpers/git-repo.js";
 import { engineChildEntryArgv, childEntryArgv } from "../src/lib/child-entry-argv.js";
 import { ENGINE_RECORD, enginePath, ensureEngineTree, listEngines, newestCurrentEngine, pruneEngineTrees } from "../src/lib/engine-tree.js";
 import { writeStatus, type RunChildStatus } from "../src/lib/run-child-contract.js";
@@ -46,12 +47,9 @@ function plantRun(state: string, runId: string, engineSha: string, runState: Run
 
 /** A real repository with `commits` commits, one src/ file and the files the engine build copies. */
 function repoWithCommits(commits: number): { repo: string; shas: string[] } {
-  const repo = tmp();
-  const git = (...args: string[]): string =>
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-C", repo, ...args], {
-      encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-    }).trim();
-  git("init", "--quiet", "-b", "main");
+  const fixture = gitRepo({ seedCommit: false, kind: "engine" });
+  const repo = fixture.dir;
+  const git = (...args: string[]): string => fixture.git(...args);
   mkdirSync(join(repo, "src"), { recursive: true });
   const shas: string[] = [];
   for (let i = 0; i < commits; i++) {
