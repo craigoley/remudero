@@ -216,7 +216,7 @@ test("W1-T8776: a source hash already stored is not rebuilt", async () => {
     assert.equal(first.kind, "built");
     const { hash, bytes, ms } = first as { hash: string; bytes: number; ms: number };
     assert.ok(bytes > 0 && ms >= 0);
-    assert.deepEqual(steps, [["child_entry.store_built", { hash, ms, bytes }]]);
+    assert.deepEqual(steps, [["child_entry.store_built", { reason: "new-build", hash, ms, bytes }]]);
     assert.equal(existsSync(join(main, OUT)), false, "the build wrote into the store, not into the tree it read");
     assert.deepEqual(calls.map((a) => a.at(-1) === "--hash" ? "hash" : a.at(-2)), ["hash", "--out"]);
     const bundle = join(store, hash, `${NAME}.mjs`);
@@ -345,7 +345,7 @@ test("W1-T8776: a build that fails or a tree without the build script leaves the
     assert.equal(steps[0]?.[0], "child_entry.store_build_failed");
     assert.deepEqual(readdirSync(store), [], "no stored hash and no temporary directory");
     assert.deepEqual(await buildIntoStore(bare, { storeRoot: store, log }), { kind: "skipped", reason: "tree-has-no-build-script" });
-    assert.equal(steps.length, 1, "a skipped tree ledgers nothing");
+    assert.deepEqual(steps[1], ["child_entry.store_build_skipped", { reason: "tree-has-no-build-script" }]);
     const silent = await buildIntoStore(broken, { storeRoot: store, runScript: async () => "no hash here\n" });
     assert.deepEqual(silent, { kind: "failed", reason: "hash-unreadable" });
     const [h1, h2] = ["1".repeat(64), "2".repeat(64)];
@@ -398,7 +398,10 @@ test("W1-T8776: retention drops a stored hash no recent main revision and no liv
     utimesSync(join(store, idle), old, old);
     steps.length = 0;
     assert.equal((await buildIntoStore(cleanup[0], { storeRoot: store, log })).kind, "present");
-    assert.deepEqual(steps, [["child_entry.store_pruned", { removed: [idle] }]]);
+    assert.deepEqual(steps, [
+      ["child_entry.store_present", { reason: "source-hash-already-present", hash }],
+      ["child_entry.store_pruned", { removed: [idle] }],
+    ]);
   } finally {
     clean(cleanup);
   }
