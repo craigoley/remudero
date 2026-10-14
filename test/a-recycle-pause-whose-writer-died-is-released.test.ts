@@ -90,7 +90,7 @@ function release(f: Fixture): { status: number | null; out: string } {
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
-function ledgerRows(f: Fixture): Array<Record<string, unknown>> {
+function rowsWritten(f: Fixture): Array<Record<string, unknown>> {
   if (!existsSync(f.ledger)) return [];
   return readFileSync(f.ledger, "utf8")
     .split("\n")
@@ -106,7 +106,7 @@ function assertKept(f: Fixture, written: string, out: string): void {
     "nothing may be moved aside",
   );
   assert.equal(
-    ledgerRows(f).filter((r) => r.step === "recycle.orphan_pause_released").length,
+    rowsWritten(f).filter((r) => r.step === "recycle.orphan_pause_released").length,
     0,
     "a kept PAUSE writes no release row",
   );
@@ -132,7 +132,7 @@ test("W1-T9409: a dead writer and a running old container release the recycle PA
   assert.equal(existsSync(f.pause), false, `the orphaned recycle PAUSE must be released:\n${r.out}`);
   const aside = join(f.state, "state", `PAUSE.orphaned-recycle-${pid}`);
   assert.equal(readFileSync(aside, "utf8"), `${written}\n`, "it is moved aside byte-for-byte, never deleted");
-  const rows = ledgerRows(f).filter((row) => row.step === "recycle.orphan_pause_released");
+  const rows = rowsWritten(f).filter((row) => row.step === "recycle.orphan_pause_released");
   assert.equal(rows.length, 1, "exactly one release row");
   const row = rows[0]!;
   assert.equal(row.lane, "deploy");
@@ -152,7 +152,7 @@ test("W1-T9409: a pid reused by a process with another start time reads as a dea
   writeFileSync(f.pause, `${written}\n`);
   const r = release(f);
   assert.equal(existsSync(f.pause), false, `a reused pid is not the writer:\n${r.out}`);
-  const row = ledgerRows(f).find((x) => x.step === "recycle.orphan_pause_released");
+  const row = rowsWritten(f).find((x) => x.step === "recycle.orphan_pause_released");
   assert.match(String(row?.writer_evidence), /reused/);
 });
 
@@ -187,7 +187,7 @@ test("W1-T9409: an operator PAUSE is kept", (t) => {
     assert.equal(r.status, 0, r.out);
     assertKept(f, written, r.out);
   }
-  assert.deepEqual(ledgerRows(f), [], "an operator hold writes no ledger row of any kind");
+  assert.deepEqual(rowsWritten(f), [], "an operator hold writes no ledger row of any kind");
 });
 
 test("W1-T9409: a writer dead after docker stop keeps the PAUSE", (t) => {
@@ -229,7 +229,7 @@ test("W1-T9409: an old-shape recycle PAUSE is never released and is ledgered onc
     assert.equal(r.status, 0, r.out);
     assertKept(f, written, r.out);
   }
-  const rows = ledgerRows(f);
+  const rows = rowsWritten(f);
   assert.equal(rows.length, 1, "one unverifiable row per body, not one per tick");
   assert.equal(rows[0]!.step, "recycle.orphan_pause_unverifiable");
   assert.equal(rows[0]!.writer_pid, pid);

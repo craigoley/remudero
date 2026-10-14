@@ -10,7 +10,9 @@
 # files, so the PAUSE held all core dispatch for ~2h45m with remudero-daemon still the old container. No
 # trap covers SIGKILL either (the OOM killer on a thrashing host), so a check from OUTSIDE the writer is
 # the only complete answer, and this host tick is the one actor that sees host pids and docker.
-#
+
+set -u
+
 # NO TIMER AND NO THRESHOLD. A PAUSE is moved aside only when ALL of these hold:
 #   (a) it parses and its `reason` is EXACTLY the recycle's. Anything else is an operator hold (W1-T4197)
 #       and is kept, with no ledger row;
@@ -28,9 +30,6 @@
 # human to act on.
 #
 # NEVER FATAL to the tick: every path exits 0 except a usage error.
-
-set -u
-
 ORP_REASON="container recycle (deploy/recycle-container.sh)"
 
 # The writer's start time, in the exact normalised form deploy/recycle-container.sh records: C locale
