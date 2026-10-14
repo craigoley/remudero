@@ -5636,7 +5636,6 @@ export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> =
   // non-determinism. It is not pure over the tree alone, and neither is its twin.
   "scripts/comment-load-baseline.json": "comment-load-ratchet",
   "docs/docs-index.json": "docs-index",
-  "learnings/index.json": "learnings-index",
   "docs/cli-reference.md": "cli-reference",
   "MASTER-PLAN.md": "capability-snapshot",
   "packages/api-client/src/schema.d.ts": "api-client:generate",
