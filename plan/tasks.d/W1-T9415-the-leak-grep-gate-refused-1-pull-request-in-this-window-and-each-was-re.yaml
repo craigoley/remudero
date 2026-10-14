@@ -1,0 +1,31 @@
+- id: W1-T9415
+  title: "THE leak-grep GATE REFUSED 1 PULL REQUEST IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:11383:leak-grep"
+  ci_learning_prs: [11383]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the leak-grep gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:11383:leak-grep in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:11383:leak-grep. The leak-grep gate went red on #11383 and was repaired; the repair touched plan/tasks.d/W1-T9181-the-revalidation-garden-never-closes-on-an-absence.yaml. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared file is only learnings/ci.yaml, a guidance file, and the task adds a matched learnings entry. The description doesn't show any change to secrets, auth, merge or deploy policy, or any data deletion."
+      - "The acceptance check is a grep for a specific string in that file, so it can be verified automatically."
+      - "The ci-learning family has 21 merged and 1 declined machine tasks (Beta mean 0.92), so its track record is good."
+      - "The note says \"a person decides what guidance changes\", but the change still goes through CI and review. The note doesn't ask for an operator-only decision on budget, priorities or policy."
+      - "No bounded change view was supplied, so I am judging from the description and files list only."
+    judged_at: "2026-10-14T09:46:22.455Z"
+    pin: "a8069d840adb28b26ab3c693e13e5fb9cd1231f06629c3fbfdb30616027e541e"

@@ -78,6 +78,8 @@ export interface SelectorShadowRecord {
   narrowSize?: number;
   impactSize?: number;
   impactFallback?: string;
+  /** Commits the run's base was past the impact map's sha, when the selector knew it. */
+  impactDistance?: number;
   failures: SelectorShadowFailure[];
 }
 
@@ -88,6 +90,8 @@ export interface SelectorShadowMiss {
   prNumber?: number;
   selection: "floor" | "narrow" | "impact";
   file: string;
+  /** An impact miss: how far the map was behind, so misses can be read against the staleness bound. */
+  impactDistance?: number;
 }
 
 /** A miss the gate does not charge to the selector, with the reason the operator can audit. */
@@ -142,6 +146,10 @@ function validImpactFields(size: unknown, fallback: unknown): boolean {
     (fallback === undefined || (size !== undefined && typeof fallback === "string" && fallback.trim().length > 0));
 }
 
+function validImpactDistance(size: unknown, distance: unknown): boolean {
+  return distance === undefined || (size !== undefined && nonnegativeInteger(distance));
+}
+
 function validImpactVerdict(size: unknown, verdict: unknown): boolean {
   return size === undefined ? verdict === undefined : isSelectorShadowVerdict(verdict);
 }
@@ -158,7 +166,8 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
     const row = value as Record<string, unknown>;
     if (typeof row.fullRun !== "boolean" || !nonnegativeInteger(row.floorSize) ||
         (row.narrowSize !== undefined && !nonnegativeInteger(row.narrowSize)) ||
-        !validImpactFields(row.impactSize, row.impactFallback) || !Array.isArray(row.failures)) {
+        !validImpactFields(row.impactSize, row.impactFallback) || !validImpactDistance(row.impactSize, row.impactDistance) ||
+        !Array.isArray(row.failures)) {
       throw new Error("selector shadow: invalid record sizes or failures");
     }
     const failures = row.failures.map((entry: unknown): SelectorShadowFailure => {
@@ -179,7 +188,8 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
     records.push({ fullRun: row.fullRun, floorSize: row.floorSize as number,
       ...(row.narrowSize === undefined ? {} : { narrowSize: row.narrowSize as number }),
       ...(row.impactSize === undefined ? {} : { impactSize: row.impactSize as number }),
-      ...(row.impactFallback === undefined ? {} : { impactFallback: row.impactFallback as string }), failures });
+      ...(row.impactFallback === undefined ? {} : { impactFallback: row.impactFallback as string }),
+      ...(row.impactDistance === undefined ? {} : { impactDistance: row.impactDistance as number }), failures });
   }
   return records;
 }
@@ -596,6 +606,7 @@ export interface SelectorShadowObservation {
   narrowSize?: number;
   impactSize?: number;
   impactFallback?: string;
+  impactDistance?: number;
   failures: SelectorShadowFailure[];
   recovered: number;
 }
@@ -608,7 +619,8 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
   const records = parseSelectorShadowLines(run.log);
   if (records.length !== SELECTOR_SHADOW_SHARDS) return { kind: "incomplete" };
   const impact = records[0]!;
-  if (records.some((record) => record.impactSize !== impact.impactSize || record.impactFallback !== impact.impactFallback)) {
+  if (records.some((record) => record.impactSize !== impact.impactSize || record.impactFallback !== impact.impactFallback ||
+      record.impactDistance !== impact.impactDistance)) {
     throw new Error("selector shadow: inconsistent impact evidence across shards");
   }
   const jobs = shardEvidence(run.log);
@@ -632,7 +644,8 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
     source, fullRun: records.some((record) => record.fullRun), floorSize: median(records.map((record) => record.floorSize))!,
     ...(narrowSize === null ? {} : { narrowSize }),
     ...(impact.impactSize === undefined ? {} : { impactSize: impact.impactSize }),
-    ...(impact.impactFallback === undefined ? {} : { impactFallback: impact.impactFallback }), failures, recovered,
+    ...(impact.impactFallback === undefined ? {} : { impactFallback: impact.impactFallback }),
+    ...(impact.impactDistance === undefined ? {} : { impactDistance: impact.impactDistance }), failures, recovered,
   } };
 }
 
@@ -686,6 +699,7 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
           ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
           ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
           selection, file: failure.file,
+          ...(selection === "impact" && run.impactDistance !== undefined ? { impactDistance: run.impactDistance } : {}),
         } : undefined;
         // An unattributed miss is neither a selection nor a miss: it leaves the gate's arithmetic.
         if (miss !== undefined && reason !== undefined) {
@@ -757,6 +771,7 @@ function selectorShadowObservationRow(o: SelectorShadowObservation): Record<stri
     ...(o.narrowSize === undefined ? {} : { narrow_size: o.narrowSize }),
     ...(o.impactSize === undefined ? {} : { impact_size: o.impactSize }),
     ...(o.impactFallback === undefined ? {} : { impact_fallback: o.impactFallback }),
+    ...(o.impactDistance === undefined ? {} : { impact_distance: o.impactDistance }),
     failures: o.failures, recovered: o.recovered,
   };
 }
@@ -765,7 +780,8 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
   if (!nonnegativeInteger(row.ci_run_id) || typeof row.head_sha !== "string" || (row.source !== "live" && row.source !== "replay") ||
       typeof row.full_run !== "boolean" || !nonnegativeInteger(row.floor_size) || !nonnegativeInteger(row.recovered) ||
       (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) ||
-      !validImpactFields(row.impact_size, row.impact_fallback) || !Array.isArray(row.failures)) return undefined;
+      !validImpactFields(row.impact_size, row.impact_fallback) || !validImpactDistance(row.impact_size, row.impact_distance) ||
+      !Array.isArray(row.failures)) return undefined;
   const failures: SelectorShadowFailure[] = [];
   for (const entry of row.failures as unknown[]) {
     const f = entry as Record<string, unknown> | null;
@@ -786,6 +802,7 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
     ...(row.narrow_size === undefined ? {} : { narrowSize: row.narrow_size as number }),
     ...(row.impact_size === undefined ? {} : { impactSize: row.impact_size as number }),
     ...(row.impact_fallback === undefined ? {} : { impactFallback: row.impact_fallback as string }),
+    ...(row.impact_distance === undefined ? {} : { impactDistance: row.impact_distance as number }),
     failures, recovered: row.recovered,
   };
 }

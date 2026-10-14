@@ -1,0 +1,47 @@
+- id: W1-T9421
+  title: "SERVE'S SLOTS NEVER BUILD THEIR WORKER BUNDLES, so W1-T9370 can start no worker from one: a slot is a git worktree plus `npm ci`, its tree has no dist/child-entries, and the core store is empty (W1-T9374): after its install, each serve slot and the cold checkout runs scripts/build-child-entries.mjs in a child process and ledgers serve.slot_child_entries {outcome: built|absent|failed}; a failure only leaves the workers on tsx"
+  repo: remudero
+  depends_on: [W1-T8777]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which bundles a serve slot holds before its generation starts
+  band_meaning: span
+  origin: "operator ruling 2026-10-14: 'go with your recommendation. It doesn't feel like a one way door. We can always undo it' (serve runs its workers from precompiled bundles); 'don't stop! Fix it!'"
+  plan_refs: [W1-T9370, W1-T8777, W1-T8776, W1-T9374, W1-T7729]
+  files: [src/lib/serve-slots.ts, src/lib/serve-supervisor-main.ts, test/a-serve-slot-builds-its-worker-bundles.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 (operator session) at origin/main ce329e86d.
+    - W1-T9370 starts a serve worker from a bundle only when the worker's own tree holds a current one, after one
+      store lookup (materializeFromStore). Otherwise it starts the .ts source under tsx.
+    - Serve's generations run from the serve clone (the cold start) and the slots a/b. createSlotPreparer
+      (src/lib/serve-slots.ts) makes a slot with `git worktree add` or `checkout`/`reset`, then prepareSlotDeps runs
+      `npm ci` or links node_modules. Nothing runs scripts/build-child-entries.mjs.
+    - deploy/Dockerfile builds the bundles into the image's /app. Serve's generations do not run /app's source.
+    OBSERVED 2026-10-14 on the host: ~/rmd-serve-repo (mounted as the serve clone) has node_modules and no dist/.
+    W1-T9374 records the core store directory as absent. So, as things stand, every worker start under W1-T9370
+    would read "worker-not-built" and stay on tsx. The ~60 MB live / ~160 MB reserved per isolate that W1-T9370
+    measured would not be saved.
+    The build measured 2.8 s on the real tree (W1-T8777) and writes only under the tree's dist/child-entries. Run as
+    a child process, its memory is never serve's.
+  design: |
+    1. buildSlotChildEntries(dir, run, log) in serve-slots.ts. If `<dir>/scripts/build-child-entries.mjs` is absent
+       (an older sha), the outcome is `absent`. Otherwise it runs `node scripts/build-child-entries.mjs` with cwd
+       `dir` through the slot's RunCommand: `built` on success, `failed` with the error's first line otherwise. It
+       never throws. It ledgers serve.slot_child_entries {slot, sha, outcome, reason?, ms}.
+    2. createSlotPreparer calls it after prepareSlotDeps, before the slot is returned. serve-supervisor-main.ts calls it
+       for the cold checkout after its prepareSlotDeps.
+    3. A `failed` or `absent` outcome changes nothing else: the slot is returned, the generation starts, and
+       W1-T9370's startWorker falls back to the .ts source with its own reason.
+  acceptance:
+    - claim: "a prepared serve slot runs the child-entry build after its install and ledgers built; a tree without the script reads absent, and a failing build reads failed while the slot is still returned"
+      proof: 'grep: test("W1-T9421: a prepared serve slot builds its worker bundles" in test/a-serve-slot-builds-its-worker-bundles.test.ts'
+    - claim: "the slot preparer calls the build"
+      proof: 'grep: buildSlotChildEntries( in src/lib/serve-slots.ts'
+  falsifier: |
+    Remove the buildSlotChildEntries call from createSlotPreparer: the fixture slot has no worker bundle and the test
+    fails. Let the build's failure propagate: the failing-build case rejects instead of returning the slot.

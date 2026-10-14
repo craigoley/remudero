@@ -75,7 +75,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer } from "./worker-heaps.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -248,7 +248,10 @@ export type ReadModelWorkerMessage =
   | ({ type: "view_lane"; view: string } & ReadModelLaneMove)
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
-  | ThreadHeapsAnswer;
+  | ThreadHeapsAnswer
+  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds };
+
+export type ReadModelViewHolds = Record<string, { rows: number; keptBytes: number }>;
 
 export interface ReadModelLaneMove {
   view?: string;
@@ -279,6 +282,7 @@ export interface ReadModelView {
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  heldSizes?(): ReadModelViewHolds;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
   perInstance?: boolean;
   /** Its keys are built on demand (view-demand.ts): `materialize` returns only the keys the ticker's demand book holds live. */
@@ -1350,6 +1354,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       letGo(unit);
       reportHeld(true);
     }
+    if (viewsOnly && opts.lane && ready && live?.heldSizes) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
@@ -1395,6 +1400,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       if (legacy) return { ...legacy, ...(view.qualificationGeneration === undefined ? {} : { qualificationGeneration: view.qualificationGeneration }) };
     }
     return undefined;
+  }
+  function reportHolds(lane: "fast" | "heavy"): void {
+    const holds: ReadModelViewHolds = {};
+    for (const unit of units) {
+      const made = isViewFactory(unit.view) ? unit.made : unit.view;
+      if (made?.heldSizes) Object.assign(holds, made.heldSizes());
+    }
+    opts.post({ type: "view_holds", lane, holds });
   }
   function reportHeld(moved = false): void {
     if (!viewsOnly || !opts.lane) return;
@@ -1780,6 +1793,7 @@ export interface ReadModelViewLane {
   want(view: string, key: string): void;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
   read(path: string): void;
+  holdsOf(threadId: number): ThreadHolds | undefined;
   close(): void;
 }
 
@@ -1798,7 +1812,7 @@ export function threadViews(opts: {
 }): ReadModelViewLane {
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean } }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHolds }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
@@ -1817,8 +1831,13 @@ export function threadViews(opts: {
     const spawned = lane === fast ? spawnViews(opts.workerUrl ?? new URL(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? new URL(import.meta.url), data);
     lane.worker = spawned;
     lane.building = undefined;
+    lane.holds = undefined;
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (msg.type === "view_holds") {
+        lane.holds = Object.fromEntries(Object.entries(msg.holds).map(([instance, held]) => [`board:${instance}`, { entries: held.rows, bytes: held.keptBytes }]));
+        return;
+      }
       if (msg.type === "shadow_prepared") {
         return fast.worker?.postMessage({ type: "shadow", request: msg.request } satisfies ReadModelViewsInput);
       }
@@ -1881,6 +1900,7 @@ export function threadViews(opts: {
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
     read: (path) => send({ type: "read", path }),
+    holdsOf: (threadId) => [fast, heavy].find((lane) => lane.worker?.threadId === threadId)?.holds,
     close: () => {
       closed = true;
       stopWatch();
@@ -2003,7 +2023,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
-    if (answerThreadHeaps(port, msg, threads)) return;
+    if (answerThreadHeaps(port, msg, threads, views.holdsOf)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
     if (msg.type === "read") return void views.read((msg as unknown as { path: string }).path);

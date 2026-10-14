@@ -1,0 +1,62 @@
+- id: W1-T9425
+  title: "A LANDING WHOSE REBUILT TREE EQUALS ORIGIN/MAIN PUSHES AN EMPTY COMMIT AND OPENS A PR THAT CAN NEVER GO GREEN — on 2026-10-14 the feedback bridge force-pushed d50542cb9 (tree identical to its parent, #11606's merge, no file list) to feedback-landing, and #11619 sat red on acceptance-author-gate for 2.5 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a landing with nothing to land neither pushes nor opens a PR
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 PR-queue review: root cause of #11619 (feedback-landing, empty diff)"
+  plan_refs: [W1-T243, W1-T3560, W1-T5672]
+  files: [src/lib/feedback-landing.ts, test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, read-only:
+      - #11606 "chore(feedback): land pending filings" merged as 748e48c48 at 08:47:29Z.
+      - 17 s later, at 08:47:46Z, the bridge committed d50542cb9 on refs/heads/feedback-landing. Its parent
+        is 748e48c48 and its tree is 1f5ae77db, the SAME tree as 748e48c48. Its message is
+        feedbackCommitMessage([]): the fixed preamble and no "- plan/feedback/..." line, so `unlanded` was empty.
+      - The bridge opened #11619 on it. Its body names no file, so acceptance-author-gate went red at 09:31Z.
+        The sweep merged main into it (a91a120), the fix lane judged it, and the PR was repeat-escalated
+        (streak 50) with no possible repair: there is nothing in the diff to accept.
+    READ on origin/main ce329e86d, src/lib/feedback-landing.ts:
+      - landPendingSteps checks `initialScan.files.length === 0` BEFORE buildTree, then buildTree re-scans
+        with the scratch index (`scanLocalUnlanded(env)`), which skips a path whose blob equals
+        `origin/main:<path>` and drops a `keep-upstream` decision. That second scan can come back empty even
+        though the first did not, and nothing checks the rebuilt result. Which branch of the re-scan emptied
+        the list on 08:47Z is not recorded (the ledger rows were compacted), but the commit proves the result:
+        an empty list and a tree equal to main's reached the push.
+      - finishLanding short-circuits only when the tree equals the BRANCH's tree, never main's. It runs
+        commit-tree, force-pushes, and ensurePrOpen. The lease-loss `rebuild` path has the same gap.
+      - landContent's path (the `initialBuild.unlanded.length === 0` return) guards only its first build, not
+        `rebuild`.
+  design: |
+    1. finishLanding is the one choke point. Before any commit-tree, and again after a `rebuild`, compare
+       `build.treeSha` with `<build.mainSha>^{tree}`. When they are equal there is nothing to land: return
+       `{ landed: false, files: [] }` (keeping any `refused`), push nothing, and do not call ensurePrOpen.
+       Do not key this on `unlanded.length` alone: a carried branch record can make a non-main tree with an
+       empty local list, and that tree must still land.
+    2. If the branch already has an open landing PR whose head tree equals main's tree (the #11619 shape),
+       close it with a one-line comment naming the merged PR that already carries its content, through the
+       same net.gh seam ensurePrOpen uses. Leave the branch in place; the next real landing force-pushes it.
+    3. Log one ledger line for the no-op (`landing.nothing_to_land`, with family, branch and main sha), so a
+       stream of no-op calls is visible rather than silent.
+    Tests go in the new file, titled verbatim as in the proofs. Build the fixture with the existing
+    feedback-landing test helpers: land a record, merge it onto the fixture's origin/main, then run landing
+    with the record still dirty on disk. Assert no push to feedback-landing and no `gh pr create`.
+  acceptance:
+    - claim: "a landing whose rebuilt tree equals origin/main pushes nothing and opens no PR"
+      proof: 'grep: test("W1-T9425: a landing whose rebuilt tree equals origin/main pushes nothing and opens no PR" in test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts'
+    - claim: "a lease-loss rebuild that comes back equal to main also pushes nothing"
+      proof: 'grep: test("W1-T9425: a rebuild after a lost lease that equals main pushes nothing" in test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts'
+    - claim: "an open landing PR whose head tree equals main is closed, and its branch is kept"
+      proof: 'grep: test("W1-T9425: an open landing PR with an empty diff is closed and its branch kept" in test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts'
+  falsifier: |
+    On main, call finishLanding (through landPendingSteps' generator, answering its asks as the existing
+    feedback-landing tests do) with a build whose treeSha equals origin/main's tree and whose `unlanded` is
+    empty, as d50542cb9 was. It runs commit-tree, force-pushes feedback-landing, and asks `gh pr create` with
+    a body that lists no file.

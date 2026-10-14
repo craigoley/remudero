@@ -1724,6 +1724,10 @@ import {
   flakeClaimsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
+  listRetirableEscalationIssuesAsync,
+  createEscalationTriageHistoryReader,
+  indexEscalationTriageHistory,
+  type EscalationTriageHistoryReader,
   logCostGovernorDeferral,
   logMemoryObservation,
   logQueueGovernorDeferral,
@@ -3408,6 +3412,7 @@ export function buildEscalationTriageRuntime(
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
+import { fetchPrChecks, renderPrChecks } from "./lib/pr-checks.js";
 export { unknownArgError };
 
 // ── W1-T2888: the read-and-print report verbs, moved to src/lib/report-commands.ts ────────────
@@ -25870,6 +25875,31 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   return drift ? 1 : 0;
 }
 
+/** W1-T3083: `rmd pr-checks <pr-number>` — the terminal caller of the rollup derivation (lib/pr-checks.ts).
+ *  Exit 0 nothing red, 1 something red, 2 bad usage OR a failed read: a dead fetch is never "no red checks". */
+export function reportPrChecks(
+  rest: string[],
+  opts: { fetch?: GhApiFetcher; self?: { owner: string; repo: string } } = {},
+): number {
+  const prArg = rest[0];
+  const badArg = prArg === undefined || prArg.startsWith("--") ? "rmd pr-checks: <pr-number> must come first"
+    : unknownArgError("pr-checks", rest.slice(1), ["--repo"]);
+  const prNumber = Number(prArg);
+  if (badArg || !Number.isInteger(prNumber) || prNumber <= 0) {
+    console.error(`${badArg ?? `rmd pr-checks: '${prArg}' is not a valid PR number`}\nusage: ${commandSyntax("pr-checks")}`);
+    return 2;
+  }
+  try {
+    const self = opts.self ?? resolveOwnerRepo();
+    const report = fetchPrChecks(self.owner, flagValue(rest, "--repo") ?? self.repo, prNumber, opts.fetch ?? ghJson);
+    console.log(renderPrChecks(prNumber, report));
+    return report.exitCode;
+  } catch (e) {
+    console.error(`rmd pr-checks: could not read PR #${prNumber}'s checks (not "no red checks"): ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+}
+
 /**
  * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
  * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
@@ -46854,7 +46884,9 @@ export async function sweepEscalationTriage(
   io: {
     dryRun?: boolean;
     rows?: Record<string, unknown>[];
-    issues?: IssueGateway;
+    /** W1-T9390: the daemon's reader, built once per start; absent (`rmd sweep`), one is built for this call. */
+    history?: EscalationTriageHistoryReader;
+    issues?: AsyncIssueGateway;
     runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
     clock?: Clock;
     relabel?: (url: string, label: string) => void | Promise<void>;
@@ -46863,9 +46895,11 @@ export async function sweepEscalationTriage(
 ): Promise<void> {
   try {
     const { ledgerPath, runId, owner, repo } = context;
-    const history = io.rows ?? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows;
-    const issues = io.issues ?? ghIssueGateway(owner, repo);
-    const open = listRetirableEscalationIssues(issues);
+    // W1-T9390: this rung runs on the daemon loop, so its ledger read and every GitHub read or write are awaited.
+    const history = io.rows ?? (await (io.history ?? createEscalationTriageHistoryReader())(dirname(ledgerPath))).rows;
+    const issues = io.issues ?? ghIssueGatewayAsync(owner, repo, { exec: (args) => ghTextAsync(args, {}, io.execAsync) });
+    const open = await listRetirableEscalationIssuesAsync(issues);
+    const { births, judgedStateKeys } = indexEscalationTriageHistory(history);
     const nowMs = (io.clock ?? systemClock).now();
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
     const deps = { issues, ledgerPath, runId };
@@ -46878,8 +46912,7 @@ export async function sweepEscalationTriage(
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];
     for (const issue of open) {
-      const birth = [...history].reverse().find((row) => row.issue_url === issue.url && row.triage_subject &&
-        ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"].includes(String(row.step)));
+      const birth = births.get(issue.url);
       if (!birth || typeof birth.ts !== "string" || !Number.isFinite(Date.parse(birth.ts))) continue;
       const subject = birth.triage_subject as Escalation;
       if (!subject || !Array.isArray(subject.options)) continue;
@@ -46894,8 +46927,7 @@ export async function sweepEscalationTriage(
     }
     await runStaleEscalationRejudge(candidates, {
       ledgerPath, runId, log, dryRun: io.dryRun,
-      alreadyJudgedStateKeys: new Set(history.filter((row) => row.step === "escalation.rejudged" &&
-        typeof row.state_key === "string").map((row) => String(row.state_key))),
+      alreadyJudgedStateKeys: judgedStateKeys,
       judge: (candidate) => {
         if (candidate.referentStateNow === "referent state unavailable")
           return Promise.resolve({ decision: "deliver", reason: "referent state unavailable" });
@@ -47924,6 +47956,9 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  // W1-T9390: the escalation-triage rung's ledger slice, held for this daemon's life like `boardGithub`, so a
+  // full sweep parses only the rotations and live bytes written since the one before.
+  const escalationTriageHistory = createEscalationTriageHistoryReader();
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -48053,7 +48088,7 @@ export function buildSweepHook(
       // own read failures degrade to [] internally, so it never strands the credit rung.
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub, tickRead });
       if (!github) await sweepEscalationTriage({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo, ledgerPath, runId },
-        openPrs, log, { runtime: triageRuntime });
+        openPrs, log, { runtime: triageRuntime, history: escalationTriageHistory });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
@@ -56157,6 +56192,12 @@ const COMMANDS: readonly CommandSpec[] = [
       " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
+    name: "pr-checks",
+    syntax: "rmd pr-checks <pr-number> [--repo <name>]",
+    summary: "Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.",
+    detail: "W1-T3083: the terminal caller of the one correct rollup derivation — unions the head's check runs with its combined commit statuses (rollupFromRest), so a status such as remudero-review is never dropped for lacking a conclusion, and keeps only the latest attempt per check name (dedupeRollupByLatestAttempt), so a superseded failure never outranks its later success. FAILS CLOSED: a word that is neither known-OK (SUCCESS/SKIPPED/NEUTRAL) nor known-FAIL is printed as pending, never green; the sets are imported from lib/sweep.ts. Exit 0 nothing red (pending is listed, not failed), 1 something red, 2 bad usage or a FAILED read — a dead fetch is never reported as no red checks.",
+  },
+  {
     name: "hand-worktree",
     syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
     summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
@@ -57378,6 +57419,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
+  ["pr-checks", (rest) => reportPrChecks(rest)],
   [
     "retro",
     async (rest) => {

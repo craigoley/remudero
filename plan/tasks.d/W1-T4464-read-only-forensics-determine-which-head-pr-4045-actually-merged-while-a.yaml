@@ -8,7 +8,7 @@
   budget_usd: 100.00
   risk: high
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=cefc03fad3b80621
   attempts: 0
   origin: "followup#DAEMON-1788584618629:2026-09-05T05:18:27.429Z:2"

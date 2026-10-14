@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups; item 3 asked to find what calls process.report.getReport in the daemon loop and whether it is synchronous and repeated)"
   plan_refs: [W1-T7746, W1-T9361, W1-T9114, W1-T113, W1-T9352]
   files: [src/lib/worker.ts, test/the-usage-probe-runs-no-process-report-on-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

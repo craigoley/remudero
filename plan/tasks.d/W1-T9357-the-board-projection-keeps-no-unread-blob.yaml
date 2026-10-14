@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: serve memory investigation (operator: 'go with all … find ways to reduce memory consumption')"
   plan_refs: [W1-T6467]
   files: [src/lib/board-projection.ts, test/the-board-projection-keeps-no-unread-blob.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
