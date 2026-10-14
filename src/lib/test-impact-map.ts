@@ -166,10 +166,13 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
 }
 
 
-/** Commits the base may be past the map's sha before the arm stops trusting it. Main lands a few
- *  dozen merges a day and the shard artifacts live one day, so a map this far behind is no longer
- *  the newest one obtainable. PRIMARY CONTROL: it alone decides when the arm stops speaking. */
-export const IMPACT_MAP_STALENESS_BOUND = 150;
+/** Commits the base may be past the map's sha before the arm stops trusting it. MEASURED 2026-09-30..
+ *  10-13: main lands 149–272 first-parent commits a day, so 150 silenced the arm for the last hours of
+ *  11 of 13 days and for every day after a missed nightly. 500 covers two days at the busiest rate.
+ *  A changed file that moved since the map still falls back on its own; the shadow record carries
+ *  the distance so the miss rate by distance can set this. PRIMARY CONTROL: it alone decides when the
+ *  arm stops speaking. */
+export const IMPACT_MAP_STALENESS_BOUND = 500;
 
 /** One test file's coverage, keyed by the files it loaded. `functions` rows are
  *  `[startLine, endLine, ...suite indices that executed the function]`, 1-based original lines. */

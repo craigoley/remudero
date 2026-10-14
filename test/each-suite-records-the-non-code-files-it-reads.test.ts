@@ -27,6 +27,7 @@ import {
   type ReadMap,
   type ReadMapInput,
 } from "../src/lib/affected-suites.js";
+import { IMPACT_MAP_STALENESS_BOUND } from "../src/lib/test-impact-map.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   createReadRecorder,
@@ -273,7 +274,7 @@ test("without a usable read map a non-code change falls back to the full run and
 
   const stale = selectAffectedSuites(["deploy/unit.service"], input({ map: map(), drift: { distance: 900, changedSinceMap: [] } }));
   assert.equal(stale.fullRun, true);
-  assert.match(stale.readMapFallback!, /stale: 900 commits behind the base, past its bound of 150/);
+  assert.match(stale.readMapFallback!, new RegExp(`stale: 900 commits behind the base, past its bound of ${IMPACT_MAP_STALENESS_BOUND}$`));
 
   const foreign = selectAffectedSuites(["package.json"], input({ map: map(), drift: { changedSinceMap: [], problem: "no ancestry" } }));
   assert.equal(foreign.fullRun, true);
