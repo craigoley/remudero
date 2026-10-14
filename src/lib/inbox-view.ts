@@ -22,11 +22,9 @@ export const INBOX_CLASSIFY_INTERVAL_MS = 60_000;
 /** An unchanged classification is re-stamped this often, so its age keeps saying how recently it was checked. */
 export const INBOX_CLASSIFICATION_RESTAMP_MS = INBOX_STALE_AFTER_MS / 2;
 const validatedInstanceSources = new WeakMap<PanelGraphDeps, string>();
-const dismissalWindows = new WeakMap<ClassifiedInbox, { from: string; to: string }>();
+const dismissalWindows = new WeakMap<PanelGraphDeps, { key: string; window: { from: string; to: string } }>();
 
 function dismissalAudit(classified: ClassifiedInbox, deps: PanelGraphDeps, now: number) {
-  let window = dismissalWindows.get(classified);
-  if (!window) { window = { from: fixedClock(now - 86_400_000).iso(), to: fixedClock(now).iso() }; dismissalWindows.set(classified, window); }
   const heldTask = classified.plan.byId.get("W1-T216");
   const heldAsk = classified.classifications.find(row => row.proposalId === "verify-human:W1-T216");
   const terminal = classified.classifications.some(row => {
@@ -34,13 +32,24 @@ function dismissalAudit(classified: ClassifiedInbox, deps: PanelGraphDeps, now: 
     return (row.state === "retired" || row.state === "ratified") && taskId !== undefined && classified.projection.get(taskId)?.merged === true;
   });
   const scope = deps.inboxAuditScope ?? deps.inboxSourceIdentity;
-  return buildInboxDismissalAudit({ scope: scope && { instance: scope.instance, repository: scope.repository }, window,
+  const input = { scope: scope && { instance: scope.instance, repository: scope.repository },
     coverage: { receipts: classified.attentionEvidence?.archiveLedger ?? "unavailable", outcomes: "partial", plan: "observed",
       registry: inboxClassificationEvidence(classified).complete ? "observed" : "partial" },
     controls: { heldSecurity: { taskId: "W1-T216", observed: Boolean(heldTask && heldAsk),
       passed: heldTask?.dispatch_hold === true && Boolean(heldAsk && heldAsk.state !== "retired" && heldAsk.state !== "ratified" && heldAsk.state !== "declined") },
       terminalMechanical: { observed: terminal, passed: terminal } },
-    receipts: inboxDismissalReceipts(classified.ledgerLines) });
+    receipts: inboxDismissalReceipts(classified.ledgerLines) } as const;
+  const stamps = [deps.planPath, deps.ledgerPath, join(deps.inboxRoot, "state", "inbox-proposals.json")].map(path => {
+    const stat = statSync(path, { throwIfNoEntry: false });
+    return [path, stat ? [stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs] : "absent"];
+  });
+  const key = JSON.stringify([stamps, input]);
+  let held = dismissalWindows.get(deps);
+  if (!held || held.key !== key) {
+    held = { key, window: { from: fixedClock(now - 86_400_000).iso(), to: fixedClock(now).iso() } };
+    dismissalWindows.set(deps, held);
+  }
+  return buildInboxDismissalAudit({ ...input, window: held.window });
 }
 
 /** What the last pass wrote: its content's identity, and when. Seeded from disk on the first pass. */
