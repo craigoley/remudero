@@ -108,6 +108,7 @@ import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, per
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { judgementFamily } from "./machine-filing-judge.js";
+import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
@@ -2119,7 +2120,7 @@ export async function classifyAllProposalsSliced(
   const state = inboxClassifyState(deps);
   const retained = await readRetainedHumanReleases(deps);
   const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts);
-  const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines);
+  const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines, fp.plan, fp.projection);
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence)
     ? reused : { ...reused, attentionEvidence };
@@ -2437,14 +2438,14 @@ async function readRetainedHumanReleases(deps: PanelGraphDeps) {
     step: ["ratify.approved", "verify_human.judged"], readLiveRecords: () => [], refuseIncomplete: true,
   });
   const receipts = new Map<string, string>();
-  const judges = new Map<string, { decision: string; reason: string }>();
+  const judges = new Map<string, Record<string, unknown>>();
   if (ledger.ok) {
     for (const row of ledger.rows) {
       if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string") {
         receipts.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
       }
-      if (row.step === "verify_human.judged" && typeof row.task_id === "string" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
-        judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
+      if (row.step === "verify_human.judged" && typeof row.task_id === "string") {
+        judges.set(row.task_id, row);
       }
     }
   }
@@ -2452,17 +2453,24 @@ async function readRetainedHumanReleases(deps: PanelGraphDeps) {
   return { receipts, judges, archiveLedger };
 }
 
-function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHumanReleases>>, live: LedgerLines): InboxAttentionEvidence {
+function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHumanReleases>>, live: LedgerLines, plan: Plan, projection: ReadonlyMap<string, StatusProjection>): InboxAttentionEvidence {
   const releases = new Map(retained.receipts);
   const judges = new Map(retained.judges);
   for (const row of live) {
     if (typeof row.task_id !== "string") continue;
     if (row.step === "ratify.approved" && row.released === "verify-human") releases.set(row.task_id, humanReleaseReceipt(row).slice(0, 512));
-    if (row.step === "verify_human.judged" && typeof row.judge_decision === "string" && typeof row.judge_reason === "string") {
-      judges.set(row.task_id, { decision: row.judge_decision.slice(0, 64), reason: row.judge_reason.slice(0, 300) });
+    if (row.step === "verify_human.judged") {
+      judges.set(row.task_id, row);
     }
   }
-  return { archiveLedger: retained.archiveLedger, releases: [...releases], judges: [...judges] };
+  const rulings = currentVerifyHumanRulings([...judges.values()], id => {
+    const task = plan.byId.get(id);
+    if (!task || task.depends_on.some(dep => projection.get(dep) === undefined || projection.get(dep)?.indeterminate)) return undefined;
+    return unmetDependencies(plan, task, t => projection.get(t.id)?.merged === true).length === 0;
+  });
+  return { archiveLedger: retained.archiveLedger, releases: [...releases],
+    judges: [...rulings].map(([id, ruling]) => [id, { ...ruling, reason: ruling.reason.slice(0, 300),
+      ...(ruling.state === "judged" ? { at: ruling.at?.slice(0, 64) ?? null } : {}) }]) };
 }
 
 /** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */

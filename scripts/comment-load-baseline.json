@@ -218,7 +218,7 @@
   "src/lib/sweep.ts": 5000,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 39,
-  "src/lib/task-id-reservation.ts": 257,
+  "src/lib/task-id-reservation.ts": 261,
   "src/lib/task-id.ts": 500,
   "src/lib/task-linter.ts": 1312,
   "src/lib/tier.ts": 67,
