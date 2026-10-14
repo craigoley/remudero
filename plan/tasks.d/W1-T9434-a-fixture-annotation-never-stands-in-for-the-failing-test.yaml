@@ -1,0 +1,56 @@
+- id: W1-T9434
+  title: "A FIX ROUND READS A PASSING TEST'S ::error:: FIXTURE LINES AS THE SHARD'S FAILURE — on 2026-10-14 #11559's coverage-shard (5/8) failed on route-wiring's write-route ledger test, but the round's ci_failures excerpt (tail_source annotations) held only the merge_group fixture refusals the-ci-gate test prints, so the worker edited that unrelated test and the fix rung escalated it out of scope (#11651)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — the fix round's failure excerpt names the failing test, not annotation noise
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 PR-queue review: why #11559 (W1-T3956) round 1 fixed the wrong file"
+  plan_refs: [W1-T8038, W1-T76, W1-T1227, W1-T3956]
+  files: [src/run-task.ts, test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, read-only:
+      - CI job 115797612505, coverage-shard (5/8) of #11559 at head 03aa001. Its only `not ok` is
+        "every declared write route is either wiring-tested here or listed as explicit debt"
+        (test/route-wiring.test.ts): the PR's three new POST /v1/automation/triggers/* routes were in neither
+        COVERED nor COVERAGE_DEBT. The same log carries six "##[error]ci-gate-from-contract: refusing the
+        merge_group gate: ..." lines, which test/the-ci-gate-reports-on-the-merge-group-commit.test.ts prints
+        on purpose from fixtures in a test that PASSES. On a runner, `::error::` on stdout becomes a live
+        annotation.
+      - The ledger's fix.dispatch row (11:14:16Z) has ci_failures [{check "coverage-shard (5/8)", signature
+        null, tests [], tail_source "annotations", excerpt "ci-gate-from-contract: refusing the merge_group
+        gate: ..."}]. The real `not ok` never reached the worker.
+      - The worker (fix round 1) changed only test/the-ci-gate-reports-on-the-merge-group-commit.test.ts to
+        capture those lines, and pushed 58f6f36 reporting FIXED. On the new head, route-wiring moved to
+        coverage-shard (3/8) and failed there with the same assertion. The fix rung then stood down: "a fix
+        worker added path(s) outside the declared scope", and opened BLOCKED #11651. A hand push (f5db336)
+        reverted the stray edit and listed the three routes in COVERAGE_DEBT.
+    W1-T8038 handles annotation sets that hold only the RUNNER's cancellation or timeout lines. This is the
+    other case: annotations a passing test printed, which displace a log that names a real `not ok`.
+  design: |
+    1. When ciFailuresSteps builds a failure for a check whose job log is readable, a `not ok` (or a FAIL
+       summary) in that log always wins over annotations. Annotations become the excerpt only when the log has
+       no failing test and no failing step line, and then they are kept beside the job's last error line.
+    2. An annotation whose text also appears inside a test's passing output region (between its `# Subtest`
+       and its `ok N`) is marked `from_passing_test` and never becomes the excerpt or the signature.
+    3. Record which source won (`tail_source`) and the named failing test (`tests`), so the next judge can see
+       the round was given the real failure.
+    Tests go in the new file, titled verbatim as in the proofs. Use the 03aa001 shard log shape as the
+    fixture: one `not ok` from test A and six `##[error]` lines printed inside test B's passing subtest.
+  acceptance:
+    - claim: "a log with a real not ok yields that test as the failure even when annotations exist"
+      proof: 'grep: test("W1-T9434: a readable not ok wins over annotations a passing test printed" in test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts'
+    - claim: "an annotation printed inside a passing subtest never becomes the excerpt"
+      proof: 'grep: test("W1-T9434: an annotation from a passing subtest is not the excerpt" in test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts'
+    - claim: "a log with no failing test still falls back to annotations"
+      proof: 'grep: test("W1-T9434: annotations remain the excerpt when the log names no failure" in test/a-fixture-annotation-never-stands-in-for-the-failing-test.test.ts'
+  falsifier: |
+    On main, feed ciFailuresSteps a coverage-shard log with one `not ok` (route-wiring) and six `##[error]`
+    lines printed inside a passing subtest, plus those six as the job's annotations. The failure comes back
+    with tail_source "annotations", tests [] and an excerpt made only of the fixture lines.

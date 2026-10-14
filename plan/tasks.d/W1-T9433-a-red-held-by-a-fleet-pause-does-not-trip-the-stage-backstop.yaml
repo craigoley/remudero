@@ -1,0 +1,58 @@
+- id: W1-T9433
+  title: "THE STALLED-STAGE BACKSTOP COUNTS TIME THE FLEET ITSELF WITHHELD THE REPAIR — on 2026-10-14 #11629's own-red was never dispatched because a fleet PAUSE held core 08:12Z-10:57Z, yet at 10:26Z the 45-minute BACKSTOP escalated it needs-human (#11639), and after the PAUSE lifted every fix round stood down on that open issue"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a stage's backstop clock runs only while its owner could act
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 PR-queue review: why the fix lane escalated #11629 (W1-T9410's build PR) instead of fixing it"
+  plan_refs: [W1-T5900, W1-T6405, W1-T9409, W1-T9410]
+  files: [src/lib/sweep.ts, test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on the core ledger, read-only:
+      - 09:40:46Z #11629 went own-red (blocker_owner fix-lane) on head 1ccf26c. 09:54:14Z the sweep's own
+        base-fixed refresh moved it to 3b421f3; the stage kept blocker_since 09:40:46Z.
+      - From 09:46Z every sweep.disposed row for it reads "NOT DISPATCHED this pass: fleet PAUSE hold: PAUSE
+        requested: container recycle" or "deferred to full sweep (light pass)". An orphaned recycle PAUSE held
+        core from 08:12Z to 10:57Z (W1-T9409/W1-T9410). No fix.dispatch row exists for the PR in that window.
+      - 10:26:38Z pr.stuck {blocker own-red, bound_minutes 45, bound_kind BACKSTOP, diagnosis "unknown
+        signature"}; 10:27:15Z escalation.issue_opened MANUAL #11639 "own-red for 45 minutes".
+      - After the PAUSE lifted: fix.stood_down at 11:07:48Z, 11:14:38Z and 11:18:09Z, each "a needs-human
+        escalation for this exact (task, PR, head 3b421f3, cause) is ALREADY OPEN ... standing down until it is
+        closed, the head moves, or the task contract changes". The red was infrastructure (a cancelled CI
+        attempt, then a hung leak-locate probe, W1-T9426), and a plain re-run of the failed jobs turned every
+        check green. No repair was ever attempted by the fleet.
+    READ on origin/main c3753e8f8, src/lib/sweep.ts, the `reportStuckStage` closure in runSweep: the backstop
+    fires when `blocker_age_ms` exceeds `policy.stageBackstops[blocker].minutes`, measured from blocker_since.
+    It skips only when `standDownReason` names MERGED or CLOSED, or when a fix.dispatch has happened since
+    blocker_since. A pass that stood down because the fleet itself withheld the repair (a fleet PAUSE, a
+    dispatch hold, capacity) still counts toward the bound, so a long PAUSE escalates every red PR it held.
+  design: |
+    No new constant. The backstop measures how long the stage's OWNER had the chance to act.
+    1. When a pass's stand-down reason is a hold the fleet placed on itself (a fleet PAUSE or STOP hold, a
+       dispatch hold, a capacity or light-pass deferral), that pass does not count toward the stage's
+       backstop. Measure the stage's age as the time since blocker_since minus the time those passes covered,
+       read from the stage's own sweep.disposed rows. Do not keep a separate in-memory clock.
+    2. The pr.stuck row keeps blocker_since and adds `held_ms` (the excluded time), so the escalation text
+       and the ledger say how much of the age was the fleet's own hold.
+    3. Nothing else changes. A red that stays undispatched while the fleet is NOT holding itself still
+       escalates at the same bound.
+    Tests go in the new file, titled verbatim as in the proofs. Drive runSweep with the existing sweep test
+    helpers and a ledger whose disposed rows carry a PAUSE stand-down.
+  acceptance:
+    - claim: "an own-red stage whose passes all stood down on a fleet PAUSE is not escalated past its backstop"
+      proof: 'grep: test("W1-T9433: an own-red held by a fleet PAUSE is not escalated at its backstop" in test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts'
+    - claim: "the same stage escalates once its unheld time passes the bound"
+      proof: 'grep: test("W1-T9433: the backstop counts only the time the owner could act" in test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts'
+    - claim: "the pr.stuck row records the held time it excluded"
+      proof: 'grep: test("W1-T9433: pr\.stuck names the held time it excluded" in test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts'
+  falsifier: |
+    On main, give runSweep an own-red PR with blocker_since 60 minutes back and a ledger in which every
+    sweep.disposed row since then carries stand_down_reason "fleet PAUSE hold: PAUSE requested: container
+    recycle", with no fix.dispatch row. The pass writes pr.stuck with bound_kind BACKSTOP and calls escalate.

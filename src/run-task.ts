@@ -1726,6 +1726,7 @@ import {
   listRetirableEscalationIssues,
   listRetirableEscalationIssuesAsync,
   createEscalationTriageHistoryReader,
+  ESCALATION_TRIAGE_EVIDENCE_SLICE,
   indexEscalationTriageHistory,
   type EscalationTriageHistoryReader,
   logCostGovernorDeferral,
@@ -3285,12 +3286,21 @@ function realDeps(): ComposedRealGraph {
   return composedRealGraph;
 }
 
-/** Bind the closed executors to existing write ports. One factory owns one pass's budget. */
+/**
+ * Bind the closed executors to existing write ports. One factory owns one pass's budget.
+ *
+ * W1-T9406: `evidence` reads the {@link ESCALATION_TRIAGE_EVIDENCE_SLICE} through W1-T9390's incremental
+ * reader, never the whole ledger union. A pass driver awaits `refresh` first, which loads every rotation not
+ * yet seen OFF the loop; `evidence` then answers synchronously from those rotations and the live bytes written
+ * since. No time window. An unreadable slice throws (the triage then delivers), never an empty history.
+ * `evidenceHistory` is the daemon's reader, built once per start; absent, this factory builds its own.
+ */
 export function buildEscalationTriageRuntime(
   context: { root: string; config: Config; owner: string; repo: string },
   io: {
     readPolicy?: () => unknown;
     readRows?: (ledgerPath: string) => Record<string, unknown>[];
+    evidenceHistory?: EscalationTriageHistoryReader;
     clock?: Clock;
     seenAt?: () => number | undefined;
     windowMs?: () => number;
@@ -3299,10 +3309,15 @@ export function buildEscalationTriageRuntime(
     amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
     kick?: (e: Escalation) => void;
   } = {},
-): (deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings {
+): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
-  const readRows = io.readRows ?? ((path) => readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true }).rows);
+  const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
+  const readRows = io.readRows ?? ((path) => {
+    const read = evidenceHistory.current(dirname(path));
+    if (!read.ok) throw new Error(`triage evidence history is unreadable (${read.unread.length} unread: ${read.unread.slice(0, 3).join(", ")})`);
+    return read.rows;
+  });
   const clock = io.clock ?? systemClock;
   const client = io.client ?? (() => {
     const tokens = JSON.parse(readFileSync(serviceTokensPath(config.root), "utf8")) as { write?: unknown };
@@ -3328,7 +3343,8 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  return (deps) => {
+  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => parseYaml(readFileSync(policyPath(root), "utf8"))))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
     const receipts = new Map<string, string>();
@@ -3402,7 +3418,24 @@ export function buildEscalationTriageRuntime(
         return undefined; // A proposed amendment or a kick is not yet a resolved block.
       },
     };
-  };
+  }, { refresh });
+}
+
+/**
+ * W1-T9406: a pass driver's refresh of the triage evidence slice, loading its new rotations off the loop before the
+ * pass triages anything. A failed refresh is contained and logged: the evidence then reads what it lacks inline, as
+ * the union would, or refuses when the slice is unreadable.
+ */
+export async function refreshEscalationTriageEvidence(
+  runtime: Pick<ReturnType<typeof buildEscalationTriageRuntime>, "refresh">,
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  try {
+    await runtime.refresh(ledgerPath);
+  } catch (e) {
+    log("escalation_triage.evidence_refresh_failed", { error: String((e as Error)?.message ?? e) });
+  }
 }
 
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
@@ -46902,6 +46935,8 @@ export async function sweepEscalationTriage(
     const { births, judgedStateKeys } = indexEscalationTriageHistory(history);
     const nowMs = (io.clock ?? systemClock).now();
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
+    // W1-T9406: the evidence slice is refreshed off the loop before any candidate's evidence is read.
+    await runtime.refresh(ledgerPath);
     const deps = { issues, ledgerPath, runId };
     const cfg = runtime(deps);
     // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
@@ -47959,6 +47994,8 @@ export function buildSweepHook(
   // W1-T9390: the escalation-triage rung's ledger slice, held for this daemon's life like `boardGithub`, so a
   // full sweep parses only the rotations and live bytes written since the one before.
   const escalationTriageHistory = createEscalationTriageHistoryReader();
+  // W1-T9406: the triage evidence's own slice, held for this daemon's life the same way.
+  const escalationTriageEvidence = createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -47970,8 +48007,11 @@ export function buildSweepHook(
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
     const tickRead = await tickReadFor?.();
-    const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo });
+    const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
+      { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
+    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
     try {
       await mainHealthRung?.();
     } catch (e) {
