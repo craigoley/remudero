@@ -26,6 +26,11 @@ test("an inbox dismissal audit keeps partial sources unmeasurable", async () => 
   assert.equal(empty.state, "measured");
   assert.equal(empty.measurement.falseDismissals, 0);
   assert.equal(empty.measurement.falseDismissalRate, null, "an empty denominator has no precision estimate");
+  const { validInboxDismissalAudit } = await import("../src/lib/inbox-dismissal-audit.js");
+  assert.equal(validInboxDismissalAudit({ ...empty, scope: { instance: null, repository: null } }), undefined);
+  assert.equal(validInboxDismissalAudit({ ...empty, window: { from: window.to, to: window.from } }), undefined);
+  assert.equal(validInboxDismissalAudit({ ...empty, truncated: true }), undefined);
+  assert.equal(buildInboxDismissalAudit({ ...input, coverage: {} as typeof coverage }).measurement.falseDismissals, null);
   const missing = buildInboxDismissalAudit({ ...input, coverage: { ...coverage, receipts: "partial" } });
   assert.equal(missing.state, "unmeasurable");
   assert.equal(missing.measurement.falseDismissals, null);

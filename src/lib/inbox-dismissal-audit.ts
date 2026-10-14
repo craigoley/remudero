@@ -76,7 +76,7 @@ export function buildInboxDismissalAudit(input: InboxDismissalAuditInput) {
   const controlsObserved = input.controls.heldSecurity.taskId === "W1-T216" && input.controls.heldSecurity.observed && input.controls.heldSecurity.passed
     && input.controls.terminalMechanical.observed && input.controls.terminalMechanical.passed;
   const measurable = id(input.scope?.instance) && id(input.scope?.repository) && Number.isFinite(from) && Number.isFinite(to) && from <= to
-    && Object.values(input.coverage).every(value => value === "observed") && controlsObserved
+    && ["receipts", "outcomes", "plan", "registry"].every(key => input.coverage[key as keyof typeof input.coverage] === "observed") && controlsObserved
     && unqualified === 0 && conflicting === 0 && observed.unresolved === 0;
   return { contract: "inbox-dismissal-audit-v1" as const, state: measurable ? "measured" as const : "unmeasurable" as const,
     scope: input.scope ?? { instance: null, repository: null }, window: input.window, coverage: input.coverage, controls: input.controls,
@@ -108,10 +108,13 @@ export function validInboxDismissalAudit(raw: unknown): InboxDismissalAudit | un
     || !(measurement.falseDismissalRate === null || typeof measurement.falseDismissalRate === "number" && Number.isFinite(measurement.falseDismissalRate) && measurement.falseDismissalRate >= 0 && measurement.falseDismissalRate <= 1)
     || !Array.isArray(value.items) || value.items.length > INBOX_DISMISSAL_SAMPLE_LIMIT || typeof value.truncated !== "boolean") return undefined;
   if (value.state === "unmeasurable" && (measurement.falseDismissals !== null || measurement.falseDismissalRate !== null)) return undefined;
-  if (value.state === "measured" && (measurement.falseDismissals === null || !Object.values(coverage).every(x => x === "observed")
+  if (Date.parse(String(window.from)) > Date.parse(String(window.to))) return undefined;
+  if (value.state === "measured" && (!id(scope.instance) || !id(scope.repository) || measurement.falseDismissals === null || !Object.values(coverage).every(x => x === "observed")
     || !held.observed || !held.passed || !terminal.observed || !terminal.passed || Number(observed.unresolved) !== 0
     || Number(denominator.unqualified) !== 0 || Number(denominator.conflicting) !== 0)) return undefined;
   if (denominator.sampled !== denominator.eligible || denominator.returned !== value.items.length
+    || denominator.returned !== Math.min(Number(denominator.sampled), INBOX_DISMISSAL_SAMPLE_LIMIT)
+    || value.truncated !== (Number(denominator.sampled) > INBOX_DISMISSAL_SAMPLE_LIMIT)
     || Number(observed.falseDismissals) + Number(observed.terminalConfirmed) + Number(observed.unresolved) !== denominator.sampled
     || Number(observed.restored) > Number(denominator.sampled)) return undefined;
   if (value.state === "measured" && (measurement.falseDismissals !== observed.falseDismissals
