@@ -4202,8 +4202,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
     reproduceFailingTestsOnMain: deps.reproduceFailingTestsOnMainImpl,
     readTestImportClosure: deps.readTestImportClosureImpl,
-    // W1-T9047 — main's reach into a refreshed head's review: two paced compares and the proof
-    // tests' import closure, read only for a review that would otherwise be discrimination alone.
+    // W1-T9047 — two paced compares plus the proof tests' import closure.
     readReviewReuseReach: reviewReuseReachReader({
       plan,
       readFacts: (reviewedMergeBaseSha, currentMergeBaseSha, headSha) =>
@@ -9500,15 +9499,10 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
   };
 }
 
-/** W1-T9047 — the review mode a review disposition dispatches.
- *
- *  The two reuse rows match only on GREEN checks. A fleet refresh makes a new head whose CI is
- *  PENDING, so the pending-CI `post-review` row ("Start one exact-input review after CI has
- *  registered") fires first, and that row used to map straight to `{kind: "full-review"}`. The
- *  exact-input digest carries no base, and branch protection is non-strict. So a refreshed head
- *  whose own diff is unchanged needs no new LLM judgment. This routes that row through
- *  {@link reviewReuseVerdict} when the head orphaned a review (`reviewOrphanedByPush`). Every other
- *  `post-review` stays a full review. */
+/** W1-T9047 — the review mode a disposition dispatches. The reuse rows need GREEN checks, so a
+ *  refreshed head's pending-CI `post-review` row fired first and ran a full review. The digest
+ *  carries no base, so that row now consults {@link reviewReuseVerdict} when the push orphaned a
+ *  review. */
 export function reviewDispatchModeFor(pr: OpenPrView, disposition: Disposition): ReviewDispatchMode {
   const reuse = reviewReuseVerdict(reviewReuseInputsFrom(pr));
   if (disposition === "review-reused" && reuse.kind === "reuse") return reuse;
@@ -9519,24 +9513,18 @@ export function reviewDispatchModeFor(pr: OpenPrView, disposition: Disposition):
 
 /** W1-T9047 — what main's move could reach, read when a review would otherwise be `discriminate-only`. */
 export interface ReviewReuseReach {
-  /** Paths main changed between the reviewed merge base and the current one. */
   mainChangedFiles: readonly string[];
-  /** The PR's own changed paths. */
   prFiles: readonly string[];
-  /** Paths the task's acceptance proofs name (`grep: … in <path>`, `unit test: <path>`). */
   proofTargetPaths: readonly string[];
-  /** The test files the proofs run: proof paths and PR files that are test suites. */
   proofTestFiles: readonly string[];
   /** Each proof test file's import closure, itself included. A file with no entry is unknown. */
   closure: ReadonlyMap<string, ReadonlySet<string>> | undefined;
-  /** The PR files whose own-diff digest part fell back to a blob sha (GitHub sent no patch). */
+  /** PR files whose digest part fell back to a blob sha (GitHub sent no patch). */
   blobFallbackPaths?: readonly string[];
 }
 
-/** W1-T9047 — main's changed paths that touch the PR's files, its proof target paths, or its proof
- *  tests' import closure. `complete` is true only when main's list is untruncated and every proof
- *  test's closure is known. Only then does an empty `counted` prove main's move cannot reach what
- *  the review judged. */
+/** W1-T9047 — main's changed paths inside the PR's files, proof paths or proof tests' closure.
+ *  Only a `complete` read (untruncated, every closure known) lets an empty `counted` prove no reach. */
 export function mainDeltaReachingReview(reach: ReviewReuseReach): { counted: string[]; complete: boolean } {
   const reached = new Set([...reach.prFiles, ...reach.proofTargetPaths, ...reach.proofTestFiles]);
   for (const file of reach.proofTestFiles) for (const dep of reach.closure?.get(file) ?? []) reached.add(dep);
@@ -9546,10 +9534,8 @@ export function mainDeltaReachingReview(reach: ReviewReuseReach): { counted: str
   return { counted, complete };
 }
 
-/** W1-T9047 — the operator ruling of 2026-10-13, applied to a `discriminate-only` mode. Any overlap
- *  between main's delta and what the review judged forces a full review. No overlap, with complete
- *  evidence, reuses the verdict. CI and the hosted proof-discrimination check still run on the new
- *  head. An unread or incomplete reach keeps `discriminate-only`, as before this task. */
+/** W1-T9047 — operator ruling 2026-10-13: any overlap forces a full review; none, with complete
+ *  evidence, reuses the verdict; unread or incomplete keeps `discriminate-only`. */
 export function reviewModeAfterReach(
   mode: ReviewDispatchMode,
   reach: { counted: string[]; complete: boolean } | undefined,
@@ -9571,18 +9557,15 @@ export function reviewModeAfterReach(
   };
 }
 
-/** W1-T9047 — the test files a task's proofs run. A `grep:`/`unit test:` path that is a test suite,
- *  plus every test suite the PR itself changes: a `unit test:` title names no file, and its test is
- *  the PR's own. */
+/** W1-T9047 — proof paths that are test suites, plus the PR's own suites (a `unit test:` title
+ *  names no file). */
 export function reviewProofTestFiles(proofTargets: readonly string[], prFiles: readonly string[]): string[] {
   const suite = (path: string): boolean => /^test\/.*\.test\.[cm]?[jt]sx?$/.test(path);
   return [...new Set([...proofTargets, ...prFiles].filter(suite))].sort();
 }
 
-/** W1-T9047 — the production {@link SweepDeps.readReviewReuseReach}. The REST compares come from
- *  `readFacts`. The proofs come from the PR's task in `plan`, or from the body's acceptance block
- *  for a PR with no plan task ({@link fixRungTaskFor}). The closure is read at the current merge
- *  base and the head. With no proof test there is no closure to read, so it is complete. */
+/** W1-T9047 — the production {@link SweepDeps.readReviewReuseReach}. Proofs come from
+ *  {@link fixRungTaskFor}; with no proof test, the empty closure is complete. */
 export function reviewReuseReachReader(input: {
   plan: Plan;
   readFacts: (reviewedMergeBaseSha: string, currentMergeBaseSha: string, headSha: string) => ReviewReuseReachFacts;
@@ -12188,9 +12171,7 @@ export interface SweepDeps {
   reproduceFailingTestsOnMerge?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<BaseProbeResult>;
-  /** W1-T9047 — read for a `discriminate-only` review on a head whose merge base moved: main's delta
-   *  between the two merge bases, the PR's files, its proof paths and its proof tests' import
-   *  closure ({@link reviewModeAfterReach}). Unwired, or `undefined`, keeps `discriminate-only`. */
+  /** W1-T9047 — main's reach for {@link reviewModeAfterReach}. Unwired keeps `discriminate-only`. */
   readReviewReuseReach?: (
     pr: OpenPrView, reviewedMergeBaseSha: string, currentMergeBaseSha: string,
   ) => Promise<ReviewReuseReach | undefined>;
@@ -16083,10 +16064,8 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
-  /** W1-T9047 — a `discriminate-only` mode decided by main's reach ({@link reviewModeAfterReach}).
-   *  Each decision writes one `sweep.review_reuse_reach` row naming the paths it counted and the
-   *  files whose digest fell back to a blob sha. A failed read is ledgered with its reason and keeps
-   *  `discriminate-only`. */
+  /** W1-T9047 — decides a `discriminate-only` mode by main's reach and ledgers one
+   *  `sweep.review_reuse_reach` row per decision, a failed read's reason included. */
   const reviewModeWithReach = async (pr: OpenPrView, mode: ReviewDispatchMode): Promise<ReviewDispatchMode> => {
     const from = pr.reviewedMergeBaseSha;
     const to = pr.currentMergeBaseSha;
@@ -18872,8 +18851,7 @@ export async function runSweep(
       // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
-      // W1-T9047: the pending-CI post-review row now reaches the reuse verdict too, and a
-      // discriminate-only mode is then decided by what main's move could reach.
+      // W1-T9047: discriminate-only is then decided by main's reach.
       const requested = reviewDispatchModeFor(pr, disposition);
       const mode = await reviewModeWithReach(pr, requested);
       const jobReason = mode.kind === "full-review" || disposition !== "post-review"
