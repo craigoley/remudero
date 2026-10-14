@@ -80,6 +80,7 @@ function makeTree(): string {
     ].join("\n"),
   );
   writeFileSync(join(root, "src", "run-task.ts"), 'export const runTask: string = "run-task";\n');
+  writeFileSync(join(root, "src", "run-child-main.ts"), 'export const runChild: string = "run-child";\n');
   return root;
 }
 
