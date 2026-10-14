@@ -199,11 +199,17 @@ function objectSha(value: unknown): string {
 }
 
 function selectedRegistryText(text: string): void {
-  const fields = new Set(["github_repo", "repo", "project", "retired", "mode", "primary", "host", "state_dir", "container", "role", "port", "worktree"]);
+  const fields = new Set(["repo", "github_repo", "project", "retired", "mode", "primary", "state_dir", "container_name", "service_user", "image", "max_old_space_mb", "service_name", "watchdog_service_name", "watchdog_timer_name", "launcher_path", "revival_log", "gh_app_id", "gh_app_installation_id", "gh_app_private_key_path", "claude_dir", "codex_dir", "container_config_dir"]);
+  const roots = new Set<string>();
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/\s+#.*$/, "").trimEnd();
     if (!line.trim() || line.trimStart().startsWith("#")) continue;
-    if (/^\S/.test(line) && line !== "instances:" && !/^version:\s*1$/.test(line)) throw new GoLiveError("registry_target_unavailable", 503);
+    if (/^\S/.test(line)) {
+      if (line !== "instances:" && !/^version:\s*1$/.test(line)) throw new GoLiveError("registry_target_unavailable", 503);
+      const root = line.split(":")[0];
+      if (roots.has(root)) throw new GoLiveError("registry_target_unavailable", 503);
+      roots.add(root);
+    }
     const field = /^ {4}([A-Za-z_]+):/.exec(line);
     if (field && !fields.has(field[1])) throw new GoLiveError("registry_target_unavailable", 503);
   }
@@ -273,8 +279,15 @@ async function requestSelectedGoLive(input: GoLiveInput, deps: GoLiveRequestOpti
   const confirmed: GoLivePartialReceipt["confirmed"] = [];
   let phase: GoLivePartialReceipt["phase"] = "branch", receipt: GoLiveReceipt;
   try {
-    await api("POST", `${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: selected.baseSha }); confirmed.push("branch"); phase = "file";
-    await api("PUT", path, { message: title, sha: selected.fileSha, content: Buffer.from(content).toString("base64"), branch }); confirmed.push("file"); phase = "pr";
+    const created = record(await api("POST", `${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: selected.baseSha }));
+    if (created.ref !== `refs/heads/${branch}` || record(created.object).type !== "commit" || record(created.object).sha !== selected.baseSha) throw new GoLiveError("registry_response_invalid", 502);
+    confirmed.push("branch"); phase = "file";
+    const updated = record(await api("PUT", path, { message: title, sha: selected.fileSha, content: Buffer.from(content).toString("base64"), branch }));
+    const newBytes = Buffer.from(content), commit = record(updated.commit);
+    objectSha(commit.sha);
+    if (record(updated.content).sha !== createHash("sha1").update(`blob ${newBytes.length}\0`).update(newBytes).digest("hex")
+      || !Array.isArray(commit.parents) || commit.parents.length !== 1 || record(commit.parents[0]).sha !== selected.baseSha) throw new GoLiveError("registry_response_invalid", 502);
+    confirmed.push("file"); phase = "pr";
     const pr = record(await api("POST", `${repo}/pulls`, {
       title, head: branch, base: selected.branch,
       body: `Operator ${input.actor} requested go-live for ${input.instance}.\n\nShadow runs: ${evidence.runs}; would merge: ${evidence.would_merge}; would block: ${evidence.would_block}.\n\nReview and merge this registry change to promote the instance.`,

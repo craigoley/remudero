@@ -436,7 +436,11 @@ function selectedApi(options: SelectedFixtureOptions = {}) {
         value = { sha: trees[index], truncated: false, tree: [{ path: parts[index], type: index === parts.length - 1 ? "blob" : "tree", mode: index === parts.length - 1 ? "100644" : "040000", sha: index === parts.length - 1 ? blob : trees[index + 1] }] };
       }
     } else if (path === `${repo}/pulls`) value = { number: 83, html_url: `https://github.com/${repository}/pull/83` };
-    else if ((method === "POST" && path === `${repo}/git/refs`) || (method === "PUT" && path === contentPath)) value = {};
+    else if (method === "POST" && path === `${repo}/git/refs`) value = { ref: body?.ref, object: { type: "commit", sha: body?.sha } };
+    else if (method === "PUT" && path === contentPath) {
+      const changed = Buffer.from(String(body?.content), "base64");
+      value = { content: { sha: createHash("sha1").update(`blob ${changed.length}\0`).update(changed).digest("hex") }, commit: { sha: "f".repeat(40), parents: [{ sha: baseSha }] } };
+    }
     else assert.fail(`unexpected selected effect ${method} ${path}`);
     const changed = options.change ? options.change(call, value, read) : value;
     if (changed instanceof Error) throw changed;
@@ -581,4 +585,73 @@ test("registry writer refuses partial failure without publishing success receipt
     assert.equal(f.calls.filter(c => c.method !== "GET").length, phase === "branch" ? 1 : phase === "file" ? 2 : 3);
     assert.equal(deps.written.length, 0);
   }
+  for (const phase of ["branch", "file", "pr"]) {
+    const f = selectedApi({ change: (call, value) => call.method === "POST" && call.path.endsWith("/git/refs") && phase === "branch" || call.method === "PUT" && phase === "file" || call.method === "POST" && call.path.endsWith("/pulls") && phase === "pr" ? {} : value });
+    const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+    assert.equal(error.code, "go_live_proposal_incomplete");
+    const receipt = error.receipt as { phase: string; confirmed: string[] };
+    assert.equal(receipt.phase, phase); assert.deepEqual(receipt.confirmed, phase === "branch" ? [] : phase === "file" ? ["branch"] : ["branch", "file"]);
+  }
+});
+
+test("selected writer snapshots request intent and ports across asynchronous evidence", async () => {
+  const f = selectedApi(), target = { repository: f.repository, filePath: f.filePath }, input = { instance: "widgets", actor: "owner" };
+  const deps = selectedDeps(f, target);
+  deps.readRows = async () => { target.repository = "other/ops"; target.filePath = "wrong.yaml"; input.instance = "gadgets"; input.actor = "outsider"; deps.api = async () => assert.fail("mutated API must not run"); deps.writeLedger = (() => assert.fail("mutated ledger must not run")) as unknown as typeof appendLedger; return threeRuns(); };
+  const receipt = await requestGoLive(input, deps);
+  assert.equal(receipt.instance, "widgets"); assert.equal(deps.written[0].actor, "owner");
+  assert.ok(f.calls.every(call => call.path.startsWith("repos/acme/registry")));
+  assert.match(Buffer.from(String(f.calls.find(call => call.method === "PUT")?.body?.content), "base64").toString("utf8"), /gadgets:\n    github_repo: acme\/gadgets\n    mode: shadow/);
+});
+
+test("selected writer covers unknown response, schema and audit outcomes without granting publication", async () => {
+  for (const change of [
+    (call: FakeCall, value: unknown) => call.path === "repos/acme/registry" ? { id: "91", full_name: "acme/registry", default_branch: "main" } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/git/ref/") ? { object: { type: "tag", sha: "c".repeat(40) } } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/git/commits/") ? { sha: "d".repeat(40), tree: { sha: "1".repeat(40) } } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/git/trees/") ? { ...value as object, sha: "d".repeat(40) } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, path: "another.yaml" } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, content: "***" } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, encoding: "none" } : value,
+  ]) {
+    const f = selectedApi({ change });
+    assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)))).code, "registry_target_unavailable");
+    assert.ok(f.calls.every(call => call.method === "GET"));
+  }
+  for (const text of ["version: 9\n" + REGISTRY, REGISTRY + "future_policy: live\n", REGISTRY.replace("    mode: shadow # flips via PR", "    foreign_permission: true"), "version: 1\nversion: 1\n" + REGISTRY, "instances:\n  x:\n    mode: shadow\n", REGISTRY.replace("mode: shadow # flips via PR", 'mode: shadow"')]) {
+    const f = selectedApi({ text });
+    await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+    assert.ok(f.calls.every(call => call.method === "GET"));
+  }
+  for (const [instance, rows, code] of [["ghost", threeRuns, "instance_not_found"], ["core", threeRuns, "instance_not_shadow"], ["widgets", async () => [], "insufficient_shadow_runs"]] as const) {
+    const f = selectedApi(), deps = selectedDeps(f); deps.readRows = rows;
+    assert.equal((await codeOf(requestGoLive({ instance, actor: "owner" }, deps))).code, code);
+    assert.ok(f.calls.every(call => call.method === "GET"));
+  }
+  const f = selectedApi(), deps = selectedDeps(f);
+  deps.writeLedger = (() => { throw new Error("fixture disk full"); }) as unknown as typeof appendLedger;
+  const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, deps));
+  assert.equal(error.code, "go_live_audit_failed");
+  assert.equal((error.receipt as { status: string }).status, "review_pending");
+  assert.equal(f.calls.filter(call => call.method !== "GET").length, 3);
+});
+
+test("selected writer real default REST is bounded and the live sentinel cannot reach a write", async (t) => {
+  const original = process.env.GH_TOKEN;
+  const f = selectedApi(), deps = selectedDeps(f); delete deps.api;
+  let fetched = 0;
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    fetched++; assert.equal((init.headers as Record<string, string>).authorization, "Bearer fixture-only-token");
+    assert.ok(init.signal instanceof AbortSignal);
+    const value = await f.api(init.method as "GET" | "POST" | "PUT", url.replace("https://api.github.com/", ""), init.body ? JSON.parse(String(init.body)) : undefined);
+    return new Response(JSON.stringify(value), { status: 200 });
+  });
+  try {
+    process.env.GH_TOKEN = "fixture-only-token";
+    const result = await requestGoLive({ instance: "widgets", actor: "owner" }, deps);
+    assert.equal(result.status, "review_pending"); assert.ok(fetched > 10);
+    const before = fetched; process.env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
+    assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, deps))).code, "registry_target_unavailable");
+    assert.equal(fetched, before);
+  } finally { if (original === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = original; }
 });
