@@ -408,14 +408,25 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
 }
 
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
- *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply.
- *  Exported (W1-T8511) so the GitHub-reply reader checks the SAME `grilling` status before it applies an answer. */
-export function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
+ *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
+function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
+  return replyRefusalFor(root, replyTo, queued, () =>
+    execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" }));
+}
+
+/** {@link replyRefusal}'s judgement, given how to read the record's origin/main blob (a throw: unreadable). The
+ *  daemon-loop GitHub-reply reader (W1-T8511) passes a blob it read asynchronously, so it checks the SAME `grilling`
+ *  status without a synchronous spawn on the loop. */
+export function replyRefusalFor(
+  root: string,
+  replyTo: string,
+  queued: ReadonlyMap<string, QueuedFeedbackRecord>,
+  readMainBlob: () => string,
+): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
-    const blob = execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" });
-    target = parseYaml(blob) as FeedbackEntry;
+    target = parseYaml(readMainBlob()) as FeedbackEntry;
   } catch {
     source = "the checkout (origin/main unreadable)";
     try {
@@ -465,7 +476,7 @@ export interface FeedbackReplyInput {
  * feedback GRILL issue (lib/escalation-answers.ts) answers the record through the SAME writes the
  * console does. Captures the entry (`reply_to` set when `replyTo` is), flips the `replyTo` record to
  * `answered` with `answered_by`, and queues both under `inboxRoot` for the landing sweep. The caller
- * owns validation, the `submissionKey` dedup and the `grilling` check ({@link replyRefusal}). `deps` is the checkout,
+ * owns validation, the `submissionKey` dedup and the `grilling` check ({@link replyRefusalFor}). `deps` is the checkout,
  * the landing-queue root and the landing bridge.
  */
 export function captureFeedbackReply(

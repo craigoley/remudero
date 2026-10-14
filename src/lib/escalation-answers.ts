@@ -49,6 +49,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
@@ -58,7 +60,7 @@ import { appendQuestionAnswer } from "./worker.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
-import { captureFeedbackReply, replyRefusal, type PanelGraphDeps } from "./panel-graph.js";
+import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
 import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
 import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
@@ -350,6 +352,8 @@ function recordedQuestionStoreOrigins(root: string): Set<string> {
   return origins;
 }
 
+const execFileAsync = promisify(execFile);
+
 /** W1-T8511: the feedback record a `TRIAGE-<feedback id>` escalation grills — any id shape (an `fb-*` capture or a
  *  gardener's `evidence-coverage-*` record), never a path: the id must be one plain file-name segment. */
 export function grilledFeedbackId(taskId: string): string | undefined {
@@ -374,17 +378,17 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
 /**
  * W1-T8511: apply the picked operator answer to the grilled feedback record through the console's own reply writer
  * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7): a queued record is read
- * first, then the route's own {@link replyRefusal} status read, both BEFORE any write — so an answered, rejected or
+ * first, then the route's own {@link replyRefusalFor} status read over an async origin/main read, both BEFORE any write — so an answered, rejected or
  * otherwise moved record gets no write at all. The answer's origin is the reply's `submission_key`, so a second pass
  * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
  * `feedback_unreadable` when a store could not be read, and undefined when there is nothing to apply.
  */
-function applyGrilledFeedbackAnswer(
+async function applyGrilledFeedbackAnswer(
   feedback: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   issue: OpenIssue,
   taskId: string,
   answers: readonly AcceptedAnswer[],
-): ({ step: string; task_id: string } & Record<string, unknown>) | undefined {
+): Promise<({ step: string; task_id: string } & Record<string, unknown>) | undefined> {
   const feedbackId = grilledFeedbackId(taskId);
   const picked = pickFeedbackAnswer(answers);
   if (feedbackId === undefined || picked === undefined) return undefined;
@@ -393,7 +397,13 @@ function applyGrilledFeedbackAnswer(
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
     if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
-    if (replyRefusal(feedback.root, feedbackId, queued)) return undefined;
+    // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
+    const mainBlob = await execFileAsync("git", ["-C", feedback.root, "show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`],
+      { encoding: "utf8" }).then((r) => r.stdout, (error: unknown) => error as Error);
+    if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
+      if (mainBlob instanceof Error) throw mainBlob;
+      return mainBlob;
+    })) return undefined;
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
@@ -667,7 +677,7 @@ export async function readEscalationAnswers(
     }
     // W1-T8511: the question-store write above is unchanged; a feedback GRILL issue ALSO answers its record.
     if (deps.feedback) {
-      const row = applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
+      const row = await applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
       if (row) writeLedger(deps.ledgerPath, { ...row, run_id: runId });
     }
   }
