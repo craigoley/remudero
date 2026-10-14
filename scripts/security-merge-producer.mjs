@@ -4,7 +4,7 @@ import {isMainModule} from './lib/argv.mjs';
 import {publishSecurityMergeDecision, SECURITY_MERGE_CONTEXT} from '../src/lib/code-scanning-merge-adapter.mjs';
 
 /** Runs from the trusted default branch. Never execute the event's head checkout.
- * Network failures and unsupported merge-group evidence cannot produce success.
+ * Network failures and unsupported merge-group evidence cannot produce a successful merge-policy status.
  */
 export async function runSecurityMergeProducer(eventName, event, transport, targetUrl) {
   if (event?.repository?.full_name !== 'craigoley/remudero') throw Error('foreign security event repository');
@@ -51,5 +51,9 @@ if (isMainModule(import.meta.url)) {
   const results=await runSecurityMergeProducer(process.env.GITHUB_EVENT_NAME,event,{read,status},
     `https://github.com/craigoley/remudero/actions/runs/${process.env.GITHUB_RUN_ID}`);
   console.log(JSON.stringify({context:SECURITY_MERGE_CONTEXT,results}));
-  if (results.some(r=>!r.published || !r.decision.mergeAllowed)) process.exitCode=1;
+  // The job reports delivery, not merge permission. A published denied/UNKNOWN decision
+  // stays failure/error on the authoritative SHA-scoped policy status. Failing this
+  // bootstrap job as well leaves a sticky red after CodeQL completion publishes safe
+  // from workflow_run (whose own check belongs to the default-branch commit).
+  if (results.some(r=>r.published !== true)) process.exitCode=1;
 }

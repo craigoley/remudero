@@ -61,3 +61,34 @@ test('security producer real CLI transport shells out, publishes exact-head meta
  shim.addRoute({when:'GET',exit:1});
  const unavailable=run();assert.equal(unavailable.status,1);assert.equal(JSON.parse(unavailable.stdout).results[0].decision.state,'unknown');
 });
+
+test('security producer delivery succeeds for published UNKNOWN and blocked decisions without granting merge permission',t=>{
+ const dir=mkdtempSync(join(tmpdir(),'rmd-security-delivery-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const eventPath=join(dir,'event.json');
+ const check={id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'failure',
+  app:{slug:'github-advanced-security',id:57789,owner:{login:'github'}},
+  output:{title:'1 new alert',summary:'Security Alerts:\n * 1 high\n'}};
+ const shim=ghShim([{when:'POST',stdout:'{}'},{when:'/files?',stdout:JSON.stringify([{filename:'src/security.ts'}])},
+  {when:'/check-runs?',stdout:JSON.stringify({total_count:0,check_runs:[]})},
+  {when:'GET',stdout:JSON.stringify({state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1})}]);
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const env={...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,GITHUB_EVENT_NAME:'pull_request_target',GITHUB_RUN_ID:'1'};
+ const command=new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname;
+ const run=()=>spawnSync(process.execPath,[command],{env,encoding:'utf8',timeout:10000});
+ const verify=(expected:string,status:string)=>{
+  const from=shim.calls().length,child=run();
+  assert.equal(child.status,0,child.stderr||child.stdout);
+  const result=JSON.parse(child.stdout).results[0];
+  assert.equal(result.headSha,head);assert.equal(result.published,true);
+  assert.equal(result.decision.state,expected);assert.equal(result.decision.mergeAllowed,false);
+  const writes=shim.calls().slice(from).filter(call=>call.includes('/statuses/'+head));
+  assert.equal(writes.length,1);assert.ok(writes[0].includes('state='+status));assert.equal(writes[0].includes('state=success'),false);
+ };
+ writeFileSync(eventPath,JSON.stringify({repository,pull_request:{number:1,head:{sha:head}}}));
+ verify('unknown','error');
+ shim.addRoute({when:'/check-runs?',stdout:JSON.stringify({total_count:1,check_runs:[check]})});
+ verify('blocked','failure');
+ env.GITHUB_EVENT_NAME='merge_group';
+ writeFileSync(eventPath,JSON.stringify({repository,merge_group:{head_sha:head}}));
+ verify('unknown','error');
+});
