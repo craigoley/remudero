@@ -28,11 +28,11 @@
     action: escalate
     confidence: 0.8
     reasons:
-      - "The filed task is a diagnose/research item. Its acceptance is a single grep for \"Risks\" in a new docs file, docs/ratification/p25_validation.md. That implies a documentation-only change."
-      - "The declared files are plan/tasks.yaml and a docs file. Neither is a secrets, auth, deploy, merge-policy or review-policy path. Nothing in the description deletes data or branches or takes an irreversible action."
-      - "The author class is operator, and the family has 3 merged and 1 declined machine task (Beta mean 0.67). That is a mixed but acceptable record, not a concerning one."
-      - "The missing docs file is consistent with a task that will create it. The rationale is a research follow-up to confirm that certain seeds reach named functions, and the acceptance check can be verified from the PR. No operator-only decision is requested."
-      - "No ACTUAL CHANGE view was supplied, so I am judging only from the description and file list. The PR still passes CI and review."
+      - "The filed task is a diagnose/research task. Its single acceptance check is a grep for \"Risks\" in a new doc, docs/ratification/p25_validation.md. That points to documentation output only."
+      - "The declared files are plan/tasks.yaml and one markdown doc. Neither is described as touching secrets, credentials, auth, merge or deploy policy, or infrastructure. The description names no deletion and no irreversible action."
+      - "The doc is absent at the base. The task creates it, which is expected for a new doc and not a drift signal."
+      - "The gates state is clean: author_class is operator, filingTime is true, and the family record is 3 merged and 1 declined (Beta mean 0.67)."
+      - "The rationale asks to confirm that certain seeds reach named functions. That is a verifiable code-trace question, not an operator-only decision. The task still goes through CI and review."
       - "the judge said proceed, but W1-T9393: at verify: auto it fails lint (rule15-filing)"
-    judged_at: "2026-10-14T06:04:42.621Z"
-    pin: "edbf3cf98b5fb9eb720897f4a3a39d0d50518f4398a9cc9253736fec847b726f"
+    judged_at: "2026-10-14T06:49:14.995Z"
+    pin: "8dca99c19dc1f5c3c0765861112d71ecd8502647a02f12dc29ff64e842bf402e"

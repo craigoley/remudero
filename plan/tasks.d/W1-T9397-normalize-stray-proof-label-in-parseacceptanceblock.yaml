@@ -1,0 +1,31 @@
+- id: W1-T9397
+  title: Normalize stray proof label in parseAcceptanceBlock
+  repo: remudero
+  depends_on:
+    - W1-T94
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=7867fcddad4e90cf
+  attempts: 0
+  files:
+    - src/lib/review.ts
+  acceptance:
+    - claim: parseAcceptanceBlock strips leading 'proof:' label from single-line claim|proof forms before dialect check
+      proof: "unit test: parseAcceptanceBlock normalizes stray proof label"
+  origin: architect
+  rationale: >-
+    From the 2026-09-22 follow-up on https://github.com/craigoley/remudero/pull/6641, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: `parseAcceptanceBlock`'s single-line `claim | proof` form
+    silently absorbs a stray `proof:` label into the proof text rather than stripping it (the way
+    the multi-line continuation form does at line ~5164 of `src/lib/review.ts`), turning a
+    harmless human formatting habit into an opaque "no runnable dialect prefix" refusal with no
+    hint the label itself was the problem. A small normalization (strip a leading `proof:\s*` from
+    the RHS before the dialect check) would make this class of PR-body typo self-healing instead
+    of a repeat CI failure. Out of scope here since it's a `src/lib/review.ts` behavior change,
+    not this ci-log fix. — from unfiled (run DAEMON-1790108780095,
+    https://github.com/craigoley/remudero/pull/6641)
