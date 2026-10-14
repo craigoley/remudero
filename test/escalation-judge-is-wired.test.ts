@@ -9,6 +9,7 @@ import {
   ESCALATION_JUDGED_STEP,
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
+  configureEscalationTriage,
   escalate,
   isEscalationJudgeExempt,
 } from "../src/lib/escalate.js";
@@ -146,7 +147,14 @@ test("W1-T3166: a production fix-rung escalation now reaches the judge — the c
 });
 
 test("W1-T3166: a DEMOTE verdict moves the issue off the needs-human board onto fleet-notice, with the judge's reason as its first comment", async () => {
-  const { issueCalls } = await rungThatEscalates(async () => ({ decision: "demote", reason: "the fix rung is still retrying; nothing to decide yet" }));
+  // W1-T8868: triage ships in shadow (every outcome delivers); a demotion lands only in act mode.
+  configureEscalationTriage(() => ({ mode: "act" }));
+  let issueCalls: Awaited<ReturnType<typeof rungThatEscalates>>["issueCalls"];
+  try {
+    ({ issueCalls } = await rungThatEscalates(async () => ({ decision: "demote", reason: "the fix rung is still retrying; nothing to decide yet" })));
+  } finally {
+    configureEscalationTriage(undefined);
+  }
   assert.equal(issueCalls.length, 1, "still opened — a demotion is never a suppression");
   assert.ok(issueCalls[0]?.labels.includes(FLEET_NOTICE_LABEL), `expected ${FLEET_NOTICE_LABEL}, got ${issueCalls[0]?.labels.join(",")}`);
   assert.ok(!issueCalls[0]?.labels.includes(NEEDS_HUMAN_LABEL), "a demoted item must NOT also carry needs-human");
