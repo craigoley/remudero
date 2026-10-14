@@ -139,6 +139,7 @@ test("W1-T9077: a fast-forward builds the new engine off the loop", async () => 
   const seams = {
     linkNodeModules: () => "linked" as const,
     materialize: () => ({ outcome: "hit" as const, hash }),
+    isCurrent: () => true,
   };
   let ticked = false;
   const pass = buildEngineAfterStore(repo, state, join(state, "child-entries"), { kind: "built", hash, ms: 1, bytes: 1 }, log, seams);

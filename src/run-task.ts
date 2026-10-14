@@ -17227,15 +17227,16 @@ export async function buildEngineAfterStore(
   stored: StoreBuildResult,
   log: (step: string, extra?: Record<string, unknown>) => void,
   /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
-  seams: Partial<Pick<EngineDeps, "git" | "linkNodeModules" | "materialize" | "clock">> = {},
+  seams: Partial<Pick<EngineDeps, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
 ): Promise<void> {
   if (stored.kind !== "built" && stored.kind !== "present") return;
   try {
     const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
     const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
-    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...seams });
+    const { isCurrent, ...buildSeams } = seams;
+    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
     if (built.kind === "failed") return;
-    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git });
+    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
     await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
   } catch (error) {
     log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
