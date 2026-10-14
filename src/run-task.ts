@@ -1724,6 +1724,10 @@ import {
   flakeClaimsForHead,
   isBlockedCi,
   listRetirableEscalationIssues,
+  listRetirableEscalationIssuesAsync,
+  createEscalationTriageHistoryReader,
+  indexEscalationTriageHistory,
+  type EscalationTriageHistoryReader,
   logCostGovernorDeferral,
   logMemoryObservation,
   logQueueGovernorDeferral,
@@ -46827,7 +46831,9 @@ export async function sweepEscalationTriage(
   io: {
     dryRun?: boolean;
     rows?: Record<string, unknown>[];
-    issues?: IssueGateway;
+    /** W1-T9390: the daemon's reader, built once per start; absent (`rmd sweep`), one is built for this call. */
+    history?: EscalationTriageHistoryReader;
+    issues?: AsyncIssueGateway;
     runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
     clock?: Clock;
     relabel?: (url: string, label: string) => void | Promise<void>;
@@ -46836,9 +46842,11 @@ export async function sweepEscalationTriage(
 ): Promise<void> {
   try {
     const { ledgerPath, runId, owner, repo } = context;
-    const history = io.rows ?? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows;
-    const issues = io.issues ?? ghIssueGateway(owner, repo);
-    const open = listRetirableEscalationIssues(issues);
+    // W1-T9390: this rung runs on the daemon loop, so its ledger read and every GitHub read or write are awaited.
+    const history = io.rows ?? (await (io.history ?? createEscalationTriageHistoryReader())(dirname(ledgerPath))).rows;
+    const issues = io.issues ?? ghIssueGatewayAsync(owner, repo, { exec: (args) => ghTextAsync(args, {}, io.execAsync) });
+    const open = await listRetirableEscalationIssuesAsync(issues);
+    const { births, judgedStateKeys } = indexEscalationTriageHistory(history);
     const nowMs = (io.clock ?? systemClock).now();
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
     const deps = { issues, ledgerPath, runId };
@@ -46851,8 +46859,7 @@ export async function sweepEscalationTriage(
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];
     for (const issue of open) {
-      const birth = [...history].reverse().find((row) => row.issue_url === issue.url && row.triage_subject &&
-        ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"].includes(String(row.step)));
+      const birth = births.get(issue.url);
       if (!birth || typeof birth.ts !== "string" || !Number.isFinite(Date.parse(birth.ts))) continue;
       const subject = birth.triage_subject as Escalation;
       if (!subject || !Array.isArray(subject.options)) continue;
@@ -46867,8 +46874,7 @@ export async function sweepEscalationTriage(
     }
     await runStaleEscalationRejudge(candidates, {
       ledgerPath, runId, log, dryRun: io.dryRun,
-      alreadyJudgedStateKeys: new Set(history.filter((row) => row.step === "escalation.rejudged" &&
-        typeof row.state_key === "string").map((row) => String(row.state_key))),
+      alreadyJudgedStateKeys: judgedStateKeys,
       judge: (candidate) => {
         if (candidate.referentStateNow === "referent state unavailable")
           return Promise.resolve({ decision: "deliver", reason: "referent state unavailable" });
@@ -47897,6 +47903,9 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  // W1-T9390: the escalation-triage rung's ledger slice, held for this daemon's life like `boardGithub`, so a
+  // full sweep parses only the rotations and live bytes written since the one before.
+  const escalationTriageHistory = createEscalationTriageHistoryReader();
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -48026,7 +48035,7 @@ export function buildSweepHook(
       // own read failures degrade to [] internally, so it never strands the credit rung.
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub, tickRead });
       if (!github) await sweepEscalationTriage({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo, ledgerPath, runId },
-        openPrs, log, { runtime: triageRuntime });
+        openPrs, log, { runtime: triageRuntime, history: escalationTriageHistory });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
