@@ -23,9 +23,13 @@ import {
   triageEscalation,
 } from "../src/lib/escalation-triage.js";
 import { runStaleEscalationRejudge } from "../src/lib/sweep.js";
+import type { OpenPrView } from "../src/lib/sweep.js";
 import { buildEscalationTriageRuntime, sweepEscalationTriage } from "../src/run-task.js";
+import type { GhAsyncExecutor } from "../src/lib/github-transport.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { pendingKicks } from "../src/lib/fleet-control.js";
 import type { Config } from "../src/lib/config.js";
+import type { EscalationJudgeVerdict } from "../src/lib/escalate.js";
 
 function ledger(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-")), "ledger.ndjson");
@@ -525,11 +529,17 @@ test("W1-T8868: plan_amendment_pr over the real sweep effects holds the task and
 
 // ── the daemon-loop rejudge sweep ────────────────────────────────────────────────────────────
 
-function sweepFixture(amend: () => Promise<string>) {
+function sweepFixture(amend: () => Promise<string>, options: {
+  subject?: Escalation;
+  openPrs?: OpenPrView[];
+  judge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+  defaultRelabel?: boolean;
+  execAsync?: GhAsyncExecutor;
+} = {}) {
   const root = runtimeRoot();
   const lp = ledger();
   const url = "https://github.com/craigoley/remudero/issues/41";
-  const subject = staleProof();
+  const subject = options.subject ?? staleProof();
   const comments: string[] = [];
   const relabels: Array<[string, string]> = [];
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
@@ -543,12 +553,15 @@ function sweepFixture(amend: () => Promise<string>) {
   };
   const context = { root, config: { root } as Config, owner: "o", repo: "r", ledgerPath: lp, runId: "SWEEP-T8868" };
   const runtime = buildEscalationTriageRuntime(context, {
-    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1, amend,
+    readPolicy: ACT_POLICY, readRows: () => [], seenAt: () => undefined, windowMs: () => 1,
+    judge: options.judge, amend,
   });
-  const run = () => sweepEscalationTriage(context, [], (step, extra) => { logged.push({ step, extra }); }, {
-    rows: [birth], issues, runtime, relabel: (u, label) => { relabels.push([u, label]); },
+  const run = () => sweepEscalationTriage(context, options.openPrs ?? [], (step, extra) => { logged.push({ step, extra }); }, {
+    rows: [birth], issues, runtime,
+    ...(options.defaultRelabel ? {} : { relabel: (u: string, label: string) => { relabels.push([u, label]); } }),
+    ...(options.execAsync ? { execAsync: options.execAsync } : {}),
   });
-  return { run, url, lp, comments, relabels, logged };
+  return { run, url, lp, comments, relabels, logged, issues };
 }
 
 test("W1-T8868: the rejudge sweep auto-resolves an old issue and relabels it fleet-notice", async () => {
@@ -588,6 +601,38 @@ test("W1-T8868: the rejudge sweep skips an open issue that has no recorded triag
   );
   assert.deepEqual(relabels, []);
   assert.equal(rows(f.lp).filter((r) => r.step === "escalation.rejudged").length, 0);
+});
+
+test("W1-T8868: the sweep's default label edit uses the guarded async GitHub transport", async () => {
+  const calls: string[][] = [];
+  const execAsync = (async (_file: string, args: string[]) => {
+    calls.push(args);
+    return { stdout: "", stderr: "" };
+  }) as unknown as GhAsyncExecutor;
+  const f = sweepFixture(async () => "https://github.com/o/r/pull/1 proposes the proof amendment; decline it to undo", {
+    defaultRelabel: true, execAsync,
+  });
+  await withLiveWritesAllowed(f.run);
+  assert.deepEqual(calls, [[
+    "issue", "edit", f.url, "--repo", "o/r", "--add-label", FLEET_NOTICE_LABEL, "--remove-label", NEEDS_HUMAN_LABEL,
+  ]]);
+});
+
+test("W1-T8868: the sweep asks its injected judge when the issue has a known PR referent", async () => {
+  const subject = esc({ taskId: "W1-TJ", summary: "W1-TJ: a retry needs a fresh review", recommendation: "retry" });
+  const judged: Escalation[] = [];
+  const openPr = {
+    taskId: subject.taskId, prNumber: 17, prUrl: "https://github.com/o/r/pull/17", headSha: "head-17",
+    reviewState: "none", checksState: "none", mergeable: "MERGEABLE", mergeableState: "clean",
+  } as unknown as OpenPrView;
+  const f = sweepFixture(async () => "unused", {
+    subject, openPrs: [openPr],
+    judge: async (e) => { judged.push(e); return { decision: "deliver", reason: "test judge says keep visible" }; },
+  });
+  await f.run();
+  assert.equal(judged.length, 1);
+  assert.match(judged[0].detail, /REFERENT STATE NOW:.*head-17/);
+  assert.deepEqual(f.relabels, []);
 });
 
 test("W1-T8868: an unreadable issue listing is logged by the rejudge sweep, never thrown", async () => {

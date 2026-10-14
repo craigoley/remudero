@@ -46812,6 +46812,7 @@ export async function sweepEscalationTriage(
     runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
     clock?: Clock;
     relabel?: (url: string, label: string) => void | Promise<void>;
+    execAsync?: GhAsyncExecutor;
   } = {},
 ): Promise<void> {
   try {
@@ -46827,7 +46828,7 @@ export async function sweepEscalationTriage(
     const relabel = io.relabel ?? (async (url: string, label: string): Promise<void> => {
       assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
       await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
-        "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"]);
+        "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], {}, io.execAsync);
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];
     for (const issue of open) {
