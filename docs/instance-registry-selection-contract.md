@@ -32,6 +32,42 @@ not-granted. A digest is integrity evidence, not a private-source release decisi
 
 ## Bounded compatibility window
 
+### Explicit proposal writer target
+
+W1-T9493 adds `onboardingGoLive.registryTarget: { repository, filePath }` to
+the existing verified-operator, high-tier proposal route. `filePath` is a raw,
+canonical repository-relative Git path, not an absolute host/container path or
+pre-escaped REST URL. Only an absent target preserves the legacy repository and
+request sequence. Invalid, unavailable or revised selection never falls back.
+
+The writer snapshots intent before asynchronous work and copies its target at
+route composition. It binds numeric repository identity, default-branch commit,
+nonrecursive exact-path trees, regular blob mode, file SHA and the same decoded
+bytes it hashes/parses/edits. Path depth is capped at 16; file bytes at 256 KiB;
+truncated or excessive trees refuse. SHA-1 Git objects and the existing version-1
+registry grammar are explicit supported inputs, not arbitrary future capability
+adoption. The selected origin, branch and bytes are re-read immediately before
+the first effect. A subsequent main advance does not retarget the proposal: it
+remains pinned to its bound commit and still needs normal review and merge.
+
+Proposal effects create only a fresh branch and update only its selected file
+with the bound replaced-file SHA. Every unrelated byte survives. Successful
+receipts remain `review_pending`, with digests/revisions rather than raw private
+paths or content. Publication permission is always `not-granted`; neither an
+actor nor a digest grants private-source release permission. No actual promotion,
+private overlay selection or new admission policy is activated by this source.
+
+Pre-effect refusals issue no writes. After an attempted effect, an incomplete
+receipt distinguishes response-verified branch/file stages from the unknown
+current stage. It does not claim nothing happened, retry effects, create a PR
+after an unverified update, clean up, close anything or publish a success receipt.
+An audit failure after a verified PR retains that real review-pending receipt.
+
+This writer does not migrate every lifecycle consumer. WORKERS CONTINUE for the
+isolated source stage; the separately approved drain/stop rules below still govern
+later live changes. Legacy absence, owner override, required gates and public
+Apache implementation remain intact. No schedules are created.
+
 The public reader's out-of-band contract versions 1 and 2 support identity, mode
 and primary capabilities with the same selected YAML grammar. A caller requiring
 an unknown capability or another contract version is refused before reading.

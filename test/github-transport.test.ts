@@ -280,6 +280,8 @@ test("approveBatchCommand (via approveCommand with 2+ bare ids) with repoDir abs
         "  origin: architect",
         "  files:",
         `    - docs/gh-transport-coverage-fixture-${slug}.md`,
+        "  design: |",
+        `    CREATES: docs/gh-transport-coverage-fixture-${slug}.md`,
         "  depends_on: []",
         "  type: implement",
         "  verify: auto",

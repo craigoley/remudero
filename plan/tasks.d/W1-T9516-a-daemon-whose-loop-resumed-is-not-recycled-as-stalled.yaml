@@ -1,0 +1,82 @@
+- id: W1-T9516
+  title: "A DAEMON WHOSE LOOP HAS RESUMED IS NOT RECYCLED AS STALLED — at 05:35:56Z on 2026-10-14 the progress watchdog read core STALLED action=recycle (newest progress row 46.8 min old) ten seconds after the daemon (pid 3182622) wrote `daemon.loop_lag` lag_ms 2,742,587, the row it writes when a loop block ENDS; the recycle then replaced a running daemon at 05:37:35Z, after the recycle's own W1-T6597 check had seen that pid write a row at 05:36:14Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the progress verdict tells a resumed daemon from a stuck one, from the daemon's own rows
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 (Craig approved filing): was the 05:35:56Z progress-watchdog STALLED recycle a false positive"
+  plan_refs: [W1-T5687, W1-T5688, W1-T6598, W1-T6597, W1-T9352, W1-T5718, W1-T7745]
+  files: [src/lib/progress-watchdog.ts, test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    ASKED: was the 05:35:56Z STALLED recycle a false positive? MEASURED on the core ledger rotation
+    ledger.2026-10-14T06-37-21-642Z.ndjson.gz and the rmd-fleet-watchdog.service journal (Azure host, read-only, niced):
+      - 04:45:50Z `daemon.boot` (pid 3182622, a freshness boot). 04:47:33-34Z three `run.start` (W1-T2858, W1-T2947,
+        W1-T3083). The newest progress rows were `sweep.pass` at 04:49:08Z and `review.posted` at 04:48:59Z.
+      - The daemon's own rows by 10-minute bucket: 633 in 04:4x, 1 in 04:5x, 0 in 05:0x, 2 in 05:1x, 0 in 05:2x,
+        330 in 05:3x. Its rows resume at 05:35:16Z (`worker.quiet_bound`).
+      - 05:35:46.293Z `daemon.loop_lag` {phase pulse, lag_ms 2742587, missed_ticks 45, last_step_before_block
+        github.wake.check_settled, sync_spawn_top execFileSync git 182282 ms from lintPlanCommand, sync_spawn_ms 300579}.
+        05:35:46.967Z `daemon.loop_stall_profile` {unattributed_ms 2458733; top frames node:buffer concat and
+        ledger-union.ts parseObject}. 05:35:47.753Z `daemon.boot_gate.opened` {trigger backstop, waited_ms 2989124,
+        bound_ms 600000, pass_in_flight true}.
+      - 05:35:56Z the launcher read "progress-watchdog -- STALLED action=recycle". The recycle logged "STALLED verdict
+        (STALLED progressAgeMs=2805902) — frozen-daemon ownership NOT proven, clause (b): pid 3182622 wrote a ledger row
+        at 2026-10-14T05:36:14.106Z, inside the 1800s stall bound". It then waited for the workers, stopped and
+        replaced the container (revival log 05:37:35Z result=ok reason=replaced). The resumed daemon had posted
+        `review.posted` at 05:36:20Z and 05:37:14Z. The new generation booted at 05:38:13Z.
+    ANSWER: the stall was real. The daemon loop was blocked for 45.7 min, which is a separate defect (see "out of
+    scope" below). The recycle was a false positive all the same. It acted 10 s after the daemon recorded that the
+    block had ended, and it replaced a daemon that was posting reviews again.
+    WHY: READ on origin/main abbee334d, src/lib/progress-watchdog.ts. The verdict ages progress from the newest
+    sweep.pass/review.posted/verdict.merged row. `PROGRESS_WATCHDOG_READ_STEPS` adds only daemon.paths and daemon.boot.
+    W1-T6598's `generationBootMs` restarts the age at a boot and at nothing else. The verdict never reads
+    `daemon.loop_lag`, which src/lib/daemon.ts `reportLoopLag` writes "on the first tick that runs after the block
+    clears", so it cannot tell a loop that resumed from one still stuck.
+    The brief's hypothesis was that the daemon was "draining or holding live work". The evidence refines it. drain.lock
+    and the three in-flight locks were the frozen daemon's own normal holdings, and they prove nothing. The signal that
+    separates the cases is the daemon's own row that says its loop came back.
+    OVERLAP CHECKED. W1-T6598 (merged) ages a stall from a generation's boot, not from a resume. W1-T6597 (merged)
+    proves ownership on the RECYCLE side. Its clause (b) saw the live row, but that clause only gates the lock reclaim,
+    never whether to recycle. W1-T9352 (queued) skips a redundant pre-exit pass on a freshness exit, and does not touch
+    the verdict. Swept plan/ on origin/main and all 11 open PR heads for STALL_RECYCLE_AFTER_MS, progress-watchdog,
+    STALLED within 80 characters of drain/inflight/holding/live, and "progress watchdog" within 80 characters of "false
+    positive". Positive control: recycle-container read 128 files on main and on every head. No task makes the verdict
+    read a resume.
+    OUT OF SCOPE, reported to the operator separately: the 45.7-min block itself (loop_stall_profile unattributed
+    2,458,733 ms in ledger-union parsing, plus a 182 s sync git spawn under lintPlanCommand).
+  design: |
+    Operator rulings: no fixed threshold (no new constant here), automated flow, one concern.
+    1. READ THE RESUME. `PROGRESS_WATCHDOG_READ_STEPS` adds `daemon.loop_lag`. A `daemon.loop_lag` row newer than the
+       newest progress row and written by the current generation's pid is a RESUME. The block ended at its ts, and
+       the row's lag_ms says how long the loop was blocked.
+    2. A RESUMED LOOP IS AGED FROM ITS RESUME. W1-T6598 does this for a boot: a generation's stall age runs from its
+       own boot. A resume is handled the same way. The stall age runs from the newest resume when that is newer than
+       the newest progress row, and the existing STALL_* bounds apply from there. A daemon that resumes and then makes
+       no progress is still recycled. A daemon that blocks again writes no new resume, so its age keeps running from
+       the old one and the allowance is never open-ended.
+    3. SAY SO. While a resume is inside its allowance, the verdict is `RECOVERING` with action none. Its reason names
+       the block's lag_ms, the resume time and the progress age it replaced. The launcher acts only on
+       action=recycle, so it needs no change. CRASH_LOOP and the boot rule are unchanged and still win.
+    Tests (new file, `test(` titles verbatim as in the proofs below) replay the 10-14 rows: the boot, the 04:49:08
+    progress rows, the 05:35:46 loop_lag and a 05:35:56 now. They also cover a resume followed by a second silence that
+    passes the bound, and a loop_lag row from a previous generation's pid.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts"
+    - claim: "replaying 2026-10-14 05:35:56, a daemon that wrote daemon.loop_lag after its newest progress row reads RECOVERING with action none"
+      proof: 'grep: test("W1-T9516: a loop that resumed after its block is recovering, not stalled" in test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts'
+    - claim: "a resumed daemon that then makes no progress past the existing bound is still recycled"
+      proof: 'grep: test("W1-T9516: a resumed loop that makes no progress is still recycled" in test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts'
+    - claim: "a loop_lag row from an earlier generation's pid is not a resume"
+      proof: 'grep: test("W1-T9516: a previous generation''s loop_lag is not a resume" in test/a-daemon-whose-loop-resumed-is-not-recycled-as-stalled.test.ts'
+  falsifier: |
+    Keep the verdict as on main: the 05:35:56 replay reads STALLED action=recycle (progress 46.8 min old) and the first
+    test fails. Restart the age at every loop_lag row with no bound: the second test sees no recycle after the second
+    silence.

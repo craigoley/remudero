@@ -51,6 +51,8 @@ const SHARED_PROOF_FRAGMENT = `
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts, test/example.test.ts]
+  design: |
+    CREATES: test/example.test.ts
   acceptance:
     - claim: "the first behaviour"
       proof: "unit test: test/example.test.ts"

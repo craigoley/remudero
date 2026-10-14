@@ -19,6 +19,16 @@
 # safety check is uncertain.
 set -u
 shopt -s nullglob
+SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/dependency-seed-guard.sh"
+elif [ -f "$SEED_GUARD_DIR/../dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/../dependency-seed-guard.sh"
+else
+  rmd_dependency_seed_risk() { echo 'dependency seed guard unavailable'; return 0; }
+fi
 
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
@@ -197,6 +207,7 @@ symlink_risk() {
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
   local path="$1" found status owner_name structure_only="${2:-0}"
+  if found=$(rmd_dependency_seed_risk "$path"); then echo "$found"; return 0; fi
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
   [ "$owner_name" = "$ME" ] || { echo "owned by ${owner_name:-unknown}"; return 0; }
