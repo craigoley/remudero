@@ -278,3 +278,30 @@ test("W1-T4067: the real stats reader unions live and both rotation forms withou
     for (const arm of Object.values(stats)) assert.deepEqual(arm, { attempts: 1, clean: 1, contractFailures: 0, costUsd: 0.01 });
   });
 });
+
+// OBSERVED 2026-10-14 on the fleet host: one spliced row in ledger.2026-09-20T23-59-59-117Z.ndjson.gz (a
+// sweep.fix_capacity row with an ENOSPC serve.error written into it) failed every one of 927 stats reads.
+const SPLICED_FOREIGN_ROW = '{"ts":"2026-09-20T13:32:26.828Z","actor":"daemon","run_id":"DAEMON-1","task_id":"DAEMON",' +
+  '"step":"sweep.fix_capacity","lane":"daemon","surface":"full","queue_depth":0,{"ts":"2026-09-20T13:32:27.001Z",' +
+  '"step":"service.error","lane":"serve","error":"ENOSPC: no space left on device, write"}';
+
+test("draft stats are not refused over a torn ledger row that names another step", async () => {
+  await withTempDir("rmd-draft-stats-torn-", async (root) => {
+    const outcome = { ts: "2026-09-21T00:00:00Z", step: "draft.routing.outcome", lane: "inbox-draft", deployment: "oss",
+      session_id: "s1", draft_cost_usd: 0.01, clean: true, contract_failed: false };
+    writeFileSync(join(root, "ledger.2026-09-20T23-59-59-117Z.ndjson.gz"), gzipSync(SPLICED_FOREIGN_ROW + "\n"));
+    writeFileSync(join(root, "ledger.ndjson"), JSON.stringify(outcome) + "\n");
+    assert.deepEqual(readDraftStats(root, "inbox-draft"), { oss: { attempts: 1, clean: 1, contractFailures: 0, costUsd: 0.01 } });
+  });
+});
+
+test("draft stats still refuse a torn ledger row that could have been a draft row", async () => {
+  for (const torn of ['{"ts":"2026-09-21T00:00:01Z","step":"inbox.drafted","run_id":"r","proposal_id":"P1","lint_cl',
+    '{"ts":"2026-09-21T00:00:01Z","host":"h","run_id":"r","task']) {
+    await withTempDir("rmd-draft-stats-torn-", async (root) => {
+      writeFileSync(join(root, "ledger.2026-09-20T23-59-59-117Z.ndjson.gz"), gzipSync(SPLICED_FOREIGN_ROW + "\n" + torn + "\n"));
+      writeFileSync(join(root, "ledger.ndjson"), "");
+      assert.throws(() => readDraftStats(root, "inbox-draft"), /corpus incomplete: ; torn=1 of 2/);
+    });
+  }
+});
