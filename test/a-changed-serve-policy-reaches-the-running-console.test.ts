@@ -168,7 +168,7 @@ test("a serve handoff is open from its request until the supervisor closes it", 
   const row = (step: string) => JSON.stringify({ ts: "2026-10-02T12:00:00Z", task_id: "SERVE", step });
   assert.equal(serveHandoffOpen(""), false);
   assert.equal(serveHandoffOpen([row("serve.supervisor_ready"), row("serve.handoff_requested")].join("\n")), true);
-  assert.equal(serveHandoffOpen([row("serve.handoff_requested"), row("serve.handoff_deferred")].join("\n")), true);
+  assert.equal(serveHandoffOpen([row("serve.handoff_requested"), row("serve.handoff_deferred")].join("\n")), false, "W1-T9504: a deferral keeps the active generation");
   assert.equal(serveHandoffOpen([row("serve.handoff_requested"), row("serve.handoff_done"), row("daemon.boot")].join("\n")), false);
   assert.equal(serveHandoffOpen([row("serve.handoff_requested"), row("serve.supervisor_start")].join("\n")), false, "a restart ends it");
 });
