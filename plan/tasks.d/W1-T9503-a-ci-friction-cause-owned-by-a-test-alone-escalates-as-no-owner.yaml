@@ -1,0 +1,67 @@
+- id: W1-T9503
+  title: "A CI-FRICTION CAUSE WHOSE FAILING TEST IMPORTS NO SOURCE ESCALATES AS NO-OWNER, NOT A RECORD ITS OWN LINT REFUSES — W1-T9059 lets a test with no resolving src/ or scripts/ import own its failure alone, so the draft names two test files, the gardener's own verdict refuses it [sizing] and lint-plan's admission refuses a test-owned ci-friction shape, and every pass throws until the overseer escalates (#11716)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  origin: "operator-session escalation triage 2026-10-14: #11716 (ci-friction gardener liveness)"
+  plan_refs: [W1-T9059, W1-T4435, W1-T6311, W1-T5380]
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts
+  status: queued
+  priority: 1  # the ci-friction gardener filed nothing from 2026-10-14T09:58Z: 5 garden_filing_failed rows, then escalation #11716
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on the core host ledger (~/rmd-state2/state, read niced; today's 8 rotations from 09:xxZ plus
+    the live file). Five `ci-friction.garden_filing_failed` rows, attempts 1-5, from 09:58:42Z to 15:02:29Z, all read
+    "ci-friction gardener: drafted record failed lint (block:sizing)". The overseer noticed at 10:09Z and 13:27Z,
+    healed, and escalated at 15:48:28Z (#11716). The scorecard's `next` is `ci-friction:check:ci-log:ci-shard` at rung 1.
+    Control: the same window holds 11 `ci-friction.scorecard` rows, and the ladder lists 8 causes.
+    WHY, read on origin/main 01f77c546 (symbols, not lines):
+      - `locateCiFrictionOwner` (src/lib/ci-friction-remedy.ts, W1-T9059) returns `files: [testPath]` when no
+        `testSourcePaths` import resolves to an existing src/ or scripts/ file. Its test "W1-T9059: a test without a
+        resolving source import owns its failure alone" pins that.
+      - `ciFrictionLadder` (src/lib/ci-friction-gardener.ts) turns any owner into a `draft` decision.
+      - `ciFrictionShardYaml` renders `files: [owner.files[0], test/<stem>.test.ts]`, so the record names two test
+        suites and no source module. `subsystemsOf` folds both companions in and scores 2 concerns at risk:medium,
+        and `sizingViolation` blocks.
+      - Had sizing passed, lint-plan's `machineFilingAdmissionViolations` would still refuse it:
+        `isCiFrictionRemedyProposal` (src/lib/plan.ts) admits a ci-friction record only when a file matches
+        CI_FRICTION_OWNER (src/, scripts/ or a workflow). Reproduced in-process: owner `test/foo-bar.test.ts` gives
+        `{ok:false, reason:"block:sizing"}` with the origin label, and an admission refusal ("verify:human — not
+        auto-runnable") with the shard path label. Owner `src/lib/review.ts` passes both.
+      - Today's trigger was narrower. `testSourcePaths` rewrote `../scripts/security-merge-producer.mjs` to a missing
+        `.ts`, which is fixed by the hand PR #11724. Any failing test that truly imports no source, such as one that
+        only reads files or spawns a CLI by path, still wedges the gardener the same way.
+      - `ciFrictionRecordVerdict` lints with the label `ci-friction:<id>`, so `subsystemsOf` gets no shard slug. The
+        landed shard is linted under its path, where the regression test named for the shard stem is the
+        own-falsifier discount. The two verdicts can therefore disagree on the same bytes.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for locateCiFrictionOwner and ciFrictionLadder (6 shards, none
+    on this case: W1-T5300, W1-T5380, W1-T5538, W1-T6311, W1-T9044, W1-T9059) and the 19 open plan-file-* and
+    run-W1-T9* heads for "failure alone", "no-owner" and testSourcePaths. The only hits are an unrelated connector
+    shard and a stale run-W1-T9057 head.
+  design: |
+    No new bound.
+    1. In `ciFrictionLadder`, an owner whose files are all test files is no owner. A test file is one under test/
+       or named *.test.*, the test that `gitCiFrictionOwnerSearch`'s `filesContaining` already applies with "a test
+       file is evidence, never an owner"; hoist it into one named predicate and use it in both places. The cause takes
+       the existing `escalate` decision with `holdReason: "no-owner"`. Its `why` names the failing test: "the failing
+       test <path> imports no src/ or scripts/ module".
+    2. `ciFrictionRecordVerdict` is called with the shard's repo-relative path (the `relPath` `apply` already
+       computes), so its sizing verdict is the one lint-plan gives the landed shard.
+    The W1-T9059 owner contract is unchanged: `locateCiFrictionOwner` still reports the test as evidence.
+    Tests go in the new file test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts, with
+    `test(` titles verbatim as in the proofs below, using a gitRepo fixture as the W1-T9059 suite does.
+  acceptance:
+    - claim: "a cause whose failing test imports no source escalates as no-owner instead of drafting a record"
+      proof: 'grep: test("W1-T9503: a cause owned by a test alone escalates as no-owner" in test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts'
+    - claim: "a cause owned by a source module still drafts, and its record passes the gardener's verdict under the shard path"
+      proof: 'grep: test("W1-T9503: a source-owned cause still drafts a record lint-plan admits" in test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts'
+  falsifier: |
+    Drive one ci-friction pass whose costliest cause's failing test imports nothing under src/ or scripts/. On
+    origin/main the pass throws "drafted record failed lint (block:sizing)". With the change it logs
+    `ci-friction.remedy_escalated` with hold_reason "no-owner" and writes no shard.

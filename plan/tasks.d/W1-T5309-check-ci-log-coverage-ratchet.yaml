@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -38,10 +38,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.84
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.84 — on the change's description/files alone, no diff was read — The filing names the measured CI cost and desired prevention, but supplies no proposed mechanism for preventing coverage-ratchet fix rounds; alignment with existing coverage requirements cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not that the test passes or the harness prevents the failure.; on the change's description/files alone, no diff was read — The supplied escalation rule explicitly requires HIGH when the finding cannot be verified from the shown evidence."
-    judged_at: "2026-10-02T18:56:08.145Z"
-    pin: "17a861f1f9cd907098b8aee7e8d37f6ed14255c0e1e2833622d682c9bf87cf4c"
+      - "The declared files are src/lib/ci-parity.ts and a new test file. The description doesn't show any change to secrets, auth, permissions, merge, deploy, or review policy, and it doesn't show any deletion or irreversible action."
+      - "The task is a machine-filed remedy for a measured CI friction cause. It asks for a structurally different fix from the earlier docs-only attempt, and the PR still has to pass CI and review."
+      - "The acceptance proof is a grep for a named test in the new test file. The evidence says that file is absent at the base, which fits a file the change will create. The proof can be verified from what is shown."
+      - "The family track record is mixed (24 merged, 40 declined, Beta mean 0.61). That calls for some scrutiny but isn't a gates-state concern. No actual change view was supplied, so my confidence is moderate."
+    judged_at: "2026-10-14T18:49:02.548Z"
+    pin: "7ff4c86a035b7c0a9691c84e4e1855c4e3ecc56b70e0105083aa5ea3d723ad16"

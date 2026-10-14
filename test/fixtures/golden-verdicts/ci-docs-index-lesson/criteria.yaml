@@ -1,0 +1,2 @@
+- claim: the docs-index-check refusal lesson is present in a matched learning
+  proof: "grep: ci-learning:11388:docs-index-check in learnings/ci.yaml"

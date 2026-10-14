@@ -155,9 +155,11 @@ test("W1-T1012: a plan filing run commits no task trailer", () => {
   // reads `..., commitMessage.split("\n")[0], planPrBody)`. The STRUCTURAL MARKER this test is
   // about is the title argument — `commitMessage.split("\n")[0]` instead of
   // `lastCommitSubject(worktreePath)` — not the argument count, so the optional trailing argument
-  // is tolerated. Tightening back to a bare `)` would silently drop a filing call site from the
+  // is tolerated. W1-T9374 also passes the proof runner and lane store/log options; the matcher
+  // stops at the title marker so those arguments cannot erase a caller from the census.
+  // Tightening back to a bare `)` would silently drop a filing call site from the
   // sweep and pass vacuously, which is the opposite of what acceptance 2 checks.
-  const filingCallSites = [...src.matchAll(/ghPrCreateFillCommand\(worktreePath,\s*owner,\s*repo,\s*branch,\s*commitMessage\.split\("\\n"\)\[0\](?:,\s*[A-Za-z_$][\w$]*)?\)/g)];
+  const filingCallSites = [...src.matchAll(/ghPrCreateFillCommand\(worktreePath,\s*owner,\s*repo,\s*branch,\s*commitMessage\.split\("\\n"\)\[0\](?=\s*[,\)])/g)];
   assert.equal(filingCallSites.length, 2, "expected exactly the triage and plan filing PR-create call sites");
   for (const site of filingCallSites) {
     const before = src.slice(Math.max(0, (site.index ?? 0) - 600), site.index ?? 0);

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 (Craig): diagnose the 04:16Z core loop stall and file it if uncovered; standing rulings: no hard fixed thresholds, automated flow, fix at the root"
   plan_refs: [W1-T8868, W1-T5283, W1-T5765, W1-T4046, W1-T7746, W1-T9361, W1-T100]
   files: [src/run-task.ts, src/lib/sweep.ts, test/escalation-triage-runs-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1  # every full sweep since #11487 froze the core loop 57-105 s (230 s over 3 of 3 passes, 03:15-04:16Z) and pushed the pass past its abandon bound
   attempts: 0
   rationale: |
