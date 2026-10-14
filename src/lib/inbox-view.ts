@@ -33,7 +33,8 @@ function dismissalAudit(classified: ClassifiedInbox, deps: PanelGraphDeps, now: 
     const taskId = deriveTaskReferent(row.proposalId);
     return (row.state === "retired" || row.state === "ratified") && taskId !== undefined && classified.projection.get(taskId)?.merged === true;
   });
-  return buildInboxDismissalAudit({ scope: deps.inboxAuditScope, window,
+  const scope = deps.inboxAuditScope ?? deps.inboxSourceIdentity;
+  return buildInboxDismissalAudit({ scope: scope && { instance: scope.instance, repository: scope.repository }, window,
     coverage: { receipts: classified.attentionEvidence?.archiveLedger ?? "unavailable", outcomes: "partial", plan: "observed",
       registry: inboxClassificationEvidence(classified).complete ? "observed" : "partial" },
     controls: { heldSecurity: { taskId: "W1-T216", observed: Boolean(heldTask && heldAsk),

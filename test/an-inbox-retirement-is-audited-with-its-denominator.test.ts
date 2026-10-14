@@ -4,7 +4,8 @@ import { createService } from "../src/lib/service.js";
 import { buildInboxAttentionCensusRoute } from "../src/lib/panel-graph.js";
 import { runSlowLaneWorker } from "../src/lib/read-model-slow-lane.js";
 import { readPersistedInbox } from "../src/lib/fleet-lane.js";
-import { NO_INSTANCE_RATIFY } from "../src/lib/instance-gateway.js";
+import { defaultInstanceInboxSources, NO_INSTANCE_RATIFY } from "../src/lib/instance-gateway.js";
+import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -168,4 +169,40 @@ test("the default slow-lane pass persists an audit that the native read exposes 
     assert.equal(body.dismissalAudit.measurement.falseDismissals, null);
     assert.deepEqual(paths.map(path => readFileSync(path, "utf8")), before);
   } finally { worker.stop(); service.closeAllConnections(); await new Promise<void>(resolve => service.close(() => resolve())); }
+});
+
+test("an instance audit inherits its maintained producer source identity", { timeout: 30_000 }, async t => {
+  const fixture = gitRepo(); t.after(() => fixture.cleanup());
+  fixture.addRemote("origin", "https://example.invalid/owner/site.git");
+  const root = join(fixture.dir, "instance"), checkout = join(root, "repos", "site"), state = join(root, "state");
+  mkdirSync(join(root, "repos"), { recursive: true }); fixture.addWorktree(checkout, "site");
+  mkdirSync(state); mkdirSync(join(checkout, "plan"));
+  const planPath = join(checkout, "plan/tasks.yaml"), ledgerPath = join(state, "ledger.ndjson"), registry = join(state, "inbox-proposals.json");
+  writeFileSync(planPath, "- id: W1-T216\n  title: Held security fixture\n  repo: site\n  depends_on: []\n  type: implement\n  verify: human\n  budget_usd: 1\n  risk: high\n  band_meaning: blast-radius\n  dispatch_hold: true\n  files: [fixture.ts]\n  acceptance: []\n");
+  writeFileSync(ledgerPath, ""); writeFileSync(registry, JSON.stringify({ proposals: [{ id: "verify-human:W1-T216", summary: "Site held fixture", evidenceAnchors: [] }] }));
+  const paths = [planPath, ledgerPath, registry], before = paths.map(path => readFileSync(path, "utf8"));
+  let message: ((value: { type?: string; held?: unknown; instances?: unknown }) => void) | undefined;
+  let resolveReady!: () => void, rejectReady!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const worker = runSlowLaneWorker({ on: (_event, fn) => { message = fn; }, postMessage(value) {
+    const row = value as { type?: string; step?: string; extra?: { instance?: string; unit?: string; error?: string } };
+    if (row.step === "inbox.classification_written" && row.extra?.instance === "site") resolveReady();
+    if (row.step === "read_model.slow_unit_failed" && row.extra?.unit === "inbox:site") rejectReady(new Error(row.extra.error));
+  } }, { instanceInboxes: [{ instance: "site", repository: "owner/site", root: checkout, planPath, ledgerPath, inboxRoot: root }] }, { schedule: () => () => {} });
+  const service = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, routes: mountInstanceInboxRoutes({
+    instance: "site", repository: "owner/site", stateDir: state,
+    routes: defaultInstanceInboxSources({ instance: "site", root, planPath, ledgerPath }, "owner/site", fakeGitHub()),
+  }) });
+  try {
+    message?.({ type: "lease", held: true, instances: ["site"] }); await ready;
+    assert.deepEqual(readPersistedInbox(state)?.dismissalAudit?.scope, { instance: "site", repository: "owner/site" });
+    await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
+    const response = await fetch(`http://127.0.0.1:${(service.address() as AddressInfo).port}/v1/i/site/inbox/attention-census`, { headers: { authorization: "Bearer fixture-read" } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { repository: string; instance: string; dismissalAudit: { scope: unknown; measurement: { falseDismissals: number | null } } };
+    assert.equal(body.repository, "owner/site"); assert.equal(body.instance, "site");
+    assert.deepEqual(body.dismissalAudit.scope, { instance: "site", repository: "owner/site" });
+    assert.equal(body.dismissalAudit.measurement.falseDismissals, null);
+    assert.deepEqual(paths.map(path => readFileSync(path, "utf8")), before);
+  } finally { worker.stop(); service.closeAllConnections(); if (service.listening) await new Promise<void>(resolve => service.close(() => resolve())); }
 });
