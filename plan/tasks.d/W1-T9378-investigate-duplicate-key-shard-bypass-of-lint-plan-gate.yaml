@@ -5,7 +5,9 @@
   type: recon
   verify: human
   risk: low
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=be279d7f56b575b1
   attempts: 0
   files:
     - docs/investigation.md
