@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: make sure a revalidation gardener works, using the open-issue backlog as its test case; a risk judge decides what needs the operator"
   plan_refs: [W1-T3167, W1-T4677, W1-T4802, W1-T4738]
   files: [src/lib/issue-revalidation-garden.ts, src/lib/garden-registry.ts, src/run-task.ts, plan/policy.yaml, test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

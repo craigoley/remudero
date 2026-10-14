@@ -11,7 +11,8 @@ import { writeAtomic } from "./fs-race-safe.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
-import { replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
+import type { AttentionJudgment } from "./inbox-responder.js";
+import { readBandMeaningReplayStore, replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -109,6 +110,7 @@ export function persistedInboxPath(stateDir: string): string {
 
 /** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
 export interface PersistedInboxContent extends ClassificationEvidence {
+  sourceIdentity?: InboxSourceIdentity;
   proposals: Proposal[];
   classifications: InboxClassification[];
   /** The only ledger rows the readers take from a pass: fleet-lane decisions and verify-human releases. */
@@ -121,10 +123,20 @@ export interface PersistedInboxContent extends ClassificationEvidence {
   stores?: { fleetDecisions: DecisionStore; plainMessages: PlainStore };
 }
 
+/** The owned inputs of a non-core classification; a different source is never a substitute. */
+export interface InboxSourceIdentity {
+  instance: string;
+  repository: string;
+  root: string;
+  planPath: string;
+  ledgerPath: string;
+  inboxRoot: string;
+}
+
 export interface InboxAttentionEvidence {
   archiveLedger: "partial" | "unavailable";
   releases: Array<[taskId: string, receipt: string]>;
-  judges: Array<[taskId: string, judgement: { decision: string; reason: string }]>;
+  judges: Array<[taskId: string, judgement: AttentionJudgment]>;
 }
 
 function validAttentionEvidence(value: InboxAttentionEvidence | undefined, maxTasks: number): InboxAttentionEvidence | undefined {
@@ -133,7 +145,10 @@ function validAttentionEvidence(value: InboxAttentionEvidence | undefined, maxTa
     !Array.isArray(value.releases) || !Array.isArray(value.judges) || value.releases.length > maxTasks || value.judges.length > maxTasks) return undefined;
   const releasesValid = value.releases.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && typeof row[1] === "string" && row[1].length <= 512);
   const judgesValid = value.judges.every((row) => Array.isArray(row) && row.length === 2 && taskId(row[0]) && row[1] && typeof row[1] === "object" &&
-    typeof row[1].decision === "string" && row[1].decision.length <= 64 && typeof row[1].reason === "string" && row[1].reason.length <= 300);
+    typeof row[1].reason === "string" && row[1].reason.length <= 300 &&
+    (row[1].state === "unclassified" || row[1].state === undefined && typeof row[1].decision === "string" && row[1].decision.length <= 64 ||
+      row[1].state === "judged" && ["needs_operator", "automate", "backlog"].includes(row[1].decision) &&
+      (row[1].at === null || typeof row[1].at === "string" && row[1].at.length <= 64)));
   return releasesValid && judgesValid ? value : undefined;
 }
 export interface PersistedInbox extends PersistedInboxContent {
@@ -349,6 +364,23 @@ function* releasedHandoffs(deps: FleetLaneDeps<number | Promise<number>>, store:
   return new Set(failed.filter(([, d]) => d.unrecorded!.count < 2 || (mainSha !== undefined && mainSha !== d.unrecorded!.sha)).map(([id]) => id));
 }
 
+/** W1-T9324: when the band replay last dropped or re-offered each proposal's draft, in ms; empty with no readable store. */
+function replayReofferTimes(stateDir: string): Map<string, number> {
+  const out = new Map<string, number>();
+  let replay;
+  try {
+    replay = readBandMeaningReplayStore(stateDir);
+  } catch {
+    // deliberate: an unreadable replay store releases nothing, so the lane holds exactly as it did before the replay.
+    return out;
+  }
+  for (const [id, entry] of Object.entries(replay?.proposals ?? {})) {
+    const times = [entry.reofferedAt, entry.invalidatedAt].map((t) => (t === undefined ? Number.NaN : Date.parse(t))).filter(Number.isFinite);
+    if (times.length > 0) out.set(id, Math.max(...times));
+  }
+  return out;
+}
+
 function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
   // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace. W1-T9041:
@@ -374,7 +406,15 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
   yield* settleHandoffs(deps, store, readRows, withinDay);
   const released = yield* releasedHandoffs(deps, store);
   const unrecorded = (id: string) => store[id]?.handoff === undefined && store[id]?.unrecorded !== undefined;
-  const decidedIds = new Set(Object.entries(store).filter(([id, d]) => d.decision === "merge" || (withinDay(d.ts) && !released.has(id))).map(([id]) => id));
+  const reoffered = replayReofferTimes(deps.stateDir);
+  // W1-T9324: a `file` decision older than the replay's re-offer judged a draft the replay dropped, so it holds nothing.
+  const staleDecision = (id: string, ts: string) => {
+    const at = reoffered.get(id);
+    return at !== undefined && Date.parse(ts) < at;
+  };
+  const decidedIds = new Set(
+    Object.entries(store).filter(([id, d]) => d.decision === "merge" || (withinDay(d.ts) && !released.has(id) && !staleDecision(id, d.ts))).map(([id]) => id),
+  );
   const open = proposals.filter(
     (p: Proposal) =>
       inboxOwner(p) === "fleet" &&

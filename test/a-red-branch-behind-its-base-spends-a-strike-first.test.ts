@@ -460,5 +460,12 @@ test("a ci-log fix dispatch records each red check and the failing test file its
     },
   });
   const dispatch = rows.find((r) => r.step === "fix.dispatch");
-  assert.deepEqual(dispatch?.extra?.ci_failures, [{ check: "ci", signature: "test/sweep-gateway-warm.test.ts" }]);
+  // W1-T9057: each entry also carries the failing titles, a bounded excerpt and where the tail came from.
+  assert.deepEqual(dispatch?.extra?.ci_failures, [{
+    check: "ci",
+    signature: "test/sweep-gateway-warm.test.ts",
+    tests: ["buildSweepHook builds once"],
+    excerpt: "not ok 7 - buildSweepHook builds once\n    at TestContext.<anonymous> (file:///workspace/remudero/test/sweep-gateway-warm.test.ts:88:3)",
+    tail_source: null,
+  }]);
 });

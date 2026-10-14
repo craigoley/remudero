@@ -8,9 +8,13 @@
 //
 //   node scripts/build-child-entries.mjs [--root <dir>]          build; exit 1 loudly on any failure
 //   node scripts/build-child-entries.mjs [--root <dir>] --check  exit 0 iff every bundle is current
+//   node scripts/build-child-entries.mjs [--root <dir>] --hash   print the tree's source hash; build nothing
+//   node scripts/build-child-entries.mjs [--root <dir>] --out <d>  build into <d>, laid out as dist/child-entries
 //
 // W1-T8775: the check-proof spawn site in src/lib/plan-pr-emitter.ts runs a bundle through
 // src/lib/child-entry-argv.ts when childEntryIsCurrent holds, and tsx otherwise.
+// W1-T8776: src/lib/child-entry-store.ts runs `--hash` and `--out` in a child process to fill the shared
+// store, and validates a stored build with this same childEntryIsCurrent (`outDir` = the stored directory).
 import { createHash } from "node:crypto";
 import {
   closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
@@ -166,11 +170,17 @@ function writeAtomic(path, text) {
   renameSync(tmp, path);
 }
 
-/** Build every declared entry into `<root>/<outDir>` and write the manifest last. Throws on any failure. */
-export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTRIES, outDir = OUT_DIR } = {}) {
+/**
+ * Build every declared entry into `<root>/<outDir>` and write the manifest last. Throws on any failure.
+ * W1-T8776: `layoutDir` (default `outDir`) is where the bundle will RUN from, and every bundle-relative path
+ * is computed against it; `outDir` is only where the bytes land. The shared store builds into a private
+ * directory laid out as `<root>/dist/child-entries`, so a copy materialized there resolves inside its tree.
+ */
+export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTRIES, outDir = OUT_DIR, layoutDir = outDir } = {}) {
   root = resolve(root);
   const esbuild = loadEsbuild(root);
   const bundleDir = resolve(root, outDir);
+  const layout = resolve(root, layoutDir);
   mkdirSync(bundleDir, { recursive: true });
   // Remove the old manifest first, so a failed rebuild leaves no manifest vouching for half-written bundles.
   rmSync(join(bundleDir, MANIFEST_NAME), { force: true });
@@ -181,19 +191,24 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
     if (!existsSync(entryPath)) throw new Error(`child entry ${entry.name}: source ${entry.source} does not exist under ${root}`);
     const bundle = `${entry.name}.mjs`;
     const outfile = join(bundleDir, bundle);
-    await esbuild.build({
+    // Built in memory as if at its layout path, then written where outDir says: the bytes never depend on outDir.
+    const result = await esbuild.build({
       absWorkingDir: root,
       entryPoints: [entryPath],
-      outfile,
+      outfile: join(layout, bundle),
+      write: false,
       bundle: true,
       platform: "node",
       format: "esm",
       packages: "external",
       logLevel: "silent",
-      banner: { js: bundleBanner(bundleDir, entryPath) },
+      banner: { js: bundleBanner(layout, entryPath) },
       define: { "import.meta.url": "__rmd_module_url" },
-      plugins: [moduleUrlPlugin(bundleDir)],
+      plugins: [moduleUrlPlugin(layout)],
     });
+    const output = result.outputFiles?.find((f) => f.path === join(layout, bundle));
+    rmSync(outfile, { force: true });
+    if (output) writeFileSync(outfile, output.contents);
     const payload = readIfPresent(outfile) ?? Buffer.alloc(0);
     if (payload.length === 0) throw new Error(`child entry ${entry.name}: esbuild reported success but wrote no bundle at ${outfile}`);
     built.push({ name: entry.name, source: entry.source, bundle, bytes: payload.length, sha256: payloadDigest(payload) });
@@ -237,15 +252,16 @@ const isSafeRelativePath = (p) =>
  * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
  * manifest passes. The store is instance-owned, which is the boundary this relies on.
  */
-export function childEntryIsCurrent(root, name, { outDir = OUT_DIR } = {}) {
+export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash } = {}) {
   try {
-    return judgeChildEntry(resolve(root), name, outDir);
+    return judgeChildEntry(resolve(root), name, outDir, treeHash);
   } catch (err) {
     return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
   }
 }
 
-function judgeChildEntry(root, name, outDir) {
+/** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
+function judgeChildEntry(root, name, outDir, treeHash) {
   if (typeof name !== "string" || !ENTRY_NAME.test(name)) return notCurrent("entry-name-invalid");
   const manifest = readChildEntryManifest(root, outDir);
   if (!manifest) return notCurrent("no-manifest");
@@ -274,7 +290,7 @@ function judgeChildEntry(root, name, outDir) {
     throw err;
   }
   if (refusal) return refusal;
-  const now = sourceHash(root);
+  const now = treeHash ?? sourceHash(root);
   if (manifest.sourceHash !== now) return { current: false, reason: "source-changed", built: manifest.sourceHash, now };
   return { current: true, reason: "source-hash-match", bundle };
 }
@@ -282,13 +298,24 @@ function judgeChildEntry(root, name, outDir) {
 async function main(argv) {
   const rootAt = argv.indexOf("--root");
   const root = rootAt >= 0 ? resolve(argv[rootAt + 1] ?? ".") : SELF_ROOT;
+  if (argv.includes("--hash")) {
+    try {
+      process.stdout.write(`source hash ${sourceHash(root)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`CHILD-ENTRY HASH FAILED: ${err?.message ?? err}\n`);
+      return 1;
+    }
+  }
   if (argv.includes("--check")) {
     const results = CHILD_ENTRIES.map((e) => ({ name: e.name, ...childEntryIsCurrent(root, e.name) }));
     for (const r of results) process.stdout.write(`${r.name}: ${r.current ? "current" : `STALE (${r.reason})`}\n`);
     return results.every((r) => r.current) ? 0 : 1;
   }
   try {
-    const manifest = await buildChildEntries({ root });
+    const outAt = argv.indexOf("--out");
+    const outDir = outAt >= 0 ? resolve(argv[outAt + 1] ?? ".") : OUT_DIR;
+    const manifest = await buildChildEntries({ root, outDir, layoutDir: OUT_DIR });
     for (const e of manifest.entries) process.stdout.write(`built ${OUT_DIR}/${e.bundle} (${e.bytes} bytes) from ${e.source}\n`);
     process.stdout.write(`source hash ${manifest.sourceHash}\n`);
     return 0;

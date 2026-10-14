@@ -1,0 +1,58 @@
+- id: W1-T9283
+  title: "A FOLLOW-UP PROMISE IS OWED BY THE PR THAT ADDS IT, AND THE TASK THAT FILES IT SATISFIES IT — W1-T8779's guard read every bullet of an edited ADR's follow-up list as owed and ignored the PR's own task record, so #11255 (W1-T8775, the build that IS ADR 0006's first follow-up) failed review seven fix rounds running"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11255 stuck about 14 h on 'promised follow-ups reported for harvest' after W1-T9001 fixed the harvest timeout"
+  plan_refs: [W1-T8779, W1-T8775, W1-T9001]
+  files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, test/a-follow-up-promise-is-owed-by-the-pr-that-adds-it.test.ts]
+  status: merged
+  priority: 1 # operator-2026-10-13: this guard blocked the core memory cut (#11255) for half a day
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on #11255 (W1-T8775). The PR edited docs/adr/0006-precompiled-daemon-child-entries.md. Review
+    (src/lib/review.ts observePromisedFollowUps) then read EVERY bullet of that ADR's "Follow-up tasks this record
+    files:" list at head as a promise this PR owes, and tagged each with the PR's own task id. Three bullets passed
+    because W1-T8776, W1-T8777 and W1-T8778 carry W1-T8775 in plan_refs and quote them. The first bullet failed every
+    round. It is W1-T8775's own work, and W1-T8775's own record quotes it verbatim under "PROMISE IDENTITY". But
+    unreportedFollowUps (src/lib/promised-follow-ups.ts) only accepts a record whose plan_refs include the task, and
+    observePromisedFollowUps filters planRecords the same way. A task never lists itself in its own plan_refs, so the
+    build the promise asked for could not pass. Replayed locally: with main's ADR bullet and the PR's Update paragraph,
+    unreported = [first bullet]; counting the task's own record, unreported = [].
+    The fix lane then looped for seven rounds rewording the ADR bullet (09:41Z, 18:18Z). Each rewording created a new
+    unmatched promise. Its harvested ## Follow-ups entries paraphrased the bullet, and the literal-naming matcher
+    rejects a paraphrase. The fix-progress judge said "change-approach" but the rounds kept the same shape. The PR was
+    unstuck by hand on 2026-10-13 by restoring the ADR to main's text, which was outside the task's declared files.
+    The second defect is the same one in general form. A PR that touches an ADR for any reason re-owes every bullet
+    that ADR ever listed. A bullet already on origin/main was owed by the PR that added it. Records that filed it
+    under another task's plan_refs do not count for the new PR, so any later edit of ADR 0006 hits the same wall.
+  design: |
+    1. src/lib/promised-follow-ups.ts: promisedFollowUps takes the base text too. For each changed ADR, and for the
+       task-design source, a bullet is promised only when no bullet in the base list has the same normalized text
+       (the existing `normalized`). A new ADR has an empty base list. The base side is read through the same pinned
+       origin/main object that observePromisedFollowUps already resolves. An unreadable base is UNKNOWN, as an
+       unreadable head is today, never an empty list. A missing path at base (a new file) reads as empty.
+    2. unreportedFollowUps: a plan record also satisfies a promise when `record.id === promise.taskId` and its
+       title, rationale or prompt names the promise (the same literal `namesPromise`). The PR's own task filing the
+       promise is the filing. observePromisedFollowUps keeps that record in planRecords, applying the same
+       id-or-plan_refs rule in its filter.
+    3. The unmet reason in judgeReview keeps naming each unreported bullet verbatim. It adds one sentence: rewording or
+       deleting the promise text in the record does not satisfy it; copy the bullet text verbatim into a typed
+       ## Follow-ups entry. The fix lane read the current reason as an invitation to edit the ADR.
+    4. No new thresholds and no model calls. The harvest (recoverPromisedFollowUpReports) and its W1-T9001 rotation
+       window are unchanged.
+  acceptance:
+    - claim: "an ADR follow-up bullet already on origin/main is not owed by a PR that edits the same ADR"
+      proof: 'grep: test("W1-T9283: a bullet already on base is not owed by a later edit" in test/a-follow-up-promise-is-owed-by-the-pr-that-adds-it.test.ts'
+    - claim: "a bullet the PR adds is satisfied when the PR's own task record names it"
+      proof: 'grep: test("W1-T9283: the task that files the promise satisfies it" in test/a-follow-up-promise-is-owed-by-the-pr-that-adds-it.test.ts'
+    - claim: "a bullet the PR adds that no report entry or record names still fails review, and the reason says rewording does not satisfy it"
+      proof: 'grep: test("W1-T9283: an added unreported bullet still blocks review" in test/a-follow-up-promise-is-owed-by-the-pr-that-adds-it.test.ts'
+  falsifier: |
+    Drop the base comparison and #11255's shape returns: editing ADR 0006's Update paragraph re-owes all four bullets,
+    so the first test fails. Drop the own-record rule and the second test sees the first bullet unreported.

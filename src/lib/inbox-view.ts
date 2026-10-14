@@ -7,18 +7,20 @@
  * nav badge counts. With no viewer neither ran, and the fleet lane decided on readiness as old as the
  * last human read: 6 h in the Phase 0 measurement. A read now writes nothing.
  */
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
+import { parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
 export const INBOX_CLASSIFY_INTERVAL_MS = 60_000;
 /** An unchanged classification is re-stamped this often, so its age keeps saying how recently it was checked. */
 export const INBOX_CLASSIFICATION_RESTAMP_MS = INBOX_STALE_AFTER_MS / 2;
+const validatedInstanceSources = new WeakMap<PanelGraphDeps, string>();
 
 /** What the last pass wrote: its content's identity, and when. Seeded from disk on the first pass. */
 export interface InboxRefreshMemo {
@@ -35,6 +37,8 @@ export interface InboxRefresh {
   /** The snapshot was written this pass: changed, or due a re-stamp. */
   written: boolean;
   pruned: number;
+  /** W1-T8831: the earliest snooze still ahead of this pass, when the next recompute is due for it; null when none is snoozed. */
+  nextSnoozeWakeAt: string | null;
   /** When the snapshot now on disk was written. */
   generatedAt: string | null;
 }
@@ -64,13 +68,33 @@ function persistedContent(classified: ClassifiedInbox, stores: InboxStores): Per
  */
 export async function refreshInboxClassification(deps: PanelGraphDeps, memo: InboxRefreshMemo, clock: Clock = systemClock): Promise<InboxRefresh> {
   const stateDir = join(deps.inboxRoot, "state");
+  if (deps.inboxSourceIdentity) {
+    const registryPath = join(stateDir, "inbox-proposals.json");
+    const stamp = JSON.stringify([registryPath, deps.ledgerPath, deps.planPath].map(path => {
+      const stat = statSync(path);
+      if (!stat.isFile()) throw new Error("instance inbox input is not a regular file");
+      return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs];
+    }));
+    if (validatedInstanceSources.get(deps) !== stamp) {
+      const registry = parseProposalRegistryResult(readFileSync(registryPath, "utf8"));
+      if (registry.kind !== "ok" || !registry.proposals.every(p => p && typeof p.id === "string" && typeof p.summary === "string"))
+        throw new Error("instance inbox registry is unavailable");
+      const ledger = readFileSync(deps.ledgerPath, "utf8");
+      for (const line of ledger.split("\n").filter(line => line.trim())) {
+        const row: unknown = JSON.parse(line);
+        if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("instance inbox ledger is unavailable");
+      }
+      validatedInstanceSources.set(deps, stamp);
+    }
+  }
   if (memo.identity === undefined) {
     const onDisk = readPersistedInbox(stateDir);
     if (onDisk) Object.assign(memo, { identity: onDisk.identity, writtenAtMs: Date.parse(onDisk.generatedAt) });
   }
   const classified = await classifyAllProposalsSliced(deps);
+  if (deps.inboxMayPersist && !deps.inboxMayPersist()) throw new Error("instance inbox lease is not held");
   const { registryPath, proposals, classifications } = classified;
-  const { prunedIds } = pruneRatifiedProposals(proposals, classifications);
+  const prunedIds = deps.inboxSourceIdentity ? [] : pruneRatifiedProposals(proposals, classifications).prunedIds;
   if (prunedIds.length > 0) {
     const pruned = new Set(prunedIds);
     updateProposalRegistry(registryPath, (current) => {
@@ -82,8 +106,12 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const now = clock.now();
   // W1-T8825: the slow lane alone records when the inbox first saw each id; a read only reads that record.
   recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
-  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines });
-  const content = persistedContent(classified, stores);
+  // W1-T8831: a proposal that left the registry drops its archive/snooze mark. An empty registry read prunes nothing: it may be a torn read.
+  if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
+  // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
+  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
+  const content = { ...persistedContent(classified, stores),
+    ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
   const identity = persistedInboxIdentity(content);
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
@@ -96,7 +124,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const generatedAt = fixedClock(memo.writtenAtMs!).iso();
   return {
     bodies: inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt)),
-    proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt,
+    proposals: proposals.length, changed, written, pruned: prunedIds.length, nextSnoozeWakeAt: nextInboxSnoozeWake(stateDir, now), generatedAt,
   };
 }
 
@@ -110,7 +138,7 @@ const INBOX_STORE_SOURCE = `inbox-store:${INBOX_VIEW_INSTANCE}`;
 function inboxStoreSource(generatedAt: string, state: ViewSource["state"] = "fresh"): ViewSource {
   return { name: INBOX_STORE_SOURCE, asOf: generatedAt, state };
 }
-export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet"] as const;
+export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"] as const;
 export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
 
 type Lanes = ReturnType<typeof inboxLanes>;

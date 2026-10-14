@@ -40,6 +40,8 @@ import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   armOutcomeReason,
+  heldPlanPrFromLedger,
+  PLAN_PR_REEVALUATED_STEP,
   decideArmReprobeFromFacts,
   armFailureAction,
   armFailureIsRateLimited,
@@ -66,7 +68,7 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
-import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -89,7 +91,7 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import { createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
@@ -237,6 +239,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
+import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
   rollupFromRest,
@@ -278,6 +281,7 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
+import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -1471,6 +1475,8 @@ export interface BuildSweepEffectsDeps {
   productionProgressJudge?: boolean;
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
+  /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -1833,6 +1839,7 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -1893,6 +1900,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reconcileMainRunGaps",
   "readFleetState",
   "pullMutationVerdicts",
+  "pullFoldDebt",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -2037,6 +2045,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
+  | "pullFoldDebt"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -4494,6 +4503,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return rows;
       } catch (e) {
         log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+    },
+
+    // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
+    pullFoldDebt: async (ingested) => {
+      try {
+        const input = {
+          owner,
+          repo,
+          ingested,
+          settled: settledFoldDebtArtifacts,
+          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          root: repoRoot,
+          log,
+          land: deps.landFeedbackImpl,
+        };
+        return landFoldDebt(pullFoldDebtEntries(input), input);
+      } catch (e) {
+        log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
       }
     },
@@ -12316,6 +12346,8 @@ export interface SweepDeps {
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
+  pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -13986,38 +14018,58 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
-   *  fresh one taken after it. */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before this reading would have held container-short or host-short; the
+   *  reading is then the fresh one taken after it. */
   reclaim?: SlackReclaimRecord;
 }
 
-/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
- *  `reread` after a collection. Undefined when this process has no reclaimer. */
-export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+/** The daemon's own reclaim, as a reading's caller hands it in: given the short pool's figure (the container working
+ *  set, or the host's MemAvailable for `pool` "host"), reclaim once and call `reread` after a collection; `reread`
+ *  returns the same pool's fresh figure. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (
+  figureMib: number | undefined,
+  reread: () => number | undefined,
+  pool?: SlackReclaimPool,
+) => SlackReclaimRecord | undefined;
 
 /** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
-export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
-  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+export const installedSlackReclaim: SlackReclaim = (figureMib, reread, pool) =>
+  installedDaemonSlackReclaimer()?.reclaim(figureMib, reread, pool);
 
 /**
  * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
  * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
- * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
- * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. A paced or unavailable reclaim
+ * keeps `first`, named.
+ *
+ * W1-T9358 — A HOST-SHORT READING RECLAIMS TOO. The daemon's pages are the host's, so its freed slack is host memory:
+ * on 2026-10-14 00:19-00:31Z three host-short holds kept 3 empty lanes idle with no reclaim, while reclaims in the same
+ * hour freed 0.18-2.24 GB each. A host-short reading hands the reclaimer the host's MemAvailable, so its evidence
+ * pacing waits on the binding pool's own figure. ONE RECLAIM PER READING: a reading that already carries a reclaim (a
+ * container-short reading whose re-read came back host-short) is never reclaimed again. Any other tier, or no
+ * reclaimer, returns `first` unchanged.
  */
-export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+export function reclaimBeforeHold<T extends {
+  tier?: string;
+  container?: ContainerMemoryHeadroom;
+  hostAvailableMib?: number;
+  reclaim?: SlackReclaimRecord;
+}>(
   first: T,
   reread: () => T,
   reclaim: SlackReclaim | undefined,
 ): T {
-  if (first.tier !== "container-short" || reclaim === undefined) return first;
-  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
-    ? reading.container.workingSetMib : undefined;
+  if (reclaim === undefined || first.reclaim !== undefined) return first;
+  const pool: SlackReclaimPool | undefined = first.tier === "container-short" ? "container"
+    : first.tier === "host-short" ? "host" : undefined;
+  if (pool === undefined) return first;
+  const figure = (reading: T) => pool === "host" ? reading.hostAvailableMib
+    : reading.container !== undefined && "workingSetMib" in reading.container ? reading.container.workingSetMib : undefined;
   let fresh: T | undefined;
-  const record = reclaim(workingSet(first), () => {
+  const record = reclaim(figure(first), () => {
     fresh = reread();
-    return workingSet(fresh);
-  });
+    return figure(fresh);
+  }, pool);
   if (record === undefined) return first;
   return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
@@ -15254,6 +15306,16 @@ export async function runSweep(
       if (pulled.length > 0) log("sweep.mutation_verdict_pull.ingested", { rows: pulled.length });
     } catch (e) {
       log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+    try {
+      for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
+      }
+    } catch (e) {
+      log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
 
@@ -19098,13 +19160,24 @@ export async function runSweepLightPass(
   };
   // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
   const planMergeToken = Symbol("light-pass-plan-merge");
-  const planMergeCandidate = lightPassPlanMergeOwner !== undefined
-    ? undefined
-    : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
+  // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
+  // one at a time under that same claim, instead of leaving each for a later pass.
+  const planMerges = lightPassPlanMergeOwner !== undefined
+    ? []
+    : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines);
+  const planMergeCandidate = planMerges[0];
   if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
   const releasePlanMerge = (): void => {
     if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
   };
+  const planMergeSequence = new Map<number, { index: number; done: Promise<void>; finish: () => void }>();
+  planMerges.forEach((pr, index) => {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    planMergeSequence.set(pr.prNumber, { index, done, finish });
+  });
+  const lastPlanMergeNumber = planMerges.at(-1)?.prNumber;
+  const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -19197,7 +19270,8 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      if (planMergeCandidate?.prNumber === pr.prNumber) {
+      const planMergeTurn = planMergeSequence.get(pr.prNumber);
+      if (planMergeTurn !== undefined) {
         // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
         // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
         // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
@@ -19222,8 +19296,28 @@ export async function runSweepLightPass(
           });
         };
       }
-      return runSweep([pr], scopedDeps, policy).finally(() => {
-        if (pr.prNumber === planMergeCandidate?.prNumber) releasePlanMerge();
+      // W1-T9212: a held plan PR waits for the plan PR ahead of it, so the claim covers one merge at a time.
+      const previousPlanMerge = planMergeTurn !== undefined && planMergeTurn.index > 0
+        ? planMergeSequence.get(planMerges[planMergeTurn.index - 1]!.prNumber)?.done : undefined;
+      const heldAtSelection = planMergeTurn !== undefined
+        ? heldPlanPrFromLedger(selectionLedgerLines, pr) : undefined;
+      const sweepOne = async (): Promise<SweepSummary> => {
+        if (previousPlanMerge !== undefined) await previousPlanMerge;
+        return runSweep([pr], scopedDeps, policy);
+      };
+      return sweepOne().then(async (summary) => {
+        if (heldAtSelection !== undefined && !deps.dryRun) {
+          const disposed = readLedger(deps.ledgerPath).findLast((l) => l.step === "sweep.disposed" &&
+            l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+          reevaluationRows(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: PLAN_PR_REEVALUATED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, trigger: heldAtSelection.trigger,
+            wait_ms: Math.max(0, now - heldAtSelection.heldAtMs),
+            ...(typeof disposed?.arm_outcome === "string" ? { arm_outcome: disposed.arm_outcome } : {}) });
+        }
+        return summary;
+      }).finally(() => {
+        planMergeTurn?.finish();
+        if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
       });
     }),
@@ -19354,12 +19448,30 @@ export function selectLightPassPlanMerge(
   now: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): OpenPrView | undefined {
+  return selectLightPassPlanMerges(openPrs, policy, now, ledgerLines)[0];
+}
+
+/** W1-T9212 — the plan PRs ONE light pass merges under its single claim, in the order it takes them:
+ *  the {@link selectLightPassPlanMerge} choice first (a held plan PR, longest-held first, outranks one
+ *  never held), then every OTHER held plan PR this pass observes ready. A plan PR that was never held
+ *  keeps W1-T5901's one-per-pass bound. A PR GitHub still reads unmergeable is re-read by its own arm,
+ *  never merged on the hold's inherited reading. */
+export function selectLightPassPlanMerges(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): OpenPrView[] {
   const attempts = (pr: OpenPrView): number =>
     ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
       l.head_sha === pr.headSha && l.arm_attempted === true).length;
-  return openPrs
+  const ready = openPrs
     .filter((pr) => pr.isPlanFiling === true && deriveDisposition(pr, policy, now).disposition === "mergeable")
-    .sort((a, b) => attempts(a) - attempts(b) || a.prNumber - b.prNumber)[0];
+    .map((pr) => ({ pr, held: heldPlanPrFromLedger(ledgerLines, pr) }));
+  ready.sort((a, b) =>
+    (a.held?.heldAtMs ?? Infinity) - (b.held?.heldAtMs ?? Infinity) || attempts(a.pr) - attempts(b.pr) ||
+    a.pr.prNumber - b.pr.prNumber);
+  return ready.filter((entry, index) => index === 0 || entry.held !== undefined).map((entry) => entry.pr);
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
@@ -19992,7 +20104,7 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
 }
 
@@ -20003,7 +20115,9 @@ export interface MemoryGovernorResult {
  *
  *  TIERED for the container: below the floor it defers only while live work in this container can still free
  *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
- *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm's tier is unchanged; its caller
+ *  (`memoryGovernorGateFor`) reclaims the daemon's slack once before a host-short hold, as before a container-short
+ *  one (W1-T9358, see {@link reclaimBeforeHold}). */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
@@ -20498,9 +20612,9 @@ function readPrTerminalLiveCursor(ledgerPath: string): PrTerminalLiveCursor {
   }
 }
 
-/** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
- *  written once, so each is read once per process; only an archive that failed to open is re-read. */
-const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Map<string, ArchivedTerminal> }>();
+/** Only actionable PR keys stay in memory; consumed keys can be read again from rotation digests. */
+export const terminalUnionScans = createSizedMemo<string, ArchivedTerminal & { signature: string }>();
+const terminalMemoKey = (ledgerPath: string, key: string): string => `${dirname(ledgerPath)}\0${key}`;
 
 /** The newest archived terminal row of a PR: its ts and state (a merged fact is final and wins). */
 interface ArchivedTerminal {
@@ -20508,29 +20622,57 @@ interface ArchivedTerminal {
   state: string;
 }
 
-function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
+function terminalArchiveSignature(dir: string): string | undefined {
+  try {
+    const digest = createHash("sha256");
+    for (const entry of ledgerRotationEntries(fs.readdirSync(dir), dir)) {
+      const stat = fs.statSync(entry.path);
+      digest.update(JSON.stringify([entry.path, stat.size, stat.mtimeMs]));
+    }
+    return digest.digest("hex");
+  } catch (error) {
+    // Reason: an unreadable inventory cannot validate a hit; the union read below reports unread archives.
+    return undefined;
+  }
+}
+
+function terminalKeysInArchives(ledgerPath: string, wanted: ReadonlySet<string>): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
   const dir = dirname(ledgerPath);
-  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Map<string, ArchivedTerminal>() };
-  terminalUnionScans.set(dir, memo);
+  const signature = terminalArchiveSignature(dir);
+  const keys = new Map<string, ArchivedTerminal>();
+  const missing = new Set<string>();
+  for (const key of wanted) {
+    const cached = terminalUnionScans.get(terminalMemoKey(ledgerPath, key));
+    if (signature !== undefined && cached?.signature === signature) keys.set(key, cached);
+    else missing.add(key);
+  }
+  if (missing.size === 0) return { keys, unread: 0 };
+  const digests = ledgerRotationDigests(dir, (rows) => rows.filter((row) => row.step === PR_TERMINAL_STEP).map((row) =>
+    ({ step: row.step, pr_url: row.pr_url, ts: row.ts, state: row.state })), { holder: "sweep-pr-terminal", reducerVersion: "1" });
   const read = readLedgerUnionRecordsSync(dir, {
-    pattern: /"step":"pr\.terminal"/,
+    step: PR_TERMINAL_STEP,
     dedupe: false,
     readLiveRecords: () => [],
     rotationRecords: (entry, parse) => {
-      if (memo.scanned.has(entry.path)) return { rows: [], torn: 0, tornLines: [] };
-      const records = parse();
-      memo.scanned.add(entry.path);
-      return records;
+      const read = digests.rotationRecords(entry, parse);
+      return { ...read, rows: read.rows.filter((row) => {
+        const key = prUrlKey(row.pr_url);
+        return key !== undefined && missing.has(key);
+      }) };
     },
     onRecord: (row) => {
       const key = row.step === PR_TERMINAL_STEP ? prUrlKey(row.pr_url) : undefined;
-      if (!key) return;
+      if (!key || !missing.has(key)) return;
       const next = { ts: typeof row.ts === "string" ? row.ts : "", state: String(row.state) };
-      const had = memo.keys.get(key);
-      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) memo.keys.set(key, next);
+      const had = keys.get(key);
+      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) keys.set(key, next);
     },
   });
-  return { keys: memo.keys, unread: read.unread.length };
+  if (read.unread.length === 0 && signature !== undefined) for (const key of missing) {
+    const value = keys.get(key);
+    if (value) terminalUnionScans.set(terminalMemoKey(ledgerPath, key), { ...value, signature });
+  }
+  return { keys, unread: read.unread.length };
 }
 
 /**
@@ -20551,6 +20693,7 @@ export function runPrTerminalReconcile(
     collectPrTerminalKeys(cursor, deps.readLedger(deps.ledgerPath));
   }
   const { named } = cursor;
+  const actionable = new Set<string>();
   const pending: ClosedPrFact[] = [];
   let needsArchives = false;
   for (const [key, prUrl] of named) {
@@ -20558,10 +20701,15 @@ export function runPrTerminalReconcile(
     const fact = covered === true ? undefined : lookup(prUrl);
     if (fact && prUrlKey(fact.prUrl) === key) {
       pending.push(fact);
+      actionable.add(key);
       if (covered === undefined) needsArchives = true;
     }
   }
-  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath) : undefined;
+  const prefix = `${dirname(deps.ledgerPath)}\0`;
+  for (const key of terminalUnionScans.keys()) {
+    if (key.startsWith(prefix) && !actionable.has(key.slice(prefix.length))) terminalUnionScans.delete(key);
+  }
+  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath, actionable) : undefined;
   let appended = 0;
   for (const fact of pending) {
     const key = prUrlKey(fact.prUrl)!;
@@ -20570,7 +20718,10 @@ export function runPrTerminalReconcile(
       // a live closed fact with a named row after it: the PR was reopened and closed again
     } else {
       const archivedFact = archived?.keys.get(key);
-      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) continue;
+      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) {
+        terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
+        continue;
+      }
     }
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
       run_id: deps.runId,
@@ -20585,6 +20736,7 @@ export function runPrTerminalReconcile(
     });
     cursor.terminalSeq.set(key, cursor.seq++);
     cursor.terminalState.set(key, fact.state);
+    terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
     appended++;
   }
   return { named: named.size, appended, unionRead: archived !== undefined };
@@ -20891,7 +21043,7 @@ export interface StaleEscalationRejudgeOptions {
   /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
    *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
    *  the type this rung hands back ({@link EscalationJudgeDecision}) cannot even express "close". */
-  demote: (url: string, reason: string) => void;
+  demote: (url: string, reason: string) => void | Promise<void>;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -20907,6 +21059,11 @@ export interface StaleEscalationRejudgeOptions {
    *  exactly like a fresh install with no history yet; this never widens who gets judged, only
    *  whether a given observed state is judged MORE THAN ONCE. */
   alreadyJudgedStateKeys?: ReadonlySet<string>;
+  triage?: {
+    mode: EscalationTriageMode;
+    evidence?: (e: Escalation) => TriageEvidence;
+    autoResolve?: (candidate: StaleEscalationRejudgeCandidate, action: TriageAction) => Promise<void>;
+  };
 }
 
 /** One candidate's outcome this pass. */
@@ -21006,12 +21163,27 @@ export async function runStaleEscalationRejudge(
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
     // birth judge was never asked either.
+    let evidence: TriageEvidence = {};
+    let evidenceError: string | undefined;
+    try {
+      evidence = deps.triage?.evidence?.(c.escalation) ?? {};
+    } catch (err) {
+      // not erased: the unreadable evidence becomes a deliver verdict naming this error just below.
+      evidenceError = String(err);
+    }
+    const first = triageEscalation(c.escalation, evidence);
     let verdict: EscalationJudgeVerdict;
-    if (isEscalationJudgeExempt(c.escalation)) {
+    if (evidenceError !== undefined) {
+      verdict = { decision: "deliver", reason: `triage evidence unreadable (${evidenceError})` };
+    } else if (isEscalationJudgeExempt(c.escalation)) {
       verdict = { decision: "deliver", reason: `${c.escalation.class} is operator-owned by rule — exempt from judgement` };
+    } else if (first.decidedBy !== "default") {
+      verdict = { decision: first.kind === "digest" ? "demote" : "deliver", reason: first.reason };
     } else {
       try {
-        verdict = await deps.judge(c);
+        const proposed = await deps.judge(c);
+        verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
+          ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
@@ -21022,6 +21194,30 @@ export async function runStaleEscalationRejudge(
             `re-judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
             "leave needs-human, never silently hiding work from the operator",
         };
+      }
+    }
+
+    const triaged = evidenceError !== undefined
+      ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
+      : triageEscalation(c.escalation, evidence, verdict);
+    if (!deps.dryRun && deps.triage) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: c.escalation.taskId, step: "escalation.triaged",
+        class: c.escalation.class, issue_url: c.issueUrl, state_key: c.stateKey,
+        triage_mode: deps.triage.mode, triage_outcome: triaged.kind,
+        triage_decided_by: triaged.decidedBy, triage_reason: triaged.reason,
+        ...(triaged.kind === "auto_resolve" ? { triage_action: triaged.action } : {}),
+      });
+    }
+    if (deps.triage) verdict = {
+      decision: deps.triage.mode === "act" && triaged.kind === "digest" ? "demote" : "deliver",
+      reason: triaged.reason,
+    };
+    if (!deps.dryRun && deps.triage?.mode === "act" && triaged.kind === "auto_resolve" && deps.triage.autoResolve) {
+      try {
+        await deps.triage.autoResolve(c, triaged.action);
+      } catch (err) {
+        log("sweep.escalation_auto_resolve.failed", { issue_url: c.issueUrl, reason: String(err) });
       }
     }
 
@@ -21067,7 +21263,7 @@ export async function runStaleEscalationRejudge(
       continue;
     }
     try {
-      deps.demote(c.issueUrl, verdict.reason);
+      await deps.demote(c.issueUrl, verdict.reason);
       demoted++;
       results.push({
         issueUrl: c.issueUrl,

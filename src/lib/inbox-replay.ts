@@ -432,6 +432,24 @@ function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
     });
   };
 
+  // W1-T9324: an entry the replay dropped a draft for, with no outcome, is judged on the re-draft it now holds.
+  const judgeRedraft = (id: string, entry: BandMeaningReplayEntry) => {
+    const relinted = relintCached(deps, drafts, id, clock);
+    // No cached draft: the re-draft is still due. Clean: the fleet lane files it once the classification reads it ready.
+    if (!relinted || relinted.judged.checks.length === 0) return;
+    const offered = entry.offered;
+    if (!offered || offered.checks.join(",") !== relinted.judged.checks.join(",")) {
+      toRedraft.push({ id, reason: "violations changed", judged: relinted.judged });
+    } else if (offered.guidance !== relinted.judged.guidance) {
+      toRedraft.push({ id, reason: "guidance changed", judged: relinted.judged });
+    } else {
+      // Dirty on the very judgement it was re-drafted on: nothing changes for it until the lint or guidance does.
+      const unresolved = Object.values(relinted.violations).flat();
+      record(id, entry, { outcome: "redraft_not_ready", at: now, unresolved_violations: unresolved, judged: relinted.judged });
+      escalate(id, entry, relinted.violations);
+    }
+  };
+
   for (const [id, entry] of Object.entries(store.proposals)) {
     if (isFinal(entry.outcome)) continue;
     const state = states?.[id];
@@ -469,6 +487,7 @@ function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
     const outcome = ledgerOutcome(id, entry, after, now) ?? superseded;
     if (!outcome) {
       if (entry.invalidatedAt === undefined) toInvalidate.push(id);
+      else judgeRedraft(id, entry);
       continue;
     }
     const relinted = isFinal(outcome) ? undefined : relintCached(deps, drafts, id, clock);

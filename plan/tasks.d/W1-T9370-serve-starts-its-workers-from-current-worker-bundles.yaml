@@ -1,0 +1,49 @@
+- id: W1-T9370
+  title: "SERVE'S WORKER THREADS EACH PAY ~60 MB LIVE AND ~160 MB RESERVED JUST TO LOAD THEIR CODE THROUGH TSX — measured per isolate on now-view.ts's module graph: tsx 82 MB used / 218 MB reserved, the same graph as an esbuild bundle without tsx 22 / 57 (bundle WITH tsx still registered 42 / 174), and serve keeps 8+ persistent isolates: a worker serve starts from its own URL starts from the tree's current worker bundle, with tsx dropped from its execArgv, and from its .ts source as today whenever the bundle is not current, the switch is off, or the start fails"
+  repo: remudero
+  depends_on: [W1-T8777]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how serve's worker threads load their code
+  band_meaning: span
+  origin: "operator ruling 2026-10-14: 'go with your recommendation. It doesn't feel like a one way door. We can always undo it' (serve runs its workers from precompiled bundles)"
+  plan_refs: [W1-T7729, W1-T8776, W1-T8777]
+  files: [src/lib/child-entry-argv.ts, src/lib/read-model-worker.ts, src/lib/read-model-slow-lane.ts, src/lib/status.ts, src/lib/board-worker.ts, test/serve-starts-its-workers-from-current-worker-bundles.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 (operator session, serve memory investigation).
+    OBSERVED, serve.memory since 10-13 12:00Z (256 samples), time-averaged worker heaps: heavy views 1,350 MB, slow lane 501,
+    board worker 337, read-model spawn 278, fast views 259, oracle 188; the main heap ~0.6 GB.
+    OBSERVED, one worker isolate importing now-view.ts's module graph, two runs each, identical:
+    - `--import tsx`, .ts source: 82 MB used, 218 MB total heap;
+    - esbuild bundle, tsx still registered: 42 / 174;
+    - esbuild bundle, no tsx: 22 / 57.
+    So both the bundle and dropping tsx from the worker's execArgv matter. W1-T8777 builds each worker module as its
+    own bundle and resolves it for a BUNDLED parent. Serve's main thread stays on tsx here (the lower-risk half, and
+    most of the gain), so its workers need a start that works from a tsx parent.
+    OPERATOR RULING 2026-10-14: this is reversible ("we can always undo it"); RMD_BUNDLED_WORKERS=0 turns it off at the
+    next serve start, and the tsx start stays the fallback for every doubt.
+  design: |
+    1. startWorker(selfUrl, options) in child-entry-argv.ts constructs the Worker. In a bundled isolate it starts
+       bundledWorkerUrl(selfUrl) (W1-T8777). Otherwise, unless RMD_BUNDLED_WORKERS is "0", it judges the module's worker
+       bundle (workerBundle, source hash verified) and on a current one starts it with execArgv = process.execArgv minus
+       every tsx loader flag. The tree is hashed at most once per process and module root, and a miss materializes from
+       the store once (materializeFromStore) before falling back.
+    2. Every doubt starts the .ts source as today: not current, switch off, store miss, or a Worker constructor that
+       throws (for example ERR_WORKER_INVALID_EXEC_ARGV for a flag a worker refuses).
+    3. Each module's first decision is reported once through an injectable log seam, as worker.entry_resolved
+       {module, kind: bundle|tsx, reason}, so production shows which start each worker got.
+    4. The eight self-URL worker starts in read-model-worker.ts, read-model-slow-lane.ts, status.ts and board-worker.ts
+       use startWorker when no workerUrl override is passed; an override keeps today's `new Worker(url, …)`.
+  acceptance:
+    - claim: "from a tsx parent, a module with a current worker bundle starts its worker from the bundle without tsx in its execArgv; a stale bundle, the switch off, or a refused start falls back to the .ts source"
+      proof: 'grep: test("W1-T9370: serve starts its workers from current worker bundles" in test/serve-starts-its-workers-from-current-worker-bundles.test.ts'
+    - claim: "the read-model worker starts its workers through startWorker"
+      proof: 'grep: startWorker(import\.meta\.url in src/lib/read-model-worker.ts'
+  falsifier: |
+    Start the worker from its self URL whatever the bundle: the fixture worker reports tsx in its execArgv and the test
+    fails. Drop the fallback on a throwing constructor: the refused-flag case throws instead of starting the source.

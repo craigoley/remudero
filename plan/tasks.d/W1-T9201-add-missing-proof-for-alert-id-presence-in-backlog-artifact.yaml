@@ -14,7 +14,9 @@
     locates in the backlog artifact) cannot be satisfied piecewise, so the task stays whole at
     risk:high per the
  #588 merits test.
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6925f08a6f9366d3
   attempts: 0
   files:
     - src/lib/proof-queue-audit.ts

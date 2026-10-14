@@ -1,0 +1,32 @@
+- id: W1-T9378
+  title: Investigate duplicate-key shard bypass of lint-plan gate
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/investigation.md
+  acceptance:
+    - claim: Root cause of duplicate-key shard passing lint-plan is documented
+      proof: "grep: Root cause identified in docs/investigation.md"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-03 follow-up on https://github.com/craigoley/remudero/pull/8886, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: if the duplicate-key shard really is on main, find how it passed the
+    `lint-plan` gate before merging. The `every-shard-on-main-is-lintable` ratchet should have
+    refused it. — from unfiled (run DAEMON-1791039063857,
+    https://github.com/craigoley/remudero/pull/8886)
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"bypass of lint-plan gate\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-14T03:10:12.902Z"
+    pin: "bee1b5dab06ed4d1ed90496da551cfb2f96a51047de0c624e02d1834af688614"

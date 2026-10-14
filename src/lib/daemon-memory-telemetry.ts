@@ -36,8 +36,14 @@ import { join } from "node:path";
 import { systemClock } from "./clock.js";
 import { WORKER_HEAP_TIMEOUT_MS, type TrackedWorker, type WorkerThread } from "./worker-heaps.js";
 
+import type { MemoSize } from "./ledger-union.js";
+
+export type DaemonMemoSizes = Record<"dispatchSelectionLedgerUnion" | "terminalUnionScans" |
+  "mergeLogEvidenceByRoot" | "dispatchFilingCache" | "baseReproductionHostCache", MemoSize>;
+
 /** The heartbeat fields. Every `_bytes` field is an integer byte count. */
 export interface DaemonMemoryFields {
+  memo_sizes?: DaemonMemoSizes;
   // process
   rss_bytes: number;
   heap_used_bytes: number;
@@ -87,6 +93,7 @@ export interface DaemonMemoryFields {
 
 /** Everything the sampler reads, injectable so a test drives fixture files (Rule 18). */
 export interface DaemonMemorySources {
+  memoSizes?: () => DaemonMemoSizes;
   /** The daemon's existing V8 seam (`v8HeapStatistics` in daemon.ts). */
   heapStatistics: () => { heap_size_limit: number };
   workload: () => { active_workers: number; in_flight_reviews: number };
@@ -216,6 +223,7 @@ export function sampleDaemonMemory(sources: DaemonMemorySources): DaemonMemoryFi
     in_flight_reviews: workload.in_flight_reviews,
     uptime_s: Math.round((sources.uptimeSeconds ?? (() => process.uptime()))()),
     ...(sources.bootHeadSha ? { boot_head_sha: sources.bootHeadSha.slice(0, BOOT_SHA_CHARS) } : {}),
+    ...(sources.memoSizes ? { memo_sizes: sources.memoSizes() } : {}),
   };
   return { ...fields, telemetry_sample_us: Number((nowNs() - startNs) / 1000n) };
 }

@@ -12,7 +12,7 @@
   files:
     - src/lib/inbox.ts
     - test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts
-  status: queued
+  status: merged
   priority: 1  # each such draft spends a fleet approve and an id reservation and then fails, and stays READY to be tried again
   attempts: 0
   rationale: |
