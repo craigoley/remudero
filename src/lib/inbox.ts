@@ -3394,7 +3394,6 @@ export function approveProposal(
   };
 }
 
-/** A ratification PR title fitted to commitlint's header limit: a long proposal id overran it (2026-10-13). */
 export function approvePrTitle(proposalId: string): string {
   return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
