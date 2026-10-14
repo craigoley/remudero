@@ -662,3 +662,15 @@ test("selected writer real default REST is bounded and the live sentinel cannot 
     assert.equal(fetched, before);
   } finally { if (original === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = original; }
 });
+
+test("selected writer cannot drop UTF-8 BOM bytes while rewriting a registry", async () => {
+  const f = selectedApi({ text: "\uFEFF" + REGISTRY });
+  await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+  assert.ok(f.calls.every(call => call.method === "GET"));
+});
+
+test("selected writer refuses ill-formed Unicode targets before any REST read", async () => {
+  const f = selectedApi();
+  const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f, { repository: f.repository, filePath: "ops/\uD800.yaml" })));
+  assert.equal(error.code, "registry_target_invalid"); assert.equal(f.calls.length, 0);
+});
