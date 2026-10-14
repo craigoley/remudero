@@ -24975,9 +24975,20 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
+  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
+  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
+  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
+  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
+    const w = wrappedGrepPattern(c.proof ?? "");
+    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
+  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
+    if (wrapped.length > 0) {
+      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
+      return 1;
+    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
