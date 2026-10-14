@@ -172,9 +172,12 @@ test("SDK gardener origin default child ledger", async (t) => {
     // Explicit-extra compatibility is a positive control even before the fix.
     const withoutAmbient = {...process.env};
     delete withoutAmbient[GARDENER_ORIGIN_ENV];
-    for (const mode of ['explicit','default']) {
+    for (const mode of ['explicit','default','absent','invalid']) {
       const built = mode === 'explicit'
         ? buildWorkerEnv({[GARDENER_ORIGIN_ENV]:process.env[GARDENER_ORIGIN_ENV]},withoutAmbient)
+        : mode === 'absent' ? buildWorkerEnv({},withoutAmbient)
+        : mode === 'invalid' ? buildWorkerEnv({[GARDENER_ORIGIN_ENV]:process.env[GARDENER_ORIGIN_ENV]},
+          {...process.env,[GARDENER_ORIGIN_ENV]:'W9494-fixture-secret-invalid-parent'})
         : buildWorkerEnv();
       const childEnv = {...built,NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT};
       assert.equal(childEnv[GARDENER_ORIGIN_ENV],built[GARDENER_ORIGIN_ENV]);
@@ -184,8 +187,9 @@ test("SDK gardener origin default child ledger", async (t) => {
     }
   `);
   const seen = await records(join(dir, "tmp", "sdk-ledger.ndjson"));
-  assert.equal(seen.length, 4, "both real descendants reached the default writer twice");
-  for (const mode of ["explicit", "default"]) {
+  assert.equal(seen.length, 8, "all four real descendant modes reached the default writer twice");
+  assert.equal((await readFile(join(dir, "sdk-ledger.ndjson"), "utf8")).includes("W9494-fixture-secret"), false);
+  for (const mode of ["explicit", "default", "absent", "invalid"]) {
     const priced = seen.find(row => row.run_id === `${mode}-priced`)!;
     const unpriced = seen.find(row => row.run_id === `${mode}-unpriced`)!;
     assert.ok(priced && unpriced);
@@ -209,6 +213,12 @@ test("SDK gardener origin default child ledger", async (t) => {
   assert.equal(process.env[GARDENER_ORIGIN_ENV], previous, "private probes do not change the test's ambient parent");
   for (const row of seen.filter(row => String(row.run_id).startsWith("default-"))) {
     assert.deepEqual(row.gardener_origin, expected, "default builder must carry the actual generated parent into the real writer");
+  }
+  for (const row of seen.filter(row => String(row.run_id).startsWith("absent-"))) {
+    assert.equal(Object.hasOwn(row, "gardener_origin"), false, "missing remains missing in the real child writer");
+  }
+  for (const row of seen.filter(row => String(row.run_id).startsWith("invalid-"))) {
+    assert.deepEqual(row.gardener_origin, { state: "invalid", reason: "malformed" }, "valid extras cannot conceal an invalid ambient parent");
   }
 });
 
