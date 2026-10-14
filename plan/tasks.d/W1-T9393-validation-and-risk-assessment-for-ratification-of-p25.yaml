@@ -1,0 +1,23 @@
+- id: W1-T9393
+  title: "Validation and risk assessment for ratification of P25"
+  repo: remudero
+  depends_on: ["W1-T9392"]
+  type: diagnose
+  verify: "human"
+  risk: "medium"
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - docs/ratification/p25_validation.md
+  acceptance:
+    - claim: "Risks identified with P25 ratification and mitigation plan documented."
+      proof: "grep: \"Risks\" in docs/ratification/p25_validation.md"
+  origin: architect
+  rationale: >-
+    From the 2026-10-05 follow-up on W1-T5689-1791183035928, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm the `DaemonDeps` literal and the
+    `build*DaemonHooks`/`buildSweepHook` seeds actually reach `syncPlanFromOrigin` and
+    `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
+    W1-T5689 (run W1-T5689-1791183035928)
