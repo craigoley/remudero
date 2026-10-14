@@ -674,3 +674,9 @@ test("selected writer refuses ill-formed Unicode targets before any REST read", 
   const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f, { repository: f.repository, filePath: "ops/\uD800.yaml" })));
   assert.equal(error.code, "registry_target_invalid"); assert.equal(f.calls.length, 0);
 });
+
+test("selected writer cannot use another managed repository's shadow runs", async () => {
+  const f = selectedApi({ text: REGISTRY.replace("github_repo: acme/widgets", "github_repo: other/widgets") });
+  const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+  assert.equal(error.code, "shadow_evidence_invalid"); assert.ok(f.calls.every(call => call.method === "GET"));
+});
