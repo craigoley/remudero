@@ -14,7 +14,9 @@
     One cross-file invariant that can't be satisfied piecewise: a ci-gate refusal must flow from
     ci-gate.ts through blocked-ci.ts and ci-manager.ts into the fix path, and a single test needs
     all three files together. Run-task.ts must also reach it.
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=33bdf8789bd2a250
   attempts: 0
   files:
     - src/lib/ci-gate.ts
