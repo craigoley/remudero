@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: follow-up to W1-T9390 (#11608), relayed by the coordinator; operator approved filing"
   plan_refs: [W1-T9390, W1-T8868, W1-T100]
   files: [src/run-task.ts, src/lib/sweep.ts, test/the-triage-evidence-reads-its-slice-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

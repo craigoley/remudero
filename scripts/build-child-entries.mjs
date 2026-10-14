@@ -24,10 +24,11 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. */
+/** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. `run-child` is W1-T9082's (ADR 0007). */
 export const CHILD_ENTRIES = Object.freeze([
   { name: "run-task", source: "src/run-task.ts" },
   { name: "check-proof-main", source: "src/check-proof-main.ts" },
+  { name: "run-child", source: "src/run-child-main.ts" },
 ]);
 /**
  * W1-T8777: the modules that start a worker thread from their own URL, each built as its own bundle so a bundled

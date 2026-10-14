@@ -12,7 +12,7 @@
   origin: operator#2026-10-13-console-agent-proposal-detail-followups
   plan_refs: [W1-T3977, W1-T4001, W1-T4555, CONSOLE-T100]
   files: [src/lib/agent-view.ts, src/lib/nav-badge-view.ts, test/agent-view.test.ts, test/nav-badge-from-the-read-model.test.ts, test/the-nav-badge-is-one-small-view-read.test.ts, test/read-model-worker.test.ts, openapi/daemon.yaml, docs/views.md, packages/api-client/src/schema.d.ts, src/lib/view-shadow.ts, src/lib/read-model-worker.ts, src/lib/views.ts, test/view-shadow.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED SOURCE on a28c3d23a72be5d47e1479c54b5fc285e40d3fdf:

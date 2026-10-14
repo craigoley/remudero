@@ -13,7 +13,7 @@
   files:
     - hooks/deny-floor.sh
     - test/a-host-write-by-redirect-is-refused-at-the-floor.test.ts
-  status: queued
+  status: merged
   priority: 2  # a tripwire for a rule the prompts did not hold; each slip leaves stray files on the host the operator cleans by hand
   attempts: 0
   rationale: |

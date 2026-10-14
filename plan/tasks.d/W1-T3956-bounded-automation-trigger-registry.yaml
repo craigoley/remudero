@@ -18,7 +18,7 @@
     - test/automation-trigger-registry.test.ts
     - test/automation-trigger-history.test.ts
     - test/automation-trigger-replay.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Kilo's Cloud Agents make scheduled and webhook starts visible as named triggers with activation

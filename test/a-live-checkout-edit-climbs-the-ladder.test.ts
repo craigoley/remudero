@@ -165,7 +165,9 @@ test("live-edit ladder: an edit landing after the copy was confirmed is preserve
   assert.equal(raced.restored, false);
   assert.match(raced.reason, /changed after their copy was confirmed/);
   assert.equal(readFileSync(join(w.live.dir, "app.txt"), "utf8"), "a later edit\n", "the later edit is untouched");
-  const next = await w.rung(T0 + 2 * HOUR + 60_000);
+  const preserved = await w.rung(T0 + 2 * HOUR + 60_000);
+  assert.equal(preserved.restored, false, "a changed edit set is a first reading again: preserved, never restored at once");
+  const next = await w.rung(T0 + 2 * HOUR + 120_000);
   assert.equal(next.restored, true, next.reason);
   assert.equal(w.live.git("show", `${next.ref}:app.txt`), "a later edit", "and was preserved before the restore");
 });

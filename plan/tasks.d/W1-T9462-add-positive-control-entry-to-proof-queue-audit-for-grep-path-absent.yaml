@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=8b35b02e47800670
   attempts: 0
   files:
     - src/lib/proof-queue-audit.ts

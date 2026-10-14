@@ -16,7 +16,7 @@
     - src/lib/worker-provider.ts
     - test/a-redraft-walks-to-a-model-that-has-not-failed-it.test.ts
   status: queued
-  priority: 2
+  priority: 1  # raised 2026-10-14: 10 open band-replay escalations (#11373 #11422 #11423 #11431 #11544 #11545 #11556 #11557 #11572 #11614) whose re-drafts retried the same model: inbox.draft_fellthrough reads gpt-oss-120b to gpt-oss-120b at 02:38Z and 03:47Z, before one Sonnet relint that also came back dirty
   attempts: 0
   rationale: |
     OBSERVED 2026-10-13 on host remudero, read-only and niced, in the core daemon's ledger (~/rmd-state2/state): the

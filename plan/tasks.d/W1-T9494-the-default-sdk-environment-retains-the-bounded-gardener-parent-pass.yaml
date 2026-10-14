@@ -1,0 +1,122 @@
+- id: W1-T9494
+  title: "The default SDK environment retains the bounded gardener parent pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: blast-radius
+  priority: 2.5
+  budget_usd: 6.00
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-follow-up:gardener-sdk-origin-carrier-2026-10-14"
+  principles: {tdd: strict}
+  plan_refs: [W1-T8484, W1-T8667, W1-T5527, W1-T6466]
+  files: [src/lib/env.ts, test/env.test.ts, test/a-garden-child-retains-its-parent-pass-identity.test.ts]
+  note: |
+    MACHINE-AUTHORED, OPERATOR-APPROVED: the operator explicitly approved this exact
+    metadata-only repair in the console follow-up chat on 2026-10-14. The task-scoped
+    native rmd approve W1-T9494 release and native renderer pin that actual approval,
+    not a model verdict. Keep machine authorship and all CI/review gates. No activation, permissions,
+    credentials, billing mode, provider routing, service restart or live Inbox write
+    is authorized by this task. The implementation budget is bounded at 6 USD, not
+    the old draft's 24 USD or a missing-budget fallback. Completion and live benefit
+    require separate evidence; a missing cost is never a measured zero.
+  rationale: |
+    At operator source 900f447e9e4e9cf5446871e1d323e414d29a6943, buildWorkerEnv
+    copies its explicit ambient allowlist but omits REMUDERO_GARDENER_ORIGIN.
+    The adopted closed version/name/passId codec and default ledger writer already
+    link garden children; explicit caller extras can carry the metadata, but the
+    default SDK environment drops it. Retained real parent/default-child controls
+    distinguish absent default-child origin from linked explicit-extra origin.
+    This is one demonstrated correlation gap, not proof all unavailable costs have
+    this cause or that unlinked historical rows can be reconstructed.
+
+    The 2026-10-14T16:18:08Z native SUBJECT audit completed 19 immutable trees:
+    current/main and all 15 supplied open PR heads, plus changed-head/source controls.
+    Current advertised main has 3,977 tasks and 20 broad relevant records; no new
+    exact default-origin carrier task or three-path diff appeared in the heads.
+    Full title/rationale/prompt/design/acceptance/falsifier/context/note/plan_refs/files
+    were compared, with manifest-linked W9435/W9436 and complete task/shard controls.
+    The public audit cannot see private or unpushed work. Existing collector and
+    aggregation work is distinct: #11091 credited W1-T8484 via merged trailer and
+    native run branch, merge 1654356790c440658e44340d28298892e381cbd4; #11132 similarly
+    credited W1-T8667, merge 53c38dbc8ebec7fb9265a4a1e70f58f480247be6. Both dependency
+    records remain active in that native plan. Adopted unfiled producer #11070 is
+    source provenance, not a task dependency or an implementation credit to reuse.
+    W8866/#11697, W9435/#11714 and W9489/#11718 retain their distinct owned scopes.
+
+    No unbuilt predecessor is required: the collector and aggregation are already
+    in the adopted merge base, and none of this task's three files imports or
+    changes the collector. Retain their exact merged credit in plan_refs/context,
+    not as an unbuilt dispatch prerequisite. This removes no actual outstanding
+    dependency and does not rely on decorative status or relax a filing gate.
+
+    Genuine blast radius is the existing environment's credential/billing/identity
+    boundary, not the number of files. Correlation data must not gain authority.
+    Research: https://opentelemetry.io/docs/specs/otel/baggage/api/ describes explicit
+    context propagation and requires care when passing baggage across boundaries.
+    Reuse the existing bounded private carrier, not a new SDK, exporter or schema.
+  design: |
+    First reproduce at the adopted merge base: a real garden pass reaches the
+    default SDK environment builder, then a private real Node descendant and its
+    default private ledger writer; the parent link is missing without explicit
+    extras. Also observe the actual worker queryFn/containment caller's default-built
+    SDK options.env through its existing test ports, without a model/provider call.
+    A prefilled fake env or an import/no-match failure is not the regression.
+
+    In buildWorkerEnv carry only the existing validated bounded gardener metadata.
+    Reuse worker-containment's closed decoder/encoder and its unchanged 256-byte
+    bound. A valid ambient parent cannot be reparented by conflicting extras;
+    legitimate explicit extras without an ambient parent remain compatible under
+    the same validation. Invalid, oversized, extra-key or conflicting input cannot
+    fabricate linked context or leak raw values. Preserve no-carrier behavior and
+    the existing ledger's invalid/missing semantics instead of inventing correlation.
+    A present malformed ambient carrier stays invalid, not missing; valid extras
+    cannot conceal it by creating a new linked parent. Forward only a bounded
+    canonical invalid marker understood by the existing decoder, never rejected raw
+    input. Decode valid input before using the serializer, which does not validate.
+
+    Preserve ANTHROPIC denial and its two-factor exception; auth/HOME/shell/cache/
+    secret handling, live-root denial and authoritative task/run/repo/scope identity
+    remain unchanged. Do not import the whole environment, override a credential,
+    broaden the registry, add metadata fields or imply the carrier is authorization.
+    Use exactly the three declared existing source/test paths. No worker, producer,
+    collector, cost-price, DTO, cached view, timer, model, fleet or policy change.
+    If another implementation path proves necessary, reconcile scope normally first.
+
+    Verify physical test paths and complete TAP; env/billing/producer/writer and
+    joined census suites; literal proof resolution and native head/base discrimination;
+    same committed tree LCOV with env.ts SF present and every changed branch covered.
+    After normal gated merge and natural adoption, measure newly linked, priced and
+    unpriced receipts in their real repository/generation/window. Unknown stays
+    unknown; no historical reparenting, activation or restart is part of acceptance.
+  acceptance:
+    - claim: "the default SDK environment reaches a real child ledger with its exact generated parent"
+      proof: "unit test: SDK gardener origin default child ledger"
+    - claim: "closed validation and parent precedence prevent fabricated links and raw-value leaks"
+      proof: "unit test: SDK gardener origin validation and parent precedence"
+    - claim: "propagation leaves worker billing credentials and authoritative identities unchanged"
+      proof: "unit test: SDK gardener origin billing and identity boundaries"
+    - claim: "the actual SDK caller forwards its default-built correlated environment without provider calls"
+      proof: "unit test: SDK gardener origin actual caller handoff"
+  falsifier: |
+    Remove only propagation: generated-parent/default-builder/real-descendant/default-
+    ledger and actual SDK caller assertions fail while explicit-extra controls pass.
+    Remove validation and ambient precedence separately: malformed/oversized/extra-key
+    or conflicting-parent assertions fail without raw-data leakage. Restore the exact
+    committed source and require # fail 0 over verified physical paths. Zero-match,
+    wrapper-only, collection errors and fake env/writer returns are not falsifiers.
+    Native author, stored-body proofs, governed review and required hosted CI stay
+    mandatory. Plan filing, implementation merge, adoption and live cost coverage are
+    different receipts; no cap, selector, permission or provider waiver is allowed.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Released by the operator through rmd approve W1-T9494 after explicit metadata-only approval in the console follow-up chat; credentials, billing, permissions, authoritative identity, service settings and all test/review/merge gates remain unchanged. Shipped collector context remains referenced; no unbuilt predecessor or implementation scope is removed."
+    judged_at: "2026-10-14T17:07:51.940Z"
+    pin: "ce564816c96fc6f71c42559304511ff8f33ab79eca217a789ae6519d9f85344d"
