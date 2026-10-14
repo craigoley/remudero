@@ -233,8 +233,7 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
   const builtWorkers = [];
   // A tree that lacks a declared worker module (a fixture, a consumer checkout) builds the rest; the real tree holding
   // every one is a test's claim, and a bundled parent missing one refuses loudly at the start (bundledWorkerUrl).
-  for (const module of workers) {
-    if (!existsSync(resolve(root, module))) continue;
+  for (const module of workers.filter((declared) => existsSync(resolve(root, declared)))) {
     builtWorkers.push({ module, ...(await bundleOne(`worker entry ${module}`, module, workerBundleName(module), true)) });
   }
   const hashAfter = sourceHash(root, esbuild.version);
