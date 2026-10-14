@@ -13,7 +13,7 @@ import { isMainThread } from "node:worker_threads";
 
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
-import { RUN_CHILD_PROCESS_ENV, markRunChildProcessActor } from "./lib/ledger.js";
+import { markRunChildProcessActor } from "./lib/ledger.js";
 import type { Plan, Task } from "./lib/plan.js";
 import { withRunChildReservation } from "./lib/run-child-reservation.js";
 import type { RunResult } from "./lib/run-result.js";
@@ -107,7 +107,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
   const signals: RunChildSignalSource = deps.signals ?? process;
   const onTerm = (): void => abort.abort();
   if (!probeMode) signals.on("SIGTERM", onTerm);
-  const previousActor = process.env[RUN_CHILD_PROCESS_ENV];
+  let restoreActor: (() => void) | undefined;
   const cleanup = async (): Promise<void> => {
     try {
       try { refresh?.stop?.(); }
@@ -150,7 +150,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runTask?: RunChildRunTask } | undefined;
     const runTask = deps.runTask ?? loaded?.runTask;
     if (runTask === undefined) throw new Error("the loaded run path exports no runTask");
-    markRunChildProcessActor();
+    restoreActor = markRunChildProcessActor();
     const background: Promise<unknown>[] = [];
     const beat = setInterval(() => status("running", "run", {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
     beat.unref();
@@ -251,8 +251,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
   } finally {
     if (!probeMode) {
       signals.off("SIGTERM", onTerm);
-      if (previousActor === undefined) delete process.env[RUN_CHILD_PROCESS_ENV];
-      else process.env[RUN_CHILD_PROCESS_ENV] = previousActor;
+      restoreActor?.();
     }
     if (credentialsEntered) {
       if (previousDir === undefined) delete process.env[RUN_CHILD_DIR_ENV];

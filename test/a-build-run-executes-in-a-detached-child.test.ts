@@ -12,7 +12,8 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { deriveLedgerActor, RUN_CHILD_PROCESS_ENV } from "../src/lib/ledger.js";
+import { deriveLedgerActor, markRunChildProcessActor } from "../src/lib/ledger.js";
+import { isFleetAutomationActor } from "../src/lib/operator-interventions.js";
 import { TaskAdmissionError } from "../src/lib/plan.js";
 import type { LearnedReservation } from "../src/lib/host-memory-learning.js";
 import {
@@ -278,6 +279,12 @@ test("W1-T9085: the child awaits its paired trials before its terminal status", 
 // ── the run verb, in-process ─────────────────────────────────────────────────────────────────────────────
 
 test("the run verb hands runTask the spec's options and the plan snapshot as its plan, and marks the actor", async () => {
+  const originals = { kind: process.env.REMUDERO_PROCESS_ACTOR, daemon: process.env.REMUDERO_DAEMON_PROCESS };
+  const putBack = (name: string, value: string | undefined): void => { if (value === undefined) delete process.env[name]; else process.env[name] = value; };
+  after(() => { putBack("REMUDERO_PROCESS_ACTOR", originals.kind); putBack("REMUDERO_DAEMON_PROCESS", originals.daemon); });
+  process.env.REMUDERO_PROCESS_ACTOR = "daemon";
+  process.env.REMUDERO_DAEMON_PROCESS = "1";
+  const before = { kind: process.env.REMUDERO_PROCESS_ACTOR, daemon: process.env.REMUDERO_DAEMON_PROCESS };
   const { dir } = runDirFor("options", { owner: "o", allowStale: true, skipGitSync: true, planPath: "/p/tasks.yaml", handOffAtPrOpen: true, pairedTrialHost: "daemon" });
   let seen: Record<string, unknown> = {};
   let actor = "";
@@ -285,13 +292,14 @@ test("the run verb hands runTask the spec's options and the plan snapshot as its
     signals: noSignals, probe, env: {}, stderr: () => {}, loadRunPath: async () => ({}),
     runTask: async (_id, options) => {
       seen = options;
-      actor = process.env[RUN_CHILD_PROCESS_ENV] ?? "";
+      actor = deriveLedgerActor({ ...process.env, NODE_TEST_CONTEXT: undefined, REMUDERO_WORKER_SCOPE: undefined }, false);
       return RESULT;
     },
   });
   assert.equal(code, 0);
-  assert.equal(actor, "1");
-  assert.equal(process.env[RUN_CHILD_PROCESS_ENV], undefined, "the marker is put back");
+  assert.equal(actor, "run_child", "while the run executes its ledger rows carry the actor run_child");
+  assert.equal(process.env.REMUDERO_PROCESS_ACTOR, before.kind, "the daemon's own marker is put back");
+  assert.equal(process.env.REMUDERO_DAEMON_PROCESS, before.daemon);
   assert.equal(seen.owner, "o");
   assert.equal(seen.planSnapshot, undefined, "an explicit --plan (skipGitSync) is read literally, so no snapshot stands in for it");
   assert.ok(seen.abortSignal instanceof AbortSignal);
@@ -373,11 +381,19 @@ test("a SIGTERM aborts the run through its signal; a run that returns anyway is 
 });
 
 test("the actor run_child outranks the daemon markers a child inherits, and a worker outranks it", () => {
-  const inherited = { REMUDERO_PROCESS_ACTOR: "daemon", REMUDERO_DAEMON_PROCESS: "1" };
+  const inherited: NodeJS.ProcessEnv = { REMUDERO_PROCESS_ACTOR: "daemon", REMUDERO_DAEMON_PROCESS: "1" };
   assert.equal(deriveLedgerActor({ ...inherited }, false), "daemon");
-  assert.equal(deriveLedgerActor({ ...inherited, [RUN_CHILD_PROCESS_ENV]: "1" }, false), "run_child");
-  assert.equal(deriveLedgerActor({ ...inherited, [RUN_CHILD_PROCESS_ENV]: "1", REMUDERO_WORKER_SCOPE: "rmd-v1-x" }, false), "worker");
-  assert.equal(deriveLedgerActor({ ...inherited, [RUN_CHILD_PROCESS_ENV]: "1", NODE_TEST_CONTEXT: "child-v8" }, false), "test");
+  const marked = { ...inherited };
+  const restore = markRunChildProcessActor(marked);
+  assert.equal(deriveLedgerActor({ ...marked }, false), "run_child", "the daemon marker a child inherits is replaced");
+  assert.equal(deriveLedgerActor({ ...marked, REMUDERO_WORKER_SCOPE: "rmd-v1-x" }, false), "worker");
+  assert.equal(deriveLedgerActor({ ...marked, NODE_TEST_CONTEXT: "child-v8" }, false), "test");
+  restore();
+  assert.deepEqual(marked, inherited, "and put back");
+  const bare: NodeJS.ProcessEnv = {};
+  markRunChildProcessActor(bare)();
+  assert.deepEqual(bare, {});
+  assert.equal(isFleetAutomationActor("run_child"), true, "a run child's rows are fleet automation, never an operator's hand");
 });
 
 // ── the daemon side, against a fake child process ────────────────────────────────────────────────────

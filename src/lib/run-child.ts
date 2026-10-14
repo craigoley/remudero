@@ -17,7 +17,6 @@ import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { RUN_CHILD_PROCESS_ENV } from "./ledger.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
@@ -538,7 +537,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     });
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, launch.argv, {
-      cwd: launch.cwd, env: { ...(ports.env ?? process.env), [RUN_CHILD_PROCESS_ENV]: "1" }, stderrFd,
+      cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);

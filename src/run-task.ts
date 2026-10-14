@@ -38949,7 +38949,7 @@ export async function runInChildWhenOn(
     log: input.log, options: input.options,
     plan: async () => input.planSync({ allowStale: input.allowStale }),
   }, {
-    abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), Date.now()).yieldCost.ms },
+    abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
     ...seams.ports,
   });
   return launched.started ? { settled: launched.settled } : undefined;
