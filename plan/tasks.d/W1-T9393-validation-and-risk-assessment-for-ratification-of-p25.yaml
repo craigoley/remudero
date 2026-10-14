@@ -5,7 +5,9 @@
   type: diagnose
   verify: "human"
   risk: "medium"
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=4e47971a850a0119
   attempts: 0
   files:
     - plan/tasks.yaml
