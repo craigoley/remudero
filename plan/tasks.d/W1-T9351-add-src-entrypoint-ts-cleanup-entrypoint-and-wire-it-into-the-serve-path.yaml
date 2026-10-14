@@ -6,7 +6,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=420aaec5a6f41d32
   attempts: 0
   files:
     - src/entrypoint.ts
