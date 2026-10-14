@@ -2157,7 +2157,8 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
           const actor = verifiedActor(req);
           if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
           try {
-            const registryRepository = deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
+            const registryRepository = onboardingGoLive ? onboardingGoLive.registryRepository
+              : deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
             const receipt = await requestGoLive({ instance: instance.name, actor }, {
               ...(onboardingGoLive ?? deps.onboardingGoLive), registryRepository, stateDir, ledgerPath: deps.ledgerPath,
             });

@@ -47,7 +47,7 @@ export type GoLiveWiring = Pick<LedgerWriterDeps, "writeLedger"> & {
 };
 /** Reuse serve's composition-root wiring and the shared ledger port for request inputs. */
 type GoLiveRequestOptions = GoLiveWiring & LedgerWriterDeps &
-  Pick<RepoLayout, "stateDir"> & { registryRepository: string };
+  Pick<RepoLayout, "stateDir">;
 export type { GoLiveRequestOptions as GoLiveDeps };
 export interface GoLiveReceipt {
   status: "review_pending";
@@ -313,7 +313,7 @@ export async function requestGoLive(input: { instance: string; actor: string }, 
   // Safety policy: at least one actual run, even when the install configures its own threshold.
   if (!Number.isInteger(minimum) || minimum < 1) throw new GoLiveError("invalid_shadow_run_minimum", 503);
   if (deps.registryTarget !== undefined) return requestSelectedGoLive({ instance: input.instance, actor: input.actor }, deps, selectedTarget(deps.registryTarget), minimum);
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(deps.registryRepository)) throw new GoLiveError("registry_repository_invalid", 503);
+  if (typeof deps.registryRepository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(deps.registryRepository)) throw new GoLiveError("registry_repository_invalid", 503);
   const api = deps.api ?? githubGoLiveApi();
   const repo = `repos/${deps.registryRepository}`;
   const base = stringField(record(await api("GET", repo)).default_branch);

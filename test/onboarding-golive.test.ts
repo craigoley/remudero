@@ -456,7 +456,8 @@ function selectedDeps(fixture: ReturnType<typeof selectedApi>, registryTarget: u
 test("registry writer explicit target wins and never falls back", async () => {
   for (const repository of ["acme/registry", "other/ops"]) {
     const f = selectedApi({ repository });
-    const result = await requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f));
+    const deps = selectedDeps(f); deps.registryRepository = "invalid legacy repository";
+    const result = await requestGoLive({ instance: "widgets", actor: "owner" }, deps);
     assert.equal(result.pr_url, `https://github.com/${repository}/pull/83`);
     assert.ok(f.calls.every(c => c.path.startsWith(`repos/${repository}`)));
   }
@@ -573,6 +574,10 @@ test("registry writer route snapshots target without weakening operator confirma
     const replay = await fetch(base + route.path, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: "{}" });
     assert.equal(replay.status, 403); assert.ok(f.calls.every(c => c.path.startsWith("repos/acme/registry")));
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  const noPrimary = selectedApi();
+  const wiringWithoutLegacy = selectedDeps(noPrimary); delete wiringWithoutLegacy.registryRepository;
+  const noPrimaryRoute = find(buildOnboardingGoLiveRoutes(routeDeps(t, { onboardingGoLive: wiringWithoutLegacy }, REGISTRY.replace("    primary: true\n", ""))), "POST", "/v1/i/widgets/go-live");
+  assert.equal((await invoke(noPrimaryRoute, "owner")).status, 202, "explicit selection must not require an unrelated legacy primary");
 });
 
 test("registry writer refuses partial failure without publishing success receipt", async () => {
@@ -613,12 +618,14 @@ test("selected writer covers unknown response, schema and audit outcomes without
     (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, path: "another.yaml" } : value,
     (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, content: "***" } : value,
     (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? { ...value as object, encoding: "none" } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/git/ref/") ? { object: { type: "commit", sha: "not-an-object-sha" } } : value,
+    (call: FakeCall, value: unknown) => call.path.includes("/contents/") ? [] : value,
   ]) {
     const f = selectedApi({ change });
     assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)))).code, "registry_target_unavailable");
     assert.ok(f.calls.every(call => call.method === "GET"));
   }
-  for (const text of ["version: 9\n" + REGISTRY, REGISTRY + "future_policy: live\n", REGISTRY.replace("    mode: shadow # flips via PR", "    foreign_permission: true"), "version: 1\nversion: 1\n" + REGISTRY, "instances:\n  x:\n    mode: shadow\n", REGISTRY.replace("mode: shadow # flips via PR", 'mode: shadow"')]) {
+  for (const text of ["version: 9\n" + REGISTRY, REGISTRY + "future_policy: live\n", REGISTRY.replace("    mode: shadow # flips via PR", "    foreign_permission: true"), "version: 1\nversion: 1\n" + REGISTRY, "instances:\n  x:\n    mode: shadow\n", REGISTRY.replace("mode: shadow # flips via PR", 'mode: shadow"'), REGISTRY + "# invalid\0\n", "# " + "x".repeat(270000) + "\n" + REGISTRY]) {
     const f = selectedApi({ text });
     await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
     assert.ok(f.calls.every(call => call.method === "GET"));
