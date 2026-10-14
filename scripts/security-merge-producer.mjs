@@ -40,8 +40,13 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
 if (isMainModule(import.meta.url)) {
   const read=path=>JSON.parse(execFileSync('gh',['api','--method','GET',path],
     {encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
-  const status=payload=>{execFileSync('gh',['api','--method','POST',`repos/craigoley/remudero/statuses/${payload.sha}`,
-    '--input','-'],{input:JSON.stringify(payload),encoding:'utf8',timeout:15000,maxBuffer:1<<20});};
+  // Fields travel as argv `-f` (raw string) pairs, never a stdin body: a child that exits without
+  // draining stdin would otherwise surface a spurious EPIPE instead of its real exit status.
+  const status=payload=>{
+    const fields=Object.entries(payload).filter(([k,v])=>k !== 'sha' && v !== undefined)
+      .flatMap(([k,v])=>['-f',`${k}=${v}`]);
+    execFileSync('gh',['api','--method','POST',`repos/craigoley/remudero/statuses/${payload.sha}`,...fields],
+      {stdio:['ignore','pipe','pipe'],encoding:'utf8',timeout:15000,maxBuffer:1<<20});};
   const event=JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH,'utf8'));
   const results=await runSecurityMergeProducer(process.env.GITHUB_EVENT_NAME,event,{read,status},
     `https://github.com/craigoley/remudero/actions/runs/${process.env.GITHUB_RUN_ID}`);
