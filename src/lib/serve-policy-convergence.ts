@@ -16,20 +16,27 @@
  * automatic replace passes it the host memory budget's thresholds and the launcher re-checks fresh
  * host pressure before its first destructive step. Its named refusal (a returned ServeReplaceHold) is a
  * HOLD: the old container stays, and no failure, back-off or escalation is recorded.
+ * W1-T9487: W1-T9094 stopped the build daemon recycling for serve-only image inputs, so the daemon's
+ * image stopped being serve's measure: serve is judged against the newest PUBLISHED image for its own
+ * inputs, read from its `/etc/rmd-build-sha`; only when that cannot be read does the daemon's decide.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 import {
+  IMAGE_BUILD_SHA_PATH,
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
+  bakedPathCommitsBehind,
   daemonInstanceRegistryPath,
   deployLedgerPath,
   githubSlugOf,
   imageShaContainerFor,
   isPrimaryDeployment,
   readMountPlanDrift,
+  playwrightCoreVersionCommitsBehind,
   readResourcePolicyDrift,
+  workerSdkCommitsBehind,
   type DeployDeps,
   type MountPlanDrift,
   type RealDeployOpts,
@@ -71,7 +78,15 @@ export function serveReplaceAdmissionEnv(policy: HostMemoryBudgetPolicy): string
   ];
 }
 
-export type ServeImageDrift = { expected: string; actual: string } | { kind: "unknown"; reason: string };
+/** `basis: "serve-inputs"` (W1-T9487): expected is the newest image-input commit, actual serve's build
+ *  sha. Without it, both are image ids and expected is the daemon's (W1-T6245). */
+export type ServeImageDrift = { expected: string; actual: string; basis?: "serve-inputs" } | { kind: "unknown"; reason: string };
+
+/** W1-T9487 — serve's build sha and how many of its own image-input commits origin/main has beyond it. */
+export interface ServeImageInputs {
+  buildSha: string;
+  behind: number;
+}
 
 export interface ServePolicyInputs {
   drift: ResourcePolicyDrift[] | undefined;
@@ -166,6 +181,25 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
   };
 }
 
+/**
+ * W1-T9487 — serve's image reading. Serve on every image input of its own is converged, whatever the
+ * daemon runs. Behind them, it drifts only once an image containing the newest input is published
+ * (the deploy cycle's own `imagePublished`); before that it waits for the build, which is never drift.
+ * An unreadable build sha leaves today's daemon comparison deciding.
+ */
+function readServeImage(deps: Parameters<typeof runServePolicyCycle>[0]): ServeImageDrift | undefined {
+  const inputs = deps.serveImageInputs?.();
+  if (inputs === undefined) return deps.serveImageDrift?.();
+  if (inputs.behind === 0) return undefined;
+  const newest = deps.newestBakedSha?.();
+  const published = newest === undefined ? undefined : deps.imagePublished?.(newest);
+  if (newest !== undefined && published === true) return { expected: newest, actual: inputs.buildSha, basis: "serve-inputs" };
+  const image = newest === undefined
+    ? "the newest image input is unknown"
+    : `an image containing ${newest.slice(0, 9)} is ${published === false ? "not published yet" : "of unknown publication"}`;
+  return { kind: "unknown", reason: `serve is ${inputs.behind} image-input commit(s) behind origin/main, but ${image} — waiting for the build` };
+}
+
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
 export function runServePolicyCycle(
@@ -173,6 +207,7 @@ export function runServePolicyCycle(
     escalate?: (e: Escalation) => void;
     serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
     serveImageDrift?: () => ServeImageDrift | undefined;
+    serveImageInputs?: () => ServeImageInputs | undefined;
   },
   opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
@@ -180,7 +215,7 @@ export function runServePolicyCycle(
   }
   const drift = deps.servePolicyDrift();
   const mountDrift = deps.serveMountPlanDrift?.();
-  const imageDrift = deps.serveImageDrift?.();
+  const imageDrift = readServeImage(deps);
   const nowMs = deps.now();
   const decision = decideServePolicyConvergence({
     drift,
@@ -213,14 +248,15 @@ export function runServePolicyCycle(
     // Only a reading known BEFORE the replace is re-checked: an unknown one never caused it.
     const after = drift === undefined ? [] : deps.servePolicyDrift();
     const mountsAfter = mountDrift === undefined ? [] : deps.serveMountPlanDrift?.();
-    const imageAfter = imageDrift && "expected" in imageDrift ? deps.serveImageDrift?.() : undefined;
+    const imageAfter = imageDrift && "expected" in imageDrift ? readServeImage(deps) : undefined;
     if (deps.serveHealthy?.() !== true) error = "serve is not running after the replace";
     else if (after === undefined || after.length > 0) error = `limits still off the policy after the replace (${after ? describeDrift(after) : "unreadable"})`;
     else if (mountsAfter === undefined || mountsAfter.length > 0) {
       error = `binds still off the scratch mount plan after the replace (${mountsAfter ? describeMountDrift(mountsAfter) : "unreadable"})`;
     }
     else if (imageAfter) {
-      error = `image still off the daemon after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
+      const measure = imageDrift && "basis" in imageDrift ? "behind its newest published input" : "off the daemon";
+      error = `image still ${measure} after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
   } catch (err) {
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
@@ -253,6 +289,7 @@ export function realServePolicyDeps(
   if (isPrimaryDeployment(registryText, o.stateRoot) !== true) return {};
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
+  const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
   return {
     servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
@@ -268,6 +305,19 @@ export function realServePolicyDeps(
       } catch (err) {
         return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
       }
+    },
+    serveImageInputs: () => {
+      let buildSha: string;
+      try {
+        buildSha = exec("docker", ["exec", SERVE_POLICY_CONTAINER, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+      } catch {
+        return undefined; // serve down or no docker — the daemon comparison decides, as before
+      }
+      if (!/^[0-9a-f]{40}$/i.test(buildSha)) return undefined; // built without RMD_BUILD_SHA reads "unknown"
+      // serve executes every baked input, and the deploy cycle's lockfile image inputs too
+      const baked = bakedPathCommitsBehind(buildSha, git, "serve");
+      if (baked === undefined) return undefined;
+      return { buildSha, behind: baked + (playwrightCoreVersionCommitsBehind(buildSha, git) ?? 0) + (workerSdkCommitsBehind(buildSha, git) ?? 0) };
     },
     pausePresent: () => isPaused(o.stateRoot),
     serveHandoffInProgress: () => {
@@ -324,7 +374,7 @@ export function realServePolicyDeps(
     escalate: (e) => {
       const slug = (() => {
         try {
-          return githubSlugOf(exec("git", ["-C", o.installPath, "remote", "get-url", "origin"]).trim());
+          return githubSlugOf(git(["remote", "get-url", "origin"]).trim());
         } catch {
           return undefined; // no origin — the failure row and back-off file still record it
         }

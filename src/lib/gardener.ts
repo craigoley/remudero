@@ -523,19 +523,88 @@ export async function freshMergedPlanLintAsync(root: string, paths: readonly str
   return lintMergedPlanChange({ base, changes });
 }
 
-export type GardenTaskIdMinter = ((branch: string) => string) & { async?: (branch: string) => Promise<string> };
+/** Gives back a reserved id whose filing never reached a PR; a minter without it only leaves the hole. */
+export interface GardenTaskIdRelease {
+  release?: (taskId: string, reason: string) => void;
+  releaseAsync?: (taskId: string, reason: string) => Promise<void>;
+}
+
+export type GardenTaskIdMinter = ((branch: string) => string) & { async?: (branch: string) => Promise<string> } & GardenTaskIdRelease;
+
+type GardenLandState = "unstarted" | "in_flight" | "not_opened" | "opened" | "threw";
+
+interface HeldGardenIds {
+  mint: GardenTaskIdMinter;
+  ids: string[];
+  land: GardenLandState;
+}
+
+type GardenFilingWorkspace = Pick<GardenCheckout, "branch"> & { land?: (opts: { paths: string[]; title: string; body: string }) => unknown };
+
+/** Ids a workspace's filing reserved, and how far its landing got: only a landing that never pushed may release them. */
+const gardenHeldIds = new WeakMap<object, HeldGardenIds>();
+
+function trackGardenIds(ws: GardenFilingWorkspace, mint: GardenTaskIdMinter): HeldGardenIds {
+  const known = gardenHeldIds.get(ws);
+  if (known) return known;
+  const held: HeldGardenIds = { mint, ids: [], land: "unstarted" };
+  gardenHeldIds.set(ws, held);
+  const land = ws.land;
+  if (typeof land === "function") {
+    ws.land = (opts) => {
+      held.land = "in_flight";
+      let out: unknown;
+      try {
+        out = land.call(ws, opts);
+      } catch (e) {
+        held.land = "threw";
+        throw e;
+      }
+      const settle = (url: unknown) => ((held.land = url ? "opened" : "not_opened"), url);
+      if (!isPromiseLike(out)) return settle(out);
+      return Promise.resolve(out).then(settle, (e: unknown) => {
+        held.land = "threw";
+        throw e;
+      });
+    };
+  }
+  return held;
+}
 
 /** CLI preparation stays synchronous; the daemon awaits every reservation before any tree write. */
-export function prepareGardenTaskIds(ws: Pick<GardenCheckout, "branch">, count: number, mint: GardenTaskIdMinter, async = false): string[] | Promise<string[]> {
+export function prepareGardenTaskIds(ws: GardenFilingWorkspace, count: number, mint: GardenTaskIdMinter, async = false): string[] | Promise<string[]> {
   if (count === 0) return [];
   if (!ws.branch) throw new Error("gardener: filing workspace has no branch for task-id reservation (no reservation branch)");
   const branch = ws.branch;
-  if (!async) return Array.from({ length: count }, () => mint(branch));
+  const held = trackGardenIds(ws, mint);
+  const keep = (id: string) => (held.ids.push(id), id);
+  if (!async) return Array.from({ length: count }, () => keep(mint(branch)));
   return (async () => {
     const ids: string[] = [];
-    for (let i = 0; i < count; i++) ids.push(await (mint.async ?? mint)(branch));
+    for (let i = 0; i < count; i++) ids.push(keep(await (mint.async ?? mint)(branch)));
     return ids;
   })();
+}
+
+/**
+ * Releases every id {@link prepareGardenTaskIds} reserved through `ws` when its filing ended before a
+ * push: a gate refused it, its preflight refused the landing, or it threw first. A landing that opened,
+ * is in flight or threw keeps its ids, since a branch or PR may carry them. Idempotent; never throws.
+ */
+export function releaseGardenTaskIds(ws: object, reason: string, async: boolean): void | Promise<void> {
+  const held = gardenHeldIds.get(ws);
+  if (!held || held.ids.length === 0 || (held.land !== "unstarted" && held.land !== "not_opened")) return;
+  const ids = held.ids.splice(0);
+  if (async && held.mint.releaseAsync) {
+    return Promise.all(ids.map((id) => held.mint.releaseAsync!(id, reason))).then(() => undefined, () => undefined);
+  }
+  for (const id of ids) {
+    try {
+      held.mint.release?.(id, reason);
+    } catch {
+      /* the minter's release records its own failure; one refusal must not keep the others */
+    }
+  }
 }
 
 /** Rolling p95 with three times the observed duration; first use inherits the poll cadence. */
@@ -1167,6 +1236,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   if (acting !== undefined && plan.actions.length > 0) {
     try {
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
+      let unfiled = "the filing ended before its PR opened";
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
         const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
@@ -1186,6 +1256,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
             deps.log(`${spec.name}.landing_lint_skipped`, { reason: String((e as Error)?.message ?? e) });
           }
           if (lint) {
+            unfiled = `the merged-plan lint refused ${lint.file}: ${lint.message}`;
             // The check working, not a filing failure: no streak, no fingerprint — the next pass rebuilds on fresh main.
             deps.log(`${spec.name}.landing_refused`, { file: lint.file, message: lint.message });
             deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
@@ -1195,7 +1266,11 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
           if (prUrl === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
+      } catch (e) {
+        unfiled = String((e as Error)?.message ?? e);
+        throw e;
       } finally {
+        yield* step(() => releaseGardenTaskIds(ws, `${spec.name} gardener: ${unfiled}`, async));
         yield* step(() => ws.dispose());
       }
     } catch (e) {

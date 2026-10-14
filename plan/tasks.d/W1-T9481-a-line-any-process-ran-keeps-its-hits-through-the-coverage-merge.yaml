@@ -1,0 +1,72 @@
+- id: W1-T9481
+  title: "A FILE RUN BOTH UNDER PLAIN NODE AND UNDER TSX LOSES ITS HITS IN THE COVERAGE MERGE — Node keeps the two instances as separate function lists and writes each line's count last-writer-wins, so a plain-node child's zero range erases a tsx test's hits and diff-coverage blocks a fully tested line (#11660, scripts/build-child-entries.mjs:237)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a line any single process ran is never merged down to zero (coverage-merge-ratchet.mjs)
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: fix #11660 (W1-T8777) and its root cause"
+  plan_refs: [W1-T8777, W1-T6180, W1-T210]
+  files: [scripts/coverage-merge-ratchet.mjs, test/a-line-any-process-ran-keeps-its-hits-through-the-coverage-merge.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on #11660 (W1-T8777), CI run 38579607155, job coverage-ratchet 115916268327, head a8766805f:
+    "diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests: scripts/build-child-entries.mjs:237".
+    The merge line read "droppedRepeatInstances=1007 lineHitsRescued=271/574679087 across 8 shard LCOV(s)".
+    Three tests in test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts run that line in-process.
+    Two repair rounds (a hand pair a5f48272b + db8239472, then fleet fix a8766805f) chased a same-process dual-load
+    theory. Neither changed the red, because the cause is across processes.
+    REPRODUCED on the Mac, Node 24.21.0, with ci.yml's exact coverage flags (--enable-source-maps
+    --experimental-test-coverage --import tsx --import ./test/setup/tmp-hygiene.ts):
+      - The new test file alone: lcov DA:237,3. scripts/coverage-merge-ratchet.mjs --premap-output, then --output
+        --shard-count 1 --line-lcov: DA:237,3. droppedRepeatInstances=0.
+      - The same file plus the four other suites that load the script (a-daemon-child-entry-is-precompiled,
+        every-worktree-at-one-source-hash-shares-one-built-bundle, the-remaining-check-proof-sites-use-the-shared-bundle-launcher,
+        a-check-proof-child-runs-the-precompiled-entry-when-current): Node's own lcov AND the repo merge both read DA:237,0.
+      - Pairwise, the result depends on which pair is run: DA:237 read 0, 0, 3 and 5 for the four partners.
+      - Raw V8 files: the script shows two shapes. Plain-node children (CLI --check/--hash/build runs) load it natively,
+        with a function extent of 21260 and no source map. tsx test processes load the CJS-transformed copy, with an
+        extent of 58287 and a map. Merging ONE tsx test report with ONE plain-node child report through
+        coverage-merge-ratchet zeroed lines 234-239. Each report alone is correct.
+    WHY, READ in Node 24.21.0 internal/test_runner/coverage (which coverage-merge-ratchet drives on purpose):
+    mergeCoverage only joins functions whose name AND first-range offsets match. The source-mapped tsx functions never
+    match the native ones exactly, so both lists are kept. summary() then runs mapRangeToLines over every function in
+    order, and each range overwrites the counts of the lines it covers. The last list written wins, and a child that
+    never called buildChildEntries writes a zero range over the whole function.
+    scriptsTheSourceMapDescribes (#9855, W1-T6180) handles the same-process case only. The lineHitsRescued union cannot
+    help, because the shard LCOVs it reads come from the same Node merge and are already zero.
+    Any .mjs or .ts file that tests load under tsx AND that children run under plain node is exposed. That includes
+    scripts/build-child-entries.mjs and every bundled child entry that ADR 0006/0007 moves onto plain node.
+    #11660's own fix (419712819) builds in a plain-node child so both shapes record a hit. That works around the
+    problem for one line. It is not a fix.
+  design: |
+    1. During --premap-output, after mapping each process report on its own, record per URL the set of 1-based lines
+       that report alone counts as hit (count > 0), using the same pinned-Node mapper and getLines the merge uses. Write
+       the sets into the premapped corpus beside the existing line records (bounded and chunked like them).
+    2. In the final --output merge, after summary(), raise every line that any single process recorded as hit to at
+       least 1 (or to that process's count) before rendering lcov. Never lower a count. Log the number of lines raised
+       as processLineHitsRescued=<lines>/<files> next to lineHitsRescued, so the effect shows on every run.
+    3. Count the URLs that reached the merge in two or more instance shapes (different generated extents across
+       processes) and print them in the same log line as mixedShapeFiles=<n>, so a reader can measure the exposure.
+    4. Measure the premap and merge wall time on one real CI run before and after, and state both numbers in the PR
+       body. If the per-process pass costs more than the measured shard slack, process only URLs seen in two or more
+       shapes.
+    Tests go in the new file, titled verbatim as in the proofs. Build the fixtures from REAL raw V8 output: run a tiny
+    module once under `node --import tsx` with a require() and once under plain node, each with NODE_V8_COVERAGE, and
+    feed both directories through writePremappedCoverageDirectories and mergeRawCoverageDirectories. Do not hand-write
+    V8 JSON.
+  acceptance:
+    - claim: "a line one process ran under tsx keeps its hit when a plain-node process that never ran it is merged after it"
+      proof: 'grep: test("W1-T9481: a line a tsx process ran survives a plain-node process that never ran it" in test/a-line-any-process-ran-keeps-its-hits-through-the-coverage-merge.test.ts'
+    - claim: "the merge never lowers a line below any single process's own count, whatever the merge order"
+      proof: 'grep: test("W1-T9481: merge order never lowers a line below one process own hit" in test/a-line-any-process-ran-keeps-its-hits-through-the-coverage-merge.test.ts'
+    - claim: "the merge reports how many lines it raised and how many files arrived in mixed shapes"
+      proof: 'grep: processLineHitsRescued= in scripts/coverage-merge-ratchet.mjs'
+  falsifier: |
+    On main, premap then merge one tsx report that ran a line and one plain-node report of the same file that did not.
+    The merged lcov reads that line as 0, which is what blocked #11660 at scripts/build-child-entries.mjs:237.
