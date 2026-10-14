@@ -56,6 +56,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { sampleCgroupMemory } from "./daemon-memory-telemetry.js";
 import {
   DEFAULT_ESTIMATE_MIB,
+  WORKER_CLASSES,
   defaultInstance,
   parseProcStat,
   readMemoryLedger,
@@ -103,6 +104,8 @@ export const HOST_MEMORY_BUDGET_ORIGIN = "proposal";
 
 export interface HostMemoryBudgetPolicy {
   mode: ShadowMode;
+  /** Per-class overrides of `mode` (`sweep.hostMemoryBudget.classModes`); a class not named runs under `mode`. */
+  classModes?: Partial<Record<WorkerClass, ShadowMode>>;
   /** MemAvailable the host must keep after every projected claim. */
   hostReserveMib: number;
   /** memory.max - memory.current this container must keep after its own unrealized reservations. */
@@ -157,6 +160,7 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
     );
   }
   const out: Partial<HostMemoryBudgetPolicy> = { mode: modeRow.value as ShadowMode };
+  if (block.classModes !== undefined) out.classModes = parseClassModes(`${base}.classModes`, mapping(`${base}.classModes`, block.classModes));
   for (const key of NUMERIC_KEYS) {
     const path = `${base}.${key}`;
     const row = mapping(path, block[key]);
@@ -169,6 +173,28 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
     out[key] = value;
   }
   return out as HostMemoryBudgetPolicy;
+}
+
+/** `classModes`: a proposal row whose value maps a worker class to a mode. An unknown class or mode throws. */
+function parseClassModes(path: string, row: Record<string, unknown>): Partial<Record<WorkerClass, ShadowMode>> {
+  proposalOrigin(path, row);
+  const value = mapping(`${path}.value`, row.value);
+  const out: Partial<Record<WorkerClass, ShadowMode>> = {};
+  for (const [workerClass, mode] of Object.entries(value)) {
+    if (!WORKER_CLASSES.includes(workerClass as WorkerClass)) {
+      throw new Error(`policy.yaml: '${path}.value' names an unknown worker class ${JSON.stringify(workerClass)}.`);
+    }
+    if (!SHADOW_MODES.includes(mode as ShadowMode)) {
+      throw new Error(`policy.yaml: '${path}.value.${workerClass}' accepts only "off", "shadow" or "enforce", got ${JSON.stringify(mode)}.`);
+    }
+    out[workerClass as WorkerClass] = mode as ShadowMode;
+  }
+  return out;
+}
+
+/** The mode one worker class runs under: its `classModes` override, else the block's `mode`. Pure. */
+export function hostMemoryBudgetModeFor(policy: Pick<HostMemoryBudgetPolicy, "mode" | "classModes">, workerClass: WorkerClass): ShadowMode {
+  return policy.classModes?.[workerClass] ?? policy.mode;
 }
 
 let cachedPolicy: HostMemoryBudgetPolicy | undefined;
@@ -1566,7 +1592,8 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     if (!ports.write) return { kind: "no-sink" };
     const startedNs = ports.nowNs();
     const policy = ports.policy();
-    if (policy.mode === "off") return { kind: "off" };
+    const mode = hostMemoryBudgetModeFor(policy, start.workerClass);
+    if (mode === "off") return { kind: "off" };
     const inputs = gatherShadowInputs(start, ports, policy);
     const instance = instanceOf(ports, start.root);
     const now = ports.clock.now();
@@ -1589,7 +1616,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         counterfactual: true,
         note: "counterfactual: the work started regardless; cascades (what would have run later had this start deferred) are not modelled",
         cascades_modelled: false,
-        mode: policy.mode,
+        mode,
         worker_class: start.workerClass,
         instance,
         reservation_id: start.reservationId ?? null,
