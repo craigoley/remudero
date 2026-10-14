@@ -14,9 +14,10 @@
  * When no donor qualifies, the next step is REPORTED with the free space, never run here.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statfsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { configuredDependencySeedRoot, materializeDependencySeed, type SeedMethod } from "./dependency-seeds.js";
 
 export function defaultHandWorktreeParent(
   repoDir: string,
@@ -52,6 +53,7 @@ export interface HandWorktreeRequest {
 
 export type NodeModulesOutcome =
   | { kind: "hard-linked"; donor: string }
+  | { kind: "seeded"; donor: string; method: SeedMethod }
   | { kind: "npm-ci-needed"; reasons: string[] };
 
 export type HandWorktreeResult =
@@ -106,11 +108,11 @@ export function findDonor(repoDir: string, target: string, npmCommand = "npm"): 
   const list = run("git", ["-C", repoDir, "worktree", "list", "--porcelain"]);
   if (!list.ok) return { reasons: [`git worktree list failed: ${list.detail}`] };
   const lock = readFileSync(targetLock);
-  const targetDev = statSync(target).dev;
+  const targetDev = configuredDependencySeedRoot() ? undefined : statSync(target).dev;
   const reasons: string[] = [];
   for (const line of list.stdout.split("\n")) {
     const candidate = line.startsWith("worktree ") ? line.slice("worktree ".length) : "";
-    if (candidate === "" || resolve(candidate) === resolve(target)) continue;
+    if (candidate === "" || realpathSync(candidate) === realpathSync(target)) continue;
     const why = donorRejection(candidate, lock, npmCommand, targetDev);
     if (why === null) return { donor: candidate };
     reasons.push(`${candidate}: ${why}`);
@@ -120,6 +122,14 @@ export function findDonor(repoDir: string, target: string, npmCommand = "npm"): 
 
 /** `cp -al` the donor's node_modules into `target`: a hard-linked copy, never a symlink. */
 export function hardLinkNodeModules(donor: string, target: string): NodeModulesOutcome {
+  const root = configuredDependencySeedRoot();
+  if (root) {
+    try {
+      const result = materializeDependencySeed(target, { root, sourceDir: donor });
+      if (result.status === "materialized") return { kind: "seeded", donor, method: result.method };
+      return { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] };
+    } catch (error) { return { kind: "npm-ci-needed", reasons: [`dependency seed refused: ${(error as Error).message}`] }; }
+  }
   const cp = run("cp", ["-al", join(donor, "node_modules"), join(target, "node_modules")]);
   return cp.ok ? { kind: "hard-linked", donor } : { kind: "npm-ci-needed", reasons: [`cp -al from ${donor} failed: ${cp.detail}`] };
 }
@@ -162,7 +172,16 @@ export function createHandWorktree(req: HandWorktreeRequest): HandWorktreeResult
   const added = run("git", ["-C", repoDir, "worktree", "add", "--quiet", "--no-track", "-b", branch, path, "origin/main"]);
   if (!added.ok) return { status: "refused", reason: `git worktree add failed: ${added.detail}` };
   const donor = findDonor(repoDir, path, req.npmCommand);
-  const nodeModules = "donor" in donor ? hardLinkNodeModules(donor.donor, path) : { kind: "npm-ci-needed" as const, reasons: donor.reasons };
+  let nodeModules: NodeModulesOutcome;
+  const root = configuredDependencySeedRoot();
+  if ("donor" in donor) nodeModules = hardLinkNodeModules(donor.donor, path);
+  else if (root) {
+    try {
+      const result = materializeDependencySeed(path, { root });
+      nodeModules = result.status === "materialized" ? { kind: "seeded", donor: result.seed, method: result.method }
+        : { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] };
+    } catch (error) { nodeModules = { kind: "npm-ci-needed", reasons: [`dependency seed refused: ${(error as Error).message}`] }; }
+  } else nodeModules = { kind: "npm-ci-needed", reasons: donor.reasons };
   return { status: "created", path, branch, freeBytes: freeBytesAt(parent), nodeModules };
 }
 
@@ -171,6 +190,8 @@ export function renderHandWorktree(result: Extract<HandWorktreeResult, { status:
   const lines = [`path:   ${result.path}`, `branch: ${result.branch} (no upstream; push with \`git push -u origin HEAD\`)`];
   if (result.nodeModules.kind === "hard-linked") {
     lines.push(`node_modules: hard-linked from ${result.nodeModules.donor} (identical package-lock.json)`);
+  } else if (result.nodeModules.kind === "seeded") {
+    lines.push(`node_modules: ${result.nodeModules.method} from a validated dependency seed`);
   } else {
     lines.push(`node_modules: none linked — next step: \`npm ci\` in ${result.path} (~850 MB; ${formatGiB(result.freeBytes)} free)`);
     for (const reason of result.nodeModules.reasons) lines.push(`  no donor: ${reason}`);
