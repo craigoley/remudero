@@ -895,7 +895,9 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
-  pruneOrphanedDrafts,
+  createProposalShardReader,
+  proposalShardDir,
+  pruneOrphanedDraftsAsync,
   parseProposalRegistry,
   parseSupersedesExpr,
   deriveTaskReferent,
@@ -51067,6 +51069,9 @@ export function buildInboxDraftHook(
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
+  // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
+  // full sweep reads, off the loop, only the shard files that changed since the one before.
+  const shardReader = createProposalShardReader(proposalShardDir(join(config.root, "state", "inbox-proposals.json")), { log });
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -51075,7 +51080,7 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
-      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
