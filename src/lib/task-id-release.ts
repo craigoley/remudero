@@ -70,6 +70,7 @@ export function releaseTaskIdReservation(
     }
     verdict = next.value;
   } catch (e) {
+    // deliberate: a release must never throw over the refusal it follows; the reason is ledgered below.
     verdict = { outcome: "failed", detail: String((e as Error)?.message ?? e) };
   }
   return record(held, opts.reason, opts.lane, verdict, opts.log);
@@ -91,6 +92,7 @@ export async function releaseTaskIdReservationAsync(
     }
     verdict = next.value;
   } catch (e) {
+    // deliberate: a release must never throw over the refusal it follows; the reason is ledgered below.
     verdict = { outcome: "failed", detail: String((e as Error)?.message ?? e) };
   }
   return record(held, opts.reason, opts.lane, verdict, opts.log);
