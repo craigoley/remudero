@@ -7,8 +7,13 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainThread } from "node:worker_threads";
 
 import { runsBundled } from "./lib/child-entry-argv.js";
+import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import {
+  RUN_CHILD_DIR_ENV, RUN_CHILD_SOCKET_ENV, startRunChildGitCredentialSocket, type CredentialHelperSocketHandle,
+} from "./lib/secret-boundary.js";
 import {
   RUN_CHILD_SCHEMA, childIdentity, contractMismatchFailure, readSpec, realRunChildProbe, toRunChildFailure, writeStatus,
   type RunChildFailure, type RunChildProbe, type RunChildStatus,
@@ -30,6 +35,9 @@ export interface RunChildMainPorts {
   probe?: RunChildProbe;
   maxRssBytes?: () => number;
   stderr?: (text: string) => void;
+  env?: NodeJS.ProcessEnv;
+  tokenRefresh?: Omit<Parameters<typeof startInstallationTokenRefresh>[0], "env" | "log">;
+  startCredentialSocket?: typeof startRunChildGitCredentialSocket;
 }
 
 const defaultLoadRunPath = (): Promise<unknown> => import("./run-task.js");
@@ -69,6 +77,25 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     pid: process.pid, startTicks: "unknown", containerGeneration: (deps.probe ?? realRunChildProbe).generation(),
   };
   let engineSha = "unknown";
+  let refresh: ReturnType<typeof startInstallationTokenRefresh> | undefined;
+  let socket: CredentialHelperSocketHandle | undefined;
+  const previousDir = process.env[RUN_CHILD_DIR_ENV];
+  const previousSocket = process.env[RUN_CHILD_SOCKET_ENV];
+  let credentialsEntered = false;
+  let credentialFailure: RunChildFailure | undefined;
+  const cleanup = async (): Promise<void> => {
+    try {
+      try { refresh?.stop?.(); }
+      finally {
+        const closing = socket;
+        socket = undefined;
+        await closing?.close();
+      }
+    } catch (error) {
+      credentialFailure = { class: "spawn_infra_blocked", reasonClass: "spawn_infra_blocked", message: `credential cleanup failed: ${String(error)}` };
+      throw error;
+    }
+  };
   const status = (state: RunChildStatus["state"], phase: string, extras: Partial<ProbeStatusExtras>, failure?: RunChildFailure): void => {
     const next: RunChildStatus = {
       schema: RUN_CHILD_SCHEMA, runId, identity, engineSha, entryKind: runsBundled() ? "bundle" : "tsx",
@@ -87,6 +114,27 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       return 1;
     }
     engineSha = spec.value.engine.sha;
+    status("starting", "credentials", {});
+    credentialsEntered = true;
+    process.env[RUN_CHILD_DIR_ENV] = dir;
+    delete process.env[RUN_CHILD_SOCKET_ENV];
+    try {
+      refresh = startInstallationTokenRefresh({ ...deps.tokenRefresh, env: deps.env, log: () => {} });
+      if (refresh.armed) {
+        const minted = await refresh.firstResult;
+        if (minted === undefined || minted.ok === false) throw new Error("run child's first installation token mint failed");
+        // This entry also hosts the socket thread; it is already bundled in the pinned engine tree.
+        socket = await (deps.startCredentialSocket ?? startRunChildGitCredentialSocket)({
+          runDir: dir, log: () => {},
+          ...(runsBundled() ? { threadUrl: new URL("../dist/child-entries/run-child.mjs", import.meta.url) } : {}),
+        });
+        process.env[RUN_CHILD_SOCKET_ENV] = socket.socketPath;
+      }
+    } catch (error) {
+      await cleanup();
+      status("failed", "credentials", {}, { class: "spawn_infra_blocked", reasonClass: "spawn_infra_blocked", message: `credential startup failed: ${String(error)}` });
+      return 1;
+    }
     status("starting", "load", {});
     const loadStart = clock();
     await (deps.loadRunPath ?? defaultLoadRunPath)();
@@ -94,23 +142,37 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     const snapshot = readPlanSnapshot(spec.value.planSnapshotPath);
     const maxRssBytes = (deps.maxRssBytes ?? (() => process.resourceUsage().maxRSS * 1024))();
     if ("error" in snapshot) {
+      await cleanup();
       status("failed", "plan", { loadMs, maxRssBytes }, { class: "unknown", reasonClass: "plan_snapshot_unreadable", message: snapshot.error });
       return 1;
     }
+    await cleanup();
     status("done", "done", { loadMs, planTasks: snapshot.tasks, maxRssBytes });
     return 0;
   } catch (error) {
+    try { await cleanup(); }
+    catch (closeError) {
+      stderr(`run-child: credential cleanup failed: ${String(closeError)}\n`);
+    }
+    const failure = credentialFailure ?? toRunChildFailure(error);
     try {
-      status("failed", "probe", {}, toRunChildFailure(error));
+      status("failed", "probe", {}, failure);
     } catch (writeError) {
       stderr(`run-child: could not write the failed status: ${(writeError as Error).message}\n`);
     }
     stderr(`run-child: probe failed: ${(error as Error)?.stack ?? String(error)}\n`);
     return 1;
+  } finally {
+    if (credentialsEntered) {
+      if (previousDir === undefined) delete process.env[RUN_CHILD_DIR_ENV];
+      else process.env[RUN_CHILD_DIR_ENV] = previousDir;
+      if (previousSocket === undefined) delete process.env[RUN_CHILD_SOCKET_ENV];
+      else process.env[RUN_CHILD_SOCKET_ENV] = previousSocket;
+    }
   }
 }
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `runChildMain()`, while this wrapper only exits.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainThread && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   void runChildMain(process.argv.slice(2)).then((code) => process.exit(code));
 }

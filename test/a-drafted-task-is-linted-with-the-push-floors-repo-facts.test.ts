@@ -81,6 +81,7 @@ function draft(shape: DraftShape): string {
 
 /** The ledgerRowActor proposal's cached draft: a NEW module whose only call proof greps the new file itself. */
 const UNCALLED_MODULE = draft({
+  extra: ["  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
   files: ["src/lib/ledgerCaller.ts", "test/ledger.test.ts"],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -89,7 +90,7 @@ const UNCALLED_MODULE = draft({
 });
 const CALLED_MODULE = draft({
   risk: "high",
-  extra: ["  band_meaning: span"],
+  extra: ["  band_meaning: span", "  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
   files: ["src/lib/ledgerCaller.ts", "src/lib/panel.ts", "test/ledger.test.ts"],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -186,6 +187,7 @@ test("W1-T9039: a drafted blocked task is cached queued", async () => {
       return worker(`=== FRAGMENT START ===\n${BLOCKED}=== FRAGMENT END ===\n${stamp}`);
     },
     log: (step, extra) => events.push({ step, extra }),
+    repoFacts: facts,
   }, "run-9039");
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.equal(spawned.length, 1, "the harness owns the field, so no redraft is spent on it");
@@ -200,6 +202,7 @@ test("W1-T9039: a drafted blocked task is cached queued", async () => {
   const [kept] = await runDraftRung([proposal], "- id: W1-T1\n", {
     spawn: async () => worker(`=== FRAGMENT START ===\n${retired}=== FRAGMENT END ===\n${stamp}`),
     log: () => undefined,
+    repoFacts: facts,
   }, "run-9039b");
   assert.equal(kept.ok ? kept.candidate.fragmentYaml : "", retired.trimEnd());
 });

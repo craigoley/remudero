@@ -11,6 +11,7 @@ import { isMainModule, parseArgv } from "./lib/argv.mjs";
 
 const VERSION = "1.180.0";
 const RULE_ID = "rmd-native-qualification-sentinel";
+const PARSER_RULE_ID = "rmd-original-typescript-parser-marker";
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
 const safePath = (path) => typeof path === "string" && path.length <= 256 &&
@@ -110,6 +111,45 @@ export function verifyControl(report, sarif, expectedPaths) {
   return summary;
 }
 
+export function parserControlSources() {
+  const before = 'declare function rmdParserMarker(value: string): void;\nrmdParserMarker("before");\n';
+  const after = '\nrmdParserMarker("after");\n';
+  return {
+    "module.ts": 'export interface Registration { version: string }\n',
+    "inline-import.ts": before + 'export interface Inventory {\n  preventionSources?: { registrations: import("./module.js").Registration[]; unavailable: number };\n  rounds: string[];\n}\n' + after,
+    "named-import.ts": 'import type { Registration } from "./module.js";\n' + before + 'export interface Inventory {\n  preventionSources?: { registrations: Registration[]; unavailable: number };\n  rounds: string[];\n}\n' + after,
+  };
+}
+
+export function verifyParserControl(report, sarif, exitCode) {
+  const summary = summarizeReports(report, sarif, exitCode);
+  assert.equal(exitCode, 0, "parser control process failed");
+  assert.equal(summary.engineRequested, "OSS", "parser control must use CE");
+  assert.equal(summary.ruleCount, 1, "parser control must use one original rule");
+  assert.ok(sarif.runs[0].tool.driver.rules[0].id.endsWith(PARSER_RULE_ID), "wrong parser rule");
+  assert.ok(summary.successfulInvocation && summary.notificationErrorCount === 0, "parser invocation failed");
+  assert.equal(summary.errorInventoryTruncated, false, "parser errors were truncated");
+  const expected = ["inline-import.ts", "named-import.ts"];
+  assert.deepEqual([...report.paths.scanned].sort(), expected, "parser target census differs");
+  const markers = report.results.map((result) => {
+    assert.ok(result.check_id.endsWith(PARSER_RULE_ID), "wrong parser finding rule");
+    return `${result.path}:${result.start?.line}`;
+  }).sort();
+  const sarifMarkers = sarif.runs[0].results.map((result) => {
+    assert.ok(result.ruleId.endsWith(PARSER_RULE_ID), "wrong parser SARIF rule");
+    const location = result.locations?.[0]?.physicalLocation;
+    return `${location?.artifactLocation?.uri}:${location?.region?.startLine}`;
+  }).sort();
+  assert.deepEqual(markers, ["inline-import.ts:2", "inline-import.ts:8", "named-import.ts:3", "named-import.ts:9"], "parser boundary markers missing");
+  assert.deepEqual(sarifMarkers, markers, "parser JSON and SARIF markers differ");
+  assert.ok(summary.errorInventory.every((error) => error.type === "PartialParsing" &&
+    error.path === "inline-import.ts" && ["warn", "warning"].includes(error.level)), "unexpected parser-control error");
+  return { ...summary, markerReachability: "VERIFIED", wholeAstCoverage: "NOT_ESTABLISHED",
+    namedImport: "COMPLETE", inlineImport: summary.errorCount === 0 ? "COMPLETE" : "PARTIAL",
+    sourceSha256: Object.fromEntries(Object.entries(parserControlSources()).map(([path, bytes]) => [path, digest(bytes)])),
+    authority: "original paired parser diagnostic only; partial parsing is not waived or a source fix" };
+}
+
 export function qualifySemgrep({ command = "semgrep", enginePath = process.env.SEMGREP_QUALIFICATION_ENGINE } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-semgrep-qualification-"));
   const repo = join(root, "fixture");
@@ -119,10 +159,10 @@ export function qualifySemgrep({ command = "semgrep", enginePath = process.env.S
   for (const key of Object.keys(env)) if (key.startsWith("GIT_") &&
     !["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT"].includes(key)) delete env[key];
   for (const key of ["SEMGREP_APP_TOKEN", "SEMGREP_BASELINE_COMMIT", "SEMGREP_RULES"]) delete env[key];
-  const run = (executable, args) => {
+  const run = (executable, args, cwd = repo) => {
     const remaining = deadline - Date.now();
     assert.ok(remaining > 0, "qualification deadline expired");
-    const result = spawnSync(executable, args, { cwd: repo, env, encoding: "utf8",
+    const result = spawnSync(executable, args, { cwd, env, encoding: "utf8",
       timeout: Math.min(60_000, remaining), maxBuffer: 4 * 1024 * 1024 });
     assert.ifError(result.error);
     assert.equal(result.signal, null, "qualification child was interrupted");
@@ -176,6 +216,18 @@ export function qualifySemgrep({ command = "semgrep", enginePath = process.env.S
     const invalidReport = json(bad.output);
     assert.ok(Array.isArray(invalidReport.errors) && invalidReport.errors.length > 0,
       "invalid-rule refusal lacks an explicit scanner error");
+    const parserRepo = join(root, "parser");
+    mkdirSync(parserRepo);
+    for (const [path, bytes] of Object.entries(parserControlSources())) writeFileSync(join(parserRepo, path), bytes);
+    const parserRule = join(root, "parser-rule.json");
+    const parserRuleBytes = JSON.stringify({ rules: [{ id: PARSER_RULE_ID, languages: ["typescript"],
+      severity: "INFO", message: "original disposable parser boundary marker", pattern: "rmdParserMarker($X)" }] });
+    writeFileSync(parserRule, parserRuleBytes);
+    const parserOutput = join(root, "parser.json"), parserSarif = join(root, "parser.sarif");
+    const parser = run(command, ["scan", "--config", parserRule, "--metrics", "off", "--disable-version-check",
+      "--jobs", "1", "--timeout", "5", "--max-memory", "512", "--json", "--output", parserOutput,
+      "--sarif-output", parserSarif, "inline-import.ts", "named-import.ts"], parserRepo);
+    const parserControl = verifyParserControl(json(parserOutput), json(parserSarif), parser.status);
     assert.equal(git(["status", "--porcelain"]), "", "baseline fixture must stay clean");
     return { schema: "rmd-semgrep-native-qualification-v1", version: VERSION,
       runtime: { node: process.version, platform: process.platform, arch: process.arch },
@@ -187,6 +239,7 @@ export function qualifySemgrep({ command = "semgrep", enginePath = process.env.S
       },
       controlRuleSha256: digest(ruleBytes), base, head, fullControl, baselineControl,
       invalidControl: { exitCode: bad.result.status, errorCount: invalidReport.errors.length },
+      parserControl, parserRuleSha256: digest(parserRuleBytes),
       authority: "original synthetic controls only; no registry-rule redistribution, Pro engine or pilot activation",
       uploadProcessing: "NOT_VERIFIED" };
   } finally {
