@@ -1,5 +1,5 @@
 import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
-import { childEntryArgv } from "./child-entry-argv.js";
+import { childEntryArgv, type ChildEntryStoreOptions } from "./child-entry-argv.js";
 import { fileURLToPath } from "node:url";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
 import { join } from "node:path";
@@ -48,8 +48,11 @@ const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
  */
 export function checkProofLaunchArgv(
   proof: string, base: string, root: string = HARNESS_ROOT, extra: readonly string[] = [],
+  store: ChildEntryStoreOptions = {},
 ): string[] {
-  return childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra]).argv;
+  const launch = childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra], undefined, store);
+  store.log?.("pr_open.check_proof_child", { kind: launch.kind, reason: launch.reason });
+  return launch.argv;
 }
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
@@ -63,11 +66,12 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
 function proofArgs(
   proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
 ): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
   if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
-  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo);
+  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo, store);
 }
 
 // A PR proof runs on the branch being published. The child already receives its exact base
@@ -83,8 +87,9 @@ export function defaultProofRunner(
   bin: string = PROOF_NODE,
   /** The tree whose check-proof entry runs; the harness itself unless a test supplies a fixture. */
   harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
 ): OpenPullRequestProofResult {
-  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot), {
+  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot, store), {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: PROOF_MAX_BUFFER,
@@ -112,6 +117,7 @@ export const PR_OPEN_PROOF_TIMEOUT_MS = 15 * 60_000;
 
 export interface AsyncProofRunOptions {
   bin?: string;
+  store?: ChildEntryStoreOptions;
   timeoutMs?: number;
   /** How long a SIGTERMed child may linger before SIGKILL. */
   graceMs?: number;
@@ -136,7 +142,7 @@ export function defaultProofRunnerAsync(
     let timedOut = false;
     const child = execFile(
       opts.bin ?? PROOF_NODE,
-      proofArgs(proof, mergeBase, target, opts.bin),
+      proofArgs(proof, mergeBase, target, opts.bin, undefined, opts.store),
       { cwd: repoRoot, encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER, env: proofEnv() },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
         clearTimeout(timer);

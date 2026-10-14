@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.33
   status: queued
@@ -28,10 +28,13 @@
     - PR #10311: 8.19 PR-hours — the worker's FIX_OUTCOME line was not recognised [provider codex, selected_model gpt-6.1-sol, model sonnet, effort high]
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.86
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
     reasons:
-      - "high-risk verdict at confidence 0.86 — on the change's description/files alone, no diff was read — The filed record names fix-outcome:unstated and requests clearing it without a person, but does not specify the automated remedy or its permitted actions; the supplied text cannot establish whether operator-only decisions are involved.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for a test declaration via grep, rather than executing a behavioral test; it does not verify the claimed removal of operator intervention."
-    judged_at: "2026-10-10T18:08:28.885Z"
-    pin: "a1fcb9c24b69ae28bdd4ebbbb3ac74c1af8eae494efa79610c807cf95f2fef58"
+      - "The description and files list show the change is limited to the fix-lane gardener source file (src/lib/fix-lane-gardener.ts) and one new test file. The defect is that the worker's FIX_OUTCOME line isn't recognised, which is a parsing and handling problem inside the fix lane's own harness."
+      - "Nothing in the description mentions secrets, credentials, auth, permissions, deletion, merge, deploy or review policy, or irreversible actions. It also doesn't ask for an operator-only decision."
+      - "The acceptance criterion is a grep for a named test in the new test file, so it can be checked from what is shown. The filing cites 5 distinct PRs as evidence."
+      - "The gates state is clean. The author is a machine in the fix-lane family, with 1 merged and 0 declined tasks (Beta mean 0.86). The plan record has no planRefs, and no bounded change view was supplied, so this verdict rests on the description alone."
+    judged_at: "2026-10-14T18:50:52.749Z"
+    pin: "dac4b4e5a3dd1bbf82aac1002a840e5f709be95c62ab86af7eada3062e4c55f6"

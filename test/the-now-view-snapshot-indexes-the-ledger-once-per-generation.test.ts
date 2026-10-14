@@ -133,6 +133,8 @@ test("W1-T6253: a new row generation rebuilds the index", (t) => {
   append({ step: "worker.cost", task_id: "W1-T1", run_id: "r2", usd: 0.25 });
   resave();
   build();
-  assert.ok(status.ledgerIndexBuildCount() - indexes >= 1, "a new ledger row is a new generation, indexed again");
+  // W1-T9436: the now view's index is the board's, read from the fact store for each build, so no in-memory index is
+  // held for any generation and none can be served stale.
+  assert.equal(status.ledgerIndexBuildCount() - indexes, 0, "the store-read index is never built in memory");
   assert.ok(nowView.dayCostScanCount() - scans >= 1, "and its day costs scanned again");
 });

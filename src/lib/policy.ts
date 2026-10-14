@@ -1034,6 +1034,50 @@ export function loadDefaultPolicy(): Policy {
   return cachedDefaultPolicy;
 }
 
+// ── sweep.runChild.mode (W1-T9082, ADR 0007 A.9) ────────────────────────────────────────────
+// Read optionally, like `sweep.hostMemoryBudget` (host-memory-shadow.ts): the row is a PROPOSAL, not an
+// EXPECTED_ORIGIN_KIND field, and `validatePolicy` never sees it. An absent block means off, so a policy.yaml that
+// predates it loads unchanged; a present block is validated, so a typo still fails loud.
+
+/** `off` starts no probe; `shadow` starts one beside each in-process run. `on` and `auto` are accepted here and
+ *  implemented by later tasks: until then they behave as `shadow` ({@link runChildEffectiveMode}). */
+export const RUN_CHILD_MODES = ["off", "shadow", "on", "auto"] as const;
+export type RunChildMode = (typeof RUN_CHILD_MODES)[number];
+
+/** The mode a run actually gets. `on` and `auto` run as `shadow` until their tasks land, and `fellBack` says so. */
+export function runChildEffectiveMode(mode: RunChildMode): { mode: "off" | "shadow"; fellBack: boolean } {
+  if (mode === "off") return { mode: "off", fellBack: false };
+  return { mode: "shadow", fellBack: mode !== "shadow" };
+}
+
+/** Validate `sweep.runChild.mode` out of the `sweep` mapping. An absent `runChild` block reads as `off`. */
+export function parseRunChildMode(sweep: unknown): RunChildMode {
+  const block = isPlainObject(sweep) ? sweep.runChild : undefined;
+  if (block === undefined) return "off";
+  if (!isPlainObject(block)) throw new PolicyError("policy.yaml: 'sweep.runChild' must be a mapping.");
+  const row = block.mode;
+  if (!isPlainObject(row)) throw new PolicyError("policy.yaml: 'sweep.runChild.mode' must be a mapping with 'value'/'origin'.");
+  if (row.origin !== "proposal") {
+    throw new PolicyError(`policy.yaml: 'sweep.runChild.mode.origin' must be "proposal", got ${JSON.stringify(row.origin)}.`);
+  }
+  const found = RUN_CHILD_MODES.find((mode) => mode === row.value);
+  if (found === undefined) {
+    throw new PolicyError(`policy.yaml: 'sweep.runChild.mode' accepts only ${RUN_CHILD_MODES.map((m) => `"${m}"`).join(", ")}, got ${JSON.stringify(row.value)}.`);
+  }
+  return found;
+}
+
+/** `sweep.runChild.mode` from the policy at `path` (default: this installation's). A missing or unparseable file throws. */
+export function loadRunChildMode(path: string = installPolicyPath()): RunChildMode {
+  let raw: unknown;
+  try {
+    raw = parseYaml(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
+  }
+  return parseRunChildMode(isPlainObject(raw) ? raw.sweep : undefined);
+}
+
 // ── Daily-cost-ceiling override store (W1-T332) ─────────────────────────────────────────────
 // A runtime-tunable value belongs in a store the console can write at runtime, not the committed
 // `plan/policy.yaml` behind a PR and a deploy (operator ruling 2026-08-04) — reuses
