@@ -25,9 +25,10 @@ import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadS
 import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -2729,29 +2730,152 @@ function listProposalShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".json")).sort();
 }
 
-/** Parse every shard, keyed by each file's OWN declared `id`, never the filename. Two files declaring the SAME id is
- *  refused loud, mirroring plan.ts's duplicate-task-id guard. */
-function readProposalShards(shardDir: string): Map<string, { proposal: Proposal; path: string }> {
-  const out = new Map<string, { proposal: Proposal; path: string }>();
-  for (const file of listProposalShardFiles(shardDir)) {
-    const shardPath = join(shardDir, file);
-    let raw: unknown;
-    try {
-      raw = JSON.parse(fs.readFileSync(shardPath, "utf8"));
-    } catch (err) {
-      throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
-    }
-    const proposal = raw as Proposal;
-    if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
-      throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
-    }
-    const existing = out.get(proposal.id);
+/** Every shard, read synchronously (CLI callers); the daemon reads through {@link createProposalShardReader}. */
+function readProposalShards(shardDir: string): Map<string, ProposalShardEntry> {
+  return indexProposalShards(
+    listProposalShardFiles(shardDir).map((file) => {
+      const shardPath = join(shardDir, file);
+      let text: string;
+      try {
+        text = fs.readFileSync(shardPath, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+      }
+      return parseProposalShard(shardPath, text);
+    }),
+  );
+}
+
+/** One parsed shard; `text` lets a registry write skip an unchanged shard (W1-T9443). */
+export interface ProposalShardEntry {
+  proposal: Proposal;
+  path: string;
+  text: string;
+}
+
+function parseProposalShard(shardPath: string, text: string): ProposalShardEntry {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+  }
+  const proposal = raw as Proposal;
+  if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
+    throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
+  }
+  return { proposal, path: shardPath, text };
+}
+
+/** Key shards by each file's OWN `id`; two files with one id are refused, as plan.ts refuses duplicate task ids. */
+function indexProposalShards(entries: readonly ProposalShardEntry[]): Map<string, ProposalShardEntry> {
+  const out = new Map<string, ProposalShardEntry>();
+  for (const entry of entries) {
+    const existing = out.get(entry.proposal.id);
     if (existing) {
-      throw new Error(`duplicate proposal id '${proposal.id}' (shard ${shardPath} collides with ${existing.path})`);
+      throw new Error(`duplicate proposal id '${entry.proposal.id}' (shard ${entry.path} collides with ${existing.path})`);
     }
-    out.set(proposal.id, { proposal, path: shardPath });
+    out.set(entry.proposal.id, entry);
   }
   return out;
+}
+
+export interface ProposalShardReaderFs {
+  readdir(dir: string): Promise<string[]>;
+  stat(path: string): Promise<{ ino: bigint; size: bigint; mtimeNs: bigint }>;
+  readFile(path: string): Promise<string>;
+}
+
+const realProposalShardReaderFs: ProposalShardReaderFs = {
+  readdir: (dir) => fs.promises.readdir(dir),
+  stat: async (path) => {
+    const s = await fs.promises.stat(path, { bigint: true });
+    return { ino: s.ino, size: s.size, mtimeNs: s.mtimeNs };
+  },
+  readFile: (path) => fs.promises.readFile(path, "utf8"),
+};
+
+export interface ProposalShardRefreshCounts {
+  files: number;
+  read: number;
+  unchanged: number;
+  removed: number;
+  ms: number;
+}
+
+export interface ProposalShardReader {
+  refresh(): Promise<Map<string, ProposalShardEntry>>;
+}
+
+const isEnoent = (err: unknown): boolean => (err as NodeJS.ErrnoException)?.code === "ENOENT";
+
+/**
+ * W1-T9443: {@link readProposalShards}' population and refusals, held for a daemon's life: `refresh()` re-reads only a file whose
+ * (inode, size, mtime ns) moved. Writers land shards by rename, so a rewrite always moves the inode. A file unlinked
+ * mid-refresh is gone; a refused refresh keeps the last good memo.
+ */
+export function createProposalShardReader(
+  shardDir: string,
+  io: { fs?: ProposalShardReaderFs; log?: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock } = {},
+): ProposalShardReader {
+  const seam = io.fs ?? realProposalShardReaderFs;
+  const clock = io.clock ?? systemClock;
+  let memo = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+  const width = Math.max(1, Number(process.env.UV_THREADPOOL_SIZE) || 4);
+  return {
+    async refresh() {
+      const started = clock.now();
+      let names: string[];
+      try {
+        names = (await seam.readdir(shardDir)).filter((f) => f.endsWith(".json")).sort();
+      } catch (err) {
+        if (!isEnoent(err)) throw new Error(`cannot read proposal shard directory (${shardDir}): ${String(err)}`);
+        names = [];
+      }
+      const next = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+      const results: Array<{ digest: string; entry: ProposalShardEntry } | undefined> = new Array(names.length);
+      let read = 0;
+      let cursor = 0;
+      let failed = false;
+      const work = async (): Promise<void> => {
+        while (!failed && cursor < names.length) {
+          const i = cursor++;
+          const shardPath = join(shardDir, names[i]!);
+          try {
+            const s = await seam.stat(shardPath);
+            const digest = `${s.ino}:${s.size}:${s.mtimeNs}`;
+            const prior = memo.get(shardPath);
+            if (prior && prior.digest === digest) {
+              results[i] = prior;
+              continue;
+            }
+            let text: string;
+            try {
+              text = await seam.readFile(shardPath);
+            } catch (err) {
+              if (isEnoent(err)) throw err;
+              throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+            }
+            read++;
+            results[i] = { digest, entry: parseProposalShard(shardPath, text) };
+          } catch (err) {
+            if (!isEnoent(err)) {
+              failed = true;
+              throw err;
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(width, names.length) }, work));
+      for (const r of results) if (r) next.set(r.entry.path, r);
+      const population = indexProposalShards([...next.values()].map((r) => r.entry));
+      const removed = [...memo.keys()].filter((path) => !next.has(path)).length;
+      memo = next;
+      const counts: ProposalShardRefreshCounts = { files: next.size, read, unchanged: next.size - read, removed, ms: clock.now() - started };
+      io.log?.("proposal_shards.refreshed", { ...counts });
+      return population;
+    },
+  };
 }
 
 /** Load `registryPath` merged with the sibling `inbox-proposals.d/` shards as ONE population, with the same signature
@@ -2897,14 +3021,17 @@ export function updateProposalRegistry(
     // A `next` proposal that is NEW, or already had a shard mirror, gets its OWN file atomically — MIRRORED alongside
     // the blob write below, never instead of it, so every existing reader keeps seeing the same population. Promoting
     // an UNTOUCHED legacy entry is a migration, not a side effect of an unrelated write.
+    // W1-T9443: an unchanged shard is left alone, so the digest reader re-reads only what an update moved.
     for (const proposal of next) {
       const isNew = !currentIds.has(proposal.id);
-      const hadShard = shards.has(proposal.id);
-      if (isNew || hadShard) {
-        fs.mkdirSync(shardDir, { recursive: true });
+      const prior = shards.get(proposal.id);
+      if (isNew || prior) {
+        const text = JSON.stringify(proposal, null, 2);
         const shardPath = proposalShardPath(registryPath, proposal.id);
+        if (prior && prior.path === shardPath && prior.text === text) continue;
+        fs.mkdirSync(shardDir, { recursive: true });
         const tmpShardPath = `${shardPath}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmpShardPath, JSON.stringify(proposal, null, 2), "utf8");
+        fs.writeFileSync(tmpShardPath, text, "utf8");
         fs.renameSync(tmpShardPath, shardPath);
       }
     }
@@ -2967,6 +3094,94 @@ export function pruneOrphanedDrafts(draftsPath: string, registryPath: string): {
     return null; // the registry itself is never rewritten here
   });
   return result;
+}
+
+async function readFileIfExistsAsync(path: string): Promise<string | undefined> {
+  try {
+    return await fs.promises.readFile(path, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return undefined;
+    throw err;
+  }
+}
+
+/** {@link updateProposalRegistry}'s lock, awaiting between polls; resolves to its release. */
+async function acquireProposalRegistryLockAsync(registryPath: string, opts: UpdateProposalRegistryOpts = {}): Promise<() => Promise<void>> {
+  const lockPath = `${registryPath}.lock`;
+  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 20;
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  await fs.promises.mkdir(dirname(lockPath), { recursive: true });
+  const deadline = systemClock.now() + maxWaitMs;
+  for (;;) {
+    try {
+      const handle = await fs.promises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() }));
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseRegistryLockInfo,
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") {
+        if (systemClock.now() >= deadline) {
+          throw new Error(`pruneOrphanedDraftsAsync: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    }
+  }
+  return async () => {
+    try {
+      await fs.promises.unlink(lockPath);
+    } catch {
+      // already gone — idempotent
+    }
+  };
+}
+
+/** W1-T9443: {@link pruneOrphanedDrafts} with every read awaited. Only an orphan takes the lock, and it looks again
+ *  under it; `undefined` when it did not look. */
+export async function pruneOrphanedDraftsAsync(
+  draftsPath: string,
+  registryPath: string,
+  reader: ProposalShardReader,
+  opts: UpdateProposalRegistryOpts = {},
+): Promise<{ count: number; bytesBefore: number; bytesAfter: number } | undefined> {
+  const look = async (): Promise<{ raw: string; drafts: DraftCache; orphans: number } | undefined> => {
+    const blob = parseProposalRegistryResult(await readFileIfExistsAsync(registryPath));
+    if (blob.kind !== "ok") return undefined;
+    const raw = await readFileIfExistsAsync(draftsPath);
+    if (raw === undefined) return undefined;
+    const shards = await reader.refresh();
+    const live = new Set([...blob.proposals.map((p) => p.id), ...shards.keys()]);
+    const drafts = parseDraftCache(raw);
+    const orphans = Object.keys(drafts).filter((id) => !live.has(id)).length;
+    return { raw, drafts: Object.fromEntries(Object.entries(drafts).filter(([id]) => live.has(id))), orphans };
+  };
+  const first = await look();
+  if (!first || first.orphans === 0) {
+    return first && { count: 0, bytesBefore: Buffer.byteLength(first.raw), bytesAfter: Buffer.byteLength(first.raw) };
+  }
+  const release = await acquireProposalRegistryLockAsync(registryPath, opts);
+  try {
+    const held = await look();
+    if (!held) return undefined;
+    const bytesBefore = Buffer.byteLength(held.raw);
+    if (held.orphans === 0) return { count: 0, bytesBefore, bytesAfter: bytesBefore };
+    const text = JSON.stringify(held.drafts, null, 2);
+    await writeAtomicAsync(draftsPath, text);
+    return { count: held.orphans, bytesBefore, bytesAfter: Buffer.byteLength(text) };
+  } finally {
+    await release();
+  }
 }
 
 /** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON
@@ -3391,6 +3606,10 @@ export function approveProposal(
     ...(adopted ? { adopted: true } : {}),
     ...(joinedPr ? { joined: true } : {}),
   };
+}
+
+export function approvePrTitle(proposalId: string): string {
+  return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
 
 /** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`

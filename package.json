@@ -109,6 +109,7 @@
     "census:host-capability-fixtures": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/host-capability-fixtures.test.ts",
     "census:host-worktree-git": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
     "census:near-fixture-crossing": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    "census:worktree-creation": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/worktree-creation-census.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"

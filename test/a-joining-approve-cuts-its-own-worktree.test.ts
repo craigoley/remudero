@@ -320,3 +320,51 @@ test("W1-T9161: a destination push is a plain fast-forward to that branch", () =
     "a destination is never forced",
   );
 });
+
+/** Each refs/rmd-id/* ref on the origin, with the holder branch its newest commit names. */
+function reservationHolders(origin: GitRepo): Array<[string, string]> {
+  return origin.git("for-each-ref", "--format=%(refname:short) %(contents:body)", "refs/rmd-id/").split("\n")
+    .map((line) => /^(rmd-id\/\S+) rmd-id holder branch=(\S+)/.exec(line))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => [m[1]!, m[2]!]);
+}
+
+test("the join that loses its push gives back the remote reservation it took for the join", async () => {
+  const w = joinWorld("rmd-release-join", { ids: ["P-LOSER"], approver: { pid: deadPid(), host: hostname() } });
+  w.seed.git("checkout", "--quiet", w.priorBranch);
+  writeFileSync(join(w.seed.dir, "plan", "tasks.d", "W1-T60-the-rival-joiner.yaml"), planTask("W1-T60", "filed by the rival joiner"));
+  w.seed.git("add", "-A");
+  w.seed.git("commit", "--quiet", "-m", "chore(plan): ratify P-RIVAL via rmd approve");
+  const rivalSha = w.seed.git("rev-parse", "HEAD");
+  w.seed.git("push", "--quiet", "origin", `${rivalSha}:refs/rival/joiner`);
+  w.shim.addRoute({ when: "pulls?state=open", stdout: "[]", writes: { path: join(w.origin.dir, "refs", "heads", w.priorBranch), content: `${rivalSha}\n` } });
+
+  const rows = await w.approve("P-LOSER");
+  const { row, steps } = approvedRow(rows, "P-LOSER");
+  assert.ok(row, `the loser still filed its own PR; steps=${steps}`);
+  const released = rows.filter((r) => r.step === "task_id.reservation_released");
+  assert.equal(released.length, 1, `the join's claim was released; steps=${steps}`);
+  assert.match(String(released[0]!.reason), /rejected as non-fast-forward/);
+  assert.equal(released[0]!.outcome, "released");
+  assert.deepEqual(reservationHolders(w.origin).map(([, holder]) => holder), [String(row.branch)], "only the claim its own PR files is still held");
+});
+
+test("an approve that fails before its branch is pushed gives back every remote reservation it took", async () => {
+  const w = joinWorld("rmd-release-refused", { ids: ["P-BROKEN"], approver: { pid: liveChild(), host: hostname() } });
+  // main loses MASTER-PLAN.md, so the stamp write fails AFTER the ids are reserved and BEFORE anything is pushed.
+  w.seed.git("checkout", "--quiet", "main");
+  w.seed.git("rm", "--quiet", "MASTER-PLAN.md");
+  w.seed.git("commit", "--quiet", "-m", "chore: drop the master plan");
+  w.seed.git("push", "--quiet", "origin", "main");
+  execGit(w.repoDir, "fetch", "--quiet", "origin");
+
+  const rows = await w.approve("P-BROKEN");
+  const steps = JSON.stringify(rows.filter((r) => r.task_id === "P-BROKEN").map((r) => r.step));
+  assert.ok(rows.some((r) => r.step === "approve.id_materialized" && r.task_id === "P-BROKEN"), `positive control: it reserved before it failed; steps=${steps}`);
+  assert.ok(rows.some((r) => r.step === "approve.error" && r.task_id === "P-BROKEN"), `it failed; steps=${steps}`);
+  const released = rows.filter((r) => r.step === "task_id.reservation_released");
+  assert.equal(released.length, 1, `steps=${steps}`);
+  assert.match(String(released[0]!.reason), /^rmd approve P-BROKEN: failed before its branch was pushed: /);
+  assert.deepEqual(reservationHolders(w.origin), [], "no refs/rmd-id ref outlives the refused filing");
+  assert.deepEqual(w.runBranches(), [w.priorBranch], "and no branch was pushed");
+});
