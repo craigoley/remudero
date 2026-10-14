@@ -25844,11 +25844,6 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   return drift ? 1 : 0;
 }
 
-/**
- * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
- * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
- * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
- */
 /** W1-T3083: `rmd pr-checks <pr-number>` — the terminal caller of the rollup derivation (lib/pr-checks.ts).
  *  Exit 0 nothing red, 1 something red, 2 bad usage OR a failed read: a dead fetch is never "no red checks". */
 export function reportPrChecks(
@@ -25874,6 +25869,11 @@ export function reportPrChecks(
   }
 }
 
+/**
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
+ * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
+ */
 export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number; scratchRoot?: string; exists?: (path: string) => boolean } = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
