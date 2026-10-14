@@ -1317,6 +1317,139 @@ export interface components {
       reason: string;
       evidenceRef?: string;
     };
+    /** An immutable automation-trigger-v1 definition (`validateAutomationTriggerDefinition`). Its activation mode never changes after registration; pause/resume is registry state. A definition, like every trigger request, is a closed whitelist: a command, credential, raw prompt or model instruction is refused by name, and any unnamed field is refused. */
+    AutomationTriggerDefinition: {
+      version: "automation-trigger-v1";
+      triggerId: string;
+      /** A registered flow whose automation-action-v1 contract and capability grant already exist. */
+      flowId: string;
+      activation: {
+        mode: "schedule" | "webhook" | "manual";
+        /** Schedule only -- the cadence entry (W1-T2923) this trigger runs on. */
+        scheduleId?: string;
+        /** Schedule only -- an IANA timezone. */
+        timezone?: string;
+        /** Schedule only. A non-existent (spring-forward) wall time is skipped or shifted; an ambiguous (fall-back) wall time fires once, at its first occurrence. */
+        dst?: "skip-gap" | "shift-gap";
+        /** Webhook only -- the authenticated event (W1-T2568) this trigger accepts. */
+        event?: string;
+      };
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      /** The environment/policy profile, resolved at execution time, never at registration. */
+      profileId: string;
+      limits: {
+        maxQueued: number;
+        maxInFlight: number;
+      };
+      expirySeconds: number;
+      staleAfterSeconds: number;
+      /** Runs sharing this key share one in-flight bound; defaults to the triggerId. */
+      concurrencyKey: string;
+    };
+    /** One append-only history entry. Nothing ever rewrites an earlier event. */
+    AutomationTriggerRunEvent: {
+      kind: "queued" | "refused" | "start-refused" | "started" | "heartbeat" | "success" | "failed" | "expired" | "cancelled";
+      at: string;
+      code?: string;
+      reason: string;
+      /** The linked automation-action-v1 completion receipt. */
+      receiptId?: string;
+      profile?: {
+        profileId: string;
+        revision: string;
+      };
+    };
+    /** One bounded run as read now. `stale` (in progress with no observation inside the trigger's staleAfterSeconds) and `unknown` (the latest observation is dated after this read) are derived at read time; every other state is the run's latest stored event. A manual replay is a NEW run linked by `replayOf`; the original is never modified. */
+    AutomationTriggerRun: {
+      version: "automation-trigger-v1";
+      runId: string;
+      triggerId: string;
+      flowId: string;
+      /** The flow's automation-action-v1 contract; executing it still passes that contract's preflight and approval gate. */
+      actionId: string;
+      approvalPolicy: "none" | "human";
+      activationMode: "schedule" | "webhook" | "manual";
+      source: "schedule" | "webhook" | "manual";
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      timezonePolicy?: {
+        timezone: string;
+        dst: "skip-gap" | "shift-gap";
+      };
+      profileId: string;
+      resolvedProfile?: {
+        profileId: string;
+        revision: string;
+      };
+      idempotencyKey: string;
+      deliveryId?: string;
+      scheduledFor?: string;
+      /** Manual only -- the verified request identity, never a body field. */
+      requestedBy?: string;
+      requestedAt: string;
+      expiresAt: string;
+      concurrencyKey: string;
+      replayOf?: string;
+      state: AutomationTriggerRunState;
+      code?: string;
+      reason: string;
+      observedAt: string;
+      freshness: {
+        ageSeconds: number;
+        status: "fresh" | "stale" | "unknown";
+      };
+      receiptId?: string;
+      events: (AutomationTriggerRunEvent)[];
+    };
+    /** The bounded run-history states of automation-trigger-v1. */
+    AutomationTriggerRunState: "refused" | "queued" | "in-progress" | "success" | "failed" | "expired" | "cancelled" | "stale" | "unknown";
+    AutomationTriggerHistory: {
+      version: "automation-trigger-v1";
+      generatedAt: string;
+      triggers: ({
+        trigger: AutomationTriggerDefinition;
+        state: "active" | "paused";
+        reason: string;
+        changedAt: string;
+        /** The trigger's external source as last observed; `unknown` when never observed, never a quiet success. */
+        source: {
+          status: "available" | "unavailable" | "unknown";
+          observedAt?: string;
+          reason: string;
+        };
+        queued: number;
+        /** In-progress and stale runs -- running work stays visible on a paused trigger. */
+        inFlight: number;
+      })[];
+      /** Newest first. */
+      runs: (AutomationTriggerRun)[];
+    };
+    /** `submitAutomationTrigger`'s answer. `queued` admitted a new run; `duplicate` returns the run a repeated idempotency key or delivery id already started; `refused` names its code (e.g. unregistered-trigger, source-not-permitted, trigger-paused, request-expired, queue-full, history-full, journal-unavailable) and, against a known trigger, the refused run recorded in history. */
+    AutomationTriggerSubmission: {
+      outcome: "queued" | "duplicate" | "refused";
+      run?: AutomationTriggerRun;
+      code?: string;
+      reason?: string;
+      field?: string;
+    };
+    AutomationTriggerRunRequest: {
+      triggerId: string;
+      idempotencyKey: string;
+    };
+    AutomationTriggerActivationRequest: {
+      triggerId: string;
+      state: "active" | "paused";
+      reason?: string;
+    };
+    AutomationTriggerReplayRequest: {
+      runId: string;
+      idempotencyKey: string;
+    };
     OperatorAgentActionHistory: {
       action: AutomationAction;
       state: "registered" | "approved" | "rejected" | "in-progress" | "succeeded" | "failed" | "rolled_back" | "expired";
@@ -5874,6 +6007,55 @@ export interface paths {
           "403": HighTierRefusal;
           "409": OperatorAgentDelegationHandoffRefusal;
           "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/automation/triggers": {
+    get: {
+      responses: {
+          "200": AutomationTriggerHistory;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/automation/triggers/run": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
+        };
+    };
+  };
+  "/v1/automation/triggers/activation": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/automation/triggers/replay": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
         };
     };
   };
