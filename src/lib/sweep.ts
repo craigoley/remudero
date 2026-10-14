@@ -66,8 +66,11 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
-import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
-import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
+import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
+import { classEstimate, type LearnedEstimate } from "./host-memory-learning.js";
+import {
+  ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
+} from "./host-memory-shadow.js";
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
@@ -247,6 +250,7 @@ import {
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
+  prFilesRestArgs,
   rollupFromRest,
   needsWorkflowIdentity,
   runsForHeadRestArgs,
@@ -1910,6 +1914,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
+  "mainInheritance", // W1-T8042
   // W1-T4817: finds a main commit no workflow ran on and dispatches its workflows at main's head.
   "reconcileMainRunGaps",
   "readFleetState",
@@ -2056,6 +2061,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
+  | "mainInheritance"
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
@@ -4355,6 +4361,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // lane may still use a valid SHA when the timestamp is absent; the newer lane cannot.
     readMainRepair,
     readMainTip: async () => (await readMainCommit())?.sha,
+    mainInheritance: restMainInheritanceReads(owner, repo, readJsonImpl),
 
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
@@ -5645,7 +5652,7 @@ export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> =
   // non-determinism. It is not pure over the tree alone, and neither is its twin.
   "scripts/comment-load-baseline.json": "comment-load-ratchet",
   "docs/docs-index.json": "docs-index",
-  "learnings/index.json": "learnings-index",
+  "learnings/index.json": "learnings-index", // W1-T7954: gitignored; kept equal to review's exempt list.
   "docs/cli-reference.md": "cli-reference",
   "MASTER-PLAN.md": "capability-snapshot",
   "packages/api-client/src/schema.d.ts": "api-client:generate",
@@ -8343,6 +8350,270 @@ export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readon
   }
   const name = environmentFaultCheckName(pr) ?? "a required check";
   return `red cause: environment — ${name} repeats one message across its whole log tail, an environment fault rather than a diff defect; no strike spent`;
+}
+
+// ── W1-T8042 — a red shared across open PRs is main's, and is repaired on main once ──────────────
+// 2026-10-11: after #10834 merged, eight open PRs went red on ci-shards with one pure-test-pool hang.
+// Each was worked as its own red (fix strikes, shard re-runs) while main's own runs were cancelled
+// before concluding, so W1-T5490's base-red read main as undetermined. The one plentiful observation
+// was the same check and signature on the other open PRs; this classifier reads it.
+
+/**
+ * The red a repair is for, independent of which merge the locator names: the failing checks (a
+ * matrix shard's index folded away) and what the failing logs said — the gates they named BLOCKED
+ * and the tests they reported `not ok`. `detail` is absent when no failing log was readable, and
+ * the signature is then the failing check set alone.
+ */
+export interface MainRedSignature {
+  readonly checks: readonly string[];
+  readonly detail?: readonly string[];
+}
+
+const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const SHARD_INDEX = / \(\d+\/\d+\)$/;
+const BLOCKED_GATE = [/^main-ceiling-drift: (\S+) BLOCKED\b/, /^([A-Za-z0-9_.-]+): BLOCKED\b/];
+const NOT_OK_TITLE = /^\s*not ok\s+\d+\s+-\s+(.+?)\s*$/i;
+
+/** The {@link MainRedSignature} of failing checks `failingChecks` whose logs `failures` were read. */
+export function mainRedSignature(failingChecks: readonly string[], failures: readonly CiFailure[] | undefined): MainRedSignature {
+  const checks = [...new Set(failingChecks.map((name) => name.replace(SHARD_INDEX, "")))].sort();
+  const readable = (failures ?? []).filter((failure) => !failure.logUnavailable && failure.logTail.trim() !== "");
+  if (readable.length === 0) return { checks };
+  const detail = new Set<string>();
+  for (const failure of readable) {
+    for (const raw of failure.logTail.split("\n")) {
+      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const gate = BLOCKED_GATE.map((pattern) => pattern.exec(line)?.[1]).find((name) => name !== undefined);
+      if (gate !== undefined) detail.add(`BLOCKED ${gate}`);
+      const title = NOT_OK_TITLE.exec(line)?.[1];
+      if (title !== undefined) detail.add(`not ok ${title}`);
+    }
+  }
+  return { checks, detail: [...detail].sort() };
+}
+
+/** One red, or not: the same failing checks, and the same log detail wherever both sides read one. */
+export function mainRedSignaturesMatch(a: MainRedSignature, b: MainRedSignature): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return same(a.checks, b.checks) && (a.detail === undefined || b.detail === undefined || same(a.detail, b.detail));
+}
+
+/** W1-T8042 — a PR-side red is part of `whole` when its checks are among whole's and its log detail too:
+ *  main's own red also names the aggregator (`ci`) and every shard's detail at once. */
+export function mainRedCovers(part: MainRedSignature, whole: MainRedSignature): boolean {
+  return part.checks.every((check) => whole.checks.includes(check)) &&
+    (part.detail === undefined || whole.detail === undefined || part.detail.every((line) => whole.detail!.includes(line)));
+}
+
+export function describeMainRed(red: MainRedSignature): string {
+  return `${red.checks.join(", ")}${red.detail ? ` [${red.detail.join("; ") || "no gate or test named"}]` : " [no log read]"}`;
+}
+
+export function mainRedOfRow(line: Record<string, unknown>): MainRedSignature | undefined {
+  if (!Array.isArray(line.red_checks)) return undefined;
+  return {
+    checks: line.red_checks.map(String),
+    ...(Array.isArray(line.red_detail) ? { detail: line.red_detail.map(String) } : {}),
+  };
+}
+
+export function mainRedFields(red: MainRedSignature): Record<string, unknown> {
+  return { red_signature: describeMainRed(red), red_checks: [...red.checks], red_detail: red.detail ? [...red.detail] : null };
+}
+
+/** The ledger row that hands a shared red to main repair. main-health-rung.ts folds an `opened` row into
+ *  the same record main's own red would open; an `advanced` row only adds PRs to it. */
+export const MAIN_INHERITED_RED_STEP = "main.repair.inherited";
+
+const SHARED_RED_TEST_FILE = /test\/[\w./-]+\.test\.[cm]?[jt]s/g;
+
+/** One failing check's signature: its family (shard index folded) with the tests and gates its log
+ *  names, plus W1-T8040's pool/timeout signature. `files` are the test files the log names. */
+export interface SharedRedFailure {
+  readonly key: string;
+  readonly red: MainRedSignature;
+  readonly files: readonly string[];
+}
+
+/** `undefined` when the log names no test, gate or pool failure: such a red cannot be matched. */
+export function sharedRedFailureOf(failure: CiFailure): SharedRedFailure | undefined {
+  const red = mainRedSignature([failure.name], [failure]);
+  const pooled = deterministicTimeoutSignature(failure.logTail);
+  if ((red.detail ?? []).length === 0 && pooled === undefined) return undefined;
+  const named = failure.logTail.match(SHARED_RED_TEST_FILE) ?? [];
+  const files = [...new Set([...baseReproductionFiles([failure]), ...named])].sort();
+  return { key: [red.checks[0], ...(red.detail ?? []), pooled ?? ""].join(" | "), red, files };
+}
+
+/** An aggregator (or ci-gate) that failed beside a check it aggregates: it carries no red of its own. */
+function aggregatesAnotherFailure(name: string, failures: readonly CiFailure[]): boolean {
+  if (name === "ci-gate") return failures.some((f) => f.name !== name);
+  const entry = CI_MATRIX_AGGREGATORS.find((a) => a.aggregator === name);
+  return entry !== undefined && failures.some((f) => entry.constituent.test(f.name));
+}
+
+/** The reads the classification needs. Each `undefined` is unreadable, which keeps that PR on its own lane. */
+export interface MainInheritanceReads {
+  changedFiles(pr: OpenPrView): Promise<readonly string[] | undefined>;
+  mergeBase(pr: OpenPrView): Promise<string | undefined>;
+  /** True when main commit `ancestor` is `of` or in its history. */
+  contains(of: string, ancestor: string): Promise<boolean>;
+}
+
+export interface MainInheritedRed {
+  readonly key: string;
+  readonly red: MainRedSignature;
+  readonly files: readonly string[];
+  /** The PRs carrying it whose own diffs touch none of `files`. */
+  readonly prs: ReadonlyArray<{ readonly prNumber: number; readonly headSha: string; readonly mergeBase: string }>;
+  /** Design 1b's witness: the affected merge base every other affected base contains and no green base does. */
+  readonly candidateSha: string;
+  readonly logExcerpt: string;
+}
+
+export interface MainInheritedClassification {
+  readonly reds: readonly MainInheritedRed[];
+  /** The PRs whose EVERY red is main-inherited, with the reds each carries: the stand-down set. */
+  readonly standDown: ReadonlyMap<number, readonly MainInheritedRed[]>;
+}
+
+/**
+ * A signature is MAIN-INHERITED when (a) it is red on more than one open PR whose own diff touches no
+ * file it names, and (b) one main commit is in every such PR's merge base and in no merge base of a PR
+ * green this pass (nor main's last green run, `mainGreenSha`). A PR whose diff touches a named file is
+ * never counted: it may be the cause, so it keeps its own lane. Structural, never a tuned count; with
+ * no green base to compare against, nothing is classified.
+ */
+export async function classifyMainInheritedReds(
+  prs: readonly OpenPrView[],
+  reads: MainInheritanceReads,
+  mainGreenSha?: string,
+): Promise<MainInheritedClassification> {
+  const ownReds = new Map<number, { whole: boolean; keys: Set<string> }>();
+  const groups = new Map<string, { failure: SharedRedFailure; logTail: string; prs: OpenPrView[] }>();
+  for (const pr of prs) {
+    if (!isBlockedCi(pr)) continue;
+    const failures = pr.ciFailures ?? [];
+    const own = failures.filter((f) => !aggregatesAnotherFailure(f.name, failures));
+    const named = new Set(failures.map((f) => f.name));
+    const keys = new Set<string>();
+    let whole = own.length > 0 && (pr.redRequiredChecks ?? []).every((n) => named.has(n) || aggregatesAnotherFailure(n, failures));
+    for (const failure of own) {
+      const shared = sharedRedFailureOf(failure);
+      if (!shared) { whole = false; continue; }
+      if (keys.has(shared.key)) continue;
+      keys.add(shared.key);
+      const group = groups.get(shared.key) ?? { failure: shared, logTail: failure.logTail, prs: [] };
+      group.prs.push(pr);
+      groups.set(shared.key, group);
+    }
+    ownReds.set(pr.prNumber, { whole, keys });
+  }
+  const memo = <T>(cache: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> => {
+    if (!cache.has(key)) cache.set(key, read());
+    return cache.get(key)!;
+  };
+  const changedCache = new Map<string, Promise<readonly string[] | undefined>>();
+  const baseCache = new Map<string, Promise<string | undefined>>();
+  const containsCache = new Map<string, Promise<boolean>>();
+  const changedOf = (pr: OpenPrView) =>
+    pr.changedFiles !== undefined ? Promise.resolve(pr.changedFiles) : memo(changedCache, `${pr.prNumber}@${pr.headSha}`, () => reads.changedFiles(pr));
+  const baseOf = (pr: OpenPrView) =>
+    pr.currentMergeBaseSha !== undefined ? Promise.resolve(pr.currentMergeBaseSha) : memo(baseCache, `${pr.prNumber}@${pr.headSha}`, () => reads.mergeBase(pr));
+  const contains = (of: string, ancestor: string) =>
+    of === ancestor ? Promise.resolve(true) : memo(containsCache, `${of}>${ancestor}`, () => reads.contains(of, ancestor));
+  let greenBases: string[] | undefined;
+  const reds: MainInheritedRed[] = [];
+  for (const [key, group] of groups) {
+    if (group.prs.length < 2) continue;
+    const affected: Array<{ prNumber: number; headSha: string; mergeBase: string }> = [];
+    for (const pr of group.prs) {
+      const changed = await changedOf(pr);
+      if (changed === undefined || changed.some((path) => group.failure.files.includes(path))) continue;
+      const mergeBase = await baseOf(pr);
+      if (mergeBase !== undefined) affected.push({ prNumber: pr.prNumber, headSha: pr.headSha, mergeBase });
+    }
+    if (affected.length < 2) continue;
+    if (greenBases === undefined) {
+      const read = await Promise.all(prs.filter((pr) => pr.checksState === "green").map(baseOf));
+      greenBases = [...new Set([...read.filter((sha): sha is string => sha !== undefined), ...(mainGreenSha ? [mainGreenSha] : [])])];
+    }
+    if (greenBases.length === 0) continue;
+    const bases = [...new Set(affected.map((a) => a.mergeBase))];
+    let candidate: string | undefined;
+    for (const base of bases) {
+      if ((await Promise.all(bases.map((other) => contains(other, base)))).every(Boolean)) { candidate = base; break; }
+    }
+    if (candidate === undefined) continue;
+    const witness = candidate;
+    if ((await Promise.all(greenBases.map((green) => contains(green, witness)))).some(Boolean)) continue;
+    reds.push({ key, red: group.failure.red, files: group.failure.files, prs: affected, candidateSha: witness,
+      logExcerpt: group.logTail.slice(-2000) });
+  }
+  const standDown = new Map<number, MainInheritedRed[]>();
+  for (const [prNumber, own] of ownReds) {
+    if (!own.whole) continue;
+    const carried = reds.filter((red) => red.prs.some((p) => p.prNumber === prNumber));
+    if (carried.length > 0 && [...own.keys].every((key) => carried.some((red) => red.key === key))) standDown.set(prNumber, carried);
+  }
+  return { reds, standDown };
+}
+
+/** One page of `pulls/N/files` holds at most this many rows; a full page may be truncated. */
+const PR_FILES_PAGE = 100;
+
+/** The production reads: one PR file list, and two `compare` reads (`main...head`, `ancestor...of`). */
+export function restMainInheritanceReads(
+  owner: string,
+  repo: string,
+  readJson: (args: string[]) => Promise<unknown>,
+): MainInheritanceReads {
+  const compare = async (base: string, head: string) =>
+    (await readJson(compareRestArgs(owner, repo, base, head))) as { status?: string; merge_base_commit?: { sha?: string } } | undefined;
+  return {
+    changedFiles: async (pr) => {
+      const rows = await readJson(prFilesRestArgs(owner, repo, pr.prNumber));
+      // A diff this reader cannot see whole is unreadable, never disjoint.
+      if (!Array.isArray(rows) || rows.length >= PR_FILES_PAGE) return undefined;
+      return rows.map((row: { filename?: unknown }) => row.filename).filter((f): f is string => typeof f === "string");
+    },
+    mergeBase: async (pr) => (await compare("main", pr.headSha))?.merge_base_commit?.sha,
+    contains: async (of, ancestor) => {
+      const status = (await compare(ancestor, of))?.status;
+      return status === "ahead" || status === "identical";
+    },
+  };
+}
+
+/** The handed-over and located reds main repair holds, by offending sha, with the PRs each was handed. */
+export function mainRepairRedsFromLedger(
+  lines: readonly Record<string, unknown>[],
+): Array<{ offendingSha: string; red: MainRedSignature; prs: Map<number, string>; resolved: boolean }> {
+  const bySha = new Map<string, { offendingSha: string; red: MainRedSignature; prs: Map<number, string>; resolved: boolean }>();
+  for (const line of lines) {
+    const sha = line.offending_sha;
+    if (typeof sha !== "string") continue;
+    const opens = line.step === "main.repair.located" || (line.step === MAIN_INHERITED_RED_STEP && line.outcome === "opened");
+    const red = mainRedOfRow(line);
+    if (opens && red && (!bySha.get(sha) || bySha.get(sha)!.resolved)) bySha.set(sha, { offendingSha: sha, red, prs: new Map(), resolved: false });
+    const record = bySha.get(sha);
+    if (!record) continue;
+    if (line.step === "main.repair.resolved") record.resolved = true;
+    if (line.step !== MAIN_INHERITED_RED_STEP || !Array.isArray(line.inherited_prs)) continue;
+    for (const pr of line.inherited_prs as Array<Record<string, unknown>>) {
+      if (typeof pr?.pr_number === "number" && !record.prs.has(pr.pr_number)) record.prs.set(pr.pr_number, String(pr.first_seen_at ?? line.ts ?? ""));
+    }
+  }
+  return [...bySha.values()];
+}
+
+/** The `sweep.disposed` stand-down sentence: the signature, and the other PRs sharing it. */
+export function describeMainInherited(pr: OpenPrView, reds: readonly MainInheritedRed[]): string {
+  const each = reds.map((red) => {
+    const others = red.prs.filter((p) => p.prNumber !== pr.prNumber).map((p) => `#${p.prNumber}`).join(", ");
+    return `${describeMainRed(red.red)} is also red on ${others}, whose diffs touch none of the files it names, and main ${red.candidateSha.slice(0, 12)} is in every one's base and no green base`;
+  });
+  return `red cause: main-inherited — ${each.join("; ")}; handed to main repair; no strike, re-run or refresh spent`;
 }
 
 /** W1-T2620 — per PR, the `main_tip_sha` most recently recorded on a base-caused `sweep.disposed`
@@ -12405,6 +12676,8 @@ export interface SweepDeps {
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
    *  caught identically, FAIL QUIET, never a false "released" ledger line. */
   releaseBaseCausedStandDown?: (pr: OpenPrView, mainTipSha: string) => void | Promise<void>;
+  /** W1-T8042 — the reads {@link classifyMainInheritedReds} takes. Omitted, no red is classified main-inherited. */
+  mainInheritance?: MainInheritanceReads;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -14192,20 +14465,111 @@ export interface SweepFixCapacitySnapshot {
   queueDepth: number;
   hostWorkerBudget: number;
   activeWorkers: number;
+  /** The review reservations at the last refresh, read live (W1-T9498). */
   reviewReservations: number;
   fixesAdmitted: number;
   fixesRefused: number;
   fixAdmissionsAvailable: number;
   pressure?: FixHostPressure;
+  /** W1-T9498: the MiB arithmetic of the last refresh with a readable pressure reading. */
+  charge?: FixAdmissionCharge;
 }
 
-/** W1-T7243: reserve concurrent starts, re-read occupancy and pressure, release completed rounds. */
+/** W1-T9498: the worker classes a fix admission charges against its memory reading. */
+export type FixAdmissionClass = "fix" | "review";
+
+/** W1-T9498: the rss+swap (MiB) of each live, started worker tree of a class in this container; undefined when the
+ *  residency cannot be read, and then every reservation is charged its whole estimate. */
+export type FixAdmissionResidents = { readonly [K in FixAdmissionClass]: readonly number[] } | undefined;
+
+/** W1-T9498: what one refresh charged against the headroom, as the capacity row and a refusal show it. */
+export interface FixAdmissionCharge {
+  headroomMib: number;
+  reviewChargeMib: number;
+  fixChargeMib: number;
+  fixEstimateMib: number;
+  fixEstimateSource: "measured" | "default-unmeasured";
+  reviewEstimateMib: number;
+}
+
+/**
+ * W1-T9498 — THE CHARGE OF `count` RESERVATIONS OF ONE CLASS, ONCE. The pressure reading (MemAvailable, the container's
+ * headroom) already holds a running worker's resident memory, so a reservation whose worker runs is charged only its
+ * unrealized part, max(0, estimate - resident): the shadow budget's NO DOUBLE COUNT rule (host-memory-shadow.ts).
+ * The live trees are not tied to reservations by identity, so the reservations take the SMALLEST residents first: an
+ * ambiguous pairing never charges less than the true one. A reservation past the live trees has not started, or its
+ * tree cannot be read, and is charged its whole estimate. Pure.
+ */
+export function fixAdmissionChargeMib(count: number, estimateMib: number, residents: readonly number[] | undefined): number {
+  const trees = [...(residents ?? [])].sort((a, b) => a - b);
+  let charge = 0;
+  for (let i = 0; i < count; i++) charge += Math.max(0, estimateMib - (trees[i] ?? 0));
+  return charge;
+}
+
+/**
+ * W1-T9498: this container's live fix and review worker trees, measured as the shadow budget measures them (each tree's
+ * rss+swap, a process counted once). Only this container's own, unreleased reservations count, as
+ * {@link ownContainerWorkLive} reads them; a tree whose record cannot be read is left out, so its reservation is charged
+ * whole. An unreadable reservation store: undefined, every reservation whole.
+ */
+export function productionFixAdmissionResidents(
+  root: string,
+  readLedger: (root: string) => HostMemoryReading | undefined = (r) => readMemoryLedger({ root: r }),
+  readFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): FixAdmissionResidents {
+  const reading = readLedger(root);
+  if (reading === undefined || reading.state === "unreadable") return undefined;
+  const live = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
+    (entry.workerClass === "fix" || entry.workerClass === "review"));
+  const residents = residentsOf(readFile, live.map((entry) => entry.path));
+  const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
+  live.forEach((entry, i) => {
+    const resident = residents[i]!;
+    if (!("unread" in resident)) out[entry.workerClass as FixAdmissionClass].push(resident.mib);
+  });
+  return out;
+}
+
+/** W1-T9498: the learned estimates and live residency the PRODUCTION pressure path charges with. A caller that injects
+ *  its own pressure reading (a test) charges the class defaults with no residency read. */
+export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">): {
+  readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
+  readResidents?: () => FixAdmissionResidents;
+} {
+  if (deps.readFixPressure || !deps.fixProgressJudge) return {};
+  return {
+    readEstimate: (workerClass) => classEstimate(workerClass),
+    readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
+  };
+}
+
+/** W1-T7243: reserve concurrent starts, re-read occupancy and pressure, release completed rounds.
+ *
+ * W1-T9498 — EACH RESERVATION ITS OWN MEMORY, ONCE. With a pressure reading the controller accounts in MiB: the
+ * headroom is `availableMib - floorMib` of the binding pool, every outstanding reservation is charged at its class's
+ * learned estimate (a review at the review estimate, an admitted fix at the fix estimate; `readEstimate`, the class
+ * default when unmeasured), less what its running tree already holds (`readResidents`, {@link fixAdmissionChargeMib}),
+ * and a claim is admitted while what is left covers one fix at the fix estimate. The review reservations are READ LIVE
+ * on each refresh (`readReviewReservations`): a review's reservation ends when it settles. Measured 2026-10-14: whole
+ * 2,048 MiB slots, a review counted as a slot for the controller's whole life, and running workers charged on top of
+ * the reading that already held them, read 0 admissions on 57-66% of the minutes a repair was queued. The floor is
+ * kept, and a learned fix estimate above 2,048 MiB admits fewer fixes. Without a pressure reading the stand-in counts
+ * workers against `hostWorkerBudget`, as before; an unreadable reading admits none; the nothing-to-wait-for tier still
+ * admits one while nothing is outstanding. */
 export function createSweepFixAdmissionController(input: {
   surface: SweepRepairSurface;
   queueDepth: number;
   hostWorkerBudget: number;
   activeWorkers: number;
+  /** The review reservations when no live reader is given. */
   reviewReservations: number;
+  /** W1-T9498: the review reservations NOW: reviews reserved and not yet settled. */
+  readReviewReservations?: () => number;
+  /** W1-T9498: a class's learned estimate. Default: the class default, unmeasured. */
+  readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
+  /** W1-T9498: the live trees' residency. Default: unread, so every reservation is charged its whole estimate. */
+  readResidents?: () => FixAdmissionResidents;
   readActiveWorkers?: () => number;
   readPressure?: () => FixHostPressure;
   log?: (step: string, extra?: Record<string, unknown>) => void;
@@ -14216,14 +14580,56 @@ export function createSweepFixAdmissionController(input: {
   let reservations = 0;
   const standIn = input.readActiveWorkers === undefined && input.readPressure === undefined;
   let activeWorkers = input.activeWorkers;
+  let reviewReservations = input.reviewReservations;
   let pressure: FixHostPressure | undefined;
+  let charge: FixAdmissionCharge | undefined;
   let available = 0;
+  const estimate = (workerClass: FixAdmissionClass): LearnedEstimate =>
+    input.readEstimate?.(workerClass) ?? { estimateMib: DEFAULT_ESTIMATE_MIB[workerClass], samples: 0 };
+  const readResidents = (): FixAdmissionResidents => {
+    try {
+      return input.readResidents?.();
+    } catch (error) {
+      void error; // An unreadable residency is the unread case: every reservation is charged its whole estimate.
+      return undefined;
+    }
+  };
+  let residents: FixAdmissionResidents;
+  // What the current readings admit. A claim's own admission recomputes it without re-reading: its worker has not
+  // started, so it is charged whole on the reading the claim was judged on.
+  const compute = () => {
+    charge = undefined;
+    if (!pressure) {
+      available = Math.max(0, Math.max(0, input.hostWorkerBudget - activeWorkers) - reviewReservations - reservations);
+      return;
+    }
+    if (pressure.reason !== undefined) {
+      available = 0;
+      return;
+    }
+    const fix = estimate("fix");
+    const review = estimate("review");
+    charge = {
+      headroomMib: Math.max(0, pressure.availableMib - pressure.floorMib),
+      reviewChargeMib: fixAdmissionChargeMib(reviewReservations, review.estimateMib, residents?.review),
+      fixChargeMib: fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix),
+      fixEstimateMib: fix.estimateMib,
+      fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
+      reviewEstimateMib: review.estimateMib,
+    };
+    const left = charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib;
+    const fits = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib));
+    // Nothing to wait for: one is admitted, never wedged, while nothing else is outstanding (pressureWorkers' rule).
+    available = pressure.tier === "nothing-to-wait-for" && reviewReservations + reservations === 0 ? Math.max(1, fits) : fits;
+  };
   const refresh = () => {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
+    reviewReservations = Math.max(0, Math.trunc(input.readReviewReservations?.() ?? input.reviewReservations));
     pressure = input.readPressure?.();
-    const free = pressure ? pressureWorkers(pressure, DEFAULT_ESTIMATE_MIB.fix)
-      : Math.max(0, input.hostWorkerBudget - activeWorkers);
-    available = pressure?.reason ? 0 : Math.max(0, free - input.reviewReservations - reservations);
+    // Residency is read only when a reading can use it: something is outstanding to charge.
+    residents = pressure && pressure.reason === undefined && reviewReservations + reservations > 0
+      ? readResidents() : undefined;
+    compute();
   };
   refresh();
   let fixesAdmitted = 0;
@@ -14233,11 +14639,12 @@ export function createSweepFixAdmissionController(input: {
     queueDepth: input.queueDepth,
     hostWorkerBudget: input.hostWorkerBudget,
     activeWorkers,
-    reviewReservations: input.reviewReservations,
+    reviewReservations,
     fixesAdmitted,
     fixesRefused,
     fixAdmissionsAvailable: available,
     pressure,
+    ...(charge ? { charge } : {}),
   });
   const emit = (): void => {
     const state = snapshot();
@@ -14258,8 +14665,20 @@ export function createSweepFixAdmissionController(input: {
       pressure_host_available_mib: state.pressure?.hostAvailableMib,
       ...reclaimLedgerFields(state.pressure?.reclaim),
       pending_reservations: reservations,
+      headroom_mib: state.charge?.headroomMib,
+      review_charge_mib: state.charge?.reviewChargeMib,
+      fix_charge_mib: state.charge?.fixChargeMib,
+      fix_estimate_mib: state.charge?.fixEstimateMib,
+      fix_estimate_source: state.charge?.fixEstimateSource,
+      review_estimate_mib: state.charge?.reviewEstimateMib,
     });
   };
+  // The parenthetical a refusal names: the MiB it refused on with a reading, the worker count without one.
+  const refusalArithmetic = (): string => charge
+    ? `(headroom ${charge.headroomMib} MiB over the floor; charged ${charge.reviewChargeMib} MiB for ${reviewReservations} ` +
+      `reviews at ${charge.reviewEstimateMib} and ${charge.fixChargeMib} MiB for ${reservations} admitted fixes; ` +
+      `a fix needs ${charge.fixEstimateMib} MiB (${charge.fixEstimateSource}); ${activeWorkers} active, ${fixesAdmitted} fixes admitted)`
+    : `(${activeWorkers} active, ${reviewReservations} reserved for review, ${fixesAdmitted} fixes admitted)`;
   emit();
   return {
     snapshot,
@@ -14272,14 +14691,13 @@ export function createSweepFixAdmissionController(input: {
           admitted: false,
           reason:
             `${standIn ? `host worker budget ${input.hostWorkerBudget}` : "live host capacity"} exhausted for this ${input.surface} pass ` +
-            `(${activeWorkers} active, ${input.reviewReservations} reserved for review, ` +
-            `${fixesAdmitted} fixes admitted)` +
+            refusalArithmetic() +
             " — repair remains queued and will be re-derived next pass",
         };
       }
-      available--;
       reservations++;
       fixesAdmitted++;
+      compute();
       emit();
       let released = false;
       return { admitted: true, release: standIn ? undefined : () => {
@@ -14975,6 +15393,9 @@ export async function runSweep(
   const fullReviewLanes = fullReviewQueueDepth === undefined
     ? undefined
     : effectiveReviewWidth(deps, policy, fullReviewQueueDepth, now, ledgerLines, fullRepairActiveWorkers);
+  // W1-T9498: this full pass's review reservations, read live: its planned reviews while its pool can still start
+  // them, less those settled. Its pool counts each start and settle below.
+  const fullReviews = { planned: Math.min(fullReviewQueueDepth ?? 0, fullReviewLanes ?? 0), started: 0, settled: 0, pulling: true };
   const fullRepairAdmission =
     fullRepairActiveWorkers === undefined || fullReviewQueueDepth === undefined || fullReviewLanes === undefined
       ? undefined
@@ -14985,7 +15406,10 @@ export async function runSweep(
           activeWorkers: fullRepairActiveWorkers,
           readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
           readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
-          reviewReservations: Math.min(fullReviewQueueDepth, fullReviewLanes),
+          reviewReservations: fullReviews.planned,
+          readReviewReservations: () =>
+            (fullReviews.pulling ? Math.max(fullReviews.planned, fullReviews.started) : fullReviews.started) - fullReviews.settled,
+          ...productionFixAdmissionReaders(deps),
           log,
         });
   const fixCapacityReleases = new Map<number, () => void>();
@@ -15031,6 +15455,30 @@ export async function runSweep(
   // W1-T4351 — both folds read once per pass; `baseRedRefreshPr` holds this pass's ONE refresh.
   const mainLatestRun = mainLatestRunFromLedger(ledgerLines);
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
+  // W1-T8042 — ONE correlation per pass across every open PR; each shared red is handed to main repair once.
+  let mainInherited: MainInheritedClassification = { reds: [], standDown: new Map() };
+  if (deps.mainInheritance) {
+    try {
+      mainInherited = await classifyMainInheritedReds(openPrs, deps.mainInheritance,
+        mainLatestRun?.state === "green" ? mainLatestRun.decidedBySha : undefined);
+    } catch (error) {
+      // An unreadable merge base or diff proves nothing shared: every red keeps its own lane this pass.
+      log("sweep.main_inherited.unreadable", { reason: String((error as Error)?.message ?? error) });
+    }
+    const held = mainRepairRedsFromLedger(ledgerLines);
+    for (const red of mainInherited.reds) {
+      const owner = held.findLast((record) => !record.resolved && mainRedCovers(red.red, record.red));
+      const joined = owner ? red.prs.filter((p) => !owner.prs.has(p.prNumber)) : red.prs;
+      if (owner && joined.length === 0) continue;
+      const seenAt = clockFromMillisFn(() => now).iso();
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: MAIN_INHERITED_RED_STEP,
+        outcome: owner ? "advanced" : "opened", offending_sha: owner?.offendingSha ?? red.candidateSha,
+        candidate_sha: red.candidateSha, record_key: red.key, ...mainRedFields(red.red), test_files: [...red.files],
+        inherited_prs: red.prs.map((p) => ({ pr_number: p.prNumber, head_sha: p.headSha, merge_base: p.mergeBase,
+          first_seen_at: owner?.prs.get(p.prNumber) ?? seenAt })),
+        log_excerpt: red.logExcerpt });
+    }
+  }
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
   // W1-T7848: one `main.rule_checks.observed` row per main sha and suite set, across passes.
@@ -17484,6 +17932,18 @@ export async function runSweep(
                 }
                 if (!await askProgress()) break;
               }
+              // W1-T8042 — a PR whose every red is main-inherited stands down for main repair: no fix
+              // strike, job re-run or base refresh. Re-derived each pass, so a changed signature releases it.
+              const inheritedReds = mainInherited.standDown.get(pr.prNumber);
+              if (inheritedReds) {
+                acted = false;
+                baseRedStandDownPrs.add(pr.prNumber);
+                standDownReason = describeMainInherited(pr, inheritedReds);
+                extraDisposedFields = { ...extraDisposedFields, red_cause: "main-inherited",
+                  main_inherited: inheritedReds.map((red) => ({ red_signature: describeMainRed(red.red),
+                    candidate_sha: red.candidateSha, pr_numbers: red.prs.map((p) => p.prNumber) })) };
+                break;
+              }
               // W1-T527 — classify the evidence in hand before selecting a worker.
               // Only base-caused and environment stand down here.
               const redCause = classifyRedCause(pr, openPrs);
@@ -18815,11 +19275,13 @@ export async function runSweep(
         if (fullSurface) {
           fullPassReviewsInFlight++;
           passReviewsInFlight++;
+          fullReviews.started++;
         }
         const tracked = trackInFlightReview(runReview(job));
         const work = !fullSurface ? tracked : tracked.finally(() => {
           fullPassReviewsInFlight--;
           passReviewsInFlight--;
+          fullReviews.settled++;
           releaseReviewSlot();
         });
         if (deps.detachReviewWait) {
@@ -18830,6 +19292,7 @@ export async function runSweep(
       }
     }),
   );
+  fullReviews.pulling = false; // W1-T9498: an unstarted tail is never started by this pass, so it reserves nothing.
 
   // Only a named admission stop can leave an unstarted tail. W1-T2771: these jobs were discovered
   // but never pulled, so they own NO mutex key — do not `delete` theirs here, since a concurrent
@@ -19270,13 +19733,17 @@ export async function runSweepLightPass(
   const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
+  // W1-T9498: this pass's spawning reviews not yet settled; the repair admission reads it live.
+  let unsettledSpawning = spawning.length;
   for (const pr of [...spawning, ...planFilings]) {
     let released = false;
     releases.set(pr.prNumber, () => {
       if (released) return;
       released = true;
-      if (spawningNumbers.has(pr.prNumber)) lightPassSpawningReservations--;
-      else lightPassPlanFilingReservations--;
+      if (spawningNumbers.has(pr.prNumber)) {
+        lightPassSpawningReservations--;
+        unsettledSpawning--;
+      } else lightPassPlanFilingReservations--;
       lightPassReservedHeads.delete(lightPassHeadKey(pr));
       releaseReviewSlot();
       if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
@@ -19288,7 +19755,6 @@ export async function runSweepLightPass(
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
   const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
-  const reviewReservations = spawning.length;
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
@@ -19296,7 +19762,9 @@ export async function runSweepLightPass(
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
     readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
-    reviewReservations,
+    reviewReservations: unsettledSpawning,
+    readReviewReservations: () => unsettledSpawning,
+    ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
   const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;

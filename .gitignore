@@ -88,3 +88,6 @@ test/mutants-*/
 # a different file entirely, and it passed on the shard's first pass and failed on the retry.
 /.rmd-*-fixture-*/
 test/.tmp-*/
+
+# Optional local learnings lookup (W1-T7954).
+/learnings/index.json

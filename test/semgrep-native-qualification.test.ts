@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-const { summarizeReports, verifyControl, qualifySemgrep, main } = await import(
+const { summarizeReports, verifyControl, verifyParserControl, parserControlSources, qualifySemgrep, main } = await import(
   new URL("../scripts/semgrep-native-contract-ratchet.mjs", import.meta.url).href);
 const ruleId = "rmd-native-qualification-sentinel";
 function reports(paths = ["old.js", "new.js"]) {
@@ -16,6 +16,59 @@ function reports(paths = ["old.js", "new.js"]) {
       results: paths.map(path => ({ ruleId, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] },
   };
 }
+
+function parserReports(partial = true) {
+  const id = "rmd-original-typescript-parser-marker";
+  const { report, sarif } = reports(["inline-import.ts", "named-import.ts"]);
+  report.results = [2, 8, 3, 9].map((line, i) => ({ path: i < 2 ? "inline-import.ts" : "named-import.ts", check_id: id, start: { line } })) as typeof report.results;
+  report.errors = (partial ? [{ type: ["PartialParsing", [{ path: "inline-import.ts", start: { line: 4 }, end: { line: 4 } }]],
+    path: "inline-import.ts", level: "warn", message: "never retain source" }] : []) as typeof report.errors;
+  sarif.runs[0]!.tool.driver.rules = [{ id }];
+  sarif.runs[0]!.results = report.results.map((result: any) => ({ ruleId: id, locations: [{ physicalLocation: {
+    artifactLocation: { uri: result.path }, region: { startLine: result.start.line } } }] })) as typeof sarif.runs[0]["results"];
+  return { report, sarif };
+}
+
+test("native Semgrep paired parser controls preserve partial parsing separately from marker reachability", () => {
+  const partial = parserReports();
+  const observed = verifyParserControl(partial.report, partial.sarif, 0);
+  assert.equal(observed.status, "INCOMPLETE");
+  assert.equal(observed.inlineImport, "PARTIAL");
+  assert.equal(observed.namedImport, "COMPLETE");
+  assert.equal(observed.markerReachability, "VERIFIED");
+  assert.equal(observed.wholeAstCoverage, "NOT_ESTABLISHED");
+  assert.ok(!JSON.stringify(observed).includes("never retain source"));
+  const complete = parserReports(false);
+  assert.equal(verifyParserControl(complete.report, complete.sarif, 0).inlineImport, "COMPLETE");
+  const sources = parserControlSources();
+  assert.deepEqual(Object.keys(sources).sort(), ["inline-import.ts", "module.ts", "named-import.ts"]);
+  assert.match(sources["inline-import.ts"], /registrations: import\("\.\/module.js"\)\.Registration\[\]/);
+  assert.match(sources["named-import.ts"], /import type \{ Registration \}/);
+  assert.match(observed.sourceSha256["inline-import.ts"], /^[a-f0-9]{64}$/);
+});
+
+test("native Semgrep parser controls refuse missing markers, unqualified targets and unexpected errors", () => {
+  const original = parserReports();
+  assert.throws(() => verifyParserControl(original.report, original.sarif, 2), /process failed/);
+  for (const change of [
+    (r: any) => { r.report.results.pop(); },
+    (r: any) => { r.report.results[0].start.line = 99; },
+    (r: any) => { r.sarif.runs[0].results[0].locations[0].physicalLocation.region.startLine = 99; },
+    (r: any) => { r.report.paths.scanned.push("unobserved.ts"); },
+    (r: any) => { r.report.engine_requested = "PRO"; },
+    (r: any) => { r.report.errors[0].path = "named-import.ts"; },
+    (r: any) => { r.report.errors[0].type = "Timeout"; },
+    (r: any) => { r.report.errors[0].level = "error"; },
+    (r: any) => { r.report.errors = Array(65).fill(r.report.errors[0]); },
+    (r: any) => { r.sarif.runs[0].tool.driver.rules[0].id = "wrong-rule"; },
+    (r: any) => { r.report.results[0].check_id = "wrong-rule"; },
+    (r: any) => { r.sarif.runs[0].results[0].ruleId = "wrong-rule"; },
+    (r: any) => { r.sarif.runs[0].invocations[0].executionSuccessful = false; },
+  ]) {
+    const changed = structuredClone(original); change(changed);
+    assert.throws(() => verifyParserControl(changed.report, changed.sarif, 0));
+  }
+});
 
 test("native Semgrep controls distinguish full and baseline sentinels in both report formats", () => {
   const full = reports(), baseline = reports(["new.js"]);
@@ -136,6 +189,7 @@ data.report.results = paths.map(path => ({path, check_id: '${ruleId}'}));
 data.report.paths.scanned = paths;
 data.sarif.runs[0].results = paths.map(path => ({ruleId: '${ruleId}', locations: [{physicalLocation: {artifactLocation: {uri: path}}}]}));
 if (invalid) data.report.errors = [{type: 'InvalidRuleSchemaError'}];
+if (value('--config').endsWith('parser-rule.json')) Object.assign(data, ${JSON.stringify(parserReports())});
 fs.writeFileSync(value('--output'), JSON.stringify(data.report));
 fs.writeFileSync(value('--sarif-output'), JSON.stringify(data.sarif));
 process.exit(invalid ? 4 : 0);
@@ -145,6 +199,9 @@ process.exit(invalid ? 4 : 0);
     assert.equal(receipt.fullControl.findingCount, 2);
     assert.equal(receipt.baselineControl.findingCount, 1);
     assert.equal(receipt.invalidControl.exitCode, 4);
+    assert.equal(receipt.parserControl.inlineImport, "PARTIAL");
+    assert.equal(receipt.parserControl.namedImport, "COMPLETE");
+    assert.equal(receipt.parserControl.wholeAstCoverage, "NOT_ESTABLISHED");
     assert.notEqual(receipt.base, receipt.head, "real isolated git baseline and head differ");
     assert.match(receipt.enginePayload.sha256, /^[a-f0-9]{64}$/);
     assert.ok(receipt.enginePayload.bytes > 0, "fake payload identity is observed, not native proof");

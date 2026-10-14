@@ -191,10 +191,11 @@ test("W1-T3492 criterion 1: scheduled CI-learning stages outside the checkout an
     ["ci-learning:4321:ci-gate"],
     "the idempotency query must see plan/tasks.d shards, not only plan/tasks.yaml",
   );
+  // W1-T7954: a new filing owns its own learnings/ci.d/ file, so two lessons never append to one tail.
   assert.match(
     ciLearningShardYaml(draft(), "W1-T9002"),
-    /learnings\/ci\.yaml/,
-    "new filings must point at the existing canonical CI learning shard",
+    /learnings\/ci\.d\/[a-z0-9-]+\.yaml/,
+    "new filings must point at their own per-finding CI learning file",
   );
 });
 

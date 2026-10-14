@@ -449,7 +449,7 @@ function isParkedMachineProposal(task: Task): boolean {
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(task.files[0]!))) ||
           (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
