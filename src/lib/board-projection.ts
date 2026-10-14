@@ -228,6 +228,11 @@ export interface BoardProjection {
   rows(): ReadonlyArray<Row>;
   /** Distinct string values this projection's own table holds (W1-T6467); 0 before any ingest. */
   internedStrings(): number;
+  /**
+   * W1-T9403: what it keeps, counted as it ingests: the rows it holds (its sentinel aside), and the summed
+   * length of each kept row's source text (a fact row's ledger body; a stand-in's source columns).
+   */
+  size(): { rows: number; keptBytes: number };
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
   oracle(): BoardOracleResult;
 }
@@ -277,6 +282,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
   touched();
   let lastSeq = 0;
+  /** W1-T9403: the summed source-text length of every row in `rows` but the sentinel. */
+  let keptBytes = 0;
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
   let bulkOpen = false;
   let bulkOutOfOrder = false;
@@ -287,12 +294,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const lastRunStartMs = new Map<string, number>();
   /** Per `task|run`: its newest fact row, the row standing for a newer non-fact one, and the activity seq read. */
   const newestFactMs = new Map<string, number>();
-  const activityRows = new Map<string, { row: Row; tsMs: number }>();
+  const activityRows = new Map<string, { row: Row; tsMs: number; bytes: number }>();
   const taskActivitySeq = new Map<string, number>();
   let activitySeq = 0;
   let activitySql: ReadModelStatement | undefined;
   /** Per `task|run`: the row standing for its `worker.activity` rows (`run_worker`), and the worker seq read. */
-  const workerRows = new Map<string, { row: Row; tsMs: number }>();
+  const workerRows = new Map<string, { row: Row; tsMs: number; bytes: number }>();
   const taskWorkerSeq = new Map<string, number>();
   let workerSeq = 0;
   let workerSql: ReadModelStatement | undefined;
@@ -320,18 +327,20 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     if (at > 0) {
       rows.splice(at, 1);
       rowTsMs.splice(at, 1);
+      keptBytes -= held.bytes;
       touched();
     }
   }
 
   /** Places a stand-in row by its time, after the rows of its instant. */
-  function standIn(standing: Map<string, { row: Row; tsMs: number }>, key: string, row: Row, tsMs: number): void {
+  function standIn(standing: Map<string, { row: Row; tsMs: number; bytes: number }>, key: string, row: Row, tsMs: number, bytes: number): void {
     let at = rows.length;
     while (rowTsMs[at - 1]! > tsMs) at--;
     rows.splice(at, 0, row);
     rowTsMs.splice(at, 0, tsMs);
+    keptBytes += bytes;
     touched();
-    standing.set(key, { row, tsMs });
+    standing.set(key, { row, tsMs, bytes });
     latestTsMs = Math.max(latestTsMs, tsMs);
   }
 
@@ -348,7 +357,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       workerSeq = Math.max(workerSeq, seq);
       dropActivity(key, workerRows);
       taskWorkerSeq.set(taskId, Math.max(taskWorkerSeq.get(taskId) ?? 0, seq));
-      standIn(workerRows, key, { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms));
+      const [body, fields] = [String(r.body), String(r.fields)];
+      standIn(workerRows, key, { ...runWorkerRow(body, fields), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms), body.length + fields.length);
       moved = true;
     }
     return moved;
@@ -369,7 +379,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       taskActivitySeq.set(taskId, Math.max(taskActivitySeq.get(taskId) ?? 0, seq));
       moved = true;
       if (tsMs <= (newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY)) continue;
-      standIn(activityRows, key, { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs);
+      const ts = String(r.ts);
+      standIn(activityRows, key, { ts, step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs, ts.length + taskId.length + runId.length);
     }
     return moved;
   }
@@ -397,13 +408,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const parsed = withoutUnreadFields(JSON.parse(String(r.body)) as Row);
+      const body = String(r.body);
+      const parsed = withoutUnreadFields(JSON.parse(body) as Row);
       const row = strings ? internRowStrings(parsed, strings) : parsed;
       let at = rows.length;
       if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
       else while (rowTsMs[at - 1]! > tsMs) at--;
       rows.splice(at, 0, row);
       rowTsMs.splice(at, 0, tsMs);
+      keptBytes += body.length;
       touched();
       latestTsMs = Math.max(latestTsMs, tsMs);
       const dirt = boardDirtForRow(row, rules);
@@ -619,6 +632,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
     internedStrings: () => strings?.size ?? 0,
+    size: () => ({ rows: rows.length - 1, keptBytes }),
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
       ingest(Number.POSITIVE_INFINITY);
