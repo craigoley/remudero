@@ -5,7 +5,9 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=bb593f363770b79d
   attempts: 0
   files:
     - docs/audits/head-identity-gate-open-plan-pr-exposure.md
