@@ -30,5 +30,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"bypass of lint-plan gate\") — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-14T03:10:12.902Z"
-    pin: "bee1b5dab06ed4d1ed90496da551cfb2f96a51047de0c624e02d1834af688614"
+    judged_at: "2026-10-14T04:25:56.597Z"
+    pin: "6ed343712eb2b11f5044fb4892142b63e36b6692c86356a7998fb6bf56dde710"
