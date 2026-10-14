@@ -411,6 +411,19 @@ test("GOLDEN — DOCS-INDEX LESSON: the cited incident executes and a docs edit'
   }
 });
 
+test("GOLDEN — LEAK-GREP LESSON: the cited incident executes and the plan-shard authoring lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-leak-grep-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T9415.yaml", ".github/scripts/leak-grep.sh", ".github/workflows/ci.yml"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "leak-grep-refuses-plan-shard-token-text"), taskFile);
+  }
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
