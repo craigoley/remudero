@@ -100,15 +100,24 @@ test("W1-T4405: auto-merge enqueues when a merge queue is configured", () => {
   assert.equal(real.mergeQueue?.("not a pr url"), false);
   assert.equal(real.mergeQueue?.("not a pr url"), false, "a second read is served from the per-PR cache");
   // The real enqueue is `gh pr merge <url>` — no --squash (the queue owns the merge method), no --auto.
-  const shim = ghShim([], { kind: "w1t4405" });
+  const securityHead="a".repeat(40);
+  const shim = ghShim([
+    {when:"/files?",stdout:JSON.stringify([{filename:"docs/queue.md"}])},
+    {when:"api repos/craigoley/remudero/pulls/5",stdout:JSON.stringify({state:"open",head:{sha:securityHead},
+      base:{sha:"b".repeat(40),ref:"main",repo:{full_name:"craigoley/remudero"}},changed_files:1})},
+  ], { kind: "w1t4405" });
   const oldPath = process.env.PATH;
+  const oldCache = process.env.RMD_GH_CACHE_HOME;
   process.env.PATH = `${shim.dir}:${oldPath}`;
+  process.env.RMD_GH_CACHE_HOME=shim.dir;
   try {
     withLiveWritesAllowed(() => real.enqueue?.(PR));
   } finally {
     process.env.PATH = oldPath;
+    if(oldCache===undefined)delete process.env.RMD_GH_CACHE_HOME;else process.env.RMD_GH_CACHE_HOME=oldCache;
   }
-  assert.deepEqual(shim.calls(), [`pr merge ${PR}`]);
+  assert.equal(shim.calls().filter(call=>call.startsWith("api ")).length,3,"complete docs corpus and stable head are read before enqueue");
+  assert.equal(shim.calls().at(-1),`pr merge ${PR} --match-head-commit ${securityHead}`);
 });
 
 test("W1-T4405: a queued pull request reads as armed, not stuck", () => {

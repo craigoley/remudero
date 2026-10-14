@@ -153,6 +153,17 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
+    file: "many-gardener-receipts-fit-a-bounded-cost-summary.test.ts",
+    key: "0o100",
+    count: 1,
+    reason:
+      "The default collector must see directory-listing EACCES while named registry/live files remain readable; " +
+      "EISDIR/ENOTDIR would not preserve that distinction. The real permission fixture runs on non-root POSIX " +
+      "with an explicit root/Windows skip. Its always-on enumeration-only fault sibling still reads real files, " +
+      "checks partial known costs, and restores the complete corpus on every host.",
+  },
+  {
+    kind: "chmod",
     file: "routing-quarantine-resolution.test.ts",
     key: "0o644",
     count: 1,

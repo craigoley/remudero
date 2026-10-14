@@ -48,7 +48,7 @@ import {
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
-  mergeDirectViaRest,
+  mergeDirectViaRestAsync,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -75,7 +75,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
@@ -2570,9 +2570,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         armAuto: () => { throw new Error("Pull request is in clean status"); },
         armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
-        mergeDirect: (prUrl) => {
+        mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -2941,11 +2941,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           cause: "ci",
           ...contractRevisionFor(pr),
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
-          detail:
-            `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
-            `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
-            `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
-            `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+          detail: CANCELLED_CHECK_ESCALATION_DETAIL[kind](pr, check, reason),
           options: [
             {
               label: "investigate",
@@ -6964,6 +6960,17 @@ export type CancelledCheckEscalationKind = "cancelled-twice" | "requeue-deferral
 const CANCELLED_CHECK_ESCALATION_SUMMARY: Record<CancelledCheckEscalationKind, string> = {
   "cancelled-twice": "cancelled twice on the same head",
   "requeue-deferral-backstop": `requeue refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times while its run was in flight`,
+};
+const CANCELLED_CHECK_ESCALATION_DETAIL: Record<CancelledCheckEscalationKind,
+  (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => string> = {
+  "cancelled-twice": (pr, check, reason) =>
+    `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
+    `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
+    `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
+    `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+  "requeue-deferral-backstop": (pr, check, reason) =>
+    `GitHub refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times to requeue required check "${check.name}"'s job ` +
+    `on head ${pr.headSha} while its run was still in flight — ${reason}.`,
 };
 
 export type JobRerunRefusal = "already_running" | "not_current_attempt";

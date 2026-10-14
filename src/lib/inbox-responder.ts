@@ -10,6 +10,7 @@ import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
 import type { VerifyHumanRuling } from "./verify-human-judge.js";
+import type { InboxDismissalAudit } from "./inbox-dismissal-audit.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
@@ -92,6 +93,7 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
+  dismissalAudit?: InboxDismissalAudit;
   views: ThreadSummaryView[];
   classifications: InboxClassification[];
   taskFacts: ReadonlyMap<string, { verify: string; repo: string; title: string; status?: string; retirement?: string; dispatchHold?: boolean; risk?: string }>;
@@ -187,7 +189,8 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
   const state = Object.values(input.sources).every((source) => source === "observed") && !contradictoryRelease && !missingReferent ? "complete" : "partial";
   const verifiedCounts = state === "complete" ? { ...counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
   const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
-    sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items, ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
+    sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items,
+    ...(input.dismissalAudit ? { dismissalAudit: input.dismissalAudit } : {}), ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
   const snapshotKey = createHash("sha256").update(JSON.stringify(result)).digest("hex");
   return { ...result, snapshotKey };
 }

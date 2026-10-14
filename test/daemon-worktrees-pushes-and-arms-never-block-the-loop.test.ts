@@ -454,6 +454,16 @@ test("W1-T5284: the step drivers resume a step with its value and throw a step's
 
 const PR = "https://github.com/craigoley/remudero/pull/5284";
 
+/** The exact-head security admission (lib/security-merge-admission.ts) reads the single-PR row and
+ *  its changed files before every real merge write. A docs-only change is complete evidence CodeQL
+ *  does not scan, so these rows admit the write at {@link SECURITY_HEAD} and it is bound to it. */
+const SECURITY_HEAD = "5".repeat(40);
+const securityRow = (baseRef = "main") => JSON.stringify({
+  state: "open", changed_files: 1, head: { sha: SECURITY_HEAD },
+  base: { ref: baseRef, sha: "6".repeat(40), repo: { full_name: "craigoley/remudero" } },
+});
+const DOCS_ONLY_FILES = JSON.stringify([{ filename: "docs/a.md" }]);
+
 /** Runs `attemptArm` and `attemptArmAsync` over the same scripted deps; the async form's writes
  *  and merge-queue read return promises. */
 type ArmScript = Omit<Parameters<typeof attemptArm>[1], "say">;
@@ -487,7 +497,8 @@ test("W1-T5284: arming auto merge lets a timer fire while gh is in flight", asyn
   const shim = ghShim(
     [
       { when: "rules/branches", stdout: "[]" },
-      { when: "pulls/5284", stdout: JSON.stringify({ base: { ref: "main" } }) },
+      { when: "pulls/5284/files", stdout: DOCS_ONLY_FILES },
+      { when: "pulls/5284", stdout: securityRow() },
       { when: "pr merge", delaySeconds: 0.3, doneFile: done },
     ],
     { kind: "t5284-arm-gh" },
@@ -513,7 +524,8 @@ test("W1-T5284: arming auto merge lets a timer fire while gh is in flight", asyn
     t.diagnostic(`attemptArmAsync: ${inFlightTicks} loop tick(s) ran while gh pr merge was in flight`);
     assert.ok(inFlightTicks > 0, "a timer must run while the arm's gh call is in flight");
     assert.deepEqual(value, { outcome: "armed" });
-    assert.ok(shim.calls().includes(`pr merge ${PR} --auto --squash`), "the arm is the same gh argv");
+    assert.ok(shim.calls().includes(`pr merge ${PR} --auto --squash --match-head-commit ${SECURITY_HEAD}`),
+      "the arm is the same gh argv, bound to the security-admitted head");
     assert.ok(shim.calls().some((call) => call.includes("rules/branches/main")), "the merge-queue read went through gh");
   } finally {
     process.env.PATH = savedPath;
@@ -582,6 +594,8 @@ test("W1-T5284: the async arm's real transport carries each gh write and the cac
       { when: "pulls/7001", stdout: JSON.stringify({ base: { ref: "queued" } }) },
       { when: "pulls/7002", stdout: JSON.stringify({}) },
       { when: "pulls/7003", stdout: "not json" },
+      { when: "pulls/7004/files", stdout: DOCS_ONLY_FILES },
+      { when: "pulls/7004", stdout: securityRow() },
       { when: "--disable-auto", stderr: "can't disable auto-merge", exit: 1 },
     ],
     { kind: "t5284-arm-real" },
@@ -611,9 +625,10 @@ test("W1-T5284: the async arm's real transport carries each gh write and the cac
       await assert.rejects(Promise.resolve(real.disableAuto(url(7004))), /can't disable auto-merge/);
     });
     const calls = shim.calls();
-    assert.ok(calls.includes(`pr merge ${url(7004)} --auto --squash`));
-    assert.ok(calls.includes(`pr merge ${url(7004)}`));
-    assert.ok(calls.includes("api --method PUT repos/craigoley/remudero/pulls/7004/merge -f merge_method=squash"));
+    // Each write carries the head the security admission read, never an unbound merge.
+    assert.ok(calls.includes(`pr merge ${url(7004)} --auto --squash --match-head-commit ${SECURITY_HEAD}`));
+    assert.ok(calls.includes(`pr merge ${url(7004)} --match-head-commit ${SECURITY_HEAD}`));
+    assert.ok(calls.includes(`api --method PUT repos/craigoley/remudero/pulls/7004/merge -f merge_method=squash -f sha=${SECURITY_HEAD}`));
     assert.ok(calls.includes(`pr merge ${url(7004)} --disable-auto`));
     await assert.rejects(mergeDirectViaRestAsync("not a pr url"), /refusing to merge blind/);
   } finally {

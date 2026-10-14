@@ -144,6 +144,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
     planPath: config.planPath,
     ledgerPath: config.ledgerPath,
     inboxRoot: config.inboxRoot,
+    inboxAuditScope: { instance: "core", repository: config.repository },
     github: slowLaneTraceGithub,
     statusGithub: seams.statusGithub ?? snapshot!().github,
     ratify: ratifyCliGateway(config.root, join(config.inboxRoot, "state", "logs")),

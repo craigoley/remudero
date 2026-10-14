@@ -1,0 +1,25 @@
+- id: W1-T9387
+  title: "The review lane's worker calls record cost in only 32.2% of joined calls (312/968, 7-day window) — restore costUsd at the review ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `review`, field `cost`: 312/968 joined worker calls (32.2%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The reviewer spawns from src/run-task.ts (sandboxIntent disposable-review, incl. the shadow judge); src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gaps: W1-T9109 (ci-judge cost), W1-T8953 (isolation cost), W1-T8448 (daemon cost)."
+  design: |
+    DIAGNOSE FIRST. Find which review worker calls land without cost_usd: compare worker.attempt terminal rows for review spawns with the WorkerResult costUsd the reviewer path receives. Candidates: cash-divert or non-Claude providers (Codex) reporting no cost, timed-out / clock-bound / failed attempts whose terminal row skips accounting, and the shadow-judge spawn.
+    THEN EITHER restore: thread the worker's costUsd into the review terminal row; OR, where the provider legitimately reports no cost, record that named reason so the lane is excused honestly rather than counted missing.
+    Rule 19 merits test: one integration test must prove cost (or its named reason) survives review spawn-to-ledger-to-evidence-reader, including a failed or clock-bound attempt.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes.
+  acceptance:
+    - claim: "a test drives the review lane's spawn path, including a failed or clock-bound attempt, and feeds the resulting ledger rows into the benchmark evidence reader: a reported costUsd is retained and counted observed, while a legitimately cost-less call retains a named reason and is excused rather than missing"
+      proof: "unit test: test/review-lane-cost.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-review-cost
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/worker.ts, src/lib/benchmark-evidence.ts, test/review-lane-cost.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0
