@@ -2,7 +2,7 @@
  * `rmd approve` titled a single-proposal ratification PR `chore(plan): ratify <id> via rmd approve`, unfitted.
  * The PR title is the squash commit's header, and the approve push preflight runs commitlint over it. Long
  * adoption ids made it 103 to 112 characters, so the push was refused [pr-title] header-max-length on every try.
- * Six refusals were recorded on 2026-10-13..14, among them classifyGhLimitFailure (112), selectSkillsForTask (107),
+ * Five refusals were recorded on 2026-10-13..14: classifyGhLimitFailure (112), selectSkillsForTask (107),
  * buildPanelSkillsRoutes (108), burnRatePredicate (105) and managedReposPath (103).
  */
 import assert from "node:assert/strict";
