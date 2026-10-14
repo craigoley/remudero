@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -16,6 +16,7 @@ import {
 } from "../src/lib/foreign-pause-detector.js";
 import { SRE_LANE_DETECTORS } from "../src/lib/sre-lane.js";
 import { installPolicyPath } from "../src/lib/policy.js";
+import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 
 const at = (iso: string) => Date.parse(iso);
 const MIN = 60_000;
@@ -180,5 +181,27 @@ describe("test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.tes
     const memory = JSON.parse(readFileSync(join(stateDir, "foreign-pause-detector.json"), "utf8"));
     assert.deepEqual(memory.emitted.map((e: { key: string }) => e.key), ["instance=core since=2026-10-11T11:46:29.000Z"]);
     assert.deepEqual(await evaluateForeignPauseDetectors({ stateDir, detectors: [], nowMs: RESUME_AT, readRows: () => rows }), []);
+  });
+
+  test("W1-T8245: a pause policy entry that is not a mapping is refused by name", () => {
+    assert.throws(() => parsePausePolicy([]), /'pausePolicy' must be a mapping/);
+    assert.throws(() => parsePausePolicy({ core: "daemon" }), /'pausePolicy\.core' must be a mapping/);
+  });
+
+  test("W1-T8245: with no injected reader or writer the evaluator reads the real ledger and appends the incident to it", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rmd-foreign-pause-"));
+    const ledger = join(stateDir, LEDGER_FILENAME);
+    const rows = [...recycleHistory(ORIGIN), ...pauseRows(PAUSE_AT, RESUME_AT, remoteSetter, 2)];
+    writeFileSync(ledger, rows.map((row) => JSON.stringify({ run_id: "FLEET", task_id: "FLEET", ...row })).join("\n") + "\n");
+    const input = { stateDir, detectors: [foreignPauseDetector("core", { policy: POLICY })], nowMs: RESUME_AT };
+    const events = await evaluateForeignPauseDetectors(input);
+    assert.equal(events.length, 1);
+    const appended = readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((row) => row.step === "incident.event");
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0]!.name, "foreign-pause");
+    assert.match(String(appended[0]!.subject), /^instance=core since=2026-10-11T11:46:29\.000Z /);
+    // The memoized reader answers a second pass over the same ledger, and the dedupe memory keeps it silent.
+    assert.deepEqual(await evaluateForeignPauseDetectors(input), []);
   });
 });
