@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,14 @@
     CI runs: 38621549967, 38622613135, 38623398070.
     Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared scope is one existing test file (test/the-core-fleet-fills-the-child-entry-store.test.ts). The harness confirmed that file exists at the base. Nothing in the description or files list touches secrets, auth, deploy, merge policy, or review policy."
+      - "The task adds a test and fixes a flaky test's cause. It deletes no data, branches, or history, and it takes no irreversible action. It asks for no operator-only decision."
+      - "The acceptance criteria can be checked mechanically (a unit test and a grep). The evidence cites 3 distinct PRs and CI run IDs, so the finding can be verified from what is shown."
+      - "The flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89). The gates state is clean, and the PR will still go through CI and review."
+    judged_at: "2026-10-14T20:54:27.046Z"
+    pin: "71305a6ce999d72a29ed9bac83e013b22842724a092a3cd3367d7bb435f498ae"
