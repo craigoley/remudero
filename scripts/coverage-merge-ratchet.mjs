@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { isMainModule } from "./lib/argv.mjs";
+import { parseLcovRecords } from './lib/lcov.mjs';
 
 const RAW_COVERAGE_FILE = /^coverage-\d+-\d{13}-\d+\.json$/;
 const COMPACT_COVERAGE_FILE = /^coverage-bundle-\d+-\d{13}-\d+\.json$/;
@@ -145,6 +146,67 @@ export function renderCoverageSummary(summary) {
     output.push(`LH:${file.coveredLineCount}`, `LF:${file.totalLineCount}`, 'end_of_record');
   }
   return `${output.join('\n')}\n`;
+}
+
+/** Union line-hit evidence from independently generated shard LCOV. Node's serial raw-range merge
+ *  can zero a line hit present in one shard; max per (SF, line) is the set union for line coverage,
+ *  while branch/function totals remain sourced from the raw range merge. */
+export function mergeShardLineHits(summary, lcovTexts) {
+  if (!Array.isArray(lcovTexts) || lcovTexts.length === 0) throw new Error('at least one shard lcov is required');
+  const shardHits = new Map();
+  const sourceKey = sourceFile => relative(summary.workingDirectory, resolve(summary.workingDirectory, sourceFile)).split(sep).join('/');
+  for (const [shard, text] of lcovTexts.entries()) {
+    if (typeof text !== 'string' || text.length === 0) throw new Error(`coverage shard ${shard + 1} has empty lcov`);
+    const records = parseLcovRecords(text);
+    if (records.length === 0) throw new Error(`coverage shard ${shard + 1} lcov has no source records`);
+    for (const record of records) {
+      if (!record.sourceFile) throw new Error(`coverage shard ${shard + 1} has an empty SF record`);
+      const key = sourceKey(record.sourceFile);
+      let lines = shardHits.get(key);
+      if (!lines) { lines = new Map(); shardHits.set(key, lines); }
+      for (const { line, hits } of record.da) {
+        if (!Number.isSafeInteger(line) || line < 1 || !Number.isSafeInteger(hits) || hits < 0) {
+          throw new Error(`coverage shard ${shard + 1} has an invalid DA record for ${record.sourceFile}`);
+        }
+        lines.set(line, Math.max(lines.get(line) ?? 0, hits));
+      }
+    }
+  }
+
+  const aggregate = new Map();
+  let rescuedLines = 0;
+  let rescuedHits = 0;
+  for (const file of summary.files) {
+    const key = sourceKey(relative(summary.workingDirectory, file.path));
+    aggregate.set(key, file);
+    const shardLines = shardHits.get(key);
+    if (!shardLines) continue;
+    const lineByNumber = new Map(file.lines.map((line) => [line.line, line]));
+    const coveredBefore = file.lines.filter((line) => line.count > 0).length;
+    const ignoredLines = file.coveredLineCount - coveredBefore;
+    for (const [lineNumber, hits] of shardLines) {
+      if (hits === 0) continue;
+      const line = lineByNumber.get(lineNumber);
+      if (!line) throw new Error(`shard LCOV reports a positive hit outside aggregate source ${key}:${lineNumber}`);
+      if (hits > line.count) {
+        if (line.count <= 0) rescuedLines++;
+        rescuedHits += hits - line.count;
+        line.count = hits;
+      }
+    }
+    const coveredAfter = file.lines.filter((line) => line.count > 0).length;
+    file.coveredLineCount = ignoredLines + coveredAfter;
+    file.coveredLinePercent = file.totalLineCount === 0 ? 100 : (file.coveredLineCount / file.totalLineCount) * 100;
+  }
+  for (const [key, lines] of shardHits) {
+    if ([...lines.values()].some((hits) => hits > 0) && !aggregate.has(key)) {
+      throw new Error(`shard LCOV has positive line hits missing from the raw range merge: ${key}`);
+    }
+  }
+  summary.totals.coveredLineCount = summary.files.reduce((sum, file) => sum + file.coveredLineCount, 0);
+  summary.totals.coveredLinePercent = summary.totals.totalLineCount === 0 ? 100 :
+    (summary.totals.coveredLineCount / summary.totals.totalLineCount) * 100;
+  return { shardCount: lcovTexts.length, rescuedLines, rescuedHits };
 }
 
 function readCoverageSource(file, limit = Infinity) {
@@ -681,10 +743,16 @@ export async function main(argv) {
       sha: { type: 'string' },
       'source-root': { type: 'string' },
       'shard-count': { type: 'string' },
+      'line-lcov': { type: 'string', multiple: true },
     },
   });
+  const lineLcovFiles = values['line-lcov'] === undefined ? [] :
+    Array.isArray(values['line-lcov']) ? values['line-lcov'] : [values['line-lcov']];
   if ([values.output, values['compact-output'], values['premap-output'], values['impact-map']].filter(Boolean).length !== 1) {
     throw new Error('exactly one of --output, --compact-output or --premap-output is required, or --impact-map alone');
+  }
+  if (lineLcovFiles.length > 0 && (!values.output || lineLcovFiles.length !== positionals.length)) {
+    throw new Error('--line-lcov requires --output and exactly one shard lcov per raw shard');
   }
   assertExpectedShardCount(positionals, values['shard-count']);
   if (values['impact-map']) {
@@ -712,11 +780,15 @@ export async function main(argv) {
     );
   } else {
     const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir, droppedRepeatInstances } = mergeRawCoverageDirectories(positionals);
+    const lineUnion = lineLcovFiles.length === 0 ? undefined :
+      mergeShardLineHits(summary, lineLcovFiles.map((file) => readFileSync(file, 'utf8')));
     writeFileSync(values.output, renderCoverageSummary(summary));
     console.log(
       `coverage-merge-ratchet: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${summary.files.length} source record(s), inputBytes=${inputBytes} stagingBytes=${stagingBytes} ` +
-        `peakBytes=${peakBytes} stagingDir=${stagingDir} droppedRepeatInstances=${droppedRepeatInstances} -> ${values.output}`,
+        `peakBytes=${peakBytes} stagingDir=${stagingDir} droppedRepeatInstances=${droppedRepeatInstances}` +
+        (lineUnion ? ` lineHitsRescued=${lineUnion.rescuedLines}/${lineUnion.rescuedHits} across ${lineUnion.shardCount} shard LCOV(s)` : '') +
+        ` -> ${values.output}`,
     );
   }
 }

@@ -48,7 +48,7 @@ import {
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
-  mergeDirectViaRest,
+  mergeDirectViaRestAsync,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -68,14 +68,14 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
-import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
@@ -2570,9 +2570,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         armAuto: () => { throw new Error("Pull request is in clean status"); },
         armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
-        mergeDirect: (prUrl) => {
+        mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -14018,38 +14018,58 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
-   *  fresh one taken after it. */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before this reading would have held container-short or host-short; the
+   *  reading is then the fresh one taken after it. */
   reclaim?: SlackReclaimRecord;
 }
 
-/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
- *  `reread` after a collection. Undefined when this process has no reclaimer. */
-export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+/** The daemon's own reclaim, as a reading's caller hands it in: given the short pool's figure (the container working
+ *  set, or the host's MemAvailable for `pool` "host"), reclaim once and call `reread` after a collection; `reread`
+ *  returns the same pool's fresh figure. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (
+  figureMib: number | undefined,
+  reread: () => number | undefined,
+  pool?: SlackReclaimPool,
+) => SlackReclaimRecord | undefined;
 
 /** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
-export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
-  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+export const installedSlackReclaim: SlackReclaim = (figureMib, reread, pool) =>
+  installedDaemonSlackReclaimer()?.reclaim(figureMib, reread, pool);
 
 /**
  * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
  * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
- * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
- * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. A paced or unavailable reclaim
+ * keeps `first`, named.
+ *
+ * W1-T9358 — A HOST-SHORT READING RECLAIMS TOO. The daemon's pages are the host's, so its freed slack is host memory:
+ * on 2026-10-14 00:19-00:31Z three host-short holds kept 3 empty lanes idle with no reclaim, while reclaims in the same
+ * hour freed 0.18-2.24 GB each. A host-short reading hands the reclaimer the host's MemAvailable, so its evidence
+ * pacing waits on the binding pool's own figure. ONE RECLAIM PER READING: a reading that already carries a reclaim (a
+ * container-short reading whose re-read came back host-short) is never reclaimed again. Any other tier, or no
+ * reclaimer, returns `first` unchanged.
  */
-export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+export function reclaimBeforeHold<T extends {
+  tier?: string;
+  container?: ContainerMemoryHeadroom;
+  hostAvailableMib?: number;
+  reclaim?: SlackReclaimRecord;
+}>(
   first: T,
   reread: () => T,
   reclaim: SlackReclaim | undefined,
 ): T {
-  if (first.tier !== "container-short" || reclaim === undefined) return first;
-  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
-    ? reading.container.workingSetMib : undefined;
+  if (reclaim === undefined || first.reclaim !== undefined) return first;
+  const pool: SlackReclaimPool | undefined = first.tier === "container-short" ? "container"
+    : first.tier === "host-short" ? "host" : undefined;
+  if (pool === undefined) return first;
+  const figure = (reading: T) => pool === "host" ? reading.hostAvailableMib
+    : reading.container !== undefined && "workingSetMib" in reading.container ? reading.container.workingSetMib : undefined;
   let fresh: T | undefined;
-  const record = reclaim(workingSet(first), () => {
+  const record = reclaim(figure(first), () => {
     fresh = reread();
-    return workingSet(fresh);
-  });
+    return figure(fresh);
+  }, pool);
   if (record === undefined) return first;
   return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
@@ -20084,7 +20104,7 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
 }
 
@@ -20095,7 +20115,9 @@ export interface MemoryGovernorResult {
  *
  *  TIERED for the container: below the floor it defers only while live work in this container can still free
  *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
- *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm's tier is unchanged; its caller
+ *  (`memoryGovernorGateFor`) reclaims the daemon's slack once before a host-short hold, as before a container-short
+ *  one (W1-T9358, see {@link reclaimBeforeHold}). */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
