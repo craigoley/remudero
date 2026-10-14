@@ -71,3 +71,68 @@ export function workerMcpIsolationEvidence(summary: WorkerInitSummary | undefine
   }
   return { ...base, inventory: "observed-only", reason: "approved-name-inventory" };
 }
+
+/**
+ * W1-T9489: THE MCP BOUNDARY EVERY CLAUDE SPAWN GETS, not only the #11666 opt-in above. Before it, every fix, implement,
+ * review and recon worker ran under bypassPermissions with all eight `mcp__claude_ai_Claude_Docs__*` tools, because the
+ * CLI attaches the fleet account's claude.ai connectors to any session that is not strict (120 ledger rows, 2026-10-13/14).
+ */
+export const WORKER_MCP_BOUNDARY = "strict" as const;
+/** The tool-name prefix every claude.ai account connector is offered under ("claude.ai X" normalizes to `claude_ai_X`). */
+export const ACCOUNT_CONNECTOR_TOOL_PREFIX = "mcp__claude_ai_";
+/**
+ * Defence in depth beside strictMcpConfig. Server-level entries, one per known connector, because the pinned CLI (2.1.293,
+ * SDK 0.3.293) matches a server-level deny by EXACT server name: `mcp__claude_ai_*` parses as the server `claude_ai_*`,
+ * which names no server, so that spelling would be a silent no-op (its agent() validator says "server names take no
+ * wildcard"). strictMcpConfig is the control that stops ANY connector loading; a connector missing from this list is
+ * still caught by {@link workerMcpExposure} after the run.
+ */
+export const ACCOUNT_CONNECTOR_DENY: readonly string[] = [
+  "mcp__claude_ai_Claude_Docs",
+  "mcp__claude_ai_Gmail",
+  "mcp__claude_ai_Google_Calendar",
+  "mcp__claude_ai_Google_Drive",
+  "mcp__claude_ai_Vercel",
+];
+
+/** Apply the boundary to a spawn's final options: strict MCP config with an explicit server map (whatever the spawn
+ * already declared, else none) and the connector denies MERGED with any caller list, never replacing it. */
+export function applyWorkerMcpBoundary(options: Options): void {
+  options.strictMcpConfig = true;
+  options.mcpServers = { ...options.mcpServers };
+  options.disallowedTools = [...new Set([...(options.disallowedTools ?? []), ...ACCOUNT_CONNECTOR_DENY])];
+}
+
+/** The same boundary for the control-only usage probe, which declares no server of its own. */
+export function workerMcpProbeBoundary(): Pick<Options, "strictMcpConfig" | "mcpServers"> {
+  return { strictMcpConfig: true, mcpServers: {} };
+}
+
+export interface WorkerMcpExposure {
+  /** `exposed`: the inventory names a capability outside the boundary. `unknown`: no complete inventory to judge. */
+  state: "exposed" | "unknown";
+  /** MCP tools offered from outside the spawn's own servers (every `mcp__claude_ai_*` tool is one). */
+  tools: string[];
+  /** Server names outside the spawn's own `mcpServers` keys. */
+  servers: string[];
+  /** Server entries the init summary could not render. "claude.ai Claude Docs" is one: it has spaces, so it never
+   * reaches `serverNames.names` and only this count shows it. */
+  rejected_server_entries: number;
+  /** The worker's own result subtype, kept when an exposure replaces it. */
+  original_subtype?: string;
+}
+
+/** Judge one Claude spawn's init inventory against its own server map. `undefined` means observed and clean; a missing,
+ * partial or truncated inventory is `unknown`, never clean. */
+export function workerMcpExposure(summary: WorkerInitSummary | undefined, allowedServers: readonly string[]): WorkerMcpExposure | undefined {
+  const allowed = new Set(allowedServers);
+  const tools = (summary?.mcpToolNames.names ?? []).filter(name =>
+    name.startsWith(ACCOUNT_CONNECTOR_TOOL_PREFIX) || !allowed.has(name.split("__")[1] ?? ""));
+  const servers = (summary?.serverNames.names ?? []).filter(name => !allowed.has(name));
+  const rejected = summary?.serverNames.rejectedEntries ?? 0;
+  if (tools.length > 0 || servers.length > 0 || rejected > 0) {
+    return { state: "exposed", tools, servers, rejected_server_entries: rejected };
+  }
+  if (summary?.state !== "observed") return { state: "unknown", tools: [], servers: [], rejected_server_entries: 0 };
+  return undefined;
+}

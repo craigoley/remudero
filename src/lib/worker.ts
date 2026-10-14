@@ -1,6 +1,7 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
-import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence,
-  type WorkerMcpIsolation, type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
+import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
+  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_BOUNDARY, type WorkerMcpExposure, type WorkerMcpIsolation,
+  type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -250,6 +251,12 @@ export function workerExitOfError(e: unknown): WorkerExit {
 export interface WorkerResult {
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
   mcpIsolation?: WorkerMcpIsolationEvidence;
+  /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
+   * ones without a date cutoff. Absent on Codex/cash calls and on hand-built fixtures. */
+  mcpBoundary?: typeof WORKER_MCP_BOUNDARY;
+  /** W1-T9489: present when the init inventory showed a capability outside the boundary (`exposed`, the run then earns no
+   * success credit) or gave no complete inventory to judge (`unknown`). Absent means observed and clean. */
+  mcpExposure?: WorkerMcpExposure;
   /** Bounded observational SDK init names; raw auth/configuration envelopes are never retained. */
   initSummary?: WorkerInitSummary;
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
@@ -581,6 +588,8 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
   mcp_isolation?: WorkerMcpIsolationEvidence;
+  mcp_boundary?: typeof WORKER_MCP_BOUNDARY;
+  mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
@@ -636,6 +645,8 @@ export function workerLedgerFields(r: WorkerResult): {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
+    ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
+    ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
@@ -1106,7 +1117,7 @@ export interface SpawnWorkerArgs {
   /** Tool names this spawn is never offered, threaded to the SDK's `Options.disallowedTools`. Deliberately NOT the settings
    * `deny` list: that floor is hook-enforced, and {@link DenyFloorVerdict} exists because the block can LEAK under
    * `bypassPermissions` (claude-code#20946), whereas a disallowed tool is never presented to the model at all. Default
-   * UNRESTRICTED (W1-T2591). */
+   * UNRESTRICTED for the caller (W1-T2591); the claude.ai account-connector denies are merged in on every spawn (W1-T9489). */
   disallowedTools?: readonly string[];
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
@@ -3083,8 +3094,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         args.onSpawnError,
       ),
     };
-    // Omitted entirely when unset, so an unrestricted spawn's option object is byte-identical to what it was — never
-    // `disallowedTools: undefined`, a different object for the SDK (W1-T2591).
+    // The caller's own list. Every spawn's final list also carries the account-connector denies, merged in by
+    // applyWorkerMcpBoundary below, so no spawn's `disallowedTools` is absent any more (W1-T9489 retires W1-T2591's
+    // "unrestricted spawn is byte-identical" note).
     if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
     // Never unnamed: the CLI's own default is Opus with a 1M context (measured 2026-09-22), not the worker tier.
@@ -3202,6 +3214,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
       // so a provider refusal cannot leave the watchdog running after the caller catches it.
       if (args.mcpIsolation) applyWorkerMcpIsolation(options);
+      // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
+      // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
+      applyWorkerMcpBoundary(options);
+      const boundaryServers = Object.keys(options.mcpServers ?? {});
       const liveQuery = runQuery({ prompt: args.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3244,6 +3260,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
         if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;
       }
+      // W1-T9489: the tripwire at the producer. A worker offered anything outside its own server map is ledgered as exposed
+      // and earns no success credit: the subtype changes too, because callers grade `{isError, subtype: "success"}` as clean.
+      result.mcpBoundary = WORKER_MCP_BOUNDARY;
+      const exposure = workerMcpExposure(result.initSummary, boundaryServers);
+      if (exposure?.state === "exposed") {
+        exposure.original_subtype = result.subtype;
+        result.isError = true;
+        result.subtype = "error_mcp_exposure";
+      }
+      if (exposure) result.mcpExposure = exposure;
       if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;
       result.selectionAssignmentId = selectionAssignmentId;
@@ -3304,7 +3330,7 @@ export interface UsageProbeSession {
  * SpawnWorkerArgs.queryFn}. */
 export type UsageProbeQueryFn = (params: {
   prompt: AsyncIterable<never>;
-  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable">;
+  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable" | "strictMcpConfig" | "mcpServers">;
 }) => UsageProbeSession;
 
 /** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to
@@ -3382,7 +3408,8 @@ export function openUsageProbeSession(
   // `runQuery` creates no connection and is not what this stops.
   if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
   const q = runQuery ?? ((p: Parameters<UsageProbeQueryFn>[0]) => query(p as never) as unknown as UsageProbeSession);
-  const options: Parameters<UsageProbeQueryFn>[0]["options"] = { settingSources: [] };
+  // W1-T9489: the probe opens on the same config dir as a worker, so it gets the same strict, empty server map.
+  const options: Parameters<UsageProbeQueryFn>[0]["options"] = { settingSources: [], ...workerMcpProbeBoundary() };
   // Hand the SDK the binary spawnWorker already resolved once per process. Unset, the SDK's query() picks its own binary and,
   // on Linux, runs a synchronous, uncached process.report.getReport() to choose musl or glibc on EVERY probe — 56 s of self
   // time in the 2026-10-14 loop-stall profile. A resolution failure is never a new failure: the probe opens as before and the
