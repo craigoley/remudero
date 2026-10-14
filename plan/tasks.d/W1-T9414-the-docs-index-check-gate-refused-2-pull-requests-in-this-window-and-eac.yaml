@@ -1,0 +1,29 @@
+- id: W1-T9414
+  title: "THE docs-index-check GATE REFUSED 2 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:11388:docs-index-check"
+  ci_learning_prs: [11388, 11524]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the docs-index-check gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:11388:docs-index-check in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:11388:docs-index-check. The docs-index-check gate went red on #11388 and was repaired; the repair touched docs/docs-index.json, docs/README.md, test/a-refused-green-merge-records-why-and-reruns-a-stale-check.test.ts, test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts, test/run-task.test.ts. Recommended action: docs. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared scope is a single file, learnings/ci.yaml, which is a guidance/learnings file. The description doesn't show it touching secrets, auth, deletions, or merge/deploy/review policy."
+      - "The acceptance check is a grep for a matched learnings entry. That is verifiable from what is shown, and the evidence says the declared file exists at the base."
+      - "The ci-learning family has a good track record (21 merged, 1 declined, Beta mean 0.92). The task is machine-authored and parked, and its PR still goes through CI and review."
+    judged_at: "2026-10-14T09:46:14.436Z"
+    pin: "3c680349099de68ce635948ab504a3b9d3a82ce2adf543d747a46234b08a5586"

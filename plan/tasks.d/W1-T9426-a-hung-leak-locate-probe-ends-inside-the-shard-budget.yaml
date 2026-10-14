@@ -1,0 +1,57 @@
+- id: W1-T9426
+  title: "A HUNG LEAK-LOCATE PROBE STILL HOLDS A FINISHED ci-shard TO ITS 35-MINUTE CANCEL — on 2026-10-14 #11629's ci-shard (1/8) passed 1358/1358 by 10:37Z, then pure-test-pool's locate probe 11 ran 18 min and the job was cancelled at 11:07Z, so ci read SHARD HANG and the PR was escalated needs-human (#11639)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — the leak locator ends inside the shard's own budget
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 PR-queue review: root cause of #11629's SHARD HANG red (W1-T9410's build PR)"
+  plan_refs: [W1-T6085, W1-T8038, W1-T8040]
+  files: [scripts/pure-test-pool.mjs, test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, read-only, CI run 38545761514 attempt 4, job 115806194885 (ci-shard (1/8) of #11629,
+    head 3b421f3; the PR touches only deploy/recycle-container.sh and its own new test, which is not in shard 1):
+      - 10:37:16Z "test-tier-manifest: rest run complete — 119/119 file(s) reported, # tests 1358, # fail 0."
+      - 10:37:17Z "pure-test-pool: every pooled file passes isolated; locating the leak among 251 file(s)
+        (shard status 0 is already final)."
+      - Probes 1-10 took about 30 s each. Probe 11 started 10:41:37Z and logged at 11:00:01Z (18.4 min,
+        71 files). Probe 12 logged at 11:00:17Z. At 11:07:32Z "##[error]The operation was canceled." (the
+        job's 35-minute timeout-minutes).
+      - The `ci` aggregator then failed with "SHARD HANG — the matrix was cancelled while the PR head ... was
+        unchanged", and the sweep's fix lane stood down on needs-human issue #11639. A shard that had already
+        passed every test was reported as a hang.
+    READ on origin/main ce329e86d, scripts/pure-test-pool.mjs, runShardWithPool: #10880 moved the isolated rest
+    BEFORE location and made locateLeak O(log n). Each probe is still `run(subset, { pool: true, quiet: true,
+    role: "locate" })` with no deadline, and the probe loop has no budget. One slow or hung probe therefore
+    still spends the job's whole remaining time, and the runner's cancel replaces the final status.
+  design: |
+    No new fixed constant. Bound the diagnostic by what this shard has measured.
+    1. Time the first, full pool run. A locate probe runs a SUBSET of that pool, so give each probe a deadline
+       equal to that measured full-pool wall time. A probe past its deadline is killed (its whole process
+       group) and counted as "hung", not as pass or fail.
+    2. When the job's remaining time is known (pass the job's timeout-minutes and start time from ci.yml as
+       env), stop starting probes once the measured average probe time no longer fits in what is left.
+    3. On a hung probe or a stopped search, end location at once. Log one line naming the probe, its file
+       count, its last file, and why it stopped. Report the leak as "not isolated" with the files the search
+       had narrowed to. Return the shard's already-final status, so the job finishes before its cancel and
+       the aggregator never reads a finished shard as a hang.
+    Tests go in the new file, titled verbatim as in the proofs. Drive runShardWithPool with an injected `run`
+    whose pool run fails, whose isolated rerun passes, and whose Nth locate probe never returns before its
+    deadline.
+  acceptance:
+    - claim: "a locate probe that outlives the measured full-pool run is stopped and ends location"
+      proof: 'grep: test("W1-T9426: a locate probe past the full pool run time is killed and ends the search" in test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts'
+    - claim: "the shard returns its already-final status after a hung probe"
+      proof: 'grep: test("W1-T9426: a hung locate probe leaves the shard status final and green" in test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts'
+    - claim: "location stops starting probes when the remaining job budget cannot fit another"
+      proof: 'grep: test("W1-T9426: no probe starts once the remaining job budget cannot fit one" in test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts'
+  falsifier: |
+    On main, call runShardWithPool with a `run` stub whose pool run returns 1, whose isolated rerun and rest
+    return 0, and whose third locate probe blocks. runShardWithPool never returns: nothing bounds a probe, so
+    in CI the runner's 35-minute cancel is what ends the shard.

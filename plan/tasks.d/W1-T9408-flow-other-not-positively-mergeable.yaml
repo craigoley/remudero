@@ -1,0 +1,37 @@
+- id: W1-T9408
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — other:not positively mergeable cost 2.72 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.29
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:other:not positively mergeable"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-other-not-positively-mergeable.test.ts
+  acceptance:
+    - claim: "other:not positively mergeable is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T9408: flow-other-not-positively-mergeable clears without a person\" in test/flow-other-not-positively-mergeable.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    other:not positively mergeable cost 2.72 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #11559: 0.76 PR-hours — not positively mergeable — checks none, review none — escalating
+    - PR #9168: 0.53 PR-hours — not positively mergeable — checks none, review none — escalating
+    - PR #9886: 0.23 PR-hours — not positively mergeable — checks none, review none — escalating
+    - PR #9885: 0.22 PR-hours — not positively mergeable — checks none, review none — escalating
+    - PR #11504: 0.22 PR-hours — not positively mergeable — checks none, review none — escalating
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record requires automatic clearance of “not positively mergeable” in src/lib/sweep.ts but specifies no bounded remedy or cause diagnosis; the five cited PRs establish blocker recurrence and cost only.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration, which cannot verify automatic clearance or preservation of merge and review policy. The gates explicitly require HIGH when the finding cannot be verified from what is shown."
+    judged_at: "2026-10-14T08:52:57.243Z"
+    pin: "2660296050b5a356a383a4217c582d00d649b94e2b4894182c07745b4b6f81e1"

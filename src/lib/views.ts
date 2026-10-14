@@ -160,6 +160,10 @@ export interface ViewBodyEntry {
   key: string;
   version: number;
   generation: number;
+  /** Trusted producer contract identity, persisted separately from the public body and projector counter. */
+  qualificationGeneration?: string;
+  /** A stored body remains readable, but malformed/mismatched qualification metadata is explicitly unknown. */
+  qualificationReason?: string;
   etag: string;
   body: ViewBody;
   /** When the build that produced it began (its first bounded step); absent on a stored or slow-lane body. Not persisted. */
@@ -181,6 +185,8 @@ export interface ViewBodySource {
   onBody?(listener: (entry: ViewBodyEntry) => void): () => void;
   /** Each `auto` view's effective mode as the main thread last resolved it; unknown readiness holds it. */
   autoMode?(view: string): EffectiveViewMode | undefined;
+  /** The current producer's required shadow qualification, independent of any warm body's provenance. */
+  qualificationGeneration?(view: string): string | undefined;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -189,11 +195,16 @@ export type EffectiveViewMode = Exclude<ViewSwitchMode, "auto">;
 /** The read model's own status view, whose body carries every shadowed view's persisted readiness. */
 export const READ_MODEL_STATUS_VIEW = "read-model";
 /** The fields of view-shadow.ts's `ShadowReadiness` an `auto` switch reads (a type import of it would be a cycle). */
-export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null };
+export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null; qualificationGeneration?: string };
 
 /** `view`'s readiness as the status body last showed it; `undefined` when it shows none, which is UNKNOWN, not not-ready. */
-export function shownReadiness(readModel: Pick<ViewBodySource, "body"> | undefined, view: string): ShownReadiness | undefined {
-  return (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
+export function shownReadiness(readModel: Pick<ViewBodySource, "body" | "qualificationGeneration"> | undefined, view: string): ShownReadiness | undefined {
+  const shown = (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
+  const required = readModel?.qualificationGeneration?.(view);
+  if (required !== undefined && shown?.qualificationGeneration !== required) {
+    return { ready: false, reason: `no shadow qualification for current generation ${required}`, samples: 0, lastRealMs: null, qualificationGeneration: required };
+  }
+  return shown;
 }
 
 /**
@@ -206,7 +217,7 @@ export function effectiveViewMode(mode: ViewSwitchMode | undefined, readiness: P
 }
 
 /** A view's effective mode as serve's main thread sees it: its switch, and for `auto` the readiness its status body shows. */
-export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches" | "autoMode"> | undefined, view: string): EffectiveViewMode | undefined {
+export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches" | "autoMode" | "qualificationGeneration"> | undefined, view: string): EffectiveViewMode | undefined {
   const mode = readModel?.switches().views[view];
   return mode === "auto" ? effectiveViewMode(mode, shownReadiness(readModel, view), readModel?.autoMode?.(view)) : mode;
 }
@@ -281,17 +292,21 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
         return;
       }
-      const mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+      let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
       if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
       const key = viewKey(params);
-      const entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
+      let entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
+      const required = opts.readModel?.qualificationGeneration?.(name);
+      const qualificationRefused = mode === "serve" && opts.readModel?.switches().views[name] === "auto" && required !== undefined && entry?.qualificationGeneration !== required
+        ? `no matched body for current generation ${required}` : undefined;
+      if (qualificationRefused !== undefined) { mode = "shadow"; entry = undefined; }
       const fallback = legacy.get(name);
       const answer = (served: ViewBodyEntry | undefined): void => {
         const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
         if (rendered === undefined) {
           res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name }));
+          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name, ...(qualificationRefused === undefined ? {} : { reason: qualificationRefused }) }));
           return;
         }
         if ("error" in rendered) {

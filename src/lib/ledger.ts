@@ -694,6 +694,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
   // rotating it away loses the only evidence the judge acted.
   "escalation.judged",
+  // W1-T8868. READER: the stale re-judge pass skips an issue state already settled here
+  // (`escalation.rejudged`), and `escalation.auto_resolve_attempted` is the only record that a
+  // reversible triage action ran before its issue was opened — the audit row an undo starts from.
+  "escalation.rejudged",
+  "escalation.auto_resolve_attempted",
   // W1-T3212: `ruling.judged` is the ONLY record of what the ruling judge decided and why, on
   // both arms. Nothing else writes it, and no measurement yet establishes that this judge
   // calibrates well — reading the first weeks of these rows is what will settle that, so a

@@ -505,6 +505,8 @@ components:
             state:
               type: string
               enum: [running, stalled, unreadable]
+        fleetRuntimeHealth:
+          $ref: "#/components/schemas/FleetRuntimeHealth"
         needsYou:
           description: >
             W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's
@@ -513,6 +515,54 @@ components:
           $ref: "#/components/schemas/HumanGateCountSummary"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    FleetRuntimeHealth:
+      type: object
+      description: >
+        W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from
+        shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`)
+        is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading.
+        Carries destinations and reason codes only: no host paths, credential or config contents.
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [healthy, drift, unknown]
+        reason:
+          type: string
+        observedAt:
+          type: string
+        ageMs:
+          type: number
+        container:
+          type: string
+        checked:
+          type: integer
+        drift:
+          type: array
+          items:
+            type: object
+            required: [destination, reason]
+            properties:
+              destination:
+                type: string
+              reason:
+                type: string
+                enum: [missing, wrong_source, read_only, read_write]
+        alert:
+          type: object
+          description: Present only on `drift`. `remedy` is a NAME for the operator; no action is attached.
+          required: [severity, title, detail, remedy]
+          properties:
+            severity:
+              type: string
+              enum: [critical]
+            title:
+              type: string
+            detail:
+              type: string
+            remedy:
+              type: string
 
     StatusCounts:
       type: object
@@ -8113,6 +8163,13 @@ components:
       required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, keys, requestsPerDay, requiredSamples, ready, reason]
       properties:
         view: {type: string}
+        qualificationGeneration:
+          type: string
+          maxLength: 160
+          description: "The current producer contract these counters qualify; older generations remain archived, not counted."
+        skipped: {type: integer, minimum: 0, description: "Samples refused because either matched producer or source was not ready."}
+        lastSkippedMs: {type: integer, minimum: 0}
+        lastSkipReason: {type: string}
         requests: {type: integer}
         firstRequestMs: {type: [integer, "null"]}
         samples: {type: integer}
@@ -8788,17 +8845,108 @@ components:
       properties:
         proposals:
           type: array
+          maxItems: 100
           items:
             type: object
             required: [proposalId, category, signal, confidence]
             properties:
-              proposalId: {type: string}
+              proposalId: {type: string, maxLength: 512}
               category: {type: string}
-              signal: {type: string}
+              signal: {type: string, maxLength: 160}
               confidence: {type: number}
+        recordVersion:
+          type: string
+          enum: [operator-agent-records-v1]
+        records:
+          type: array
+          maxItems: 100
+          description: >
+            W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are
+            observations from the sole native ranking evaluation, never registered ledger history. Interpret
+            detail freshness together with the envelope sources and stale flag. Unknown details stay explicit.
+          items:
+            type: object
+            required: [proposalId, detail, durable]
+            properties:
+              proposalId: {type: string, maxLength: 512}
+              detail:
+                oneOf:
+                  - $ref: "#/components/schemas/AgentGeneratedRecommendation"
+                  - type: object
+                    required: [state, reason]
+                    properties:
+                      state: {type: string, enum: [unavailable]}
+                      reason: {type: string}
+              durable:
+                oneOf:
+                  - type: object
+                    required: [state]
+                    properties:
+                      state: {type: string, enum: [unregistered]}
+                  - type: object
+                    required: [state, source, createdAt, status]
+                    properties:
+                      state: {type: string, enum: [registered]}
+                      source: {type: string, enum: [ledger]}
+                      createdAt: {type: string, format: date-time}
+                      status: {type: string, enum: [pending, accepted, rejected, expired]}
+        coverage:
+          type: object
+          required: [ranked, published, complete, unavailable, capped]
+          description: >
+            Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail
+            remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0.
+            Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine.
+          properties:
+            ranked: {type: integer, minimum: 0}
+            published: {type: integer, minimum: 0}
+            complete: {type: integer, minimum: 0}
+            unavailable: {type: integer, minimum: 0}
+            capped: {type: integer, minimum: 0}
         reason:
           type: string
-          description: Why no proposal is generated (no repository, or no committed analytics snapshot yet).
+          description: Why generation or publication was refused, including missing, malformed or over-budget sources.
+
+    AgentGeneratedRecommendation:
+      type: object
+      required: [state, kind, observationId, repository, instanceId, proposalText, reasoning, observedAt, scoreKind, evidence, unavailable]
+      properties:
+        state: {type: string, enum: [reported]}
+        kind: {type: string, enum: [generated-recommendation]}
+        observationId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        repository: {type: string, maxLength: 160}
+        instanceId: {type: string, maxLength: 160}
+        proposalText: {type: string, maxLength: 600}
+        reasoning: {type: string, maxLength: 1400}
+        observedAt: {type: string, format: date-time}
+        scoreKind:
+          type: string
+          enum: [native-heuristic]
+          description: The rank confidence is the existing heuristic, not a calibrated probability or an approval grant.
+        evidence:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [key, value, unit, source, observedAt, freshness, window]
+            properties:
+              key: {type: string}
+              value: {type: number, minimum: 0}
+              unit: {type: string, enum: [count, tokens, tokens/run, ms, ratio]}
+              source: {type: string}
+              observedAt: {type: string, format: date-time}
+              freshness: {type: string, enum: [fresh]}
+              window:
+                type: [object, "null"]
+                required: [start, end]
+                properties:
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+        unavailable:
+          type: array
+          maxItems: 6
+          items: {type: string}
+          description: Named unknowns, including source window, independent samples, causation, cost, savings and consent.
 
     NeedsYouView:
       type: object
@@ -10552,6 +10700,236 @@ components:
         at:
           type: [string, "null"]
 
+    InboxDismissalAudit:
+      type: object
+      description: Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed.
+      required:
+        - contract
+        - state
+        - scope
+        - window
+        - coverage
+        - controls
+        - denominator
+        - observed
+        - measurement
+        - items
+        - truncated
+      properties:
+        contract:
+          type: string
+          enum:
+            - inbox-dismissal-audit-v1
+        state:
+          type: string
+          enum:
+            - measured
+            - unmeasurable
+        scope:
+          type: object
+          required:
+            - instance
+            - repository
+          properties:
+            instance:
+              type:
+                - string
+                - "null"
+            repository:
+              type:
+                - string
+                - "null"
+        window:
+          type: object
+          required:
+            - from
+            - to
+          properties:
+            from:
+              type: string
+              format: date-time
+            to:
+              type: string
+              format: date-time
+        coverage:
+          type: object
+          required:
+            - receipts
+            - outcomes
+            - plan
+            - registry
+          properties:
+            receipts:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            outcomes:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            plan:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            registry:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+        controls:
+          type: object
+          required:
+            - heldSecurity
+            - terminalMechanical
+          properties:
+            heldSecurity:
+              type: object
+              required:
+                - taskId
+                - observed
+                - passed
+              properties:
+                observed:
+                  type: boolean
+                passed:
+                  type: boolean
+                taskId:
+                  type: string
+                  enum:
+                    - W1-T216
+            terminalMechanical:
+              type: object
+              required:
+                - observed
+                - passed
+              properties:
+                observed:
+                  type: boolean
+                passed:
+                  type: boolean
+        denominator:
+          type: object
+          description: Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped.
+          required:
+            - eligible
+            - sampled
+            - returned
+            - unqualified
+            - foreign
+            - duplicates
+            - conflicting
+          properties:
+            eligible:
+              type: integer
+              minimum: 0
+            sampled:
+              type: integer
+              minimum: 0
+            returned:
+              type: integer
+              minimum: 0
+            unqualified:
+              type: integer
+              minimum: 0
+            foreign:
+              type: integer
+              minimum: 0
+            duplicates:
+              type: integer
+              minimum: 0
+            conflicting:
+              type: integer
+              minimum: 0
+        observed:
+          type: object
+          description: Observed lower bounds, never a certified zero without coverage.
+          required:
+            - falseDismissals
+            - terminalConfirmed
+            - restored
+            - unresolved
+          properties:
+            falseDismissals:
+              type: integer
+              minimum: 0
+            terminalConfirmed:
+              type: integer
+              minimum: 0
+            restored:
+              type: integer
+              minimum: 0
+            unresolved:
+              type: integer
+              minimum: 0
+        measurement:
+          type: object
+          required:
+            - falseDismissals
+            - falseDismissalRate
+          properties:
+            falseDismissals:
+              type:
+                - integer
+                - "null"
+              minimum: 0
+            falseDismissalRate:
+              type:
+                - number
+                - "null"
+              minimum: 0
+              maximum: 1
+        items:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required:
+              - receiptId
+              - proposalId
+              - taskId
+              - snapshotKey
+              - retiredAt
+              - outcome
+              - restored
+              - evidence
+            properties:
+              receiptId:
+                type: string
+              proposalId:
+                type: string
+              taskId:
+                type:
+                  - string
+                  - "null"
+              snapshotKey:
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              retiredAt:
+                type: string
+                format: date-time
+              outcome:
+                type: string
+                enum:
+                  - false_dismissal
+                  - terminal_confirmed
+                  - unresolved
+              restored:
+                type: boolean
+              evidence:
+                type: array
+                maxItems: 3
+                items:
+                  type: string
+        truncated:
+          type: boolean
+
     InboxAttentionCensusResult:
       type: object
       description: >
@@ -10559,6 +10937,8 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        dismissalAudit:
+          $ref: "#/components/schemas/InboxDismissalAudit"
         planSource:
           $ref: "#/components/schemas/PlanSource"
         scope:

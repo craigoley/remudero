@@ -197,9 +197,30 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      fleetRuntimeHealth?: FleetRuntimeHealth;
       /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
       needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
+    };
+    /** W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`) is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading. Carries destinations and reason codes only: no host paths, credential or config contents. */
+    FleetRuntimeHealth: {
+      state: "healthy" | "drift" | "unknown";
+      reason?: string;
+      observedAt?: string;
+      ageMs?: number;
+      container?: string;
+      checked?: number;
+      drift?: ({
+        destination: string;
+        reason: "missing" | "wrong_source" | "read_only" | "read_write";
+      })[];
+      /** Present only on `drift`. `remedy` is a NAME for the operator; no action is attached. */
+      alert?: {
+        severity: "critical";
+        title: string;
+        detail: string;
+        remedy: string;
+      };
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
     StatusCounts: {
@@ -3389,6 +3410,12 @@ export interface components {
     /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a day of continuous sampling since the last one: at least one sample per minute for every key the streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured traffic is higher (the rule of three). */
     ViewShadowReadiness: {
       view: string;
+      /** The current producer contract these counters qualify; older generations remain archived, not counted. */
+      qualificationGeneration?: string;
+      /** Samples refused because either matched producer or source was not ready. */
+      skipped?: number;
+      lastSkippedMs?: number;
+      lastSkipReason?: string;
       requests: number;
       firstRequestMs: number | null;
       samples: number;
@@ -3717,8 +3744,59 @@ export interface components {
         signal: string;
         confidence: number;
       })[];
-      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      recordVersion?: "operator-agent-records-v1";
+      /** W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are observations from the sole native ranking evaluation, never registered ledger history. Interpret detail freshness together with the envelope sources and stale flag. Unknown details stay explicit. */
+      records?: ({
+        proposalId: string;
+        detail: (AgentGeneratedRecommendation) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        durable: ({
+          state: "unregistered";
+        }) | ({
+          state: "registered";
+          source: "ledger";
+          createdAt: string;
+          status: "pending" | "accepted" | "rejected" | "expired";
+        });
+      })[];
+      /** Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0. Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine. */
+      coverage?: {
+        ranked: number;
+        published: number;
+        complete: number;
+        unavailable: number;
+        capped: number;
+      };
+      /** Why generation or publication was refused, including missing, malformed or over-budget sources. */
       reason?: string;
+    };
+    AgentGeneratedRecommendation: {
+      state: "reported";
+      kind: "generated-recommendation";
+      observationId: string;
+      repository: string;
+      instanceId: string;
+      proposalText: string;
+      reasoning: string;
+      observedAt: string;
+      /** The rank confidence is the existing heuristic, not a calibrated probability or an approval grant. */
+      scoreKind: "native-heuristic";
+      evidence: ({
+        key: string;
+        value: number;
+        unit: "count" | "tokens" | "tokens/run" | "ms" | "ratio";
+        source: string;
+        observedAt: string;
+        freshness: "fresh";
+        window: {
+          start: string;
+          end: string;
+        } | null;
+      })[];
+      /** Named unknowns, including source window, independent samples, causation, cost, savings and consent. */
+      unavailable: (string)[];
     };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
@@ -4538,8 +4616,71 @@ export interface components {
       decision?: "needs_operator" | "automate" | "backlog";
       at?: string | null;
     };
+    /** Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed. */
+    InboxDismissalAudit: {
+      contract: "inbox-dismissal-audit-v1";
+      state: "measured" | "unmeasurable";
+      scope: {
+        instance: string | null;
+        repository: string | null;
+      };
+      window: {
+        from: string;
+        to: string;
+      };
+      coverage: {
+        receipts: "observed" | "partial" | "unavailable";
+        outcomes: "observed" | "partial" | "unavailable";
+        plan: "observed" | "partial" | "unavailable";
+        registry: "observed" | "partial" | "unavailable";
+      };
+      controls: {
+        heldSecurity: {
+          observed: boolean;
+          passed: boolean;
+          taskId: "W1-T216";
+        };
+        terminalMechanical: {
+          observed: boolean;
+          passed: boolean;
+        };
+      };
+      /** Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped. */
+      denominator: {
+        eligible: number;
+        sampled: number;
+        returned: number;
+        unqualified: number;
+        foreign: number;
+        duplicates: number;
+        conflicting: number;
+      };
+      /** Observed lower bounds, never a certified zero without coverage. */
+      observed: {
+        falseDismissals: number;
+        terminalConfirmed: number;
+        restored: number;
+        unresolved: number;
+      };
+      measurement: {
+        falseDismissals: number | null;
+        falseDismissalRate: number | null;
+      };
+      items: ({
+        receiptId: string;
+        proposalId: string;
+        taskId: string | null;
+        snapshotKey: string;
+        retiredAt: string;
+        outcome: "false_dismissal" | "terminal_confirmed" | "unresolved";
+        restored: boolean;
+        evidence: (string)[];
+      })[];
+      truncated: boolean;
+    };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";

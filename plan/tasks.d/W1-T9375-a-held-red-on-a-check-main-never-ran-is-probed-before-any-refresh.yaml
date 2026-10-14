@@ -1,0 +1,101 @@
+- id: W1-T9375
+  title: "A HELD RED ON A CHECK MAIN NEVER RAN IS PROBED AT THE NEW TIP BEFORE ANY REFRESH — `decideBaseRed` returns `refresh` as soon as main reads green, before the fix rung's W1-T6024 probe runs, so an inherited `rule-checks` red (a check main's census never observes) is refreshed onto a main tip nobody probed; OBSERVED at origin/main 633bcb91f on both refresh paths"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a green main justifies a refresh only for a check its reading observed
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-13: file the W1-T7848 known limit (at a new main tip, a held rule red refreshes before any probe)"
+  plan_refs: [W1-T4351, W1-T6024, W1-T6405, W1-T7848, W1-T8396, W1-T7735]
+  files: [src/lib/sweep.ts, test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 510cfc997 (2026-10-14). `decideBaseRed`, its two call sites and the probe block are
+    unchanged from 633bcb91f, where the observation below was run: the only src/lib/sweep.ts changes since are one
+    added import line (every line cited here moved down by one) and edits near line 21,000.
+    WHERE THE REFRESH COMES FROM:
+      - `decideBaseRed` (src/lib/sweep.ts:8541) has two paths that return `refresh` once main reads green:
+        (a) a stand-down recorded for this head (`history.stoodDown`, :8563), and (b) W1-T6024's
+        `history.reproducedBeforeGreen` (:8566): a `sweep.base_reproduction` row with verdict `reproduced`,
+        followed by a `main.health.observed` row green on its own head (`isMainGreenOnItsOwnHead`,
+        src/lib/base-reproduction.ts:106).
+      - Neither path asks whether main's reading observed the check. `main.observedChecks` is read only while
+        main is red (:8550-8557).
+      - In the fix rung, `decideBaseRed` (the "W1-T4351 — A RED MAIN ALSO CARRIES" block, :17442-17447) runs
+        before the W1-T6024 probe block (`baseReproductionFiles(ciFailuresForFix)`, :17675). A `refresh` breaks
+        out first, so the probe never runs at the new tip.
+    WHY GREEN SAYS NOTHING HERE:
+      - `rule-checks` runs only on pull_request and merge_group. Main's push lane never posts it, so it is never
+        in `observed_checks`. W1-T7848 added the only observer: a probe's `main.rule_checks.observed` row, folded
+        into main's reading only at that row's own `main_sha`.
+      - At a newer tip M2 with no probe yet, main reads green with `rule-checks` absent from `observedChecks`.
+        That green says nothing about the rule suite, yet both paths refresh on it.
+    OBSERVED (scratch run on 633bcb91f, harness copied from test/main-health-observes-the-rule-suites.test.ts,
+    with a probe that still FAILS the suite at M2):
+      - Path (b): #9724's rule-checks red was reproduced at M1, then `main.health.observed` was green on its own
+        head at M2. Result: `stoodDown` [], `reproducedBeforeGreen` ["9724@f…"], main at M2 green with
+        `observedChecks` ["ci","ci-shard (1/8)","coverage-ratchet","ci-gate"]; refreshed [9724], probed at M2 [],
+        fixed [].
+      - Path (a): another PR's probe recorded rule-checks red at M1, so #9800 was stood down at M1 (`stoodDown`
+        ["9800@c…","rule-checks"], probed []). At M2, main was green on its own head. Result: refreshed [9800],
+        probed at M2 [], fixed [].
+      - Both stand-down reasons read "rule-checks was held while main was red; main is green at M2, so the branch
+        refresh was requested".
+    COST: one CI run (about 16 minutes) per held PR per main tip, a voided exact-input review, and a PR landed on a
+    main that may still fail the suite. INFERRED, not run: the refreshed head then goes red again and is probed only
+    on a later pass, under a new head key with no history.
+    THE SAME HOLDS for any check main's census lacks that has a probe set. `rule-checks` is the one observed.
+  design: |
+    1. `decideBaseRed(pr, main, history, opts?: { probe?: boolean })`. When `opts.probe` is true and main reads
+       green, a refresh is returned only for a check main's reading observed:
+       `main.observedChecks === undefined || main.observedChecks.includes(check)`. This applies to both paths:
+       (a) the recorded stand-down check and (b) the W1-T6024 `reproducedBeforeGreen` check.
+       - If the check is unobserved and its failure has a probe set (`baseReproductionFiles([failure]).length > 0`),
+         return `{ kind: "own" }`. The fix rung then reaches the W1-T6024 probe at the tip. A `reproduced` verdict
+         stands the PR down (and W1-T7848 records rule-checks red at the new tip). A `clear` verdict takes the
+         existing probe-gated refresh (`previouslyReproduced`/`fixedOnMain`, then W1-T8396's `assessRefresh`).
+       - A check with no probe set (lint-plan, for example) keeps today's refresh: no probe can observe it, and the
+         W1-T4351 "refresh once main is green" contract is its only route.
+       - A reading with no census (`observedChecks` undefined, legacy rows) keeps today's refresh.
+    2. The fix rung's two calls (:17444 and its re-decide at :17447) pass
+       `{ probe: mainTipSha !== undefined && deps.reproduceFailingTestsOnMain !== undefined }`. With no probe wired,
+       or no tip read, behaviour is unchanged.
+    3. The plan-scoped caller (:16232) passes nothing. It treats every non-`own` decision as a wait, so it is unchanged.
+    4. Unchanged: `baseRedHistoryFromLedger`, the probe block, W1-T7848's fold, `PR_BODY_SCOPED_CHECKS`, and every
+       red-main branch of `decideBaseRed`.
+    Tests go in the new file test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts, with
+    `test(` titles exactly as in the proofs below. Drive the real `runSweep` through test/helpers/sweep-test.ts, as
+    test/main-health-observes-the-rule-suites.test.ts does, with an in-memory ledger and a recording probe.
+    - Tests 1 and 2 are the two OBSERVED scenarios above, with the probe failing at M2: no refresh, the probe ran
+      at M2 on the rule suite, no fix dispatched.
+    - Test 3 is path (b) with the probe passing at M2: exactly one refresh.
+    - Test 4 is a failing check that IS in main's `observedChecks` (coverage-ratchet with a test file in its log):
+      it refreshes at M2 with nothing probed, today's W1-T6024 behaviour.
+    - Test 5 is path (a) with no `reproduceFailingTestsOnMain` wired: it still refreshes once main is green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts"
+    - claim: "a rule-checks red reproduced at one main tip is probed at the next green tip instead of refreshed"
+      proof: 'grep: test("W1-T9375: a reproduced rule red is probed at the next green main tip, never refreshed blind" in test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts'
+    - claim: "a rule-checks red stood down on main's recorded rule red is probed at the next green tip instead of refreshed"
+      proof: 'grep: test("W1-T9375: a rule red stood down on a recorded main rule red is probed at the next green tip" in test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts'
+    - claim: "a clear probe at the new green tip refreshes the branch once"
+      proof: 'grep: test("W1-T9375: a clear probe at the new green tip refreshes the branch once" in test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts'
+    - claim: "a check main's census observed still refreshes at the green tip without a probe"
+      proof: 'grep: test("W1-T9375: a check the main census observed is refreshed at the green tip without a probe" in test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts'
+    - claim: "with no probe wired, a held red still refreshes once main is green"
+      proof: 'grep: test("W1-T9375: with no probe wired a held rule red still refreshes once main is green" in test/a-held-red-on-a-check-main-never-ran-is-probed-before-any-refresh.test.ts'
+  falsifier: |
+    Delete the `opts.probe` census condition in `decideBaseRed`. Tests 1 and 2 then see refreshed [9724] and [9800]
+    with nothing probed at M2: the behaviour OBSERVED at 633bcb91f.
+  note: |
+    ADJACENT, NOT IN SCOPE: the fix rung's refresh reason reads "was held while main was red" for path (b), where
+    main was never red. It is a wording defect in a different string and gets its own task if it matters.
+    CONTENTION: W1-T7735 (queued) also edits src/lib/sweep.ts around base-red refreshes. Neither depends on the
+    other: W1-T7735 weighs whether a refresh is worth a CI run, and this task decides whether a green main justifies
+    one at all.

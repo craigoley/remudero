@@ -60,6 +60,12 @@ export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot
  *  core's fact rows. They are never parsed; the newest `ts` among them rides a sentinel row, because
  *  `orphanedRunIds` reads the ledger's newest `ts` from every row. */
 export const BOARD_UNREAD_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary", "incident.event", "main.health.observed"]);
+/** W1-T9357: blob fields no reader of a projection row reads (a read census of the now view over 836,723 rows found
+ *  none): 36% of a core projection's kept field bytes. A row is kept without them for the life of the thread. */
+export const BOARD_ROW_UNREAD_FIELDS: ReadonlySet<string> = new Set([
+  "question", "benchmark_run", "stand_down_reason", "worker_assignment", "decision_verdict", "stderr_excerpt",
+  "review_input_digest", "proof_exec", "changed_paths", "evaluator_provenance", "reviewer_code_provenance",
+]);
 const LATEST_TS_META = "board.latest_ts_ms";
 /** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
 export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
@@ -165,6 +171,16 @@ export interface BoardProjectionOptions {
  * ever replaced by one equal to it; objects, arrays, numbers, booleans, null and longer strings are left as
  * parsed, no object is shared, and key order does not change (an existing key is reassigned in place).
  */
+/** `row` without {@link BOARD_ROW_UNREAD_FIELDS}, other keys in order; `row` itself when it holds none. A fresh
+ *  object, never `delete`: deleting leaves the row in dictionary mode, which kept MORE (525 MB vs 504 MB). */
+export function withoutUnreadFields(row: Row): Row {
+  const keys = Object.keys(row);
+  if (!keys.some((key) => BOARD_ROW_UNREAD_FIELDS.has(key))) return row;
+  const kept: Row = {};
+  for (const key of keys) if (!BOARD_ROW_UNREAD_FIELDS.has(key)) kept[key] = row[key];
+  return kept;
+}
+
 export function internRowStrings(row: Row, table: Map<string, string>): Row {
   for (const key of Object.keys(row)) {
     const value = row[key];
@@ -212,6 +228,11 @@ export interface BoardProjection {
   rows(): ReadonlyArray<Row>;
   /** Distinct string values this projection's own table holds (W1-T6467); 0 before any ingest. */
   internedStrings(): number;
+  /**
+   * W1-T9403: what it keeps, counted as it ingests: the rows it holds (its sentinel aside), and the summed
+   * length of each kept row's source text (a fact row's ledger body; a stand-in's source columns).
+   */
+  size(): { rows: number; keptBytes: number };
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
   oracle(): BoardOracleResult;
 }
@@ -261,6 +282,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
   touched();
   let lastSeq = 0;
+  /** W1-T9403: the summed source-text length of every row in `rows` but the sentinel. */
+  let keptBytes = 0;
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
   let bulkOpen = false;
   let bulkOutOfOrder = false;
@@ -271,12 +294,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const lastRunStartMs = new Map<string, number>();
   /** Per `task|run`: its newest fact row, the row standing for a newer non-fact one, and the activity seq read. */
   const newestFactMs = new Map<string, number>();
-  const activityRows = new Map<string, { row: Row; tsMs: number }>();
+  const activityRows = new Map<string, { row: Row; tsMs: number; bytes: number }>();
   const taskActivitySeq = new Map<string, number>();
   let activitySeq = 0;
   let activitySql: ReadModelStatement | undefined;
   /** Per `task|run`: the row standing for its `worker.activity` rows (`run_worker`), and the worker seq read. */
-  const workerRows = new Map<string, { row: Row; tsMs: number }>();
+  const workerRows = new Map<string, { row: Row; tsMs: number; bytes: number }>();
   const taskWorkerSeq = new Map<string, number>();
   let workerSeq = 0;
   let workerSql: ReadModelStatement | undefined;
@@ -304,18 +327,20 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     if (at > 0) {
       rows.splice(at, 1);
       rowTsMs.splice(at, 1);
+      keptBytes -= held.bytes;
       touched();
     }
   }
 
   /** Places a stand-in row by its time, after the rows of its instant. */
-  function standIn(standing: Map<string, { row: Row; tsMs: number }>, key: string, row: Row, tsMs: number): void {
+  function standIn(standing: Map<string, { row: Row; tsMs: number; bytes: number }>, key: string, row: Row, tsMs: number, bytes: number): void {
     let at = rows.length;
     while (rowTsMs[at - 1]! > tsMs) at--;
     rows.splice(at, 0, row);
     rowTsMs.splice(at, 0, tsMs);
+    keptBytes += bytes;
     touched();
-    standing.set(key, { row, tsMs });
+    standing.set(key, { row, tsMs, bytes });
     latestTsMs = Math.max(latestTsMs, tsMs);
   }
 
@@ -332,7 +357,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       workerSeq = Math.max(workerSeq, seq);
       dropActivity(key, workerRows);
       taskWorkerSeq.set(taskId, Math.max(taskWorkerSeq.get(taskId) ?? 0, seq));
-      standIn(workerRows, key, { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms));
+      const [body, fields] = [String(r.body), String(r.fields)];
+      standIn(workerRows, key, { ...runWorkerRow(body, fields), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms), body.length + fields.length);
       moved = true;
     }
     return moved;
@@ -353,7 +379,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       taskActivitySeq.set(taskId, Math.max(taskActivitySeq.get(taskId) ?? 0, seq));
       moved = true;
       if (tsMs <= (newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY)) continue;
-      standIn(activityRows, key, { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs);
+      const ts = String(r.ts);
+      standIn(activityRows, key, { ts, step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs, ts.length + taskId.length + runId.length);
     }
     return moved;
   }
@@ -381,13 +408,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const parsed = JSON.parse(String(r.body)) as Row;
+      const body = String(r.body);
+      const parsed = withoutUnreadFields(JSON.parse(body) as Row);
       const row = strings ? internRowStrings(parsed, strings) : parsed;
       let at = rows.length;
       if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
       else while (rowTsMs[at - 1]! > tsMs) at--;
       rows.splice(at, 0, row);
       rowTsMs.splice(at, 0, tsMs);
+      keptBytes += body.length;
       touched();
       latestTsMs = Math.max(latestTsMs, tsMs);
       const dirt = boardDirtForRow(row, rules);
@@ -603,6 +632,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
     internedStrings: () => strings?.size ?? 0,
+    size: () => ({ rows: rows.length - 1, keptBytes }),
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
       ingest(Number.POSITIVE_INFINITY);

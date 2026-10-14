@@ -30,3 +30,13 @@ test("MAIN_HEALTH_FALLBACK_RUN_LIMIT is not exported from sweep", async () => {
   const module = await import("../src/lib/sweep.js");
   assert.equal(Object.hasOwn(module, "MAIN_HEALTH_FALLBACK_RUN_LIMIT"), false);
 });
+
+test("READ_ONLY_INSPECTION_VERBS is not exported from read-only-inspection", async () => {
+  const module = await import("../src/lib/read-only-inspection.js");
+  assert.equal(Object.hasOwn(module, "READ_ONLY_INSPECTION_VERBS"), false);
+});
+
+test("RUN_CHILD_PHASES is not exported from run-child-contract", async () => {
+  const module = await import("../src/lib/run-child-contract.js");
+  assert.equal(Object.hasOwn(module, "RUN_CHILD_PHASES"), false);
+});

@@ -8387,6 +8387,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
+  "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
@@ -8410,6 +8411,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
+  "^scripts/security-merge-producer\\.mjs$",
+  "^src/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
   "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.

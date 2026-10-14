@@ -104,7 +104,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -153,6 +153,9 @@ import {
 } from "./inbox.js";
 
 export interface PanelGraphDeps {
+  inboxSourceIdentity?: InboxSourceIdentity;
+  inboxMayPersist?: () => boolean;
+  inboxAuditScope?: { instance: string; repository: string };
   /** Repo root — where plan/feedback/ lives. */
   /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
   projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
@@ -2637,6 +2640,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: classified.mergedTaskIds,
+        dismissalAudit: classified.dismissalAudit,
         sources: {
           plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
@@ -2709,6 +2713,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit;
   proposals: Proposal[];
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
@@ -2734,7 +2739,10 @@ export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefin
   const held = slowLaneInboxes.get(deps);
   if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
   const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
-  const read = persisted && slowLaneInboxOf(deps, persisted);
+  const identity = deps.inboxSourceIdentity;
+  const sourceMatches = !identity || Object.entries(identity).every(([key, value]) =>
+    persisted?.sourceIdentity?.[key as keyof InboxSourceIdentity] === value);
+  const read = persisted && sourceMatches ? slowLaneInboxOf(deps, persisted) : undefined;
   slowLaneInboxes.set(deps, { stamp, read });
   return read;
 }
@@ -2746,6 +2754,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
     attentionEvidence: persisted.attentionEvidence,
+    dismissalAudit: persisted.dismissalAudit,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
     plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
     lanes: () => {

@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: a risk judge decides what actually needs the operator and what can be auto-resolved, without unnecessary risk"
   plan_refs: [W1-T3167, W1-T3401, W1-T4677, W1-T2273, W1-T8864, W1-T8866, W1-T100]
   files: [src/lib/escalate.ts, src/lib/escalation-triage.ts, src/lib/sweep.ts, src/run-task.ts, plan/policy.yaml, test/an-escalation-is-triaged-before-it-reaches-the-operator.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -1,0 +1,25 @@
+- id: W1-T9441
+  title: Add production path support to config schema
+  repo: remudero
+  depends_on:
+    - W1-T9440
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-07 follow-up on https://github.com/craigoley/remudero/pull/9838, ratified via
+    rmd approve:
+  
+    changes span config schema and review usage
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/config.ts
+    - src/lib/review.ts
+  acceptance:
+    - claim: production path can be specified in config and is validated
+      proof: "unit test: config schema accepts production path"
+    - claim: review.ts uses the configured production path
+      proof: "grep: getProductionPath( in src/lib/review.ts"
+  origin: architect
