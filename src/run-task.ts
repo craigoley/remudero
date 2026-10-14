@@ -204,7 +204,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
@@ -847,7 +847,9 @@ import {
   taskIdReservationRef,
   taskIdReservationsDir,
   withIdReservationLogging,
+  gitReservationRunnerAsync,
 } from "./lib/task-id-reservation.js";
+import { releaseTaskIdReservation, releaseTaskIdReservationAsync, type HeldTaskIdReservation } from "./lib/task-id-release.js";
 import {
   applyPlanProposalCommit,
   buildPlanGrillEscalation,
@@ -24975,9 +24977,20 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
+  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
+  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
+  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
+  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
+    const w = wrappedGrepPattern(c.proof ?? "");
+    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
+  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
+    if (wrapped.length > 0) {
+      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
+      return 1;
+    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
@@ -26697,7 +26710,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
-  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
     const readPolicy = opts.loadPolicy ?? loadDefaultPolicy;
@@ -26707,13 +26720,17 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   const mintBudget = budget;
   const clock = opts.clock ?? clockFromMillisFn(() => performance.now());
   const now = () => clock.now();
+  // The sha each id's ref was left at, so a refused filing can release exactly its own claim.
+  const held = new Map<string, string>();
+  const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
+  const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
       const remaining = bound - (now() - started);
       if (remaining <= 0) throw new GardenMintTimedOutError(now() - started, bound);
-      const result = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: Math.ceil(remaining), killSignal: "SIGKILL" });
+      const result = gitAt(args, Math.ceil(remaining));
       if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new GardenMintTimedOutError(now() - started, bound);
       return result;
     };
@@ -26726,15 +26743,33 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     // The bridge supplies its actual landing identity, even when this manual command starts from
     // main. Reserving under the checkout's source branch would create a holder claim its true
     // landing branch cannot satisfy.
-    const held = reserveTaskIdRemote(
-      mint.n,
-      gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
-    );
+    const reserver = gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log });
+    const won = reserveTaskIdRemote(mint.n, reserver);
+    held.set(won.taskId, reserver.wonAnchor?.(won.taskId) ?? won.anchor);
     if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
     mintBudget.observe(now() - started);
-    return held.taskId;
+    return won.taskId;
+  };
+  const heldReservation = (taskId: string) => {
+    const sha = held.get(taskId);
+    held.delete(taskId);
+    return sha === undefined ? undefined : { taskId, sha };
   };
   return Object.assign(mintSync, {
+    heldSha: (taskId: string) => held.get(taskId),
+    release: (taskId: string, reason: string) => {
+      const claim = heldReservation(taskId);
+      if (!claim) return;
+      const timeout = Math.ceil(mintBudget.boundMs());
+      releaseTaskIdReservation((args) => {
+        const r = gitAt(args, timeout);
+        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || String(r.error ?? "") };
+      }, claim, releaseOpts(reason));
+    },
+    releaseAsync: async (taskId: string, reason: string) => {
+      const claim = heldReservation(taskId);
+      if (claim) await releaseTaskIdReservationAsync(gitReservationRunnerAsync(root, { timeoutMs: Math.ceil(mintBudget.boundMs()) }), claim, releaseOpts(reason));
+    },
     async: async (filingBranch: string): Promise<string> => {
       const started = now();
       const bound = mintBudget.boundMs();
@@ -26761,13 +26796,14 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
            const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
            const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
            try {
-             const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
-               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) })(process.argv[2]);
-             process.stdout.write(JSON.stringify({ id, rows }));
+             const minter = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) });
+             const id = minter(process.argv[2]);
+             process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
              process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), timedOut: error?.name === "GardenMintTimedOutError", rows }));
            }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL", signal: controller.signal }), expired]);
-        const result = JSON.parse(stdout) as { id: string; error?: string; timedOut?: boolean;
+        const result = JSON.parse(stdout) as { id: string; sha?: string; error?: string; timedOut?: boolean;
           rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
         if (stderr) process.stderr.write(stderr);
         for (const row of result.rows) {
@@ -26777,6 +26813,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
         if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.error !== undefined) throw new Error(result.error);
+        if (result.sha) held.set(result.id, result.sha);
         mintBudget.observe(now() - started);
         return result.id;
       } catch (error) {
@@ -52830,6 +52867,12 @@ export async function approveCommand(
   // ids. Released on any failure path too (the catch around `approveProposal` below) — every
   // reserved id, used or not, must come back, or it is a phantom-id hole (W1-T199/224/247/263).
   let idBlock: TaskIdReservationBlock | undefined;
+  // The remote claims behind idBlock: given back when the filing fails before its branch is pushed.
+  const approveClaims: Array<{ run: (args: string[]) => { status: number; stdout: string; stderr: string }; held: HeldTaskIdReservation }> = [];
+  let approvePushStarted = false;
+  const releaseApproveClaims = (reason: string): void => {
+    for (const c of approveClaims.splice(0)) releaseTaskIdReservation(c.run, c.held, { reason: `rmd approve ${proposalId}: ${reason}`, lane: "approve", log });
+  };
   // W1-T903: shared by findPushedBranch (resume evidence) and createRatificationBranch (fresh
   // PROCEED) — both need the same clone, and only one of the two ever runs per approve call.
   const ensureRepoDir = (): string => {
@@ -52911,23 +52954,20 @@ export async function approveCommand(
           // reservation failure into a free-text `reason` string) so a genuine
           // `TaskIdReservationError` still leaves a durable, structured ledger event before
           // `materializeDraftTaskIds` reduces it to prose.
+          const approveRun = (args: string[]) => {
+            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+          };
+          const approveReserver = gatedRemoteRefReserver({ lane: "approve", log, filingBranch, run: approveRun });
           const remote = withIdReservationLogging(
             log,
             "approve.id_reservation_failed",
-            () =>
-              reserveTaskIdBlockRemote(
-                approveReserveFrom,
-                count,
-                gatedRemoteRefReserver({
-                  lane: "approve", log, filingBranch,
-                  run: (args) => {
-                    const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                  },
-                }),
-              ),
+            () => reserveTaskIdBlockRemote(approveReserveFrom, count, approveReserver),
             { proposal_id: payload.proposalId },
           );
+          for (const h of remote.handles) {
+            approveClaims.push({ run: approveRun, held: { taskId: h.taskId, sha: approveReserver.wonAnchor?.(h.taskId) ?? h.anchor } });
+          }
           return { ids: remote.ids };
         },
       },
@@ -53058,6 +53098,7 @@ export async function approveCommand(
       worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main");
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`, branch);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
+      approvePushStarted = true;
       gitPushRunBranch(worktreePath);
       return branch;
     },
@@ -53075,6 +53116,7 @@ export async function approveCommand(
       const ownTree = (worktreePath = addOwnTreeAt(dir, `origin/${branch}`));
       materializeAndCommitApproveFragment(ownTree, payload, `joined ${branch}`, branch);
       preflightApprovePush(ownTree, branch, payload.proposalId);
+      approvePushStarted = true;
       try {
         gitPushRunBranch(ownTree, { destination: branch });
       } catch (e) {
@@ -53084,6 +53126,8 @@ export async function approveCommand(
         log("approve.join_lost", { proposal_id: payload.proposalId, branch, released_ids: idBlock?.ids ?? [] });
         idBlock?.releaseAll();
         idBlock = undefined;
+        approvePushStarted = false;
+        releaseApproveClaims(`the join push onto ${branch} was rejected as non-fast-forward`);
         dropOwnTree(dir, ownTree);
         return undefined;
       }
@@ -53212,6 +53256,7 @@ export async function approveCommand(
     // (if any) comes back rather than punching a phantom-id hole.
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlock?.releaseAll();
+    if (!approvePushStarted) releaseApproveClaims(`failed before its branch was pushed: ${String((e as Error)?.message ?? e)}`);
     // W1-T9153: only a worktree this run's add returned. A refused or failed add left nothing of its own here.
     if (repoDir && addedWorktreePath) {
       try {
