@@ -231,7 +231,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { inboxThreadStorePath, ratifyCliGateway, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
@@ -40252,6 +40252,9 @@ export async function daemonCommand(
           servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
             () => tickReadGeneration),
+          // W1-T8511: only the self-target daemon owns plan/feedback/ — the same gate as its landing sweep, which drains
+          // this queue under config.root.
+          target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -48026,6 +48029,9 @@ export function buildSweepHook(
   // W1-T7734: `servedPublishedAtMs` is when the generation these facts came from was published.
   tickReadFor?: () => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
     Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>,
+  // W1-T8511: the landing deps POST /v1/feedback uses, so an operator's reply on a `TRIAGE-<feedback id>` GRILL issue
+  // also answers the grilled record. Omitted ⇒ replies land only in the question store, as before.
+  escalationFeedbackReply?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -48102,7 +48108,8 @@ export function buildSweepHook(
     // so a reply steers this same tick. Contained like `mainHealthRung` above.
     if (escalationAnswerGateway) {
       try {
-        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway, { ledgerPath });
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
         if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
       } catch (e) {
         log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });

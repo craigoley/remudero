@@ -58,6 +58,9 @@ import { appendQuestionAnswer } from "./worker.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
+import { captureFeedbackReply, replyRefusal, type PanelGraphDeps } from "./panel-graph.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
+import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
@@ -299,13 +302,14 @@ function parseRecommendation(issueBody: string): string {
  * Exported for a direct, GitHub-free unit test of the selection rule.
  */
 export function answerTextFor(replyText: string, issueBody: string): string {
-  const trimmed = replyText.trim();
-  const firstWord = trimmed.split(/\s+/)[0]?.replace(/[.,!:;]+$/, "");
-  if (firstWord) {
-    const match = parseOptionLabels(issueBody).find((label) => label.toLowerCase() === firstWord.toLowerCase());
-    if (match) return match;
-  }
-  return trimmed;
+  return optionLabelNamed(replyText, issueBody) ?? replyText.trim();
+}
+
+/** The issue's option label the reply's FIRST WORD names (case-insensitive, trailing punctuation ignored), else undefined. */
+function optionLabelNamed(replyText: string, issueBody: string): string | undefined {
+  const firstWord = replyText.trim().split(/\s+/)[0]?.replace(/[.,!:;]+$/, "");
+  if (!firstWord) return undefined;
+  return parseOptionLabels(issueBody).find((label) => label.toLowerCase() === firstWord.toLowerCase());
 }
 
 /**
@@ -344,6 +348,61 @@ function recordedQuestionStoreOrigins(root: string): Set<string> {
     }
   }
   return origins;
+}
+
+/** W1-T8511: the feedback record a `TRIAGE-<feedback id>` escalation grills — any id shape (an `fb-*` capture or a
+ *  gardener's `evidence-coverage-*` record), never a path: the id must be one plain file-name segment. */
+export function grilledFeedbackId(taskId: string): string | undefined {
+  const id = /^TRIAGE-(.+)$/.exec(taskId)?.[1];
+  return id !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..") ? id : undefined;
+}
+
+/** One accepted operator answer on an issue, stored this pass or on an earlier one. */
+interface AcceptedAnswer {
+  origin: string;
+  text: string;
+  namesOption: boolean;
+}
+
+/** W1-T8511 design step 6: when an issue holds several accepted answers, the one whose FIRST WORD is one of the
+ *  issue's option labels (the match {@link answerTextFor} makes) wins over an earlier prose reply; only when none
+ *  names an option does the earliest apply. */
+export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: readonly T[]): T | undefined {
+  return answers.find((a) => a.namesOption) ?? answers[0];
+}
+
+/**
+ * W1-T8511: apply the picked operator answer to the grilled feedback record through the console's own reply writer
+ * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7): a queued record is read
+ * first, then the route's own {@link replyRefusal} status read, both BEFORE any write — so an answered, rejected or
+ * otherwise moved record gets no write at all. The answer's origin is the reply's `submission_key`, so a second pass
+ * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
+ * `feedback_unreadable` when a store could not be read, and undefined when there is nothing to apply.
+ */
+function applyGrilledFeedbackAnswer(
+  feedback: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
+  issue: OpenIssue,
+  taskId: string,
+  answers: readonly AcceptedAnswer[],
+): ({ step: string; task_id: string } & Record<string, unknown>) | undefined {
+  const feedbackId = grilledFeedbackId(taskId);
+  const picked = pickFeedbackAnswer(answers);
+  if (feedbackId === undefined || picked === undefined) return undefined;
+  const base = { task_id: taskId, feedback_id: feedbackId, origin: picked.origin, issue_url: issue.url };
+  try {
+    const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
+    const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
+    if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
+    if (replyRefusal(feedback.root, feedbackId, queued)) return undefined;
+    if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
+    const { entry, landingError } = captureFeedbackReply(feedback, {
+      text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
+    });
+    return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
+      ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };
+  } catch (error) {
+    return { ...base, step: "escalation_answer.feedback_unreadable", reason: String((error as Error)?.message ?? error) };
+  }
 }
 
 export interface EscalationAnswerResult {
@@ -467,7 +526,8 @@ export async function readEscalationAnswers(
   root: string,
   runId: string,
   gateway: EscalationAnswerGateway,
-  deps: LedgerWriterDeps,
+  // W1-T8511: `feedback`, when set, ALSO answers the grilled feedback record a `TRIAGE-<id>` issue names.
+  deps: LedgerWriterDeps & { feedback?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand"> },
   clock: Clock = systemClock,
 ): Promise<EscalationAnswerResult> {
   const current: Record<string, unknown>[] = [];
@@ -538,10 +598,19 @@ export async function readEscalationAnswers(
       unreadable++; // counted, then just this issue is skipped this pass
       continue;
     }
+    // W1-T8511: every accepted operator answer on this issue, new or already stored, for the feedback record.
+    const acceptedAnswers: AcceptedAnswer[] = [];
     for (const comment of comments) {
       const origin = `issue#${issue.number}:comment:${comment.id}`;
-      if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per comment id
       const refusal = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
+      const accepted = (): void => {
+        const text = comment.body.trim();
+        if (text) acceptedAnswers.push({ origin, text, namesOption: optionLabelNamed(text, issue.body ?? "") !== undefined });
+      };
+      if (recordedOrigins.has(origin)) { // design (ii): idempotent per comment id
+        if (refusal === undefined) accepted();
+        continue;
+      }
       if (refusal !== undefined) {
         ignored++;
         writeLedger(deps.ledgerPath, {
@@ -561,6 +630,7 @@ export async function readEscalationAnswers(
       const answer = answerTextFor(comment.body, issue.body ?? "");
       if (!answer) continue;
       await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject);
+      accepted();
       try {
         gateway.reactPlusOne(comment.id);
       } catch {
@@ -568,27 +638,37 @@ export async function readEscalationAnswers(
       }
     }
     // W1-T4676: reactions on the ISSUE itself — optional surface, see the gateway's own header.
-    if (!gateway.listReactions || (!gateway.ownerLogin && gateway.operatorLogins === undefined)) continue;
-    let reactions: EscalationIssueReaction[];
-    try {
-      reactions = await gateway.listReactions(issue.number);
-    } catch {
-      unreadable++; // counted, then just this issue's reactions are skipped this pass
-      continue;
-    }
-    for (const reaction of reactions) {
-      const origin = `issue#${issue.number}:reaction:${reaction.id}`;
-      if (recordedOrigins.has(origin)) continue; // design (ii): idempotent per reaction id
-      if (operatorRefusal(reaction, gateway.operatorLogins,
-          reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
-      const answer = reactionAnswerText(reaction.content, issue.body ?? "");
-      if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
-      await landAnswer(taskId, origin, answer, reaction.authorLogin, reaction.sourceSubject);
+    if (gateway.listReactions && (gateway.ownerLogin || gateway.operatorLogins !== undefined)) {
+      let reactions: EscalationIssueReaction[] = [];
       try {
-        gateway.reactPlusOneOnIssue?.(issue.number);
+        reactions = await gateway.listReactions(issue.number);
       } catch {
-        // best-effort acknowledgement — a failed reaction never un-lands the answer.
+        unreadable++; // counted, then just this issue's reactions are skipped this pass
       }
+      for (const reaction of reactions) {
+        const origin = `issue#${issue.number}:reaction:${reaction.id}`;
+        if (operatorRefusal(reaction, gateway.operatorLogins,
+            reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
+        const answer = reactionAnswerText(reaction.content, issue.body ?? "");
+        if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
+        const namesOption = reaction.content === "+1";
+        if (recordedOrigins.has(origin)) { // design (ii): idempotent per reaction id
+          acceptedAnswers.push({ origin, text: answer, namesOption });
+          continue;
+        }
+        await landAnswer(taskId, origin, answer, reaction.authorLogin, reaction.sourceSubject);
+        acceptedAnswers.push({ origin, text: answer, namesOption });
+        try {
+          gateway.reactPlusOneOnIssue?.(issue.number);
+        } catch {
+          // best-effort acknowledgement — a failed reaction never un-lands the answer.
+        }
+      }
+    }
+    // W1-T8511: the question-store write above is unchanged; a feedback GRILL issue ALSO answers its record.
+    if (deps.feedback) {
+      const row = applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
+      if (row) writeLedger(deps.ledgerPath, { ...row, run_id: runId });
     }
   }
   if (gateway.refusalIssues && historyReadable) {
