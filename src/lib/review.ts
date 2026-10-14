@@ -421,6 +421,8 @@ export interface CriterionVerdict {
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
   proofFailureOutput?: string;
+  /** The output tail alone of an `executed_fail` proof (see {@link recordFailureTail}); absent for a pass. */
+  failureTail?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
   /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade (W1-T178). Optional so the
@@ -858,6 +860,8 @@ export interface WhitelistedProof {
   loadError?: string;
   /** The default executor's bounded excerpt of a run it graded `"fail"` — {@link proofFailureExcerpt}. */
   failureOutput?: string;
+  /** Just the output tail of a run graded `"fail"` (no argv/exit header) — {@link recordFailureTail} writes it. */
+  failureTail?: string;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -3086,8 +3090,9 @@ export function execWhitelistedProof(
   const shownArgs = withoutProofJudge(args);
   args = withProofJudge(whitelisted, args);
   delete whitelisted.failureOutput;
+  delete whitelisted.failureTail;
   const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
-    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
+    recordFailureTail(whitelisted, shownArgs, status, stdout, stderr);
     return "fail";
   };
   try {
@@ -3182,14 +3187,34 @@ function outputText(value: string | Buffer | null | undefined): string {
 export const PROOF_FAILURE_EXCERPT_LINES = 40;
 export const PROOF_FAILURE_EXCERPT_CHARS = 3000;
 
+/** The last {@link PROOF_FAILURE_EXCERPT_LINES} non-blank lines of stdout then stderr, capped at
+ *  {@link PROOF_FAILURE_EXCERPT_CHARS} characters; `""` when the run printed nothing. */
+export function proofFailureTail(stdout: string, stderr = ""): string {
+  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
+  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
+  return tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+}
+
+/** Record a graded-`"fail"` run's own output on the proof: the full excerpt as `failureOutput` and the bare output
+ *  tail as `failureTail`, which the criterion verdict then carries. */
+export function recordFailureTail(
+  whitelisted: WhitelistedProof,
+  shownArgs: readonly string[],
+  status: number,
+  stdout: string,
+  stderr = "",
+): void {
+  whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
+  const tail = proofFailureTail(stdout, stderr);
+  if (tail !== "") whitelisted.failureTail = tail;
+}
+
 /** A failed proof's bounded, reproducible record: the argv, the exit status, and the last
  *  {@link PROOF_FAILURE_EXCERPT_LINES} lines of stdout then stderr. It rides the verdict into the
  *  `review.posted` row and the reviewer-unmet fix prompt, so a fix worker sees what the reviewer saw. */
 export function proofFailureExcerpt(command: string, args: readonly string[], status: number, stdout: string, stderr = ""): string {
   const argv = [command, ...args].join(" ");
-  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
-  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
-  const kept = tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+  const kept = proofFailureTail(stdout, stderr);
   return [
     `$ ${argv.length > 400 ? `${argv.slice(0, 400)}…` : argv}`,
     `exit ${status}`,
@@ -3841,6 +3866,7 @@ export function judgeCriterion(
   let proofExec: ProofExecOutcome = "not_executable";
   let loadError: string | undefined;
   let proofFailureOutput: string | undefined;
+  let failureTail: string | undefined;
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
@@ -4032,6 +4058,7 @@ export function judgeCriterion(
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
             proofFailureOutput = whitelisted.failureOutput;
+            failureTail = whitelisted.failureTail;
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -4133,7 +4160,8 @@ export function judgeCriterion(
 
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
-    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}), floorMet, holdout: !!criterion.holdout,
+    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
+    ...(proofExec === "executed_fail" && failureTail ? { failureTail } : {}), floorMet, holdout: !!criterion.holdout,
   };
 }
 
@@ -5573,7 +5601,7 @@ export async function judgeReviewAsync(
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string }
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
@@ -5591,6 +5619,7 @@ export async function judgeReviewAsync(
         whitelisted.matchedLines = prior.matchedLines;
         whitelisted.loadError = prior.loadError;
         whitelisted.failureOutput = prior.failureOutput;
+        whitelisted.failureTail = prior.failureTail;
         return prior.outcome;
       }
       pending.set(key, { whitelisted, cwd });
@@ -5603,6 +5632,7 @@ export async function judgeReviewAsync(
         const outcome = await asyncExec(whitelisted, cwd);
         observed.set(key, {
           outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
+          failureTail: whitelisted.failureTail,
         });
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
