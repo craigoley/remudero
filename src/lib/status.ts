@@ -44,7 +44,7 @@ import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 import { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
-import { bundledWorkerUrl } from "./child-entry-argv.js";
+import { startWorker } from "./child-entry-argv.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -5485,7 +5485,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = new Worker(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: req });
+      worker = startWorker(import.meta.url, { workerData: req }, { override: opts.workerUrl });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place
