@@ -7,7 +7,7 @@
  * 2.8 GB with a cold tsc or a broad test run), a review about 1 GB, a garden about 1 GB and check-proof 250-290 MB.
  *
  * (1) MEASURE. While a reservation's work runs, its owner samples the tree (the bound roots and every descendant) on an
- *     unref'd timer: the sum of each live member's VmHWM, the kernel's own per-process resident peak. At release the
+ *     unref'd timer: the sum of each live member's concurrent VmRSS. Historical VmHWM peaks need not coincide. At release the
  *     largest sum seen is that tree's peak. A tree never observed records nothing; it is never recorded as zero.
  * (2) STORE. One append-only NDJSON file per instance under `estimates/` in the shared ledger directory, so instances
  *     never write the same file. Reads are a bounded tail of each file. Compaction keeps the newest samples per class.
@@ -75,6 +75,8 @@ export interface PeakSample {
   /** Present only on file-child samples; whole-tree test peaks remain a separate population. */
   testFile?: string;
   entryKind?: "bundle" | "tsx";
+  /** Absent historical rows are legacy HWM evidence, never upgraded to concurrent RSS. */
+  measurementBasis?: "legacy-hwm" | "concurrent-rss" | "process-hwm" | "unknown";
 }
 
 export interface LearnedEstimate {
@@ -143,6 +145,7 @@ export const PEAK_COMPACT_BYTES = 1024 * 1024;
 export const ESTIMATE_CACHE_MS = 60_000;
 
 export interface PeakStoreOptions {
+  measurementBasis?: PeakSample["measurementBasis"];
   entryKind?: "bundle" | "tsx";
   location?: () => { dir: string; scope?: "host" | "local" };
   root?: string;
@@ -202,11 +205,13 @@ function parseSamples(text: string): PeakSample[] {
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown };
+      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown; basis?: unknown };
       const at = typeof row.at === "string" ? Date.parse(row.at) : NaN;
       if (!WORKER_CLASSES.includes(row.c as WorkerClass) || typeof row.p !== "number" || !Number.isFinite(at)) continue;
       if (row.f !== undefined && (row.c !== "test" || typeof row.f !== "string" || !row.f)) continue;
       out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at,
+        measurementBasis: row.basis === undefined || row.basis === "legacy-hwm" ? "legacy-hwm"
+          : row.basis === "concurrent-rss" || row.basis === "process-hwm" ? row.basis : "unknown",
         ...(typeof row.f === "string" ? { testFile: testFileKey(row.f) } : {}),
         ...(row.entry_kind === "bundle" || row.entry_kind === "tsx" ? { entryKind: row.entry_kind } : {}) });
     } catch (error) {
@@ -221,7 +226,7 @@ export function compactSamples(samples: readonly PeakSample[], keep: number): Pe
   const counts = new Map<string, number>();
   const kept = new Set<PeakSample>();
   for (const s of [...samples].reverse()) {
-    const key = `${s.workerClass}:${s.testFile ?? ""}`;
+    const key = `${s.workerClass}:${s.testFile ?? ""}:${s.measurementBasis ?? "legacy-hwm"}`;
     const count = counts.get(key) ?? 0;
     if (count < keep) kept.add(s);
     counts.set(key, count + 1);
@@ -231,6 +236,7 @@ export function compactSamples(samples: readonly PeakSample[], keep: number): Pe
 
 const lineOf = (s: PeakSample): string =>
   `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso(),
+    basis: s.measurementBasis ?? "legacy-hwm",
     ...(s.testFile ? { f: s.testFile } : {}),
     ...(s.entryKind ? { entry_kind: s.entryKind } : {}) })}\n`;
 
@@ -245,6 +251,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
       appendFileSync(target, line, { mode: 0o600 });
     });
     append(path, lineOf({ workerClass, peakMib, at,
+      measurementBasis: opts.measurementBasis ?? "legacy-hwm",
       ...(testFile ? { testFile: testFileKey(testFile) } : {}),
       ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) }));
     cachedEstimates.delete(workerClass);
@@ -289,7 +296,7 @@ export function testFileKey(path: string): string {
 }
 
 export function recordTestFilePeak(path: string, peakMib: number, opts: PeakStoreOptions = {}): boolean {
-  return recordPeak("test", peakMib, opts, path);
+  return recordPeak("test", peakMib, { ...opts, measurementBasis: "process-hwm" }, path);
 }
 
 /** File p90, otherwise the file population's p90, otherwise the one-sample 512 MiB prior. */
@@ -399,7 +406,7 @@ export function treeMembers(roots: readonly { pid: number; start: string }[], li
   const live = new Map(listing.rows.map((row) => [row.pid, row]));
   const children = new Map<number, number[]>();
   for (const row of listing.rows) children.set(row.parent, [...(children.get(row.parent) ?? []), row.pid]);
-  const queue = roots.filter((r) => live.get(r.pid)?.start === r.start).map((r) => r.pid);
+  const queue = [...new Set(roots.filter((r) => live.get(r.pid)?.start === r.start).map((r) => r.pid))];
   const seen = new Set<number>(queue);
   for (let i = 0; i < queue.length; i += 1) {
     for (const child of children.get(queue[i]!) ?? []) {
@@ -457,13 +464,17 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
   };
 
   const peakOf = (members: readonly number[], skip: ReadonlySet<number>, entry: Tracked,
-    rows: ReadonlyMap<number, ProcessListing["rows"][number]>): number => {
+    rows: ReadonlyMap<number, ProcessListing["rows"][number]>): number | undefined => {
     let kb = 0;
+    let complete = true;
     for (const pid of members) {
       if (skip.has(pid)) continue;
       try {
-        const hwm = Number(/^VmHWM:\s+(\d+)/m.exec(ports.readFile(`/proc/${pid}/status`))?.[1] ?? 0);
-        kb += hwm;
+        const status = ports.readFile(`/proc/${pid}/status`);
+        const rss = /^VmRSS:\s+(\d+)/m.exec(status)?.[1];
+        if (rss === undefined) complete = false;
+        else kb += Number(rss);
+        const hwm = Number(/^VmHWM:\s+(\d+)/m.exec(status)?.[1] ?? 0);
         if (hwm > 0 && entry.hooks?.onTestFilePeak) {
           const row = rows.get(pid)!;
           const parent = rows.get(row.parent);
@@ -477,10 +488,11 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
           }
         }
       } catch (error) {
-        void error; // Exited between the listing and the read: it holds nothing now.
+        // A confirmed exit holds nothing now; denied or failed reads must not create an underestimated sample.
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") complete = false;
       }
     }
-    return kb / 1024;
+    return complete ? kb / 1024 : undefined;
   };
 
   const stopIfIdle = (): void => {
@@ -547,6 +559,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       let listing: ProcessListing;
       try {
         listing = ports.listProcesses();
+        if (!listing.complete) return;
       } catch (error) {
         void error; // An unreadable /proc this pass: the next pass tries again; no sample is invented.
         return;
@@ -565,7 +578,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         }
         const peak = peakOf(own, inner, entry, rows);
         flushFiles(entry, new Set(own.map((pid) => `${pid}:${startOf.get(pid)}`)));
-        if (peak > 0) {
+        if (peak !== undefined && peak > 0) {
           entry.observed = true;
           entry.peakMib = Math.max(entry.peakMib, peak);
         }
@@ -660,7 +673,7 @@ function openNestedTestRun(
   handle.bindRoot(pid);
   return {
     finish(peakMib) {
-      if (peakMib !== undefined) recordPeak("test", peakMib, context.store);
+      if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss" });
       handle.releaseOccupancy();
     },
   };
@@ -731,7 +744,7 @@ function learnedHandle(
         finished = true;
         try {
           const peak = sampler.finish(key);
-          if (peak !== undefined) recordPeak(workerClass, peak, store);
+          if (peak !== undefined) recordPeak(workerClass, peak, { ...store, measurementBasis: "concurrent-rss" });
         } catch (error) {
           recordError(store, "finish", error);
         }
@@ -762,7 +775,7 @@ export function adoptLearnedReservation(
 /**
  * A reservation held for the duration of SYNCHRONOUS work, released after it whatever `run` does. With `bindSelf` the
  * calling process is the tree (a verb such as check-proof reserving for itself): its own resident memory counts, and its
- * VmHWM at the end is recorded as the class's peak. Without it nothing is measured (a spawnSync child cannot be sampled
+ * sampled concurrent RSS peak is recorded for the class. Without it nothing is measured (a spawnSync child cannot be sampled
  * from its blocked parent), and the class keeps its prior unless another owner measures it.
  */
 export function withSyncChildReservation<T>(
