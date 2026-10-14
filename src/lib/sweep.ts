@@ -6878,6 +6878,32 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
   };
 }
 
+/** W1-T8040 — the signature of a cancelled check whose OWN log proves the job ran its tests, recorded a
+ *  failure, and was cancelled only by its ceiling: re-running the same sha runs the same tests and hangs
+ *  again (ci.yml's SHARD HANG text). Three shapes, mirroring W1-T8038's `poolOrTimeoutSignature`
+ *  (ci-friction-gardener.ts, which this module cannot import: gate-fire-rate.ts imports sweep.ts back):
+ *  a POOL DEFECT, a pooled failure that passes isolated, and a runner `not ok` before a timeout line.
+ *  `undefined` for everything else — no failure in the log ("timed out after a passing summary"), no
+ *  readable log, and a SUPERSEDED run keep W1-T1223's one bounded requeue. */
+export function deterministicTimeoutSignature(logTail: string | undefined): string | undefined {
+  if (!logTail) return undefined;
+  const bodies = logTail.split("\n").map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  if (bodies.some((b) => /\bSUPERSEDED\b/.test(b))) return undefined;
+  const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)/.exec(b)).find((m) => m);
+  if (defect) return `pool defect: ${defect[1] === "not isolated to one file" ? "leak not isolated to one file" : `${defect[1]} leaks`}`;
+  const poolFailed = bodies.some((b) => /^pure-test-pool: the pool of \d+ file\(s\) failed/.test(b));
+  const isolatedPassed = bodies.some((b) => /^pure-test-pool: (?:every pooled file passes isolated|rerun run complete)/.test(b));
+  const alsoFailsIsolated = bodies.some((b) => /^pure-test-pool: the pooled files also fail isolated/.test(b));
+  const firstNotOk = bodies.map((b) => /^not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]).find((t) => t !== undefined && !/^failing tests:?$/.test(t));
+  if (poolFailed && isolatedPassed && !alsoFailsIsolated) {
+    return `pool failure: ${firstNotOk ?? "pooled not ok"} fails pooled, passes isolated`;
+  }
+  if (firstNotOk !== undefined && bodies.some((b) => RUNNER_TIMEOUT_LINE.test(b))) {
+    return `timed out after a failing test: ${firstNotOk}`.slice(0, 160);
+  }
+  return undefined;
+}
+
 /** W1-T3652 — the verdict {@link cancelledRunCheckOutcome} returns: whether one check run's
  *  conclusion should be trusted as a real CI failure, plus a stated reason. `isFailure: false`
  *  is NOT a suppression — the caller still sees the check name and its own conclusion, only the
@@ -17648,13 +17674,33 @@ export async function runSweep(
               // cancellations never spends a strike on nothing.
               if (cancelledChecks.length > 0) {
                 const outcomes: string[] = [];
+                // W1-T8040: cancelled checks whose own log proves a deterministic ceiling timeout; they stay
+                // genuine failures for the ci-log fix path instead of earning a requeue.
+                const deterministicTimeouts = new Set<string>();
                 for (const check of cancelledChecks) {
                   const key = `${pr.headSha}@${check.name}`;
                   // W1-T2431: OR the ledger-derived reading with the surface-derived one — a re-run
                   // this fleet ledgered, OR one GitHub's `run_attempt` shows already happened (an
                   // operator's own, invisible to the ledger). This only widens the true case.
-                  const decision = cancelledCheckRequeueDecision(incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
-                    (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt)));
+                  const alreadyRequeued = incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
+                    (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt));
+                  const decision = cancelledCheckRequeueDecision(alreadyRequeued);
+                  const timeoutSignature = deterministicTimeoutSignature(ciFailuresForFix.find((f) => f.name === check.name)?.logTail);
+                  if (decision.requeue && timeoutSignature !== undefined) {
+                    deterministicTimeouts.add(check.name);
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: "sweep.check_requeue.skipped",
+                      pr_number: pr.prNumber,
+                      head_sha: pr.headSha,
+                      check_name: check.name,
+                      reason: "deterministic-timeout",
+                      signature: timeoutSignature,
+                    });
+                    outcomes.push(`not re-queued "${check.name}" (deterministic-timeout: ${timeoutSignature})`);
+                    continue;
+                  }
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL (inside `requeueCheckJob`). Not dry-run-guarded:
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
@@ -17664,15 +17710,18 @@ export async function runSweep(
                       await deps.escalateCancelledCheck(pr, check, result.escalate, "requeue-deferral-backstop");
                     outcomes.push(result.note ?? `re-queued "${check.name}"`);
                   } else {
-                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason, "cancelled-twice");
-                    outcomes.push(`escalated "${check.name}" (${decision.reason})`);
+                    // W1-T8040: a second cancellation whose log still names the failure says so.
+                    const reason = timeoutSignature === undefined ? decision.reason : `${decision.reason} — its log names: ${timeoutSignature}`;
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, reason, "cancelled-twice");
+                    outcomes.push(`escalated "${check.name}" (${reason})`);
                   }
                 }
                 // A cancelled check carries no diff defect — when EVERY red required check named
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
-                const genuineFailures = ciFailuresForFix.filter((f) => !cancelledChecks.some((c) => c.name === f.name));
+                const genuineFailures = ciFailuresForFix.filter((f) =>
+                  deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
