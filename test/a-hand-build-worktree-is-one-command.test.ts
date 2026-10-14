@@ -3,7 +3,7 @@
 // default seams are the ones exercised.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
@@ -87,7 +87,7 @@ test("hand-worktree creates run-<taskId>-<epochMs> at an absolute path with no u
   assert.ok(isAbsolute(path) && existsSync(join(path, "package.json")));
   assert.match(r.out, new RegExp(`path:   ${path}`));
   assert.match(r.out, new RegExp(`branch: run-W1-T9-${NOW}`));
-  assert.match(r.out, new RegExp(`hard-linked from ${lender}`));
+  assert.match(r.out, new RegExp(`hard-linked from ${realpathSync(lender)}`));
   const upstream = spawnSync("git", ["-C", path, "rev-parse", "--abbrev-ref", "@{u}"], { encoding: "utf8" });
   assert.notEqual(upstream.status, 0, "the branch must carry no upstream");
   assert.equal(f.core.git("rev-parse", `run-W1-T9-${NOW}`), f.core.git("rev-parse", "origin/main"));
@@ -97,6 +97,28 @@ test("hand-worktree creates run-<taskId>-<epochMs> at an absolute path with no u
   assert.equal(statSync(join(path, "node_modules", ".bin", "tool")).ino, statSync(join(lender, "node_modules", ".bin", "tool")).ino);
 });
 
+test("hand-worktree uses enabled dependency seeds and preserves an occupied destination", () => {
+  const f = fleet(), lender = donor(f, "seed-lender"), target = f.core.addWorktree(join(f.parent, "seed-consumer"), "seed-consumer").dir;
+  const store = join(realpathSync(f.parent), "seeds"), previous = process.env.RMD_DEPENDENCY_SEED_ROOT;
+  const writable = (path: string): void => { const s = lstatSync(path); if (s.isSymbolicLink()) return; chmodSync(path, s.mode | 0o700); if (s.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name)); };
+  try {
+    process.env.RMD_DEPENDENCY_SEED_ROOT = store;
+    const outcome = hardLinkNodeModules(lender, target);
+    assert.equal(outcome.kind, "seeded");
+    assert.ok(lstatSync(join(target, "node_modules")).isDirectory());
+    const result = { status: "created" as const, path: target, branch: "seed-consumer", freeBytes: 2 * 1024 ** 3, nodeModules: outcome };
+    assert.match(renderHandWorktree(result), /validated dependency seed/);
+    assert.deepEqual(hardLinkNodeModules(lender, target), { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] });
+    const invalid = join(f.parent, "invalid"); mkdirSync(invalid);
+    const refused = hardLinkNodeModules(lender, invalid);
+    assert.equal(refused.kind, "npm-ci-needed");
+    if (refused.kind === "npm-ci-needed") assert.match(refused.reasons[0], /dependency seed refused/);
+  } finally {
+    if (previous === undefined) delete process.env.RMD_DEPENDENCY_SEED_ROOT; else process.env.RMD_DEPENDENCY_SEED_ROOT = previous;
+    if (existsSync(store)) { writable(store); rmSync(store, { recursive: true }); }
+  }
+});
+
 test("hand-worktree refuses a relative parent and writes nothing", () => {
   const f = fleet();
   const before = f.core.git("worktree", "list");
@@ -104,6 +126,21 @@ test("hand-worktree refuses a relative parent and writes nothing", () => {
   assert.equal(r.code, 1);
   assert.match(r.err, /--parent 'rmd-work' is relative/);
   assert.equal(f.core.git("worktree", "list"), before);
+});
+
+test("an enabled hand worktree primes a reusable seed without any installed donor", () => {
+  const f = fleet(), previous = process.env.RMD_DEPENDENCY_SEED_ROOT;
+  const store = join(realpathSync(f.parent), "seeds");
+  try {
+    process.env.RMD_DEPENDENCY_SEED_ROOT = store;
+    const result = created(createHandWorktree({ repoDir: f.core.dir, taskId: "unfiled", parent: f.parent, clock: fixedClock(NOW) }));
+    assert.equal(result.nodeModules.kind, "seeded");
+    assert.ok(existsSync(join(result.path, "node_modules", ".rmd-dependency-seed.json")));
+  } finally {
+    if (previous === undefined) delete process.env.RMD_DEPENDENCY_SEED_ROOT; else process.env.RMD_DEPENDENCY_SEED_ROOT = previous;
+    const writable = (path: string): void => { const s = lstatSync(path); if (s.isSymbolicLink()) return; chmodSync(path, s.mode | 0o700); if (s.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name)); };
+    if (existsSync(store)) { writable(store); rmSync(store, { recursive: true }); }
+  }
 });
 
 test("with no identical lockfile it reports npm ci and the free space instead of running it", () => {

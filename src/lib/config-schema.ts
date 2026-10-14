@@ -394,6 +394,7 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
+  envEntry("RMD_DEPENDENCY_SEED_ROOT", "Account-owned dependency generation store on the checkout filesystem. Existing installs are preserved and reference-aware reclamation has a six-hour minimum.", ["src/lib/dependency-seeds.ts"]),
   envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
   envEntry("RMD_HEAVY_READY_DEADLINE_SERVICE", "Default OFF. Exact 1 separately enables the independent READY deadline worker at natural startup, with an explicit private READY directory. Unavailable service refuses only NEW builds; no eval dispatch or runtime activation authority.", ["src/lib/heavy-ready-startup.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),

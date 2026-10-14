@@ -1,0 +1,70 @@
+- id: W1-T9556
+  title: "THE PRE-OPEN FAST GATE'S BACKSTOP HOLDS WHILE THE DAEMON LOOP IS FROZEN — defaultRunGate bounds the gate child with execFile's `timeout`, a timer on the daemon's own loop, so a frozen loop lets the child run uncapped: on 2026-10-14 W1-T7651's gate ran 1,792 s and W1-T7898's 2,028 s against the 15-minute backstop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — who enforces the pre-open gate child's deadline; it gates every build PR's open
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, second lead); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T8778, W1-T8920, W1-T9085, W1-T9544, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T9554]
+  files: [src/lib/preopen-gate.ts, scripts/run-with-deadline.mjs, test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (rows in ~/Remudero-notes/loopblock-0450/pid311272.ndjson, daemon pid 311272):
+      - 07:27:57Z `implement.preopen_gate` W1-T7651 {result unmeasured, duration_ms 1,792,221, reason "fast gate
+        exceeded its backstop"};
+      - 08:14:18Z the same for W1-T7898 {duration_ms 2,027,848}.
+    Both ran about twice the 900 s backstop, in a morning when core's loop blocked for minutes at a time (W1-T9527's
+    04:50-05:35Z block of 2,742 s). In the 15:14-21:14Z window the 18 gates took 348-542 s and none overran, so the
+    overrun appears only when the loop is blocked: the backstop fails exactly when it is needed.
+    WHY, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `defaultRunGate` (src/lib/preopen-gate.ts) calls `execFile(file, args, { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS,
+        maxBuffer })`. Node implements `timeout` with a `setTimeout` in the parent that then kills the child, so it
+        fires only when the daemon's loop next runs. While a sync spawn or a sync ledger read holds the loop, the gate
+        child and its `node --test` grandchildren run on.
+      - The kill is `SIGTERM` to the direct child only (execFile's default `killSignal`), not its process group, so a
+        gate's test grandchildren can outlive it even when the timer does fire.
+      - `runPreopenGate` turns a killed child into `unmeasured` with the reason above; that classification is right and
+        stays.
+    OVERLAP: W1-T9085 (queued) runs a build in a detached run child; the gate would then be timed by the run child's
+    loop instead of the daemon's, which is less often frozen but still a loop timer. This task makes the deadline
+    independent of any parent loop, so it holds in both placements.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    "fast gate exceeded its backstop", "fast gate backstop", PREOPEN_GATE_BACKSTOP_MS / FAST_GATE timeout and
+    preOpenFastGate. Control: main reads 0 shards; no head reads any.
+  design: |
+    No new bound: the deadline stays `PREOPEN_GATE_BACKSTOP_MS`; only who enforces it moves off the parent's loop.
+    1. CHILD-SIDE DEADLINE. `defaultRunGate` launches the gate through a small plain-node runner
+       (scripts/run-with-deadline.mjs, no tsx) given the absolute deadline in epoch ms. The runner spawns the gate
+       command as a process-group leader, arms the deadline on its OWN loop, and at the deadline kills the group and
+       exits with a named status that `defaultRunGate` reads as "fast gate exceeded its backstop". It does nothing else,
+       so its loop is never busy, and the daemon's loop being frozen cannot hold it.
+    2. KERNEL-SIDE BACKSTOP, where available: the launch is wrapped in coreutils `timeout --kill-after` with the same
+       deadline (resolved once, as `defaultWhich` resolves tools), so even a child whose own loop is frozen is ended by
+       the kernel. Where `timeout` is absent (macOS dev hosts) the child-side deadline alone applies, and
+       `child_entry.spawned` records which enforcement ran.
+    3. The parent keeps execFile's timeout as a third, last line, and on any of the three kills the whole process group,
+       not only the direct child.
+    4. Unchanged: `runPreopenGate`'s classification, the summary read, and `PREOPEN_GATE_STEP` rows (which gain
+       `deadline_enforced_by`).
+    Tests go in test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts, with `test(` titles verbatim as in
+    the proofs below. Freeze the parent with `Atomics.wait` past a short deadline while a stub gate (which spawns a
+    grandchild) sleeps, and read the stub's and the grandchild's own last-alive times from files they write.
+  acceptance:
+    - claim: "a gate child is ended at its deadline while the parent's loop is frozen"
+      proof: 'grep: test("W1-T9556: a gate child ends at its deadline while the parent loop is frozen" in test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts'
+    - claim: "the deadline kill takes the gate's whole process group"
+      proof: 'grep: test("W1-T9556: the deadline kill takes the whole gate process group" in test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts'
+    - claim: "a deadline kill still classifies as unmeasured, exceeded its backstop"
+      proof: 'grep: test("W1-T9556: a deadline kill is unmeasured as exceeded its backstop" in test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts'
+    - claim: "the row names which enforcement ran"
+      proof: 'grep: deadline_enforced_by in src/lib/preopen-gate.ts'
+  falsifier: |
+    Keep execFile's `timeout` as the only deadline: the first test's stub child, sleeping past a 300 ms deadline while the
+    parent is frozen for 2 s, writes its exit time after the freeze ends, not at the deadline. Signal the direct child
+    only: the second test's grandchild is still alive after the kill.
