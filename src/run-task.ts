@@ -39929,8 +39929,15 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId, runOptions) =>
-          runTaskFn(taskId, {
+        runOne: (taskId, runOptions) => {
+          // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
+          // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
+          const admittedPlan = createAdmittedPlanSlot();
+          void startRunChildProbe({
+            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
+            options: { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" },
+          });
+          return runTaskFn(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
@@ -39948,7 +39955,11 @@ export async function daemonCommand(
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
             // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
-            planSnapshot: planSyncCoalescer.sync,
+            planSnapshot: (syncOptions) => {
+              const synced = planSyncCoalescer.sync(syncOptions);
+              admittedPlan.offer(synced);
+              return synced;
+            },
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
@@ -39958,7 +39969,8 @@ export async function daemonCommand(
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
             ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
-          }),
+          });
+        },
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
         // processes already announced, so a restart does not re-announce. Read ONCE at daemon
@@ -56941,6 +56953,7 @@ import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js"
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { createAdmittedPlanSlot, startRunChildProbe } from "./lib/run-child.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

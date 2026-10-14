@@ -935,6 +935,17 @@ sweep:
       origin: "proposal"
       min: 1000
       max: 86400000
+  # W1-T9082 — ADR 0007 decision A.9: whether a build run also starts a child process. mode accepts off, shadow,
+  # on or auto, and an absent block reads as off. "shadow" (shipped) starts one PROBE child per dispatched run
+  # beside the in-process run: it loads what a run child would load, round-trips the run-child contract and records
+  # `run_child.shadow` (load time, tree peak, entry kind), and never touches the task. "on" and "auto" are accepted
+  # and implemented by later tasks; until then they behave as shadow and say so. Switching beyond shadow is an
+  # operator ruling made by editing this row; nothing switches it on a timer. Read by src/lib/policy.ts
+  # (loadRunChildMode), never by validatePolicy.
+  runChild:
+    mode:
+      value: "shadow"
+      origin: "proposal"
 
 drain:
   max:
