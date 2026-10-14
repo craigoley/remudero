@@ -28,6 +28,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -3391,6 +3392,14 @@ export function approveProposal(
     ...(adopted ? { adopted: true } : {}),
     ...(joinedPr ? { joined: true } : {}),
   };
+}
+
+/** The PR title of a single-proposal ratification, fitted to commitlint's header limit, which the PR title meets
+ *  as the squash commit's header. A long proposal id (`adoption:symbol-no-caller:<path>:<symbol>`) made the raw
+ *  `chore(plan): ratify <id> via rmd approve` 103-112 characters, and the approve push preflight refused it
+ *  [pr-title] every time (2026-10-13..14). */
+export function approvePrTitle(proposalId: string): string {
+  return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
 
 /** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`
