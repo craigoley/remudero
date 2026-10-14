@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: ["W1-T9391"]
   type: implement
-  verify: "human"
+  verify: human
   risk: "medium"
   status: queued
   attempts: 0
@@ -21,3 +21,11 @@
     `build*DaemonHooks`/`buildSweepHook` seeds actually reach `syncPlanFromOrigin` and
     `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
     W1-T5689 (run W1-T5689-1791183035928)
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The title and acceptance require a delta reflecting P25 scope and dependencies, but the supplied rationale concerns daemon-hook research and provides no P25 scope or dependency details.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for W1-T9391 in plan/tasks.yaml; that presence cannot establish the claimed P25 alignment. The operator escalation rule explicitly classifies unverifiable findings as HIGH."
+    judged_at: "2026-10-14T06:04:33.620Z"
+    pin: "9c622fc6cdd0abb4278e2cbff804050ffa49dc6758990741c17046e4b20b8c65"
