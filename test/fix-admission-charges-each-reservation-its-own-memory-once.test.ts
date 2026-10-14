@@ -198,3 +198,22 @@ test("W1-T9498: the production residency reads this container's live fix and rev
   const store = live.readResidents!();
   assert.ok(store === undefined || (Array.isArray(store.fix) && Array.isArray(store.review)));
 });
+
+test("W1-T9498: an unreadable pressure reading admits no fix and charges nothing", () => {
+  const rows: Record<string, unknown>[] = [];
+  const c = createSweepFixAdmissionController({
+    surface: "light",
+    queueDepth: 3,
+    hostWorkerBudget: 8,
+    activeWorkers: 0,
+    reviewReservations: 0,
+    readReviewReservations: () => 0,
+    readActiveWorkers: () => 0,
+    readPressure: () => ({ availableMib: 64_000, floorMib: FLOOR, reason: "memory reading unreadable" }),
+    readEstimate: () => ({ estimateMib: FIX_MIB, samples: 0 }),
+    log: (step, extra) => void rows.push({ step, ...extra }),
+  });
+  assert.equal(c.snapshot().fixAdmissionsAvailable, 0, "a reading with a reason is not headroom, however large its number");
+  assert.equal(c.claim(pr).admitted, false, "no fix is admitted on an unreadable reading");
+  assert.equal(rows.at(-1)?.headroom_mib, undefined, "no MiB arithmetic is shown for a reading that was not taken");
+});
