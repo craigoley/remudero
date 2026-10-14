@@ -175,7 +175,7 @@
 - id: proof-discrimination-refusal-repair-lane
   subsystem: ci
   lifecycle: active
-  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts, src/run-task.ts]
+  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts]
   error_signatures: ["proof-discrimination", executed_stale]
   fact: >-
     When proof-discrimination refuses a PR, inspect its gate output and make each proof fail at the

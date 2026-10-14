@@ -6,6 +6,6 @@ index 1111111..2222222 100644
 +- id: proof-discrimination-refusal-repair-lane
 +  subsystem: ci
 +  lifecycle: active
-+  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts, src/run-task.ts]
++  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts]
 +  fact: Make each proof fail at the merge base and pass on the changed head; repair the lane that wrote the stale proof.
 +  src: "ci-learning:11139:proof-discrimination"

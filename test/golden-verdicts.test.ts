@@ -404,7 +404,7 @@ test("GOLDEN — PROOF-DISCRIMINATION LESSON: the cited incident executes and th
   assertGolden(verdict, golden);
 
   const learningsDir = join(HERE, "..", "learnings");
-  for (const taskFile of ["plan/tasks.d/W1-T9000.yaml", "test/new-proof.test.ts", "src/lib/proof-grammar.ts", "src/run-task.ts"]) {
+  for (const taskFile of ["plan/tasks.d/W1-T9000.yaml", "test/new-proof.test.ts", "src/lib/proof-grammar.ts"]) {
     const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
     const selected = selectLearnings(entries, [taskFile]).selected;
     assert.ok(selected.some((entry) => entry.id === "proof-discrimination-refusal-repair-lane"), taskFile);
