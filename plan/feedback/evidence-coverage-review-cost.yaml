@@ -18,8 +18,23 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11574
+summary:
+  headline: Decide whether review-lane cost evidence is missing or unnecessary
+  what_happened: Cost evidence appears on 312 of 968 joined review worker calls
+    (32.2%) in the past seven days, below the 90% floor. The gap has persisted
+    since September 28, 2026, and does not block PRs or work.
+  decision: Restore cost evidence at the review lane’s ledger write site, or
+    document why this lane legitimately lacks it.
+  options:
+    - label: Restore evidence
+      consequence: Add cost evidence to review-lane ledger writes; coverage can
+        recover as new calls are recorded.
+      intent: approve
+    - label: Record an exception
+      consequence: Document why review calls legitimately lack cost evidence; the
+        gardener will update this entry while the gap persists.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
