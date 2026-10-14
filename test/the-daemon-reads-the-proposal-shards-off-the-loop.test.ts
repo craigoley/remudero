@@ -60,6 +60,25 @@ function countingFs(): { fs: ProposalShardReaderFs; reads: string[] } {
 const inodes = (shardDir: string): Map<string, bigint> =>
   new Map(readdirSync(shardDir).map((f) => [f, statSync(join(shardDir, f), { bigint: true }).ino] as const));
 
+test("W1-T9443: a synchronous shard read failure reports the path and cause", (t) => {
+  const { registryPath, shardDir } = seedRegistry(["A"]);
+  const shardPath = join(shardDir, readdirSync(shardDir)[0]!);
+  const cause = Object.assign(new Error("permission denied"), { code: "EACCES" });
+  const originalReadFileSync = fs.readFileSync;
+  const readSpy = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    if (args[0] === shardPath) throw cause;
+    return originalReadFileSync(...args);
+  });
+
+  assert.throws(() => loadProposalRegistry(registryPath), {
+    name: "Error",
+    message: `cannot read proposal shard (${shardPath}): ${String(cause)}`,
+  });
+  assert.equal(readSpy.mock.calls.filter((call) => call.arguments[0] === shardPath).length, 1);
+  readSpy.mock.restore();
+  assert.deepEqual(loadProposalRegistry(registryPath), [proposal("A")]);
+});
+
 test("W1-T9443: a slow shard read does not block a concurrent timer", async (t) => {
   // A read that has not resolved yet: the loop must stay free to run a timer while it is pending.
   let release!: () => void;
