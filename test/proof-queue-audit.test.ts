@@ -324,6 +324,7 @@ test("proof audit fixture is independent of unrelated interpolated titles in the
       'import { test } from "node:test";\nconst prefix = "foreign";\ntest(`${prefix} never match any real test`, () => {});\n');
     const { stdout } = await runAuditCapturing(["--plan", tasksPath], {
       readMergeEvidenceLog: () => ({ dump: dumpOf(), ref: "fixture-ref" }),
+      executeProof: () => "unreadable", // Classification only; an ambiguous name must not launch a whole-suite probe.
     });
     assert.match(stdout, /name-filtered-zero-match\s+1 task\(s\): W9-OPEN-ZERO-MATCH/);
   } finally {
