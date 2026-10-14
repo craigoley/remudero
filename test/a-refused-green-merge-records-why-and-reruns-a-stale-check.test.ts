@@ -18,6 +18,16 @@ const PR_URL = "https://github.com/craigoley/remudero/pull/8620";
 const GATE_REFUSAL = 'gh: Required status check "ci-gate" is failing. (HTTP 405)';
 const TEST_REFUSAL = 'gh: Required status check "test" is failing. (HTTP 405)';
 const REQUIRED = ["ci-gate", "test", "lint"];
+const BASE = "b".repeat(40);
+// GitHub's own CodeQL producer shape for a head with no new alerts, bound to this PR.
+const CLEAN_CODEQL = {
+  id: 1, name: "CodeQL", head_sha: HEAD, status: "completed", conclusion: "success",
+  app: { id: 57789, slug: "github-advanced-security", owner: { login: "github" } },
+  output: {
+    title: "No new alerts in code changed by this pull request",
+    summary: "[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A8620+tool%3ACodeQL+is%3Aopen).",
+  },
+};
 
 // #11096's mergeability: the sweep's snapshot read it unknown on every refused pass.
 function pr(overrides: Partial<OpenPrView> = {}): OpenPrView {
@@ -66,12 +76,17 @@ function harness(t: TestContext, refusal: string, rollup: RollupCheckEntry[] | u
   const root = mkdtempSync(join(tmpdir(), "rmd-refused-green-merge-"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // GitHub's own fresh read at merge time is mergeable: the refusal is the required check, not a conflict.
-  const live = { state: "open", merged: false, auto_merge: {} as unknown, draft: false,
-    head: { sha: HEAD }, base: { ref: "main" }, mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
+  // The exact-head security admission (lib/security-merge-admission.ts) reads this same row, the
+  // changed files and the head's CodeQL run before the merge write: all three answer clean here,
+  // so the refusal under test is GitHub's own, never the security gate's.
+  const live = { state: "open", merged: false, auto_merge: {} as unknown, draft: false, changed_files: 1,
+    head: { sha: HEAD }, base: { ref: "main", sha: BASE, repo: { full_name: "craigoley/remudero" } },
+    mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
   const shim = ghShim([
     { when: "/merge", exit: 1, stderr: refusal },
     { when: "/update-branch", stdout: "{}" },
     { when: "/files", stdout: '[{"filename":"src/example.ts"}]' },
+    { when: `/commits/${HEAD}/check-runs`, stdout: JSON.stringify({ total_count: 1, check_runs: [CLEAN_CODEQL] }) },
     { when: "/compare/", stdout: '{"behind_by":0}' },
     { when: "/rules/branches/main", stdout: "[]" },
     { when: "/pulls/8620", stdout: JSON.stringify(live) },
