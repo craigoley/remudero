@@ -33,6 +33,6 @@
   plan_refs: ["§7B", "§5D", "P25"]
   files: [CLAUDE.md, "AGENTS.md"]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=ae649c01e31358f7
   attempts: 0

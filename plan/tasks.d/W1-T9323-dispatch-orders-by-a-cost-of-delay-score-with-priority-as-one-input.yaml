@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-13: the dispatch diagnosis's priority-inflation finding; W1-T8514's rationale named the tier-crossing change as a separate operator decision, and this is that decision"
   plan_refs: [W1-T4064, W1-T3412, W1-T7534, W1-T3075, W1-T8514, W1-T8502, W1-T8771, W1-T422]
   files: [src/lib/drain.ts, src/lib/dispatch-value.ts, test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
