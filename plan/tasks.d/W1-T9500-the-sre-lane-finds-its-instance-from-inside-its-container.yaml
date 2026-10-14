@@ -1,0 +1,78 @@
+- id: W1-T9500
+  title: "THE SRE LANE FINDS ITS INSTANCE FROM INSIDE ITS CONTAINER — W1-T8232 matches the daemon's state root against the registry's host paths, but inside the container the root is /home/node/Remudero, so every core start since writes `sre_lane.disabled` (63 rows across the 10-10..10-14 rotations, 0 `sre_lane.started`) and the idle-capacity detector that judges a hold's idle cost against its cause's own history never ran while a recycle PAUSE held core's 3 lanes from 08:12Z to 10:58Z on 2026-10-14"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — how a containerised daemon names its own registry instance for the SRE lane
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.txt, recommendation 4: a PAUSE-age signal relative to observed recycle durations, no fixed cap)"
+  plan_refs: [W1-T8232, W1-T8236, W1-T8238, W1-T8235, W1-T9409, W1-T4429, W1-T8245, W1-T3596]
+  files:
+    - src/lib/sre-lane.ts
+    - deploy/recycle-container.sh
+    - deploy/install-host-units.sh
+    - test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts
+    # W1-T8232's tests drive the state-root match; each changes only if red without the change
+    - test/the-sre-lane-runs-on-the-primary-instance.test.ts
+  status: queued
+  priority: 1  # operator approval 2026-10-14 (Craig): raised, being session-built; the SRE lane has never started on core (63 sre_lane.disabled, 0 sre_lane.started across the 10-10..10-14 rotations)
+  attempts: 0
+  rationale: |
+    ASKED: a PAUSE-age signal that fires when a PAUSE outlives the observed recycle durations for its kind, with no
+    fixed cap; on 2026-10-14 an orphaned recycle PAUSE held core from 08:12Z to 10:58Z (465 lane-min) before a person
+    noticed. W1-T9409 now releases a recycle PAUSE whose writer is provably gone; it does not signal one that is merely
+    long.
+    THE SIGNAL ALREADY EXISTS AND DID NOT RUN. src/lib/idle-capacity-detector.ts (W1-T8238) integrates the idle lane
+    slot-minutes each `lane.idle_changed` cause costs and judges them against `ownHistoryBound` over that cause's own
+    earlier windows (all-cause history when the cause has none). The 10-14 rows feed it exactly: 08:21:13.329Z
+    `lane.idle_changed` cause recycle_drain, idle_slots 3 of 3, dispatchable 3, hold "PAUSE requested: container
+    recycle (deploy/recycle-container.sh)", and the next row is 11:16:10Z. It is registered in `SRE_LANE_DETECTORS`
+    (src/lib/sre-lane.ts), and the SRE lane is a daemon garden.
+    MEASURED (core ledger on the Azure host, read-only, niced): 100 `ledger.2026-10-1*.ndjson.gz` rotations and the
+    live file opened (0 plain rotations exist): 63 `sre_lane.disabled` rows and 0 `sre_lane.started`. The newest,
+    15:56:34.487Z, pid 118: reason "state root /home/node/Remudero is not exactly one instance's state_dir in
+    /home/node/Remudero/remudero/.remudero/daemon-instances.yaml". The 09-27 and 11-29 rotations (the PAUSE window) hold 0
+    `idle-capacity` rows (control: 7 and 3 `lane.idle_changed` rows in the last two).
+    READ on origin/main f07a85601 (symbols): `resolveSreLaneInstance` calls `instanceForStateRoot`
+    (src/lib/deployer.ts), which compares the state root with each registry `state_dir`. The registry names host
+    paths (core: /home/craigoleyagent/rmd-state2). run-task.ts passes `config.root`, which inside every container is
+    /home/node/Remudero. `docker inspect remudero-daemon`: /home/craigoleyagent/rmd-state2 -> /home/node/Remudero; the
+    container's /proc/<pid>/mountinfo root for that mount reads /state2 (the filesystem-relative source), so the host
+    path cannot be recovered inside the container either. No instance name reaches the container: its env holds no
+    instance variable. deploy/recycle-container.sh builds `DOCKER_RUN_ARGS` with `INSTANCE_NAME` in hand.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 14 open PR heads for sre_lane.disabled, "exactly one
+    instance", "PAUSE age", pause_age, outlive and recycle durations. Control: "sre lane" reads W1-T8232 (merged, the
+    match this fixes) and the open W1-T8240, W1-T8245, W1-T8266, W1-T8267; "PAUSE age"/pause_age reads 0 on main and
+    every head. W1-T8245 judges a FOREIGN pause by cost and explicitly treats a recycle-container pause as the fleet's
+    own (its tests assert it is not foreign), so it would not flag this one. W1-T4429's tiers judge a hold's own
+    expiry, and `checkPauseHold` has no production caller (W1-T9409 rationale).
+  design: |
+    Operator rulings: no fixed threshold, automated flow.
+    1. THE CREATOR NAMES THE INSTANCE. deploy/recycle-container.sh adds `-e RMD_INSTANCE_NAME=<INSTANCE_NAME>` to
+       `DOCKER_RUN_ARGS` when it runs with an instance, and deploy/install-host-units.sh's `docker run` does the same
+       for its `--instance`. The legacy no-instance path adds nothing. Its value is not a secret and is not part of
+       `RMD_DAEMON_RUNTIME_ENV_VARS` (that array holds pass-through names only).
+    2. THE LANE PREFERS THE NAME. `resolveSreLaneInstance` takes the named instance when the variable is set and names
+       exactly one parsed registry row; a name the registry does not hold resolves false, naming it. With no variable it
+       matches the state root as today, so a host-side caller is unchanged.
+    3. `sre_lane.started`/`disabled` carries `resolved_by` ("env" or "state_root").
+    4. Report in the PR, as its own item, which other in-container callers of `instanceForStateRoot`
+       (pause-target.ts, deployer.ts, serve-policy-convergence.ts) also read a container path; do not change them here.
+    It takes effect at each instance's next recycle. Tests (new file, `test(` titles verbatim as in the proofs below)
+    drive `resolveSreLaneInstance` with the repo registry and the 15:56:34 container root, and the recycle script with
+    the stub `docker` the W1-T9409/W1-T5281 tests use, reading the captured run arguments.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts"
+    - claim: "inside the container, with RMD_INSTANCE_NAME=core, the lane resolves core as the live primary and starts"
+      proof: 'grep: test("W1-T9500: a containerised core daemon resolves its instance by name and starts the lane" in test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts'
+    - claim: "a recycle with --instance passes the instance name to the container it runs"
+      proof: 'grep: test("W1-T9500: the recycle names the instance to the container it runs" in test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts'
+    - claim: "a name the registry does not hold disables the lane, naming it"
+      proof: 'grep: test("W1-T9500: an unknown instance name disables the lane by name" in test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts'
+  falsifier: |
+    Keep the state-root match alone: /home/node/Remudero against the repo registry resolves nothing and the first test
+    reads `sre_lane.disabled`. Leave the recycle's run arguments unchanged: the second test finds no RMD_INSTANCE_NAME.

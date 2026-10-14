@@ -1,0 +1,59 @@
+- id: W1-T9405
+  title: "A MODEL'S OWN `tsc --noEmit -p .` RUNS COLD, FULL AND UNSLOTTED — a worker's raw tsc peaked at 4.4 GB rss on the host on 2026-10-14, and the same command measured 4.41 GB here, while the fleet's incremental check of the same tree peaks at 1.65 GB warm and 1.67-2.69 GB after a typical edit; `npm run typecheck` already runs that way (W1-T7392), but npx tsc and node_modules/.bin/tsc bypass it: the fleet install's tsc entry routes a whole-project no-emit check through the same prepared, seeded, slot-admitted run and passes every other invocation through untouched"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which tsc a fleet worktree's whole-project no-emit check runs; high because it repoints the tsc entry of the install every fleet worktree shares
+  band_meaning: span
+  origin: "operator session 2026-10-14: worker memory investigation (operator approved filing the worker-typecheck memory task)"
+  plan_refs: [W1-T7392, W1-T6155, W1-T5658, W1-T8776]
+  files: [src/lib/worker.ts, scripts/tsc-entry.mjs, test/a-model-tsc-runs-the-fleet-typecheck.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main eb0c3a710.
+    OBSERVED on the host (operator session, ps, read-only): a worker's `tsc --noEmit -p .` at 4.4 GB rss; earlier a
+    `tsc --noEmit --incremental --tsBuildInfo…` at 2.9 GB and an author preflight at 3.2 GB.
+    WHO RUNS IT: no code. `git grep` finds no `-p .` tsc call in src/, scripts/, test/ or .github/; every harness call
+    names `-p tsconfig.json` and most add --incremental (containment.ts, merge-probe.ts, typecheck-buildinfo.ts
+    typecheckArgs, worker-provider.ts openWeightIncrementalTypecheck). A model typed it. typecheck-run.ts's header records
+    the same class on 2026-10-10 (two worker checks at 2.4 and 2.2 GB for 18+ minutes) and made `npm run typecheck`
+    incremental, seeded and slotted; `npx tsc` and node_modules/.bin/tsc still reach the real compiler directly, and a
+    fleet worktree's node_modules is a symlink to the shared install (linkWorktreeNodeModules).
+    MEASURED here (macOS, TypeScript 7.0.2, this tree, /usr/bin/time -l, max rss):
+    - `tsc --noEmit -p .` cold: 4.41 GB, 4.9 s. With `--checkers 2`: 3.34 GB, 7.5 s.
+    - incremental, first run writing the buildinfo: 3.70-4.14 GB; warm, unchanged tree: 1.63-1.65 GB, 0.7 s;
+      warm after editing one test file: 1.67 GB; after adding an export to src/lib/now-view.ts: 2.69 GB, 1.65 s;
+      after any edit to src/lib/clock.ts (a hub every file imports): 3.9 GB. So a seeded warm start saves 1.7-2.7 GB
+      on the edits workers usually make, and little on a hub edit.
+    REJECTED: `incremental` + `tsBuildInfoFile` in tsconfig.json. Every tsc would then write a buildinfo, and one on a
+    tree it cannot write exits 1 with TS5033 (measured: `Could not write file … read-only file system`), a false red
+    for any sandboxed or read-only checker. A `checkers` key in tsconfig is accepted and ignored (4.78 GB).
+  design: |
+    1. scripts/tsc-entry.mjs (node builtins only): a whole-project no-emit check — `--noEmit`, project `.` or
+       `tsconfig.json` or none, cwd the root of a git worktree, and none of --incremental, --tsBuildInfoFile, --build,
+       --watch, --listFiles* — runs `npm run typecheck` (the install-owning checkout's scripts/typecheck.mjs, i.e. typecheck-run.ts: the worktree buildinfo
+       seeded from the canonical one, the host slot for a cold run, lowMemoryTypecheckArgs) with the remaining argv
+       passed through. Every other invocation execs the real typescript/bin/tsc with its argv unchanged. The diagnostics
+       and exit code are tsc's own.
+    2. Re-entrancy is read from process.env: the delegated run sets RMD_TSC_ENTRY=1 and an invocation that sees it
+       passes straight through, so typecheck-run's own `node_modules/.bin/tsc` call never loops.
+    3. Where a fleet worktree is cut (worker.ts, beside linkWorktreeNodeModules and refreshCanonicalSeed), the linked
+       install's node_modules/.bin/tsc is checked and, when it is not already the entry, repointed at the install-owning checkout's
+       scripts/tsc-entry.mjs; idempotent, and a fresh `npm ci` that restores npm's link is repointed at the next cut.
+       A checkout no fleet worktree is cut from (an operator's Mac checkout, CI) is never touched. merge-probe.ts keeps
+       calling typescript/bin/tsc by realpath (W1-T6155), so the harness's own probe never runs this entry.
+    4. Each delegation writes one `typecheck.raw_routed` line to stderr naming the argv it replaced, so a worker
+       transcript shows why its tsc ran incremental.
+  acceptance:
+    - claim: "a whole-project no-emit tsc in a worktree runs the fleet's incremental, seeded check, and every other tsc argv runs the real compiler unchanged"
+      proof: 'grep: test("W1-T9405: a model tsc runs the fleet typecheck" in test/a-model-tsc-runs-the-fleet-typecheck.test.ts'
+    - claim: "a delegated run is re-entrant through the environment, never through an argument"
+      proof: 'grep: RMD_TSC_ENTRY in scripts/tsc-entry.mjs'
+  falsifier: |
+    Exec the real tsc for every argv: the fixture's `tsc --noEmit -p .` runs without --incremental and the test fails.
+    Drop the RMD_TSC_ENTRY check: the delegated run re-enters the entry and the loop guard case fails.

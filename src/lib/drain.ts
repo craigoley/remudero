@@ -424,22 +424,29 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   onSkipRunBranch?: (task: Task) => void;
 }
 
-/** Dispatch priority first, then measured stride passes (W1-T4064). Without readable evidence,
+/** Measured stride passes first when a ready cost-of-delay context exists, else priority first (W1-T4064, W1-T9323). Without readable evidence,
  * the historic scope/id order remains deterministic; the comparator performs no reads. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
 export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
   return [...tasks].sort((a, b) => compareDispatch(a, b, context));
 }
 
-/** Total order: priority, stride, then scope/id. Unscored tasks follow the scored population. */
+/** Total order. With a ready cost-of-delay context (W1-T9323): stride pass, priority as the first tiebreak,
+ * then scope/id. Without one, or on a fallback context: priority, stride, then scope/id as before.
+ * Unscored tasks follow the scored population. */
 export function compareDispatch(a: Task, b: Task, context?: DispatchValueContext): number {
+  const strideFirst = context?.stridePassByTaskId !== undefined && !context.costOfDelayFallback;
+  if (strideFirst) {
+    const byStride = compareStride(a, b, context);
+    if (byStride !== 0) return byStride;
+  }
   const pa = a.priority ?? Number.POSITIVE_INFINITY;
   const pb = b.priority ?? Number.POSITIVE_INFINITY;
   if (pa !== pb) return pa - pb;
-  const sa = context?.stridePassByTaskId?.get(a.id);
-  const sb = context?.stridePassByTaskId?.get(b.id);
-  if (context?.stridePassByTaskId && (sa === undefined) !== (sb === undefined)) return sa === undefined ? 1 : -1;
-  if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+  if (!strideFirst) {
+    const byStride = compareStride(a, b, context);
+    if (byStride !== 0) return byStride;
+  }
   const ua = undeclaredScopeLast(a);
   const ub = undeclaredScopeLast(b);
   if (ua !== ub) return ua - ub;
@@ -460,6 +467,14 @@ export function compareDispatch(a: Task, b: Task, context?: DispatchValueContext
   if (na.workstream !== nb.workstream) return na.workstream - nb.workstream;
   if (na.ordinal !== nb.ordinal) return na.ordinal - nb.ordinal;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function compareStride(a: Task, b: Task, context: DispatchValueContext | undefined): number {
+  const sa = context?.stridePassByTaskId?.get(a.id);
+  const sb = context?.stridePassByTaskId?.get(b.id);
+  if (context?.stridePassByTaskId && (sa === undefined) !== (sb === undefined)) return sa === undefined ? 1 : -1;
+  if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+  return 0;
 }
 
 /** W1-T476: 1 when `t.files` is absent or empty, else 0 — an undeclared-scope task sorts LAST in its

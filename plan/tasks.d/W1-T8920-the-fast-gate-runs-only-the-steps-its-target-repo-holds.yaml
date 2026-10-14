@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: forensics on remudero-console CONSOLE-T124's build (operator: file the fixes in parallel)"
   plan_refs: [W1-T2653, W1-T4108, W1-T8917]
   files: [src/lib/ci-parity.ts, src/lib/preopen-gate.ts, test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

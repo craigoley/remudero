@@ -67,6 +67,9 @@ export interface AffectedSelection {
    *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
   impact?: string[];
   impactFallback?: string;
+  /** Commits the base is past the impact map's sha, when known: the shadow record carries it so the
+   *  arm's miss rate can be read by distance and IMPACT_MAP_STALENESS_BOUND set from it. */
+  impactDistance?: number;
   /** W1-T6084 — set when a read map was asked for and cannot speak for this change (missing, stale,
    *  not an ancestor of the base): census membership and the non-code full-run triggers then follow
    *  today's rules, and this says why. */
@@ -98,7 +101,7 @@ const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
-const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
+const READ_MAPPED = /^(?:(?:openapi|deploy)\/[\s\S]*|[\s\S]*\.json)$/;
 
 /** The two modelled contracts use content readers; other contract-tree paths force a full run.
  *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */
@@ -111,13 +114,14 @@ export function fullRunTrigger(changed: readonly string[], readMapUsable = false
   });
 }
 
-export const READ_MAP_FORMAT = "rmd-read-map-v1";
+export const READ_MAP_FORMAT = "rmd-read-map-v2";
 
 /** One test file's record, as test/setup/read-map.ts writes it. */
 export interface ReadMapRecord {
   suite: string;
   reads: readonly string[];
   listed: readonly string[];
+  unknownDescriptors?: boolean;
 }
 
 /** Main's merged read map: for each non-code path, the suites that read it (indices into `suites`),
@@ -129,6 +133,7 @@ export interface ReadMap {
   suites: string[];
   reads: Record<string, number[]>;
   listed: Record<string, number[]>;
+  unknownDescriptorSuites: string[];
 }
 
 /** What the selector decides from beside the map: why it is absent, and its drift against the base. */
@@ -142,7 +147,9 @@ export interface ReadMapInput {
 /** Merges per-suite records into one map keyed by `sha`. A suite named twice (a retry) is unioned. */
 export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: string }): ReadMap {
   const merged = new Map<string, { reads: Set<string>; listed: Set<string> }>();
+  const unknownDescriptorSuites = new Set<string>();
   for (const r of records) {
+    if (r.unknownDescriptors !== false) unknownDescriptorSuites.add(r.suite);
     const into = merged.get(r.suite) ?? { reads: new Set<string>(), listed: new Set<string>() };
     for (const p of r.reads) into.reads.add(p);
     for (const p of r.listed) into.listed.add(p);
@@ -156,7 +163,7 @@ export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: str
     for (const p of [...entry.reads].sort()) (reads[p] ??= []).push(i);
     for (const p of [...entry.listed].sort()) (listed[p] ??= []).push(i);
   });
-  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed };
+  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed, unknownDescriptorSuites: [...unknownDescriptorSuites].sort() };
 }
 
 /** The records one full run left in `dir` (test/setup/read-map.ts's files). A file that is not a
@@ -166,11 +173,11 @@ export function readReadRecords(dir: string): { records: ReadMapRecord[]; proble
   const problems: string[] = [];
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
     const value = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<ReadMapRecord> & { format?: string };
-    if (value.format !== "rmd-read-record-v1" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed)) {
+    if (value.format !== "rmd-read-record-v2" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed) || typeof value.unknownDescriptors !== "boolean") {
       problems.push(`${name} is not a read record`);
       continue;
     }
-    records.push({ suite: value.suite, reads: value.reads, listed: value.listed });
+    records.push({ suite: value.suite, reads: value.reads, listed: value.listed, unknownDescriptors: value.unknownDescriptors });
   }
   return { records, problems };
 }
@@ -185,7 +192,8 @@ export function readReadMap(path: string, read: (p: string) => string = (p) => r
   }
   const object = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
   if (value?.format !== READ_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
-      !object(value.reads) || !object(value.listed)) {
+      !object(value.reads) || !object(value.listed) || !Array.isArray(value.unknownDescriptorSuites) ||
+      !value.unknownDescriptorSuites.every(suite => typeof suite === "string" && value!.suites!.includes(suite))) {
     return { problem: `read map ${path} is not a ${READ_MAP_FORMAT} file` };
   }
   return { map: value as ReadMap };
@@ -204,6 +212,9 @@ export function readMapProblem(input: ReadMapInput | undefined): string | undefi
   if (!input) return "no read map supplied";
   const map = input.map;
   if (!map) return `no read map (${input.mapProblem ?? "none supplied"})`;
+  if (!Array.isArray(map.unknownDescriptorSuites) || map.unknownDescriptorSuites.length > 0) {
+    return "read map descriptor coverage is incomplete";
+  }
   if (input.drift.distance === undefined) {
     return `read map ${map.sha.slice(0, 12)} is not an ancestor of the base (${input.drift.problem ?? "unknown"})`;
   }
@@ -603,6 +614,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     selection.impact = arm.suites;
     selection.recentOnly.impact = arm.recentOnly;
     if (arm.fallback !== undefined) selection.impactFallback = arm.fallback;
+    if (input.impact.map && input.impact.drift.distance !== undefined) selection.impactDistance = input.impact.drift.distance;
   }
   return selection;
 }
@@ -892,7 +904,10 @@ export interface ShadowFailure {
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
 export function shadowRecord(
   selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
-): { fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; failures: ShadowFailure[] } {
+): {
+  fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; impactDistance?: number;
+  failures: ShadowFailure[];
+} {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
@@ -910,6 +925,7 @@ export function shadowRecord(
     ...(narrow ? { narrowSize: narrow.size } : {}),
     ...(impact ? { impactSize: impact.size } : {}),
     ...(selection.impactFallback === undefined ? {} : { impactFallback: selection.impactFallback }),
+    ...(selection.impactDistance === undefined ? {} : { impactDistance: selection.impactDistance }),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
       floor: verdict(floor, recentOnlyFloor, file),

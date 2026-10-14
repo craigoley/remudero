@@ -321,8 +321,10 @@ test("serve's own worker-heap reading keeps its shape: the daemon book changes n
   const h = heap(200);
   assert.deepEqual(await reading, [{
     name: "worker-heap:read-model-worker:spawnReadModel", kind: "worker-heap", entries: 1,
-    bytes: h.total_heap_size + h.external_memory, parts: { "thread-71": { entries: 1, bytes: h.total_heap_size + h.external_memory } },
-  }], "serve.memory's worker-heap line is still committed heap plus external, one part per thread");
+    // W1-T9403 added the used heap beside the committed heap; the daemon book still changes nothing here.
+    bytes: h.total_heap_size + h.external_memory, used_bytes: h.used_heap_size + h.external_memory,
+    parts: { "thread-71": { entries: 1, bytes: h.total_heap_size + h.external_memory, used_bytes: h.used_heap_size + h.external_memory } },
+  }], "serve.memory's worker-heap line is still committed heap plus external (used heap beside it), one part per thread");
 });
 
 test("a request round that throws is logged, and every heartbeat is still written", { timeout: 20_000 }, async () => {

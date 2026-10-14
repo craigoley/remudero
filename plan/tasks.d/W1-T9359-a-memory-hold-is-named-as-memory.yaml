@@ -1,0 +1,66 @@
+- id: W1-T9359
+  title: "A MEMORY HOLD IS NAMED AS MEMORY — on 2026-10-14 every dispatch the WIP governor held for memory (measured_bound 0, host-short) was logged by `daemon.queue_governor` as tier \"draining\" with the adaptive limit, and charged by the idle account to wip_limit; the row and the idle cause name the memory hold and its numbers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the governor's daemon row and the idle cause call a memory-held refill
+  band_meaning: span
+  origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T4465, W1-T7243, W1-T8235, W1-T8238, W1-T8401, W1-T9358]
+  files: [src/lib/daemon.ts, src/lib/idle-lane-accounting.ts, test/a-memory-hold-is-named-as-memory.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger, daemon pid 1710758; local copy of the rotated archives, Azure host read-only):
+      - 00:19:14.206 `dispatch_deferred_wip` (task GOVERNOR): measured_bound 0, pressure_tier host-short,
+        pressure_available_mib 3477, pressure_floor_mib 3072, observed_open_count 6, wip_limit 12, tier draining.
+      - 00:19:14.840 `daemon.queue_governor` (task DAEMON) for the same verdict: observed_open_count 6, wip_limit 12,
+        tier draining, trailing flow and headroom_fraction. No measured_bound, no pressure field. Read alone it says
+        6 open PRs under a limit of 12 on a draining queue, which admits.
+      - 00:19:14.840 `lane.idle_changed`: cause wip_limit, idle_slots 3, hold null. The same at 00:23:20 and 00:28:11
+        (available 4669 and 2678 MiB). Every wip_limit hold that day in this process was a memory hold.
+    READ on origin/main b102674b1 (symbols):
+      - `checkQueueGovernor` (src/lib/sweep.ts) defers whenever `pressureHeld` (the host bound under one build), and
+        then still reports the flow tier and `wipLimit` = the adaptive bound. The verdict carries `measuredBound` 0
+        and `pressure`, so the cause is known at the call site.
+      - `logDispatchGovernorDefer` (src/lib/daemon.ts), queue branch, writes `daemon.queue_governor` without
+        `measuredBound` or `pressure`.
+      - `idleLaneCauseForStep` (src/lib/idle-lane-accounting.ts) maps "daemon.queue_governor" to wip_limit
+        unconditionally; `idleLaneCauseForRefillReason` maps "governor: queue" to wip_limit; the refill-held reason
+        is built as `governor: ${governed.kind}` in src/lib/daemon.ts, which is "queue" for a memory hold too.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 8 open PR heads (2026-10-14 01:28Z) for
+    queue_governor, idle_changed and wip_limit. Control: "queue_governor" reads 8 shards on main and on every head
+    (W1-T4465, W1-T329, W1-T5482 and others name the row, none its memory arm); "idle_changed" reads W1-T8235,
+    W1-T8238, W1-T8245 and W1-T9352, none of which separates a memory hold from a WIP hold.
+  design: |
+    No new threshold; the row and the cause read what the verdict already holds.
+    1. THE ROW. `daemon.queue_governor` gains `held_by`: "memory" when the verdict deferred on a pressure hold
+       (`measuredBound` 0 with a pressure reading), "wip" otherwise; plus `measured_bound`, and the pressure reading:
+       `pressure_tier`, `pressure_binding`, `pressure_available_mib`, `pressure_floor_mib`,
+       `pressure_host_available_mib`, and `reclaimLedgerFields` of its reclaim. `tier` keeps its flow meaning.
+    2. THE IDLE CAUSE. A new cause `memory` in `IDLE_LANE_CAUSES`. `idleLaneCauseForStep` maps a
+       `daemon.queue_governor` row with held_by "memory" to it, and its hold names the tier, binding, available and
+       floor MiB in `reason` (for example "host-short: 3477 MiB available, floor 3072"). A WIP hold stays wip_limit.
+    3. THE REFILL REASON. A refill held by a memory-held queue verdict is reasoned "governor: memory <tier>" and
+       `idleLaneCauseForRefillReason` maps it to `memory`. "governor: queue" keeps wip_limit.
+    4. `lane.idle_summary` carries the new cause like any other (W1-T8238's detector reads causes generically).
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Use the 00:19:14 verdict as the
+    fixture.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-memory-hold-is-named-as-memory.test.ts"
+    - claim: "a memory-held queue verdict writes held_by memory with its measured bound and pressure numbers"
+      proof: 'grep: test("W1-T9359: a memory-held governor row names memory and its numbers" in test/a-memory-hold-is-named-as-memory.test.ts'
+    - claim: "a memory-held verdict charges idle slots to the memory cause with a hold naming the numbers, and a WIP hold still charges wip_limit"
+      proof: 'grep: test("W1-T9359: a memory hold is charged to memory and a WIP hold to wip_limit" in test/a-memory-hold-is-named-as-memory.test.ts'
+    - claim: "a refill held by a memory-held verdict names memory in its reason and cause"
+      proof: 'grep: test("W1-T9359: a memory-held refill names memory" in test/a-memory-hold-is-named-as-memory.test.ts'
+    - claim: "the memory cause is a named idle cause"
+      proof: 'grep: "memory", in src/lib/idle-lane-accounting.ts'
+  falsifier: |
+    Keep the row and the mapping as on main: the 00:19:14 fixture writes no held_by and charges wip_limit, and the
+    first two tests fail. Map every governor row to memory: the WIP-hold half of the second test reads memory.

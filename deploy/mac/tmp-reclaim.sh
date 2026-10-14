@@ -19,6 +19,16 @@
 # safety check is uncertain.
 set -u
 shopt -s nullglob
+SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/dependency-seed-guard.sh"
+elif [ -f "$SEED_GUARD_DIR/../dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/../dependency-seed-guard.sh"
+else
+  rmd_dependency_seed_risk() { echo 'dependency seed guard unavailable'; return 0; }
+fi
 
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
@@ -144,18 +154,69 @@ path_is_live_or_unknown() {
   return 1
 }
 
+# Descendant symlinks are never followed. They are safe to unlink with stale
+# scratch only when their target is in the candidate, or when a dangling alias
+# names a path within ROOT. Existing sibling or external targets remain risky.
+symlink_risk() {
+  local tree="$1" tree_real link_scan status
+  [ -d "$tree" ] || return 1
+  tree_real=$(cd "$tree" 2>/dev/null && pwd -P)
+  [ -n "$tree_real" ] || { echo 'symlink parent could not be resolved'; return 0; }
+  # The shell body is intentionally passed literally to find's child process.
+  # shellcheck disable=SC2016
+  link_scan=$(find "$tree" -xdev -type l -exec /bin/sh -c '
+    candidate="$1"; cleanup_root="$2"; shift 2
+    for link do
+      target=$(readlink "$link") || { echo "symlink target unreadable: $link"; exit 1; }
+      case "/$target/" in
+        */../*|*/./*) echo "contains symlink with path traversal: $link -> $target"; exit 1 ;;
+      esac
+      case "$target" in
+        /*) target_path="$target" ;;
+        *)
+          link_parent=$(cd "$(dirname "$link")" 2>/dev/null && pwd -P) || { echo "symlink parent unavailable: $link"; exit 1; }
+          target_path="$link_parent/$target"
+          ;;
+      esac
+      if [ "$cleanup_root" = /private/tmp ]; then
+        case "$target_path" in /tmp/*) target_path="/private/tmp/${target_path#/tmp/}" ;; esac
+      fi
+      target_parent=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P) || { echo "symlink target parent unavailable: $link -> $target"; exit 1; }
+      target_real="$target_parent/${target_path##*/}"
+      [ ! -L "$target_path" ] || { echo "symlink chain is unverified: $link -> $target"; exit 1; }
+      case "$target_real" in
+        "$candidate"|"$candidate"/*) ;;
+        "$cleanup_root"|"$cleanup_root"/*)
+          if [ -e "$target_path" ] || [ -L "$target_path" ]; then
+            echo "contains symlink to another live temp entry: $link -> $target"
+            exit 1
+          fi
+          ;;
+        *) echo "contains symlink outside cleanup root: $link -> $target"; exit 1 ;;
+      esac
+    done
+  ' sh "$tree_real" "$ROOT_REAL" {} + 2>&1); status=$?
+  if [ "$status" -ne 0 ]; then
+    [ -n "$link_scan" ] || link_scan='symlink scan unavailable'
+    echo "$link_scan"
+    return 0
+  fi
+  return 1
+}
+
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
   local path="$1" found status owner_name structure_only="${2:-0}"
+  if found=$(rmd_dependency_seed_risk "$path"); then echo "$found"; return 0; fi
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
   [ "$owner_name" = "$ME" ] || { echo "owned by ${owner_name:-unknown}"; return 0; }
   found=$(find "$path" -xdev ! -user "$ME" -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'ownership scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "contains foreign-owned content: $found"; return 0; }
-  found=$(find "$path" -xdev -type l -print -quit 2>/dev/null); status=$?
-  [ "$status" -eq 0 ] || { echo 'symlink scan unavailable'; return 0; }
-  [ -z "$found" ] || { echo "contains symlink: $found"; return 0; }
+  if [ -d "$path" ]; then
+    if found=$(symlink_risk "$path"); then echo "$found"; return 0; fi
+  fi
   found=$(find "$path" -xdev -name .git -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'Git metadata scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "Git checkout/worktree: $found"; return 0; }
@@ -252,10 +313,17 @@ prune_tsx_cache() {
 }
 
 process_tmp_entry() {
-  local path="$1" old_check old_status why k
+  local path="$1" old_check old_status why k entry_owner
   [ -e "$path" ] || return 0
   # TSX is a regenerable per-file cache, handled separately; never remove its root.
   case "${path##*/}" in tsx-*) prune_tsx_cache "$path"; return 0;; esac
+  # Each account owns its own hourly sweep. Check ownership before traversal so
+  # mode-700 paths owned by the other account aren't mislabeled as scan failures.
+  entry_owner=$(owner "$path" 2>/dev/null)
+  if [ "$entry_owner" != "$ME" ]; then
+    report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$ROOT_REAL/${path#./}"
+    return 0
+  fi
   old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
   if [ "$old_status" -ne 0 ]; then report_risk 'age scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
   if [ -n "$old_check" ]; then
@@ -304,9 +372,14 @@ session_scratch_risk() {
 }
 
 process_session_scratch_dir() {
-  local path="$1" recent status why k resolved
+  local path="$1" recent status why k resolved entry_owner
   [ -d "$path" ] || return 0
   if [ -L "$path" ]; then report_risk 'session scratch directory is a symlink' "$path"; return 0; fi
+  entry_owner=$(owner "$path" 2>/dev/null)
+  if [ "$entry_owner" != "$ME" ]; then
+    report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$path"
+    return 0
+  fi
   resolved=$(cd "$path" 2>/dev/null && pwd -P)
   if [ -z "$resolved" ] || [ "$resolved" != "$path" ]; then
     report_risk 'session scratch path changed or could not be resolved' "$path"; return 0

@@ -19,12 +19,13 @@
  *     convention and resolve the wrong shape for a function that defines its own.
  */
 import fs from "node:fs";
+import { devNull } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread } from "node:worker_threads";
 
-export const READ_RECORD_FORMAT = "rmd-read-record-v1";
+export const READ_RECORD_FORMAT = "rmd-read-record-v2";
 export const READ_MAP_DIR_ENV = "RMD_READ_MAP_DIR";
 export const READ_MAP_ROOT_ENV = "RMD_READ_MAP_ROOT";
 
@@ -34,6 +35,7 @@ export interface ReadRecord {
   suite: string;
   reads: string[];
   listed: string[];
+  unknownDescriptors: boolean;
 }
 
 const CODE_FILE = /\.(?:ts|mts|cts|mjs|js|cjs)$/;
@@ -57,6 +59,7 @@ export function repoRelative(raw: unknown, root: string, cwd: string = process.c
 export interface ReadRecorder {
   read(raw: unknown): void;
   list(raw: unknown, recursive?: boolean): void;
+  unknown(): void;
   snapshot(): ReadRecord;
 }
 
@@ -64,6 +67,7 @@ export interface ReadRecorder {
 export function createReadRecorder(root: string, suite: string): ReadRecorder {
   const reads = new Set<string>();
   const listed = new Set<string>();
+  let unknownDescriptors = false;
   return {
     read(raw) {
       const rel = repoRelative(raw, root);
@@ -73,7 +77,8 @@ export function createReadRecorder(root: string, suite: string): ReadRecorder {
       const rel = repoRelative(raw, root);
       if (rel !== undefined) listed.add(recursive ? `${rel === "." ? "" : `${rel}/`}**` : rel);
     },
-    snapshot: () => ({ format: READ_RECORD_FORMAT, suite, reads: [...reads].sort(), listed: [...listed].sort() }),
+    unknown: () => { unknownDescriptors = true; },
+    snapshot: () => ({ format: READ_RECORD_FORMAT, suite, reads: [...reads].sort(), listed: [...listed].sort(), unknownDescriptors }),
   };
 }
 
@@ -93,9 +98,9 @@ function recursiveOption(options: unknown): boolean {
 }
 
 /** Entry points that READ a path, and those that LIST a directory, on `fs` and on `fs.promises`. */
-const READERS = ["readFileSync", "readFile", "existsSync", "statSync"] as const;
+const READERS = ["readFileSync", "readFile", "existsSync", "statSync", "stat", "lstatSync", "lstat", "accessSync", "access", "readlinkSync", "readlink", "realpathSync", "realpath", "openAsBlob"] as const;
 const LISTERS = ["readdirSync", "readdir", "opendir", "opendirSync"] as const;
-const PROMISE_READERS = ["readFile", "stat"] as const;
+const PROMISE_READERS = ["readFile", "stat", "lstat", "access", "readlink", "realpath"] as const;
 const PROMISE_LISTERS = ["readdir", "opendir"] as const;
 
 type Patchable = Record<string, unknown>;
@@ -108,7 +113,7 @@ function patchTable(
     if (typeof original !== "function") continue;
     const wrapper = preserveProperties(original as AnyFn, ((...args: unknown[]) => {
       onCall(args);
-      return Reflect.apply(original, undefined, args);
+      return Reflect.apply(original, table, args);
     }) as AnyFn);
     table[name] = wrapper;
     undo.push(() => {
@@ -118,16 +123,100 @@ function patchTable(
 }
 
 /** Patches `target`'s read and listing entry points to feed `recorder`. Returns the undo. */
-export function patchFsForReadMap(recorder: ReadRecorder, target: { promises?: unknown } = fs): () => void {
+export function patchFsForReadMap(recorder: ReadRecorder, target: { promises?: unknown } = fs, handlePrototype?: object): () => void {
   const undo: Array<() => void> = [];
+  const descriptors = new Map<number, { path: unknown; identity: string }>();
+  const identity = (fd: number): string => {
+    const stat = nativeFstat(fd, { bigint: true });
+    return `${stat.dev}:${stat.ino}`;
+  };
+  const observe = (fn: () => void) => { try { fn(); } catch { recorder.unknown(); } };
+  const read = (raw: unknown) => observe(() => {
+    const fd = typeof raw === "number" ? raw : handlePrototype && raw !== null && typeof raw === "object" &&
+      handlePrototype.isPrototypeOf(raw) ? (raw as { fd: number }).fd : undefined;
+    if (fd === undefined) { recorder.read(raw); return; }
+    const entry = descriptors.get(fd);
+    if (!entry || entry.identity !== identity(fd)) { descriptors.delete(fd); recorder.unknown(); return; }
+    recorder.read(entry.path);
+  });
+  const track = (fd: number, path: unknown) => observe(() => {
+    if (descriptors.size >= 4096) { descriptors.clear(); recorder.unknown(); }
+    descriptors.set(fd, { path, identity: identity(fd) });
+  });
+  const absolute = (raw: unknown) => typeof raw === "string" ? resolve(raw) : Buffer.isBuffer(raw) ? resolve(raw.toString("utf8")) : raw;
+  const wrap = (table: Patchable, name: string, run: (original: AnyFn, receiver: unknown, args: unknown[]) => unknown) => {
+    const original = table[name];
+    if (typeof original !== "function") return;
+    const wrapper = preserveProperties(original as AnyFn, function (this: unknown, ...args: unknown[]) {
+      return run(original as AnyFn, this, args);
+    });
+    table[name] = wrapper;
+    undo.push(() => { table[name] = original; });
+  };
+  const table = target as Patchable;
+  wrap(table, "openSync", (original, receiver, args) => {
+    const path = absolute(args[0]); read(path);
+    const fd = Reflect.apply(original, receiver, args) as number; track(fd, path); return fd;
+  });
+  wrap(table, "open", (original, receiver, args) => {
+    const path = absolute(args[0]); read(path);
+    const callback = args.at(-1);
+    if (typeof callback !== "function") return Reflect.apply(original, receiver, args);
+    args[args.length - 1] = function (this: unknown, ...result: unknown[]) {
+      if (result[0] == null && typeof result[1] === "number") track(result[1], path);
+      return Reflect.apply(callback, this, result);
+    };
+    return Reflect.apply(original, receiver, args);
+  });
+  wrap(table, "closeSync", (original, receiver, args) => {
+    const result = Reflect.apply(original, receiver, args); descriptors.delete(args[0] as number); return result;
+  });
+  wrap(table, "close", (original, receiver, args) => {
+    // Forget before an asynchronous close: a failed close becomes conservative UNKNOWN, not a stale fd alias.
+    descriptors.delete(args[0] as number); return Reflect.apply(original, receiver, args);
+  });
+  wrap(table, "createReadStream", (original, receiver, args) => {
+    const options = args[1];
+    let fd: number | undefined;
+    let entry: { path: unknown; identity: string } | undefined;
+    observe(() => {
+      if (options !== null && typeof options === "object" && "fs" in options) recorder.unknown();
+      if (options !== null && typeof options === "object" && "fd" in options) {
+        const property = Object.getOwnPropertyDescriptor(options, "fd");
+        if (!property || !Object.hasOwn(property, "value")) recorder.unknown();
+        else if (property.value != null) {
+          read(property.value);
+          fd = typeof property.value === "number" ? property.value : property.value.fd;
+          entry = descriptors.get(fd!);
+        }
+        else read(args[0]);
+      } else read(args[0]);
+    });
+    const stream = Reflect.apply(original, receiver, args) as fs.ReadStream;
+    stream.once("close", () => { if (fd !== undefined && descriptors.get(fd) === entry) descriptors.delete(fd); });
+    return stream;
+  });
+  patchTable(table, ["read", "readSync", "readv", "readvSync", "fstat", "fstatSync"], args => read(args[0]), undo);
   const hooks = (readers: readonly string[], listers: readonly string[], table: Patchable) => {
-    patchTable(table, readers, (args) => recorder.read(args[0]), undo);
+    patchTable(table, readers, (args) => read(args[0]), undo);
     patchTable(table, listers, (args) => recorder.list(args[0], recursiveOption(args[1])), undo);
   };
   hooks(READERS, LISTERS, target as Patchable);
   if (typeof target.promises === "object" && target.promises !== null) {
     hooks(PROMISE_READERS, PROMISE_LISTERS, target.promises as Patchable);
+    wrap(target.promises as Patchable, "open", (original, receiver, args) => {
+      const path = absolute(args[0]); read(path);
+      return (Reflect.apply(original, receiver, args) as Promise<{ fd: number; once: (event: string, fn: () => void) => void }>).then(handle => {
+        const fd = handle.fd; track(fd, path); const entry = descriptors.get(fd);
+        handle.once("close", () => { if (descriptors.get(fd) === entry) descriptors.delete(fd); });
+        return handle;
+      });
+    });
   }
+  if (handlePrototype) for (const name of ["read", "readv", "readFile", "stat", "readLines", "createReadStream", "readableWebStream"]) {
+    wrap(handlePrototype as Patchable, name, (original, receiver, args) => { read(receiver); return Reflect.apply(original, receiver, args); });
+  }
+  else if (target === fs) recorder.unknown();
   return () => {
     for (const restore of undo.reverse()) restore();
   };
@@ -156,11 +245,18 @@ const writeFileSync = fs.writeFileSync;
 const readFileSync = fs.readFileSync;
 const mkdirSync = fs.mkdirSync;
 const existsSync = fs.existsSync;
+const nativeFstat = fs.fstatSync;
+const nativeOpen = fs.promises.open;
 
 /** Installs the hook for `suite`, recording into `dir`. */
-export function installReadMap(opts: { dir: string; root: string; suite: string; target?: { promises?: unknown } }): ReadMapHandle {
+export async function installReadMap(opts: { dir: string; root: string; suite: string; target?: { promises?: unknown } }): Promise<ReadMapHandle> {
   const recorder = createReadRecorder(opts.root, opts.suite);
-  const restore = patchFsForReadMap(recorder, opts.target);
+  let handlePrototype: object | undefined;
+  if (opts.target === undefined || opts.target === fs) {
+    const probe = await nativeOpen(devNull, "r");
+    try { handlePrototype = Object.getPrototypeOf(probe) as object; } finally { await probe.close(); }
+  }
+  const restore = patchFsForReadMap(recorder, opts.target, handlePrototype);
   if (opts.target === undefined) syncBuiltinESMExports();
   const file = join(opts.dir, recordFileName(opts.suite));
   return {
@@ -179,6 +275,7 @@ export function installReadMap(opts: { dir: string; root: string; suite: string;
           ...own,
           reads: [...new Set([...(before.reads ?? []), ...own.reads])].sort(),
           listed: [...new Set([...(before.listed ?? []), ...own.listed])].sort(),
+          unknownDescriptors: own.unknownDescriptors || before.format !== READ_RECORD_FORMAT || before.unknownDescriptors !== false,
         };
       }
       mkdirSync(opts.dir, { recursive: true });
@@ -190,13 +287,13 @@ export function installReadMap(opts: { dir: string; root: string; suite: string;
 
 /** The preload's entry: a no-op unless `RMD_READ_MAP_DIR` is set, this is the main thread, and the
  *  process's entry file is a test suite. Flushes the record at process exit. */
-export function installReadMapFromEnv(env: NodeJS.ProcessEnv = process.env, entry: string | undefined = process.argv[1]): ReadMapHandle | undefined {
+export async function installReadMapFromEnv(env: NodeJS.ProcessEnv = process.env, entry: string | undefined = process.argv[1]): Promise<ReadMapHandle | undefined> {
   const dir = env[READ_MAP_DIR_ENV];
   if (dir === undefined || dir === "" || !isMainThread) return undefined;
   const root = env[READ_MAP_ROOT_ENV] ?? process.cwd();
   const suite = suiteOfEntry(entry, root);
   if (suite === undefined) return undefined;
-  const handle = installReadMap({ dir, root, suite });
+  const handle = await installReadMap({ dir, root, suite });
   process.on("exit", () => {
     handle.restore();
     handle.flush();

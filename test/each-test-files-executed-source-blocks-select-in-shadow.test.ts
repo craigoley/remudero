@@ -22,6 +22,7 @@ import {
   buildImpactMap,
   decodeMappings,
   IMPACT_MAP_FORMAT,
+  IMPACT_MAP_STALENESS_BOUND,
   impactArmSelection,
   impactDrift,
   impactTouches,
@@ -74,7 +75,7 @@ const B = "test/b.test.ts";
 
 /** Runs the fixture suites under real V8 coverage, compacts the raw reports the way a CI coverage
  *  shard does, and builds the impact map from the compact corpus with the real CLI. */
-function realImpactMap(): { map: ImpactMap; dir: string; raw: string } {
+function realImpactMap(): { map: ImpactMap; dir: string; raw: string; stdout: string } {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t6083-`));
   mkdirSync(join(dir, "src"));
   mkdirSync(join(dir, "test"));
@@ -108,7 +109,7 @@ function realImpactMap(): { map: ImpactMap; dir: string; raw: string } {
   });
   assert.equal(built.status, 0, built.stderr);
   assert.match(built.stdout, /impact map of \d+ process report\(s\): 2 suite\(s\)/);
-  return { map: JSON.parse(readFileSync(join(dir, "map.json"), "utf8")) as ImpactMap, dir, raw: join(dir, "raw") };
+  return { map: JSON.parse(readFileSync(join(dir, "map.json"), "utf8")) as ImpactMap, dir, raw: join(dir, "raw"), stdout: built.stdout };
 }
 
 const fixture = realImpactMap();
@@ -175,10 +176,11 @@ test("W1-T6083: an edit to an exported module-scope binding selects every suite 
 
 test("W1-T6083: an impact map older than its staleness bound falls back to the narrow selection and names the fallback", () => {
   const diffText = diffOf("src/m.ts", ["@@ -11 +11 @@", "-a", "+b"]);
-  const stale = armFor(fixture.map, diffText, { drift: { distance: 151, changedSinceMap: [] } });
+  const bound = IMPACT_MAP_STALENESS_BOUND;
+  const stale = armFor(fixture.map, diffText, { drift: { distance: bound + 1, changedSinceMap: [] } });
   assert.deepEqual(stale.suites, ["test/narrow.test.ts"]);
-  assert.match(stale.fallback!, /stale: 151 commits behind the base, past its bound of 150/);
-  assert.equal(armFor(fixture.map, diffText, { drift: { distance: 150, changedSinceMap: [] } }).fallback, undefined, "at the bound it still speaks");
+  assert.match(stale.fallback!, new RegExp(`stale: ${bound + 1} commits behind the base, past its bound of ${bound}$`));
+  assert.equal(armFor(fixture.map, diffText, { drift: { distance: bound, changedSinceMap: [] } }).fallback, undefined, "at the bound it still speaks");
   // Through the selector: on a fallback the arm IS the narrow selection, and the shadow record says why.
   const input: AffectedSuitesInput = {
     files: FIXTURE_FILES, pathReaders: [], symbolSuites: [B],
@@ -190,6 +192,28 @@ test("W1-T6083: an impact map older than its staleness bound falls back to the n
   const record = shadowRecord(sel, [A]);
   assert.equal(record.impactSize, sel.narrow!.length);
   assert.match(record.impactFallback!, /stale/);
+});
+
+test("the staleness bound covers two days of main, and the shadow record carries the impact map's distance", () => {
+  // MEASURED 2026-09-30..10-13: main lands 149–272 first-parent commits a day, so a bound of 150
+  // silenced the arm for the last hours of 11 of 13 days and for any day after a missed nightly.
+  assert.ok(IMPACT_MAP_STALENESS_BOUND >= 2 * 244, `two days at the busiest measured rate (244/day): ${IMPACT_MAP_STALENESS_BOUND}`);
+  const diffText = diffOf("src/m.ts", ["@@ -11 +11 @@", "-a", "+b"]);
+  const run = (drift: { distance?: number; changedSinceMap: string[]; problem?: string }, withMap = true) => {
+    const sel = selectAffectedSuites(["src/m.ts"], {
+      files: FIXTURE_FILES, pathReaders: [], symbolSuites: [B],
+      impact: withMap ? { map: fixture.map, diffText, drift } : { mapProblem: "none", diffText, drift },
+    });
+    return { sel, record: shadowRecord(sel, [A]) };
+  };
+  const speaking = run({ distance: 240, changedSinceMap: [] });
+  assert.equal(speaking.sel.impactFallback, undefined, "a day's drift no longer silences the arm");
+  assert.equal(speaking.record.impactDistance, 240, "a speaking arm records its map's distance");
+  const stale = run({ distance: IMPACT_MAP_STALENESS_BOUND + 1, changedSinceMap: [] });
+  assert.match(stale.record.impactFallback!, /stale/);
+  assert.equal(stale.record.impactDistance, IMPACT_MAP_STALENESS_BOUND + 1, "a stale fallback records its distance too");
+  assert.equal(run({ changedSinceMap: [], problem: "no ancestry" }).record.impactDistance, undefined, "no distance is invented");
+  assert.equal(run({ changedSinceMap: [] }, false).record.impactDistance, undefined, "no map, no distance");
 });
 
 test("W1-T6083: the other fallbacks — no map, a base not descended from it, a non-code input, a drifted file, no diff — each name themselves", () => {
@@ -292,6 +316,32 @@ test("W1-T6083: the builder refuses a map of nothing, counts orphans, and reads 
   assert.deepEqual(Object.keys(moved.files), ["src/q.ts"]);
   assert.throws(() => decodeMappings("A!"), /invalid base64 character "!"/);
   assert.deepEqual(decodeMappings("AAAA,CAAC;AACA"), [[[0, 0], [1, 0]], [[0, 1]]]);
+});
+
+test("W1-T6107: the builder places each source map's functions once, however many reports load it", () => {
+  // Run 38514060349 (2026-10-14): every report re-placed every function of every map it carried,
+  // ~0.7s a report over ~3,400 reports, and the nightly timed out. Placing is now once per map.
+  const read = () => readdirSync(fixture.raw).map((f) => JSON.parse(readFileSync(join(fixture.raw, f), "utf8")) as CoverageProcessReport);
+  const root = realpathSync(fixture.dir);
+  const once = { placed: 0, maps: 0 };
+  const single = buildImpactMap(read(), { sha: "s", root, counts: once });
+  assert.ok(once.maps >= 1 && once.placed >= 2, `the fixture places used() and unused(): ${JSON.stringify(once)}`);
+  // 20 separately parsed copies (a raw run's own map objects, equal by content) and 20 sharing
+  // one copy's objects (a compact shard's): the work stays the single run's.
+  const shared = read();
+  const reports = [...Array.from({ length: 20 }, read).flat(), ...Array.from({ length: 20 }, () => shared.map((r) => ({ ...r }))).flat()];
+  const many = { placed: 0, maps: 0 };
+  const repeated = buildImpactMap(reports, { sha: "s", root, counts: many });
+  assert.deepEqual(many, once, "no map is placed twice, and no span is computed twice");
+  assert.deepEqual(repeated.files, single.files, "the same map");
+  // A different map for the same file is its own map, never another's spans.
+  const edited = read().find((r) => Object.keys(r["source-map-cache"] ?? {}).some((url) => url.endsWith("/src/m.ts")))!;
+  const url = Object.keys(edited["source-map-cache"]!).find((u) => u.endsWith("/src/m.ts"))!;
+  edited["source-map-cache"]![url] = { ...edited["source-map-cache"]![url]!, data: { mappings: "AAAA" } };
+  const apart = { placed: 0, maps: 0 };
+  buildImpactMap([...read(), edited], { sha: "s", root, counts: apart });
+  assert.equal(apart.maps, once.maps + 1, "the edited map is placed on its own");
+  assert.match(fixture.stdout, /\d+ function span\(s\) placed on \d+ source map\(s\)/, "the CLI reports the work it did");
 });
 
 test("W1-T6083: compaction records which suite each process ran, and the impact-map mode refuses a bad call", async () => {

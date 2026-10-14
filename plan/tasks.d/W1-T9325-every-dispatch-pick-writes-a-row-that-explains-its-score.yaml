@@ -1,0 +1,69 @@
+- id: W1-T9325
+  title: "EVERY DISPATCH PICK WRITES A ROW THAT EXPLAINS ITS SCORE — the daemon logs `dispatch.concurrent_set` and `dispatch.lane_refilled` with task ids only, so why a task was started ahead of the rest of the runnable frontier has to be rebuilt by hand from the plan and the ledger"
+  repo: remudero
+  depends_on: [W1-T9323]  # logs the components W1-T9323's score is built from; same function family in src/lib/dispatch-value.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — one observational row per started task; what is dispatched is unchanged
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-13: the dispatch diagnosis asked for a visible ledger row that explains each pick"
+  plan_refs: [W1-T9323, W1-T4064, W1-T8771, W1-T8502, W1-T8514]
+  files: [src/lib/dispatch-value.ts, src/lib/daemon.ts, test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main bbab8894f (symbols, not lines). The tick path logs
+    `dispatch.concurrent_set {tasks, lane_count}` and the refill logs `dispatch.lane_refilled {lane, finished_task,
+    next_task, ...}` in src/lib/daemon.ts. Neither row carries the started task's priority, filing age, stride pass or
+    score, or what came second. `dispatch.value.calibrated` logs class estimates, not per-task scores. Today's diagnosis
+    of why a P1.2 started while a P1 waited had to rebuild the order by hand from shards and rows.
+    WHAT ALREADY EXISTS AND WHAT IS LEFT: W1-T8502 (merged) logs `dispatch.serialized` for a refill pool member an
+    in-flight lane blocks. W1-T8771 (queued) names a runnable task the pack passes over in `dispatch.passed_over`.
+    W1-T8514 (PR #11492) names a priority deferral in `dispatch.deferred_for_priority`. All three explain who did NOT
+    start. None explains why the started task ranked where it did. That row is this task.
+  design: |
+    1. src/lib/dispatch-value.ts: export a pure `explainDispatchScore(task, context)` that returns the components the
+       comparator used for this task: `priority`, `priority_head_start`, `filing_age_ms`, `median_wait_ms`, `urgency`,
+       `score`, `stride_pass`, `starts`, `open_dependents` and `imputed`. When the context is absent or a fallback, it
+       returns `{ basis: "priority-first", priority }`, and otherwise `basis: "cost-of-delay"`. It reads only what
+       W1-T9323 put in the context. It never reads the ledger or the clock.
+    2. src/lib/daemon.ts: when the tick path starts its admitted set, and when a refill starts its task, log one
+       `dispatch.pick_scored` row per started task: `{task, site: "tick" | "lane-refill", rank, ...explainDispatchScore,
+       runner_up}`. `runner_up` is the next task in dispatch order among that pass's eligible candidates that was NOT
+       started, with its own `explainDispatchScore` and the reason it lost: `"order"`, or `"serialized"` when the
+       partition or pack set it aside. Use the same `dispatchValueContext` the pass ordered with, never a second build.
+       There is one row per start, so the row count is bounded by `run.start` and needs no dedupe.
+    3. Unchanged: what is dispatched, the order, `dispatch.concurrent_set`, `dispatch.lane_refilled`,
+       `dispatch.serialized`, and W1-T8771's and W1-T8514's rows.
+    Tests go in the new file test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive the tick and refill through the harness the existing refill tests use (for
+    example test/a-freed-lane-refills-while-its-sibling-runs.test.ts). Use injected plans and a fixed context, with no
+    live ledger and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts"
+    - claim: "a tick start logs dispatch.pick_scored with the started task's score components and the runner-up"
+      proof: 'grep: test("W1-T9325: a tick start logs dispatch\.pick_scored with its components and the runner-up" in test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts'
+    - claim: "a lane refill logs dispatch.pick_scored for the task it starts"
+      proof: 'grep: test("W1-T9325: a lane refill logs dispatch\.pick_scored for the task it starts" in test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts'
+    - claim: "a pick under the priority-first fallback still logs a row, with basis priority-first"
+      proof: 'grep: test("W1-T9325: a fallback pick logs dispatch\.pick_scored with basis priority-first" in test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts'
+    - claim: "the daemon writes the named row"
+      proof: 'grep: dispatch\.pick_scored in src/lib/daemon.ts'
+    - claim: "the explanation is a pure function of the dispatch context"
+      proof: 'grep: export function explainDispatchScore in src/lib/dispatch-value.ts'
+    - claim: "the daemon builds each row from that function"
+      proof: 'grep: explainDispatchScore( in src/lib/daemon.ts'
+  falsifier: |
+    Two lanes, context ready. Queue in order: X (score 3.5), Y (score 2.0), Z (score 1.1). The tick starts X and Y.
+    With the fix, two `dispatch.pick_scored` rows appear: X at rank 1 with runner_up Z, and Y at rank 2 with runner_up
+    Z. Remove the daemon's log call and the first test sees no row. Build the explanation from a second context and
+    a test that injects a context-builder spy sees two builds. Drop the fallback arm and the third test sees no row
+    when the context is refused.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: every `run.start` from the daemon
+    has a `dispatch.pick_scored` row within the same pass. A question like "why did P1.2 start while a P1 waited" is
+    answered by reading two rows instead of rebuilding the order.

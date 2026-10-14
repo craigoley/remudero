@@ -15,6 +15,12 @@
  * silently lapsed. A pinned ruling rides git; it cannot age out, and an edit to the record changes
  * its pin, which re-opens the question.
  *
+ * A PARKED ESCALATION IS ASKED AGAIN (W1-T8830). On 2026-10-12, 18 escalations sat in the inbox,
+ * some since 2026-10-03, because only an edit re-opened them. The pin stays on the record. Beside it,
+ * the judge's state keeps the inputs each parked escalation was judged on and a re-ask schedule
+ * ({@link reaskIntervalMs}). The judge asks again when an input moves or the schedule falls due.
+ * An unchanged answer writes nothing; a changed one lands through the one judge PR and is re-pinned.
+ *
  * EARNED AUTONOMY, NO FIXED BAR. Each filer family's record (its merged tasks, its declined ones,
  * and its gardener's Beta credit where it keeps one) is shown to the judge and sets how confident
  * a `low` verdict must be: {@link earnedConfidenceBar}. A family that keeps helping is trusted
@@ -140,6 +146,58 @@ export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
+}
+
+/** A record this judge parked under an escalate pin that still matches it: the records a re-ask reads (W1-T8830). */
+export function parkedEscalation(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
+  if (task.status !== "queued" || task.retirement !== undefined || shardRelPath(task) === undefined) return false;
+  if (operatorReleases.has(task.id) || task.verify !== "human" || task.risk_ruling?.action !== "escalate") return false;
+  if (task.risk_ruling.pin !== taskRulingPin(task)) return false;
+  return task.author_class === "machine" || !isRulingShaped(task);
+}
+
+/** The judge's inputs that can move while the record stays unchanged: the family's bar, the cost the
+ *  origin names (null when nothing prices it), and which of its `depends_on` have merged. */
+export interface MachineJudgeEvidence {
+  bar: number;
+  cost: number | null;
+  merged_deps: string[];
+}
+
+export function machineJudgeEvidence(task: Task, bar: number, cost: number | undefined, isMerged: (id: string) => boolean): MachineJudgeEvidence {
+  return { bar, cost: cost ?? null, merged_deps: task.depends_on.filter(isMerged).sort() };
+}
+
+/** Which inputs differ between the snapshot a record was judged on and the current one. */
+export function movedEvidence(then: MachineJudgeEvidence, now: MachineJudgeEvidence): string[] {
+  return [
+    then.bar !== now.bar ? "confidence_bar" : undefined,
+    then.cost !== now.cost ? "cost" : undefined,
+    then.merged_deps.join(",") !== now.merged_deps.join(",") ? "depends_on" : undefined,
+  ].filter((m): m is string => m !== undefined);
+}
+
+/** The time scale for a re-ask interval: one day for a family with an even flip record and a record
+ *  on its first ask. It is a unit, not a limit; the interval scales from it with no cap and no floor. */
+export const MACHINE_JUDGE_REASK_SCALE_MS = 24 * 60 * 60 * 1000;
+
+/** A family's re-ask history: how many re-asks ran and how many changed the verdict. */
+export interface ReaskRecord {
+  asked: number;
+  flipped: number;
+}
+
+/**
+ * How long a parked escalation waits before the judge asks again when nothing has moved. The family's
+ * flip rate is read as Beta(1 + flipped, 1 + held). Its odds against a flip set the starting interval,
+ * so a family whose re-asks often flip is asked sooner. Each unchanged answer for this record doubles
+ * the interval. A flip anywhere in the family raises the rate, which shortens the wait for every
+ * parked record in that family.
+ */
+export function reaskIntervalMs(family: ReaskRecord | undefined, repeats: number): number {
+  // The odds against a flip, (1 + held) / (1 + flipped), taken over whole counts so an interval is exact.
+  const flipped = family?.flipped ?? 0;
+  return MACHINE_JUDGE_REASK_SCALE_MS * ((1 + (family?.asked ?? 0) - flipped) / (1 + flipped)) * 2 ** repeats;
 }
 
 /** `<planDir>/tasks.d/<file>` for a record that lives in a shard, taken from the record's own
@@ -410,6 +468,24 @@ interface MachineJudgeState {
    *  not re-rendered while the daemon's lagging checkout still reads it as due (W1-T5359, 2026-10-02:
    *  W1-T5309's merged ruling was re-landed 38 times, each an empty commit that stalled the loop). */
   settled?: Record<string, string>;
+  /** An operator release whose `verify: auto` rewrite the linter refuses (a ruling-shaped record, which
+   *  ruling-verify keeps at `verify: human`), by the pin it was refused at. A release skips `declined`, so
+   *  without this an unchanged record was re-rendered every pass: W1-T5717, 515 identical refusals
+   *  2026-10-13 12:03Z to 10-14 12:00Z, each opening and disposing a landing worktree. Kept while the pin holds. */
+  refusedReleases?: Record<string, string>;
+  /** W1-T8830: for each parked escalation, keyed by the pin it is parked at, the inputs it was last asked
+   *  on, when that was, and how many answers in a row came back unchanged. Only a schedule: the ruling
+   *  itself lives on the record. */
+  reask?: Record<string, ReaskEntry>;
+  /** W1-T8830: each family's re-asks and how many flipped, which set its cadence ({@link reaskIntervalMs}). */
+  reaskRecord?: Record<string, ReaskRecord>;
+}
+
+interface ReaskEntry {
+  pin: string;
+  inputs: MachineJudgeEvidence;
+  askedAt: string;
+  repeats: number;
 }
 
 function readState(path: string): MachineJudgeState {
@@ -439,6 +515,9 @@ export interface MachineJudgePorts {
   clock: Clock;
   limit?: number;
   excludeFamilies?: readonly string[];
+  /** The cost a record's origin names, as its family's gardener prices it now (W1-T8830). When this is
+   *  absent or returns undefined, no cost is compared, and the bar, the deps and the cadence decide a re-ask. */
+  costEvidence?: (task: Task) => number | undefined;
 }
 
 /** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
@@ -476,6 +555,8 @@ export interface MachineJudgeReport {
   settled: string[];
   prUrl?: string;
   unlanded?: string[];
+  /** W1-T8830: the parked escalations asked again this pass, whatever they answered. */
+  reasked?: string[];
 }
 
 /** The Beta record gardener.ts keeps for a family, summed over its classes. */
@@ -501,6 +582,112 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
       `stays parked for you:\n  ${ruling.reasons.join("\n  ")}\n\n${task.title}\n\n` +
       `Family record: ${record.merged} merged, ${record.declined} declined. Release it with ` +
       `\`rmd approve ${task.id}\`, or edit the record and the judge will rule again.`,
+    evidenceAnchors: [],
+  };
+}
+
+/** A parked escalation the judge answered with a proceed this pass, held until landing decides whether it flipped. */
+interface PendingReask {
+  judged: Extract<MachineJudgement, { kind: "ruled" }>;
+  family: string;
+  pin: string;
+  inputs: MachineJudgeEvidence;
+  repeats: number;
+}
+
+/** Book one answered re-ask. A flip resets the record's backoff and raises its family's flip rate.
+ *  A repeat doubles the record's next interval. */
+function noteReask(state: MachineJudgeState, r: PendingReask, changed: boolean): void {
+  const family = ((state.reaskRecord ??= {})[r.family] ??= { asked: 0, flipped: 0 });
+  family.asked += 1;
+  if (changed) family.flipped += 1;
+  (state.reask ??= {})[r.judged.task.id] = { pin: r.pin, inputs: r.inputs, askedAt: r.judged.ruling.judgedAt, repeats: changed ? 0 : r.repeats + 1 };
+}
+
+/**
+ * W1-T8830: ask the judge again about each parked escalation whose inputs moved since it was last asked,
+ * or whose cadence ({@link reaskIntervalMs}) has fallen due. An unchanged answer is booked here and
+ * writes nothing. A proceed is returned so it lands through the one judge PR, re-pinned.
+ */
+async function reaskParkedEscalations(c: {
+  ports: MachineJudgePorts;
+  plan: Plan;
+  state: MachineJudgeState;
+  report: MachineJudgeReport;
+  records: Map<string, FamilyTrackRecord>;
+  released: ReadonlySet<string>;
+  excluded: ReadonlySet<string>;
+  isMerged: (id: string) => boolean;
+  policy: RiskPolicy;
+  room: number;
+}): Promise<Map<string, PendingReask>> {
+  const { ports, plan, state } = c;
+  // A schedule is kept while its record is open. A pin that no longer matches is re-seeded below.
+  state.reask = Object.fromEntries(
+    Object.entries(state.reask ?? {}).filter(([id]) => plan.byId.get(id)?.status === "queued" && plan.byId.get(id)?.retirement === undefined),
+  );
+  // Every record's cadence reads the family's history as it stood when the pass began, so a re-ask
+  // answered earlier in this pass never shifts a sibling's wait, and plan order cannot change who is asked.
+  const cadence: Record<string, ReaskRecord> = structuredClone(state.reaskRecord ?? {});
+  const pending = new Map<string, PendingReask>();
+  let room = c.room;
+  for (const task of plan.tasks) {
+    if (room <= 0) break;
+    if (!parkedEscalation(task, c.released)) continue;
+    const family = judgementFamily(task);
+    const pin = task.risk_ruling!.pin; // parkedEscalation proved it is the record's own pin
+    if (c.excluded.has(family) || state.declined?.[task.id] === pin) continue;
+    if (!c.records.has(family)) c.records.set(family, familyTrackRecord(plan, family, c.isMerged, ports.gardenRecord?.(family)));
+    const record = c.records.get(family)!;
+    const inputs = machineJudgeEvidence(task, earnedConfidenceBar(c.policy.confidenceThreshold, record.mean), ports.costEvidence?.(task), c.isMerged);
+    const prior = state.reask[task.id];
+    // First sight of this pin (parked before W1-T8830, or the state was lost): the inputs are taken as
+    // they stand now, and the cadence counts from the ruling's own judged_at.
+    const entry = prior?.pin === pin ? prior : { pin, inputs, askedAt: task.risk_ruling!.judged_at, repeats: 0 };
+    state.reask[task.id] = entry;
+    const moved = movedEvidence(entry.inputs, inputs);
+    const intervalMs = reaskIntervalMs(cadence[family], entry.repeats);
+    // Written as "not yet due" negated, so an unparseable judged_at (NaN) reads as due and is asked.
+    const cadenceDue = !(Date.parse(entry.askedAt) + intervalMs > ports.clock.now());
+    if (moved.length === 0 && !cadenceDue) continue;
+    room -= 1;
+    const judged = await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock });
+    if (judged.kind === "unavailable") {
+      c.report.unavailable.push(task.id);
+      ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, reask: true });
+      continue;
+    }
+    (c.report.reasked ??= []).push(task.id);
+    const changed = judged.ruling.action !== "escalate";
+    ports.log("machine_judge.reasked", {
+      task_id: task.id,
+      family,
+      moved,
+      cadence_due: cadenceDue,
+      interval_ms: intervalMs,
+      previous_action: "escalate",
+      action: judged.ruling.action,
+      verdict: judged.ruling.verdict,
+      confidence: judged.ruling.confidence,
+      confidence_bar: judged.bar,
+      changed,
+    });
+    const reask: PendingReask = { judged, family, pin, inputs, repeats: entry.repeats };
+    if (changed) pending.set(task.id, reask);
+    else noteReask(state, reask, false);
+  }
+  return pending;
+}
+
+/** An operator release the judge cannot pin on the record: the operator is told why once, rather than the
+ *  judge re-rendering it every pass. The ledger's release row is untouched; only the durable pin is refused. */
+export function refusedReleaseProposal(task: Task, reason: string): Proposal {
+  return {
+    id: `machine-judge-release:${task.id}`,
+    summary:
+      `Your release of ${task.id} (\`rmd approve ${task.id}\`) cannot be pinned on the record, which keeps verify: human:\n  ${reason}\n\n` +
+      `${task.title}\n\nOnly the ledger's release row carries it now. Edit the record so it clears that check and the ` +
+      "judge will pin the release; an unchanged record is not retried.",
     evidenceAnchors: [],
   };
 }
@@ -554,7 +741,9 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
     (t) =>
       needsMachineJudgement(t, released) &&
       state.settled?.[t.id] !== taskRulingPin(t) &&
-      (released.has(t.id) || (!excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t))),
+      (released.has(t.id)
+        ? state.refusedReleases?.[t.id] !== taskRulingPin(t)
+        : !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
   const dueIds = new Set(due.map((t) => t.id));
@@ -564,6 +753,12 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   // Kept only while the plan still reads the record at the pin it was settled at.
   state.settled = Object.fromEntries(
     Object.entries(state.settled ?? {}).filter(([id, pin]) => {
+      const t = plan.byId.get(id);
+      return t !== undefined && pin === taskRulingPin(t);
+    }),
+  );
+  state.refusedReleases = Object.fromEntries(
+    Object.entries(state.refusedReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
       return t !== undefined && pin === taskRulingPin(t);
     }),
@@ -604,6 +799,8 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       reasons: judged.ruling.reasons,
     });
   }
+  const reasks = await reaskParkedEscalations({ ports, plan, state, report, records, released, excluded, isMerged, policy, room: ports.limit === undefined ? Infinity : ports.limit - due.length });
+  ruled.push(...[...reasks.values()].map((r) => r.judged));
   // Persisted before landing, so a landing that throws never costs these rulings again.
   writeAtomic(statePath, JSON.stringify(state) + "\n");
   if (ruled.length === 0) return report;
@@ -628,11 +825,26 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           r.ruling = { ...r.ruling, action: "escalate", reasons: [...r.ruling.reasons, `the judge said proceed, but ${out.refused}`] };
           out = renderRuledShard(text, relPath, judgedPin, r.ruling, plan.byId, admission);
         }
+        const reask = reasks.get(r.task.id);
+        if (reask !== undefined) {
+          // A re-ask counts as a flip only if it lands changed. If the record cannot honour a proceed,
+          // it stays parked under its current pin, and nothing is rewritten.
+          const held = r.ruling.action === "escalate";
+          noteReask(state, reask, !held);
+          if (held) {
+            ports.log("machine_judge.reask_held", { task_id: r.task.id, reason: r.ruling.reasons.at(-1) });
+            continue;
+          }
+        }
         if ("refused" in out) {
-          // Settled by the record's pin, so an unchanged record is not re-judged every pass.
-          (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
+          // Settled by the record's pin, so an unchanged record is not re-judged every pass. A release
+          // bypasses `declined`, so it is settled in its own map and told to the operator once.
+          if (r.byOperator) {
+            (state.refusedReleases ??= {})[r.task.id] = taskRulingPin(r.task);
+            ports.stageProposal(refusedReleaseProposal(r.task, out.refused));
+          } else (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
           report.refused.push(r.task.id);
-          ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
+          ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused, ...(r.byOperator ? { operator_release: true } : {}) });
           continue;
         }
         const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
@@ -649,6 +861,10 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action });
         if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
         else {
+          // The inputs this escalation was judged on, kept so that a later move re-opens it (W1-T8830).
+          (state.reask ??= {})[r.task.id] = {
+            pin, inputs: machineJudgeEvidence(r.task, r.bar, ports.costEvidence?.(r.task), isMerged), askedAt: r.ruling.judgedAt, repeats: 0,
+          };
           report.escalated.push(r.task.id);
           if (!ws) ports.stageProposal(machineJudgeProposal(r));
         }

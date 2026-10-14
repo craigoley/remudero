@@ -1,0 +1,29 @@
+- id: W1-T9329
+  title: Wire resolveCadenceIntervalMinutes from plan/policy.yaml into run-task.ts statusCommand
+  repo: remudero
+  depends_on:
+    - W1-T252
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=8b145524f863e80b
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - plan/policy.yaml
+  acceptance:
+    - claim: CLI statusCommand reads resolveCadenceIntervalMinutes from plan/policy.yaml for each rung
+      proof: "grep: resolveCadenceIntervalMinutes usage in src/run-task.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-09-11 follow-up on https://github.com/craigoley/remudero/pull/5108, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: wire a real `resolveCadenceIntervalMinutes` from
+    `plan/policy.yaml` at the CLI call site (e.g. `run-task.ts`'s `statusCommand`) so production
+    cadence judging uses each rung's declared interval instead of always falling back to the
+    default — out of this task's declared file scope, and the fallback is conservative (can only
+    under-report) so nothing regresses without it. — from W1-T3381 (run DAEMON-1789131530223,
+    https://github.com/craigoley/remudero/pull/5108)

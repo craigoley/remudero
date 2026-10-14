@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -60,7 +60,7 @@ test(`${PROOF}: no --parent creates the worktree in a newly created scratch hand
   assert.equal(result.code, 0, result.err);
   const path = join(parent, `run-unfiled-${NOW}`);
   assert.ok(existsSync(join(path, ".git")));
-  assert.ok(repo.git("worktree", "list", "--porcelain").includes(`worktree ${path}\n`));
+  assert.ok(repo.git("worktree", "list", "--porcelain").includes(`worktree ${realpathSync(path)}\n`));
   assert.ok(result.out.includes(`parent: ${parent} (scratch root ${scratchRoot} is a directory)`));
   assert.match(result.out, /next step: `npm\s+ci`/);
   assert.equal(existsSync(join(scratchRoot, "worktrees")), false);

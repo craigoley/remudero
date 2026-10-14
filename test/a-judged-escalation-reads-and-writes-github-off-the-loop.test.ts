@@ -161,16 +161,16 @@ test("unit test: test/a-judged-escalation-reads-and-writes-github-off-the-loop.t
   );
   assert.deepEqual(
     deliverRun.rows.map((r) => r.step),
-    ["escalation.judged", "escalation.issue_opened"],
+    ["escalation.judged", "escalation.triaged", "escalation.issue_opened"],
   );
 
   const demoteRun = await both(
-    (issues, path) => escalateWithJudge(escalation(), { issues, ledgerPath: path, runId: "R", judge: demote }),
+    (issues, path) => escalateWithJudge(escalation(), { issues, ledgerPath: path, runId: "R", judge: demote, triage: { mode: "act" } }),
     () => syncStore(),
   );
   assert.deepEqual(
     demoteRun.rows.map((r) => r.step),
-    ["escalation.judged", "escalation.demoted"],
+    ["escalation.judged", "escalation.triaged", "escalation.demoted"],
   );
   assert.deepEqual(demoteRun.store.comments, ["self-resolving storm"]);
 

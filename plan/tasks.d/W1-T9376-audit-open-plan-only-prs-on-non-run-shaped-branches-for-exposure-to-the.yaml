@@ -1,0 +1,29 @@
+- id: W1-T9376
+  title: Audit open plan-only PRs on non-run-shaped branches for exposure to the intermittent head-identity-gate failure, and ledger the findings
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=bb593f363770b79d
+  attempts: 0
+  files:
+    - docs/audits/head-identity-gate-open-plan-pr-exposure.md
+  acceptance:
+    - claim: The audit report lists every currently-open plan-only PR whose branch name is not run-* shaped. Each entry gives the PR number, branch name and head sha.
+      proof: "grep: head sha in docs/audits/head-identity-gate-open-plan-pr-exposure.md"
+    - claim: Each listed PR is classified as exposed or not exposed to the head-identity-gate failure. The classification cites the observed gate result or the branch-name and commit-shape rule that decides it.
+      proof: "grep: exposed in docs/audits/head-identity-gate-open-plan-pr-exposure.md"
+    - claim: "The report names the remediation path for any exposed PR, such as rebasing it, re-filing it on a run-shaped branch, or waiting for the fix PR #5365 to merge."
+      proof: "grep: remediation in docs/audits/head-identity-gate-open-plan-pr-exposure.md"
+  origin: followup:DAEMON-1789296090167:2026-09-13T11:02:46.538Z:1
+  rationale: >-
+    From the 2026-09-13 follow-up on https://github.com/craigoley/remudero/pull/5363, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: audit whether any other currently-open plan-only PR
+    (filing-shaped commit on a non-`run-*`-shaped branch) is silently exposed to the same
+    intermittent `head-identity-gate` failure while #5365 is unmerged. — from PR-5363 (run
+    DAEMON-1789296090167, https://github.com/craigoley/remudero/pull/5363)

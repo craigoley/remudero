@@ -1,0 +1,57 @@
+- id: W1-T9328
+  title: "LINT FLAGS A PRIORITY FILED BELOW THE OPEN QUEUE'S HEAD — the `dispatch-priority` check warns only outside [0, 99] or on a closed task, so W1-T9030 and W1-T9252 (0.9), W1-T8776 (0.91), W1-T9062 (0.915), W1-T8950 (0.92) and W1-T8831 (0.93) each passed lint while undercutting about 20 open tasks at 1"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low  # Rule 19: one concern — one advisory arm on the existing dispatch-priority check; it never blocks
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-13: the dispatch diagnosis's priority-inflation finding, the lint half (the order half is W1-T9323)"
+  plan_refs: [W1-T9323, W1-T422, W1-T4064]
+  files: [src/lib/task-linter.ts, test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main bbab8894f (symbols, not lines). `dispatchPriorityViolations` (src/lib/task-linter.ts, W1-T422)
+    warns on a priority outside `DISPATCH_PRIORITY_MIN`..`DISPATCH_PRIORITY_MAX`, or on a priority left on a
+    non-open task. A value set just below every other open task's is silent. That is the move behind the six sub-1
+    values open on 2026-10-13. Each one is legal and each one restarts the race.
+    WHY A WARNING: the operator's 2026-09-30 hold is no blocking rules, and a priority value cannot produce a wrong
+    verdict, only a different order. W1-T9323 removes the payoff, because priority then counts by the share of the queue
+    it outranks. This check makes the attempt visible at filing time, so the filer files at the head value instead.
+    NO FIXED NUMBER: the comparison is with the plan's own open priorities at lint time, never with a constant such
+    as 1.
+  design: |
+    1. src/lib/task-linter.ts: add a module-private `priorityBelowQueueHeadViolations(task, plan)`. For a task with a numeric priority
+       whose status is open (not in `NON_OPEN_FILING_STATUSES`), let `head` be the minimum numeric priority over every
+       OTHER plan task whose status is open. When `task.priority < head`, return one `warn` with check
+       `dispatch-priority`. The message names the task, its value, `head`, and how many open tasks sit at `head`, and
+       says to file at the head value instead, because a value below it buys at most one rank (W1-T9323). An absent
+       priority, an equal value, a non-open task, or a plan with no other open priority returns nothing.
+    2. Call it from `lintPlan` beside `blockedWithoutDispositionViolations`, which also needs the whole plan. Do not
+       call it from `lintTask`, which has no plan. It runs only for ids in `only` when `only` is given, so
+       `lint-plan:fast` warns on changed shards alone and never on the existing backlog.
+    3. Severity is always `warn` and the result's `ok` is unchanged. The check reads the shard `status:` field, which
+       lags merges. A merged task left at a low value only makes the warning conservative, and the warning is advisory.
+    Tests go in the new file test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts, with `test(` titles
+    exactly as in the proofs below. Use `lintPlan` over in-memory plans, with no git and no network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts"
+    - claim: "a changed open task whose priority is below every other open task's warns, naming the head value"
+      proof: 'grep: test("W1-T9328: a priority below every other open task warns with the queue head value" in test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts'
+    - claim: "a priority equal to the head, an absent priority, or a non-open task does not warn, and the warning never blocks"
+      proof: 'grep: test("W1-T9328: a priority at the head, absent, or on a closed task does not warn and nothing blocks" in test/lint-flags-a-priority-filed-below-the-open-queue-head.test.ts'
+    - claim: "the linter carries the named check"
+      proof: 'grep: priorityBelowQueueHeadViolations in src/lib/task-linter.ts'
+  falsifier: |
+    Plan: open A at 1, open B at 1, open C at 0.9, merged D at 0.5. Linting C warns with head 1 and count 2. The
+    merged D is ignored, so the head is not 0.5. Linting A is silent. Drop the status filter and C reads head 0.5,
+    so it does not warn. Compare with `<=` and A warns against B. Make it `block` and the second test sees `ok: false`.
+  note: |
+    EFFECT, measured after merge with no numeric pass mark: count new shards filed below the head before and after,
+    from `git log -p plan/tasks.d`. Healthy shape: new sub-head values stop appearing, or each one carries a rationale
+    sentence answering the warning.

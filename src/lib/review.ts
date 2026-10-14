@@ -8,6 +8,7 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
+import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -28,6 +29,7 @@ import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
+import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -2225,7 +2227,12 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const root = configuredDependencySeedRoot();
+    const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
+    const args = root && !existsSync(nodeModules)
+      ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
+      : PROOF_INSTALL_ARGS;
+    exec(command, args, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -2251,7 +2258,12 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const install = execFileAsync("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const root = configuredDependencySeedRoot();
+  const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
+  const args = root && !existsSync(nodeModules)
+    ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
+    : PROOF_INSTALL_ARGS;
+  const install = execFileAsync(command, args, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
     () => undefined,
     () => undefined, // Best effort; the runner check below decides availability.
   );
@@ -8387,6 +8399,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
+  "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
@@ -8410,6 +8423,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
+  "^scripts/security-merge-producer\\.mjs$",
+  "^src/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
   "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.

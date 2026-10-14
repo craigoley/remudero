@@ -497,6 +497,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd next-task-id --reserve / rmd run-task / rmd drain",
     note: "W1-T1055: the push IS the claim, so two concurrent minters cannot leave holding the same number.",
   },
+  // ── src/lib/task-id-release.ts ───────────────────────────────────────────────────────────
+  {
+    id: "task-id-reservation-ref-release",
+    action: "delete a `refs/rmd-id/<id>` reservation this run pushed and never filed",
+    module: "src/lib/task-id-release.ts",
+    symbol: "releaseTaskIdReservation",
+    boundary: "git-push",
+    gate: "always",
+    ledgerSteps: ["task_id.reservation_released", "task_id.reservation_release_skipped"],
+    verb: "garden filings, rmd approve",
+    note: "Leased on the sha the run pushed (--force-with-lease=<ref>:<sha>), so another writer's claim is never deleted. Each push passes assertClaimRefPushAllowed.",
+  },
   // ── src/lib/branch-reaper.ts ─────────────────────────────────────────────────────────────
   {
     id: "prune-deletable-branches",

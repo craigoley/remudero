@@ -165,6 +165,7 @@ export interface Task {
   /** Why this task exists, in operator-facing prose. Read-only, like every other narrative field;
    *  rendered on the row-click task card (lib/task-card.ts). */
   rationale?: string;
+  design?: string;
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
@@ -448,7 +449,7 @@ function isParkedMachineProposal(task: Task): boolean {
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(task.files[0]!))) ||
           (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
@@ -686,6 +687,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
       rationale: e.rationale as string | undefined,
+      design: typeof e.design === "string" ? e.design : undefined,
       origin: e.origin as string | undefined,
       // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
       // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field
@@ -1348,6 +1350,15 @@ export function assertRunnable(
   }
 }
 
+export function missingDeclaredPaths(
+  task: Task,
+  facts: Pick<MachineFilingAdmissionContext, "pathExists" | "pathExistsAtBase">,
+  allowedNewPath: (path: string) => boolean = () => false,
+): string[] {
+  return (task.files ?? []).filter((path) =>
+    !facts.pathExists?.(path) && !allowedNewPath(path) && !facts.pathExistsAtBase?.(path));
+}
+
 export function machineFilingAdmissionViolations(
   task: Task,
   context: MachineFilingAdmissionContext,
@@ -1376,15 +1387,13 @@ export function machineFilingAdmissionViolations(
     }
   }
 
-  const exists = context.pathExists ?? (() => false);
-  const existsAtBase = context.pathExistsAtBase ?? (() => false);
   const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
     isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
   // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
-  const missing = declared.filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)) && path !== scoutNew);
+  const missing = missingDeclaredPaths(task, context, (path) => (newTestAllowed && created(path)) || path === scoutNew);
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

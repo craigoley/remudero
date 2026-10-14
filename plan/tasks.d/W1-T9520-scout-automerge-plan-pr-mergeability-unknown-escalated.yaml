@@ -1,0 +1,22 @@
+- id: W1-T9520
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — automerge.plan_pr_mergeability_unknown_escalated landed 14 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.75
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:automerge.plan_pr_mergeability_unknown_escalated"
+  files:
+    - test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts
+  acceptance:
+    - claim: "automerge.plan_pr_mergeability_unknown_escalated stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9520: automerge.plan_pr_mergeability_unknown_escalated no longer recurs\" in test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step automerge.plan_pr_mergeability_unknown_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 5 in the older half, 9 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.

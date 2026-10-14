@@ -1,0 +1,63 @@
+- id: W1-T9380
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:acceptance-author-gate cost 63 PR minute(s) across 85 round(s) on 77 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.11
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:acceptance-author-gate"
+  files:
+    - src/lib/ci-parity.ts
+    - test/check-ci-log-acceptance-author-gate.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:acceptance-author-gate"
+      proof: "grep: test(\"W1-T9380: check:ci-log:acceptance-author-gate is prevented, not retried\" in test/check-ci-log-acceptance-author-gate.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:acceptance-author-gate's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:acceptance-author-gate cost 63 PR minute(s) (seven-day half-life) across 85 fix round(s) on 77 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-parity.ts: test/the-gate-admission-population-is-checked-from-one-scan.test.ts imports it
+    - test/the-gate-admission-population-is-checked-from-one-scan.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-gate-admission-population-is-checked-from-one-scan.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #11521 (https://github.com/craigoley/remudero/pull/11521) at 2026-10-14T01:14:13.923Z: ci-log round — ci-shard (1/8): test/a-non-core-inbox-has-its-own-classification-producer.test.ts; acceptance-author-gate
+        failing tests: an instance classification producer preserves held and foreign proposal sources
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 3 - an instance classification producer preserves held and foreign proposal sources
+          |   ---
+          |   duration_ms: 10913.829389
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-non-core-inbox-has-its-own-classification-producer.test.ts:1:5805'
+          |   failureType: 'testCodeFailure'
+          |   error: 'the maintained worker never persisted the instance classification'
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   operator: 'fail'
+          |   stack: |-
+          |     untilSnapshot (
+    - PR #10918 at 2026-10-11T17:52:39Z: hand fix PR #10918: scripts/flake-screen.mjs, scripts/pool-run-marker.mjs, scripts/preflight-author.mjs, scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, src/li
+    - PR #10787 at 2026-10-11T10:49:51.848Z: ci-log round — rule-checks: test/the-gate-admission-population-is-checked-from-one-scan.test.ts; ci-shard (5/8): test/census-population-is-derived-not-counted.test.ts; ci-shard (1/8): test/the-gate-ad
+    - PR #10611 at 2026-10-10T10:00:43Z: hand fix PR #10611: src/lib/ci-parity.ts, src/lib/secret-boundary.ts, src/lib/short-path-root.ts; minutes are the pass median proxy (6.308458333333334), not measured repair time
+    - PR #10594 at 2026-10-10T07:34:55Z: hand fix PR #10594: src/lib/ci-parity.ts; minutes are the pass median proxy (6.308458333333334), not measured repair time
+
+    WHAT THE LAST RUNG TRIED: W1-T5096 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:acceptance-author-gate in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing reports recurring acceptance-author-gate rounds, but the supplied failure excerpt concerns an instance classification producer; it does not establish a common root cause or a preventive remedy in src/lib/ci-parity.ts.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration rather than executing a behavioral test, so it cannot verify the stated prevention outcome.; on the change's description/files alone, no diff was read — The escalation rule explicitly requires HIGH when the finding cannot be verified from what is shown; this filing requests structural repair without supplying a verified causal diagnosis."
+    judged_at: "2026-10-14T04:26:26.038Z"
+    pin: "810c3c3fae1e16d92ac4800eba39cdfe126d2cf83baa2f1a9144ff015098ae79"

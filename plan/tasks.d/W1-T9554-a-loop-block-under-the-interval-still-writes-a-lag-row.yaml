@@ -1,0 +1,71 @@
+- id: W1-T9554
+  title: "A LOOP BLOCK SHORTER THAN THE TICK INTERVAL STILL WRITES A LAG ROW, AGAINST A BOUND LEARNED FROM THE LOOP'S OWN DELAY — reportLoopLag writes `daemon.loop_lag` only past one whole interval (60 s), so on 2026-10-14 core's 20-60 s blocks (33 of 38 alive intervals at 20 s or more) left no row naming their phase or caller"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — when a late tick is reported; it runs on every daemon tick and writes the ledger
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, bound-class item); standing rulings: no hard fixed thresholds (the bound is learned, not picked), automated flow"
+  plan_refs: [W1-T4041, W1-T5718, W1-T7745, W1-T7746, W1-T9361, W1-T9544, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T9556]
+  files: [src/lib/daemon.ts, src/lib/read-plane.ts, test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; `daemon.alive` rows streamed to
+    ~/Remudero-notes/sync-spawn-filing/alive.ndjson). Over the 38 rows of 15:14-21:14Z (five daemon pids):
+    `loop_delay_max_ms` was 20 s or more in 33 and 60 s or more in 6 (max 69.4 s at 21:14:26Z); `loop_delay_p99_ms`
+    ran 20-607 ms (median 153 ms; one 16:13Z row of a two-minute interval read 61 s). So the blocks and the loop's
+    ordinary delay sit two orders of magnitude apart: the population the bound must separate is observed on both sides.
+    The earlier 15:38-19:39Z census (~/Remudero-notes/loopblock-0450/) found the same: 26 of 31 intervals at 20 s or
+    more, max 64 s, and W1-T9527 found 12-38 s quiet-bound reads that wrote no lag row.
+    WHY THEY WRITE NOTHING, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `reportLoopLag` (src/lib/daemon.ts) returns unless `lagMs > sample.intervalMs`. Its doc calls the interval the
+        derived threshold ("at least one tick was missed"). For the liveness pulse the interval is the poll interval,
+        60 s on core, so a 59 s block is invisible; only `daemon.alive`'s interval maximum records it, with no phase,
+        no `last_step_before_block` and no `sync_spawn_top` of its own.
+      - `reportTickLag` hands each lag to the stall profiler first (`observeLoopLag`, W1-T7746) and then to
+        `reportLoopLag`; the callers are the liveness pulse and the interphase review clock.
+      - `startReadPlaneTelemetry` (src/lib/read-plane.ts) owns the `monitorEventLoopDelay` histogram whose max and p99
+        `daemon.alive` reports, and resets it every alive interval.
+    OVERLAP: W1-T9516 (#11775, open) stops the progress watchdog recycling a daemon whose loop resumed; it reads lag
+    rows and does not change when they are written. W1-T9361 (queued) changes what a stall-profile row attributes, not
+    the lag row's bound. W1-T9527's filing names this gap and leaves it unfiled.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    reportLoopLag, "loop_lag threshold or bound", "lag_ms > interval" and loop_delay_max. Control: main reads 5 shards
+    (W1-T4051, W1-T4075, W1-T7745, W1-T7746 merged; W1-T9352 queued); the two heads above main are W1-T9516's and
+    W1-T9527's filings, neither changes the lag row's bound.
+  design: |
+    No new constant. The bound is learned from the loop's own delay distribution and never rises above today's.
+    1. LEARN THE ORDINARY DELAY. read-plane keeps a rolling digest of each closed alive interval's `loop_delay_p99_ms`
+       (bounded by the number of intervals in the window it keeps, never by wall time alone) and exposes
+       `learnedLagBoundMs()`: an upper quantile of that digest. It answers `undefined` until the digest holds enough
+       intervals that a single interval cannot be that quantile, so one bad interval (the 61 s p99 row above) never
+       sets the bound. On the measured window the 90th percentile of the p99s is about 400 ms.
+    2. REPORT AGAINST IT. `reportLoopLag` writes `daemon.loop_lag` when the lag exceeds the learned bound, or the
+       interval when nothing is learned yet, and never a bound above the interval, so every row written today is still
+       written. The row gains `bound_ms` and `bound_basis` (`learned` or `interval`); `missed_ticks` keeps its meaning.
+    3. VOLUME IS BOUNDED BY CONSTRUCTION: at most one row per tick of each caller, which the tick interval already
+       limits (two callers at a 60 s interval is at most 2,880 rows a day, about 1.4 MB, against the core ledger's
+       roughly 9.5 MB per rotation (about one an hour to ninety minutes)); no new rate limit.
+    4. Unchanged: the stall profiler's own bound (W1-T7746), `sync_spawn_top` / `sync_spawn_ms` attribution
+       (W1-T7745), and the rows' consumers, which read `lag_ms` rather than assume it exceeds the interval. A reader
+       that assumes so is found by a caller sweep in the build and named in the PR.
+    Tests go in test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts, with `test(` titles verbatim as in
+    the proofs below, over synthetic samples and a fake clock.
+  acceptance:
+    - claim: "a lag under the interval but past the learned bound writes a row naming its bound"
+      proof: 'grep: test("W1-T9554: a lag under the interval but past the learned bound writes a row" in test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts'
+    - claim: "a lag within the loop's ordinary delay writes no row"
+      proof: 'grep: test("W1-T9554: a lag within the learned ordinary delay writes no row" in test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts'
+    - claim: "with nothing learned the bound is the interval, and the learned bound never exceeds it"
+      proof: 'grep: test("W1-T9554: with nothing learned the bound is the interval and never above it" in test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts'
+    - claim: "one bad interval does not raise the learned bound"
+      proof: 'grep: test("W1-T9554: one bad interval does not raise the learned bound" in test/a-loop-block-under-the-interval-still-writes-a-lag-row.test.ts'
+  falsifier: |
+    Keep `lagMs > sample.intervalMs` as the only test: the first test's 30 s lag against a 60 s interval and a learned
+    bound near 150 ms writes no row. Learn from `loop_delay_max_ms` or from the mean instead of an upper quantile of
+    the p99s: the fourth test's single 61 s interval drags the bound past the 30 s block.

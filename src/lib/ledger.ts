@@ -694,6 +694,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
   // rotating it away loses the only evidence the judge acted.
   "escalation.judged",
+  // W1-T8868. READER: the stale re-judge pass skips an issue state already settled here
+  // (`escalation.rejudged`), and `escalation.auto_resolve_attempted` is the only record that a
+  // reversible triage action ran before its issue was opened — the audit row an undo starts from.
+  "escalation.rejudged",
+  "escalation.auto_resolve_attempted",
   // W1-T3212: `ruling.judged` is the ONLY record of what the ruling judge decided and why, on
   // both arms. Nothing else writes it, and no measurement yet establishes that this judge
   // calibrates well — reading the first weeks of these rows is what will settle that, so a
@@ -751,6 +756,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
   "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
   "main.repair.fix_opened", // W1-T8575 mainRepairPrUrlsFromLedger (sweep.ts): lost, a red-main repair PR is held for the red it repairs.
+  "main.repair.located", // W1-T8042 mainRepairRedsFromLedger (sweep.ts): lost, a red shared across PRs opens a second record.
+  "main.repair.resolved", // W1-T8042 same fold: lost, a repaired red's record reads open and absorbs a new red.
+  "main.repair.inherited", // W1-T8042 same fold and mainRepairRecordsFromLedger: lost, the shared red is handed over again.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.

@@ -110,6 +110,18 @@
       "grepHint": "Audit fixtures"
     },
     {
+      "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
+      "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
+      "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",
+      "grepHint": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)"
+    },
+    {
+      "path": "docs/audits/pr-5389-coverage-shard-classification.md",
+      "title": "PR #5389 coverage-shard (1/4) failure — flake or regression? (W1-T4347)",
+      "summary": "Scope: W1-T4347. Read-only forensic pass: one artifact, no source, script or test edited, no fix",
+      "grepHint": "PR #5389 coverage-shard (1/4) failure — flake or regression? (W1-T4347)"
+    },
+    {
       "path": "docs/audits/recon-2026-07-21.md",
       "title": "Remudero — Production Readiness Review (fresh-eyes recon)",
       "summary": "Date: 2026-07-21 · Reviewer: external recon pass, no project history · Method: 7 parallel source audits + direct measurement of the live clone, state dir, laun…",
@@ -126,6 +138,12 @@
       "title": "Worktree base provisioning — a read-only forensic pass (2026-09-02)",
       "summary": "Scope: W1-T2625. Read-only. No source changed. The trigger is the follow-up harvest from run",
       "grepHint": "Worktree base provisioning — a read-only forensic pass (2026-09-02)"
+    },
+    {
+      "path": "docs/author-gate-accounting.md",
+      "title": "Whole-gate cost and dependency provenance",
+      "summary": "The author gate checks installed dependency metadata and real tool bytes before",
+      "grepHint": "Whole-gate cost and dependency provenance"
     },
     {
       "path": "docs/base-ref-contract.md",
@@ -650,6 +668,12 @@
       "grepHint": "Bounded heavy READY reservations, v2"
     },
     {
+      "path": "docs/instance-registry-selection-contract.md",
+      "title": "Instance registry selection contract",
+      "summary": "W1-T9435 supplies an additive public read/binding contract and an explicitly opted-in",
+      "grepHint": "Instance registry selection contract"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
@@ -788,6 +812,12 @@
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
     },
     {
+      "path": "docs/security-merge-policy.md",
+      "title": "Exact-head high/critical merge protection",
+      "summary": "This is a staged, trusted metadata producer, not a claim that repository protection",
+      "grepHint": "Exact-head high/critical merge protection"
+    },
+    {
       "path": "docs/semgrep-native-ce.md",
       "title": "Native hash-locked Semgrep Community Edition",
       "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
@@ -816,6 +846,12 @@
       "title": "Console views: `GET /v1/views/<name>`",
       "summary": "A view is one read per console surface, computed in core. The console renders it; it does not",
       "grepHint": "Console views: `GET /v1/views/<name>`"
+    },
+    {
+      "path": "docs/worker-mcp-isolation.md",
+      "title": "Staged worker MCP isolation",
+      "summary": "This policy is default off: no production caller supplies `mcpIsolation` today. It changes neither",
+      "grepHint": "Staged worker MCP isolation"
     }
   ]
 }

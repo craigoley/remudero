@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13 (standing approval: keep going, don't drop anything): regression from W1-T8779 (#11230) found holding #11255"
   plan_refs: [W1-T8779, W1-T8775, W1-T7729, W1-T913, W1-T2844]
   files: [src/lib/review.ts, src/lib/ledger-union.ts, src/lib/sweep.ts, test/a-promise-harvest-reads-only-the-rotations-its-pr-can-be-in.test.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts, test/a-proof-run-that-cannot-load-is-not-unmet.test.ts, test/review-status-pending.test.ts]
-  status: queued
+  status: merged
   priority: 0.85 # operator-2026-10-13: W1-T8779's harvest aborts on the host and leaves every PR that promises follow-ups pending forever; it is holding the memory cut (#11255, W1-T8775) and will hold W1-T8776..W1-T8778
   attempts: 0
   rationale: |

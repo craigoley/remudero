@@ -1,0 +1,81 @@
+- id: W1-T9447
+  title: "A SERVE REPLACE REPORTS FAILED FOR A BOOT THAT IS STILL PROGRESSING — deploy/serve-container.sh waits a fixed BANNER_WAIT_S (60 s) for the `listening on` line and then prints `FAILED — no ... in the log after 60s` and exits 1, while the serve supervisor's own constants record a slowest measured boot of 66 s; on 2026-10-14 ~12:05Z a supervisor-on `--replace` printed FAILED for a serve that bound shortly after (RSS 2.3 GB at 1:40)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — how the replace script decides a serve boot finished, failed or is still running; deploy/serve-container.sh and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-14: a supervisor-on serve --replace at ~12:05Z reported FAILED while serve was still booting"
+  plan_refs: [W1-T6031, W1-T4005, W1-T5319, W1-T1222]
+  files:
+    - deploy/serve-container.sh
+    - test/a-serve-replace-waits-while-its-boot-progresses.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 5fa4c003e. Symbols, not lines.
+    THE WAIT. deploy/serve-container.sh step 6 ("PROVE THE THREE THINGS THAT ACTUALLY DECIDE REACHABILITY") polls
+    `docker logs <container> | grep -qF "$BANNER_RE"` every BANNER_POLL_S (3 s) until `waited` reaches BANNER_WAIT_S,
+    which defaults to `${RMD_SERVE_BANNER_WAIT_S:-60}`. A miss prints `serve-container: FAILED — no "listening on
+    http://0.0.0.0:4317" in the log after 60s.`, sets FAIL=1, and the script exits 1. The loop reads nothing else:
+    not whether the container is still running, not whether its log is still growing, not the serve supervisor's
+    own boot rows.
+    THE BOOT IT IS WAITING FOR IS SLOWER THAN THE WAIT. SERVE_SUPERVISOR defaults to `on`, so the container runs
+    src/lib/serve-supervisor-main.ts, which forks a standby generation, polls its `/v1/ready` and smoke routes, then
+    promotes it. src/lib/serve-supervisor.ts's own constants say a boot can take longer than 60 s:
+    STANDBY_READY_BOUND_MS (330 s) is documented as "about 5x the slowest boot measured (66 s)", and
+    COLD_START_STILL_DEGRADED_EVERY_MS as "the slowest boot measured". The supervisor also writes its own progress
+    rows to the instance ledger: serve.supervisor_start, serve.generation_forked, serve.cold_start_degraded (bound,
+    serving degraded), serve.cold_start_still_degraded (per interval, with the unmet criteria) and
+    serve.cold_start_ready (with readyMs).
+    OBSERVED 2026-10-14 ~12:05Z (operator session): `serve-container.sh --replace` with the supervisor on printed
+    the FAILED line; serve listened shortly after, and its RSS was 2.3 GB at 1:40. The operator had to read the log
+    by hand to learn the replace had worked. A FAILED for a healthy slow boot teaches the operator to ignore FAILED,
+    which is the one line this step exists to make trustworthy.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the plan/ trees of all 369 readable origin heads for
+    BANNER_WAIT, RMD_SERVE_BANNER and the replace's FAILED line. Main has 2 hits (W1-T4005 preflights the image pull,
+    W1-T5319 refreshes the ACR login; both only set the env in tests); no head adds one. No head modifies
+    deploy/serve-container.sh against its merge base. W1-T6031 (merged) fixed the same shape in TEST helpers
+    (test/helpers/serve-boot-banner.ts), not in this script. Positive control: the same sweep finds
+    `^- id: W1-T9436$` on head plan-file-1791981352331 only.
+  design: |
+    No fixed boot deadline. The wait ends on the serve's own signals, and its outcome has three values, not two.
+    1. READY: the `listening on` banner is matched in the container log (still matched, never echoed — it carries the
+       read token). With the supervisor on, a serve.cold_start_ready or serve.cold_start_degraded row in the
+       instance's ledger for this boot (newer than the script's own `docker run`) also counts as bound. Print the
+       existing `bound ...` line plus the elapsed time.
+    2. FAILED: the container stopped or is restarting (`docker inspect` State.Running false or State.Restarting
+       true), or the supervisor recorded a terminal failure for this boot. Print FAILED with that cause and exit 1,
+       as today.
+    3. STILL BOOTING: neither yet. Keep waiting while the boot shows progress: the container log grew, a new
+       supervisor row for this boot appeared, or the container's memory use moved since the last poll. Print one
+       progress line per poll interval naming what moved and the elapsed time, so the operator sees it is alive.
+       When no progress has been seen for a silence window, stop waiting and print `UNDETERMINED — still booting,
+       no progress for <n>s` (never FAILED) with the next command to run, and exit with a status distinct from 0
+       and 1. The silence window comes from measured boots, not a constant: the slowest serve.cold_start_ready
+       readyMs this instance's ledger holds (the supervisor's own STANDBY_READY_BOUND_MS when it holds none),
+       and it applies to SILENCE, not to total boot time.
+    4. RMD_SERVE_BANNER_WAIT_S stays an explicit override (tests and operators set it to skip or shorten the wait),
+       with today's FAILED-on-expiry behaviour only when it is set; the default path is 1-3 above. The existing
+       suites that set it (test/serve-image-preflight.test.ts, test/a-changed-serve-policy-reaches-the-running-
+       console.test.ts, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts) stay
+       green unchanged; they are not in this task's files.
+    Tests go in the new file, driving the script with a fake `docker` on PATH (as test/serve-image-preflight.test.ts
+    does) whose log, inspect and stats outputs change per call, with `test(` titles verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-serve-replace-waits-while-its-boot-progresses.test.ts"
+    - claim: "a boot whose log keeps growing past the old 60 s wait and then prints the banner reports bound, not FAILED"
+      proof: 'grep: test("W1-T9447: a boot still progressing past the old wait reports bound when the banner lands" in test/a-serve-replace-waits-while-its-boot-progresses.test.ts'
+    - claim: "a container that exits before the banner still reports FAILED and exits 1"
+      proof: 'grep: test("W1-T9447: a container that exits before binding reports FAILED" in test/a-serve-replace-waits-while-its-boot-progresses.test.ts'
+    - claim: "a boot that stops progressing is reported UNDETERMINED with a distinct exit status, never FAILED"
+      proof: 'grep: test("W1-T9447: a boot that stops progressing reports UNDETERMINED not FAILED" in test/a-serve-replace-waits-while-its-boot-progresses.test.ts'
+  falsifier: |
+    Against main, a fake docker whose log grows every poll and prints the banner at 75 s: the script prints FAILED at
+    60 s and exits 1, so the first test fails. Wait on total time instead of silence, and the same fixture with the
+    banner at 3x the measured boot fails again. Print FAILED on silence, and the UNDETERMINED test fails.

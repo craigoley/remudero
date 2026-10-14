@@ -1,3 +1,4 @@
+import { learningsSourceFiles } from "./learnings.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -802,7 +803,7 @@ export function applyLearningActions(learningsDir: string, actions: GardenAction
   const located: Record<string, string> = {};
   const targets = actions.filter((a) => a.class === "merge" || a.class === "retire");
   if (targets.length === 0 || !existsSync(learningsDir)) return { paths: [], located };
-  for (const name of readdirSync(learningsDir).filter((f) => f.endsWith(".yaml")).sort()) {
+  for (const { filename: name } of learningsSourceFiles(learningsDir)) {
     const path = join(learningsDir, name);
     let text = readFileSync(path, "utf8");
     for (const a of targets) {
@@ -895,7 +896,7 @@ export function cheapFingerprint(repoRoot: string, stateDir: string): string {
   const mtime = (p: string) => (existsSync(p) ? statSync(p).mtimeMs : 0);
   const layout = resolveRepoLayout(repoRoot);
   const learnings = layout.learningsDir;
-  const shardTimes = existsSync(learnings) ? readdirSync(learnings).sort().map((f) => mtime(join(learnings, f))) : [];
+  const shardTimes = learningsSourceFiles(learnings).map(({ filename }) => `${filename}:${mtime(join(learnings, filename))}`);
   return [
     ...shardTimes,
     mtime(join(repoRoot, "DECISIONS.md")),
@@ -1084,7 +1085,7 @@ interface PassBefore {
 function readPassBefore(root: string, learningsDir: string): PassBefore {
   const shards = new Map<string, string>();
   if (existsSync(learningsDir)) {
-    for (const name of readdirSync(learningsDir).filter((f) => f.endsWith(".yaml")).sort()) shards.set(`${basename(learningsDir)}/${name}`, readFileSync(join(learningsDir, name), "utf8"));
+    for (const { filename: name } of learningsSourceFiles(learningsDir)) shards.set(`${basename(learningsDir)}/${name}`, readFileSync(join(learningsDir, name), "utf8"));
   }
   return { shards, log: readFileIfExists(join(root, GARDEN_LOG)) };
 }

@@ -79,6 +79,8 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/inbox/approve", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/inbox/reframe", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/inbox/decline", "W1-T2604: ledger-only write, no gateway/root to mis-wire -- covered in test/the-console-inbox-can-decline-a-proposal.test.ts"],
+  ["POST /v1/inbox/archive", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
+  ["POST /v1/inbox/snooze", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
   ["POST /v1/inbox/restore", "W1-T3407: ledger-only reversal of decline -- covered in test/a-decline-can-be-taken-back.test.ts"],
   // W1-T4584: six write routes the line-start source scan could not see (built through a variable,
   // or declared with method and path on one line), surfaced once the helper learned the assembled
@@ -286,6 +288,18 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   [
     "POST /v1/provider-auth",
     "W1-T3960: server-owned provider-auth session lifecycle; projection and request validation are covered in test/provider-auth-sessions.test.ts and test/provider-auth-console.test.ts",
+  ],
+  [
+    "POST /v1/automation/triggers/run",
+    "W1-T3956: journals to the daemon ledger through the serve-wired registry; manual-start acceptance and refusals over HTTP are covered in test/automation-trigger-registry.test.ts",
+  ],
+  [
+    "POST /v1/automation/triggers/activation",
+    "W1-T3956: pause/resume of a named trigger over HTTP, including the paused-start refusal, is covered in test/automation-trigger-replay.test.ts",
+  ],
+  [
+    "POST /v1/automation/triggers/replay",
+    "W1-T3956: replay idempotency and its 404/400 refusals over HTTP are covered in test/automation-trigger-replay.test.ts",
   ],
 ]);
 

@@ -115,6 +115,7 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
     "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
     "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
+    "test/worktree-creation-census.test.ts",
   ]);
 });
 

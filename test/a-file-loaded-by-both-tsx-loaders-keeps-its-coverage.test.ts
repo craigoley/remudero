@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { scriptsTheSourceMapDescribes } from "../scripts/coverage-merge-ratchet.mjs";
+import { mergeShardLineHits, scriptsTheSourceMapDescribes } from "../scripts/coverage-merge-ratchet.mjs";
 
 /**
  * A FILE LOADED BY BOTH tsx LOADERS IN ONE PROCESS KEEPS EVERY OTHER PROCESS'S COVERAGE OF IT.
@@ -78,9 +78,50 @@ test("a process that loads a file through both tsx loaders erases no other proce
       const control = linesHit(root, ...order.map((d) => (d === loadsBoth ? loadsOnce : d)));
       assert.ok(linesHit(root, ...order) >= control, `merging ${order.map((d) => d.split("/").pop()).join(" then ")} lost lines the single-load control keeps`);
     }
+
+    const shardLcovA = join(root, "shard-a.lcov");
+    const shardLcovB = join(root, "shard-b.lcov");
+    const baselineRecord = readFileSync(join(root, "merged-calls-all-loads-both.info"), "utf8")
+      .split("end_of_record").find((record) => /^SF:.*probe\.ts$/m.test(record));
+    assert.ok(baselineRecord, "the baseline merger must include the probe's source record");
+    const sourceFile = /^SF:(.*)$/m.exec(baselineRecord!)![1];
+    writeFileSync(shardLcovA, `TN:\nSF:${sourceFile}\nDA:1,999\nend_of_record\n`);
+    writeFileSync(shardLcovB, `TN:\nSF:${sourceFile}\nDA:1,7\nend_of_record\n`);
+    const cliOutput = join(root, "merged-with-shard-lcov.info");
+    execFileSync(process.execPath, [
+      "--expose-internals", "scripts/coverage-merge-ratchet.mjs", "--output", cliOutput, "--shard-count", "2",
+      "--line-lcov", shardLcovA, "--line-lcov", shardLcovB, callsAll, loadsBoth,
+    ], { cwd: process.cwd(), encoding: "utf8", stdio: "pipe" });
+    const cliRecord = readFileSync(cliOutput, "utf8").split("end_of_record")
+      .find((record) => /^SF:.*probe\.ts$/m.test(record));
+    assert.ok(cliRecord, "the CLI merge must retain the probe's LCOV record");
+    assert.match(cliRecord!, /^DA:1,999$/m, "the CLI must union line hits from repeated --line-lcov arguments");
+
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("shard LCOV restores aggregate line hits without altering raw branch/function totals", () => {
+  const summary = {
+    workingDirectory: "/repo",
+    files: [{
+      path: "/repo/src/lib/adapter.mjs", lines: [{ line: 1, count: 0 }, { line: 2, count: 0 }],
+      coveredLineCount: 0, totalLineCount: 2, coveredLinePercent: 0,
+    }],
+    totals: { coveredLineCount: 0, totalLineCount: 2, coveredLinePercent: 0 },
+  };
+  const result = mergeShardLineHits(summary, [
+    "SF:src/lib/adapter.mjs\nDA:1,0\nDA:2,3\nend_of_record\n",
+    "SF:src/lib/adapter.mjs\nDA:1,2\nDA:2,0\nend_of_record\n",
+  ]);
+  assert.deepEqual(summary.files[0]!.lines.map((line) => line.count), [2, 3]);
+  assert.equal(summary.files[0]!.coveredLineCount, 2);
+  assert.equal(summary.totals.coveredLineCount, 2);
+  assert.equal(summary.totals.coveredLinePercent, 100);
+  assert.deepEqual(result, { shardCount: 2, rescuedLines: 2, rescuedHits: 5 });
+  assert.throws(() => mergeShardLineHits(summary, ["SF:src/missing.mjs\nDA:1,1\nend_of_record\n"]),
+    /positive line hits missing from the raw range merge/);
 });
 
 test("a repeated URL keeps only the instance its cached source map describes", () => {

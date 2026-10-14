@@ -11,8 +11,8 @@
   origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
   plan_refs: [W1-T5764, W1-T6249, W1-T6282, W1-T6093, W1-T6598, W1-T4945, W1-T3240, W1-T147]
   files: [src/lib/daemon.ts, src/lib/deploy-judge.ts, src/run-task.ts, test/one-boot-per-advance.test.ts]
-  status: queued
-  priority: 1
+  status: blocked
+  retirement: retired  # superseded by W1-T9094 (#11462): a build-role (daemon) container is now image-stale only for BUILD_ROLE_IMAGE_BAKED_PATHS (IMAGE_BAKED_PATHS minus BAKED_RUNTIME_SOURCE_PATHS; deploy-judge.ts imageBakedPathsForRole, deployer.ts roleScopedBakedCommitsBehind) and core's launcher runs with RMD_RESOURCE_POLICY_ROLE=build, so the recycle this task deferred to no longer follows these advances; all five baked advances it measured (config-schema.ts, fleet-control.ts, deployer.ts, ledger.ts) are BAKED_RUNTIME_SOURCE_PATHS files, so built as written it would defer every restart for a runtime-source advance to a recycle that never comes; operator approval 2026-10-14
   attempts: 0
   rationale: |
     MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy).

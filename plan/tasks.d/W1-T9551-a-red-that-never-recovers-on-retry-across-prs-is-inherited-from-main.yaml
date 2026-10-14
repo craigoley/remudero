@@ -1,0 +1,71 @@
+- id: W1-T9551
+  title: "A RED THAT NEVER RECOVERS ON RETRY ACROSS SEVERAL PRS IS INHERITED FROM MAIN, NOT A FLAKE — the flake-incident gardener filed W1-T9532 for a test that failed on 3 PRs with 0 recovered on retry and 3 also failed, a deterministic main red that the main-repair lane had already fixed in #11782; a group with no recovery that fails on two or more distinct PRs, or in main's own CI at their base, is classified main-inherited, files nothing as a flake and is routed to the main-health rung"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: spans the flake-incident gardener's classifier, its garden wiring (the main-failures reader) and the main-health rung's read of the routed rows; one concern — a no-recovery red is routed to main-health, not filed as a flake
+  band_meaning: span
+  origin: "operator 2026-10-14: W1-T9532 (#11790) filed a deterministic main red as a flake incident"
+  plan_refs: [W1-T6406, W1-T9532, W1-T8042, W1-T5350, W1-T6403]
+  files: [src/lib/flake-incident-gardener.ts, src/lib/garden-registry.ts, src/lib/main-health-rung.ts, test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-14: a deterministic main red filed as a flake sends the fleet to "pin the cause of an intermittent failure" that does not exist, after main-repair already fixed it (W1-T9532, retired in the same PR)
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14: #11758 and #11744 merged green on their own bases and together broke
+    test/the-core-fleet-fills-the-child-entry-store.test.ts on main (the store-fill fixture lacked the new
+    src/run-child-main.ts entry). The main-repair lane fixed it in #11782 (f19b8c887, 20:10Z,
+    Remudero-Task: main-repair-c0a435a51c28). At 20:54Z the flake-incident gardener still filed W1-T9532
+    (#11790): "Failed CI on 3 distinct pull requests ... #11705, #11735, #11769. Retry outcomes: 0 recovered on
+    retry, 3 also failed on retry". Every PR based before the fix inherited the red; none of them was a flake.
+    READ at origin/main 699dbec37:
+    - src/lib/flake-incident-gardener.ts `runFlakeIncidentGardener` groups `test.flake_retry` rows (written by
+      `selectorShadowFlakeLedger` in src/lib/selector-shadow-gardener.ts: file, titles, ci_run_id, shard,
+      retry_outcome recovered|also_failed, head_sha, base_sha, pr_numbers) by (file, title), counts a PR only
+      when its diff touches neither the test nor a module it imports, and files at `FLAKE_INCIDENT_POLICY.filePrs`
+      distinct PRs. `Evidence` already counts `recovered` and `alsoFailed`, but they are only printed in the
+      rationale; nothing branches on them.
+    - It never reads main's CI. The selector-shadow pass beside it in src/lib/garden-registry.ts
+      (`selectorShadowGardenPass`) already builds `selectorShadowMainFailures(owner, repo, io)`, a per-base-sha
+      reader of the test files main's own CI failed (the W1-T5350 base-red guard), but does not hand it to
+      `runFlakeIncidentGardener`.
+    - The main-health rung (src/lib/main-health-rung.ts) folds `main.repair.*` rows into `MainRepairRecord`s by
+      `mainRepairRecordsFromLedger`, each carrying a `MainRedSignature` whose `detail` lists the `not ok <title>`
+      lines main's failing logs named.
+  design: |
+    1. Classify before filing. A (file, title) group is MAIN-INHERITED when its counted observations have
+       `recovered === 0` and either (a) `also_failed` observations on at least `policy.watchPrs` distinct PRs (the
+       gardener's existing watch tier, no new constant), or (b) main's own CI failed the same test file at any
+       observation's `base_sha`, read through a new optional `mainFailures` source on `FlakeIncidentSources`
+       (the `SelectorShadowMainFailures` shape). garden-registry.ts passes the same memoized
+       `selectorShadowMainFailures` reader the selector-shadow pass uses. A base sha whose main run is unread or
+       CANCELLED is not evidence either way (doctrine: cancelled-is-not-red), so (a) alone decides.
+    2. A main-inherited group files NOTHING as a flake incident, whatever its PR count. It writes one
+       `flake_incident.main_inherited` row (origin, file, title, prs, runs, base shas, main_red true|false|unread,
+       route "main-health"), re-written only when its PR set grows, like the existing watch row.
+    3. Route to main-health. The rung reads `flake_incident.main_inherited` rows on its own pass. A row whose test
+       title already appears as `not ok <title>` in an open or resolved `MainRepairRecord`'s red detail is logged
+       as covered by that repair (offending sha, fix PR) and nothing more. Any other row is a main-red hint: the
+       rung re-reads main's newest completed CI for that check and, if it still fails the test, enters its
+       existing locate/repair path; if main is green on it, it logs the hint resolved. The rung never files a
+       flake task.
+    4. A group with ANY recovered retry keeps today's path unchanged: a test that passes on retry is a flake.
+    5. A main-inherited origin counts as handled for `openTaskFor`, so a later pass does not file it as a flake
+       once its PR count crosses `filePrs`.
+  acceptance:
+    - claim: "a red that never recovers on retry across two or more PRs files no flake incident"
+      proof: 'grep: test("W1-T9551: a red that never recovers on retry across PRs files no flake incident" in test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts'
+    - claim: "a red that main's own CI also fails at the PRs' base files no flake incident"
+      proof: 'grep: test("W1-T9551: a red main also fails at the base files no flake incident" in test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts'
+    - claim: "a main-inherited red is routed to the main-health rung, which names the repair that already covers it"
+      proof: 'grep: test("W1-T9551: a main-inherited red is routed to the main-health rung" in test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts'
+    - claim: "a red that recovers on retry still files a flake incident"
+      proof: 'grep: test("W1-T9551: a red that recovers on retry is still a flake incident" in test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts'
+  falsifier: |
+    Replay W1-T9532's evidence (3 PRs #11705/#11735/#11769, each also_failed, 0 recovered) through
+    `runFlakeIncidentGardener`. At origin/main it files a flake incident; with the change it files nothing and
+    writes one `flake_incident.main_inherited` row. Drop the recovered===0 branch and the first test reds; keep
+    one recovered row in the fixture and the flake is still filed.
