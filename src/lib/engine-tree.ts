@@ -83,7 +83,7 @@ export type EngineGit = (repoDir: string, args: readonly string[]) => Promise<st
 /** Through the hardened git leaf: the managed checkout's pointer is vetted and its config pinned. */
 export const hardenedEngineGit: EngineGit = (repoDir, args) => hostWorktreeGitAsync(repoDir, args);
 
-export interface EngineDeps {
+export interface EngineBuildOptions {
   /** The managed checkout the engine is a worktree of. */
   repoDir: string;
   /** Where W1-T8776's stored bundles live. */
@@ -109,7 +109,10 @@ async function removeEngineDir(path: string, repoDir: string, git: EngineGit): P
     void reasonOf(err);
   }
   rmSync(path, { recursive: true, force: true });
-  await git(repoDir, ["worktree", "prune"]).catch((err: unknown) => void reasonOf(err));
+  await git(repoDir, ["worktree", "prune"]).catch((err: unknown) => {
+    // A failed prune only leaves a stale registration; the directory is already gone and the next pass prunes again.
+    void reasonOf(err);
+  });
 }
 
 const inFlight = new Map<string, Promise<EngineBuildResult>>();
@@ -121,7 +124,7 @@ const inFlight = new Map<string, Promise<EngineBuildResult>>();
  * `present`. Never rejects: every failure is a typed `failed`, ledgered as `engine.build_failed`, and the previous
  * engine stays the newest. A concurrent call for the same engine joins the one in flight.
  */
-export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: string, deps: EngineDeps): Promise<EngineBuildResult> {
+export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<EngineBuildResult> {
   const key = `${stateRoot}\0${sourceHash}`;
   const running = inFlight.get(key);
   if (running) return running;
@@ -138,7 +141,7 @@ export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: str
   return pass;
 }
 
-async function buildEngine(stateRoot: string, sha: string, sourceHash: string, deps: EngineDeps): Promise<EngineBuildResult> {
+async function buildEngine(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<EngineBuildResult> {
   if (!GIT_SHA.test(sha)) return { kind: "failed", reason: `sha-invalid: ${JSON.stringify(sha)}` };
   if (!SHA256_HEX.test(sourceHash)) return { kind: "failed", reason: `source-hash-invalid: ${JSON.stringify(sourceHash)}` };
   const clock = deps.clock ?? systemClock;
@@ -184,7 +187,7 @@ function bundleIsCurrent(root: string): boolean {
   return Array.isArray(entries) && entries.length > 0 && entries.every((e) => script.childEntryIsCurrent(root, String(e?.name)).current);
 }
 
-export interface NewestEngineDeps {
+export interface NewestEngineOptions {
   repoDir: string;
   log?: StoreLog;
   git?: EngineGit;
@@ -208,7 +211,7 @@ async function isAncestor(git: EngineGit, repoDir: string, ancestor: string, tip
  * that is not the tip it ledgers `engine.lag` {engine_sha, main_sha, commits_behind}: the children spawned on it run
  * behind main by that many commits, visibly. An engine that cannot be judged is skipped with `engine.candidate_skipped`.
  */
-export async function newestCurrentEngine(stateRoot: string, mainSha: string, deps: NewestEngineDeps): Promise<EngineRef | undefined> {
+export async function newestCurrentEngine(stateRoot: string, mainSha: string, deps: NewestEngineOptions): Promise<EngineRef | undefined> {
   const log = deps.log ?? (() => {});
   const git = deps.git ?? hardenedEngineGit;
   const current = deps.isCurrent ?? bundleIsCurrent;
@@ -238,7 +241,7 @@ export async function newestCurrentEngine(stateRoot: string, mainSha: string, de
 
 // ── retention ────────────────────────────────────────────────────────────────────────────────
 
-export interface PruneEngineDeps {
+export interface PruneEngineOptions {
   repoDir: string;
   log?: StoreLog;
   git?: EngineGit;
@@ -277,7 +280,7 @@ function namedByLiveRuns(stateRoot: string, probe: RunChildProbe): { hashes: Set
  * so nothing is removed that pass (`engine.prune_deferred`). Leftover `.build-` siblings and unrecorded engine
  * directories that no build in this process is making are cleared too. Returns the engine hashes removed.
  */
-export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineDeps): Promise<string[]> {
+export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptions): Promise<string[]> {
   const log = deps.log ?? (() => {});
   const git = deps.git ?? hardenedEngineGit;
   const engines = listEngines(stateRoot);

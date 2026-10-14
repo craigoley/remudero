@@ -17227,7 +17227,7 @@ export async function buildEngineAfterStore(
   stored: StoreBuildResult,
   log: (step: string, extra?: Record<string, unknown>) => void,
   /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
-  seams: Partial<Pick<EngineDeps, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
+  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
 ): Promise<void> {
   if (stored.kind !== "built" && stored.kind !== "present") return;
   try {
@@ -56879,7 +56879,7 @@ import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFail
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
-import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineDeps } from "./lib/engine-tree.js";
+import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
