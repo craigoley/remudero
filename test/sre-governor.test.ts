@@ -293,7 +293,7 @@ test("the emergency stop, a pause or quiet hours stop every runbook", () => {
   assert.deepEqual(fleetControlsBesideLedger(ledgerPath), { emergencyStop: undefined, pause: undefined, quietHours: undefined });
   writeFileSync(join(root, "state", "QUIET_HOURS"), "{}");
   writeFileSync(join(root, "state", "PAUSE"), JSON.stringify({ requestedAt: "2026-09-25T00:00:00Z", reason: "deploy" }));
-  assert.deepEqual(fleetControlsBesideLedger(ledgerPath), { emergencyStop: undefined, pause: "PAUSE requested: deploy", quietHours: "QUIET_HOURS set" });
+  assert.deepEqual(fleetControlsBesideLedger(ledgerPath), { emergencyStop: undefined, pause: "PAUSE requested: deploy; actor: actor unrecorded", quietHours: "QUIET_HOURS set" });
   const lane = ledgerGovernorVerdict(ledgerPath, [A], () => NOW);
   assert.equal(lane(A).tier, "stopped");
   assert.match(lane(A).reason, /^pause holds: /);

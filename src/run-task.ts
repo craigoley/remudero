@@ -3236,6 +3236,7 @@ import {
   stopDetail,
 } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
+import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import {
   readGithubWebhookSecret,
   resolveGithubWebhookSecretFilePath,
@@ -3245,7 +3246,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
+import { LEDGER_REQUEST_STEP, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -18175,8 +18176,9 @@ async function runTask(
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
     noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
-    const spawnArgs = opts.gitCredentialSocketPath
-      ? withGitCredentialSocket(requestedSpawnArgs, opts.gitCredentialSocketPath)
+    const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
+    const spawnArgs = socketPath
+      ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
       : requestedSpawnArgs;
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
@@ -49180,6 +49182,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       pushed: result.pushed,
       reason: reason ?? null,
       session_id: result.sessionId,
+      actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
       requested_by_pid: process.pid,
     });
@@ -49206,6 +49209,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     resolved_by: target.resolvedBy,
     reason: reason ?? null,
     session_id: info.sessionId ?? null,
+    actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
     requested_by_pid: info.pid,
   });
@@ -49237,6 +49241,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
       step: "fleet.resume",
       scope: "fleet",
       cleared_shared_pause: cleared,
+      actor_evidence: gatherActorEvidence(),
+      session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+      requested_by_pid: process.pid,
     });
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
@@ -49254,6 +49261,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     resolved_by: target.resolvedBy,
     cleared_stop: result.clearedStop,
     cleared_pause: result.clearedPause,
+    actor_evidence: gatherActorEvidence(),
+    session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+    requested_by_pid: process.pid,
   });
   console.log(
     `### rmd resume — instance '${target.instance}' cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +

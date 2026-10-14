@@ -1,0 +1,50 @@
+- id: W1-T9538
+  title: "Harness-run skill steps: fenced rmd: directives in SKILL.md, piloted on proof-preflight, ledgered as harness-observed skill.step rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR RULED 2026-10-13 ('File, pilot proof-preflight'). Skill usage is self-reported
+    (SKILLS_USED -> skills.used via logSkillsUsed), so buildSkillEffectivenessReport measures injection and
+    self-claims, not execution. proof-preflight steps 2, 5 and 6 (run proof before, rerun proof after, run
+    test-tier check) are deterministic: the harness already knows the task's proofs and files. Pattern observed
+    in nanoclaw (nanocoai/nanoclaw ab09973a): prose plus fenced directives, an engine runs what it understands,
+    anything else degrades to the agent. Ships NO new skill; the 2026-09-29 outcome-only skill retirement stands;
+    mining is out of scope. Line numbers cited in the feedback were read at efd226b50 and have drifted at current
+    main (logSkillsUsed now src/run-task.ts:37625, buildSkillEffectivenessReport src/lib/skill-workshop.ts:831);
+    the implementer re-locates by symbol."
+  design: |
+    1. SYNTAX. Fenced blocks inside SKILL.md (rmd:proof before, rmd:proof after, rmd:check <command>). With
+       fences stripped the prose must still read as a complete procedure (test asserts this on proof-preflight).
+    2. RUNNER. A new module parses fences and runs the ones it understands around the worker: before-proof
+       result and after-proof/check results are placed in the worker prompt. One skill.step ledger row per
+       step: skill, step, phase, outcome. Harness-observed, never self-reported.
+    3. FALLBACK. An unknown directive or a step that fails to run falls back to the prose step for the agent,
+       with a row whose outcome records the deferral. Never a crash, never a silent drop.
+    4. REPORT. buildSkillEffectivenessReport reads skill.step rows when present and measures effectiveness on
+       executed steps; with no rows it keeps today's behaviour.
+    5. Annotate .claude/skills/proof-preflight/SKILL.md steps 2, 5, 6 with the fences. Keep the boundary that
+       workers do not execute scripts: the harness runs the steps, not the worker.
+    FALSIFIER: remove the harness step runner; a proof-preflight run then writes no skill.step row and its
+    prompt carries no before or after proof result.
+  acceptance:
+    - claim: "fences parse, unknown directives defer to prose, and stripping fences leaves a complete skill"
+      proof: "unit test: test/skill-steps.test.ts"
+    - claim: "one integration test loads the real proof-preflight skill fences, executes them through the worker harness and runner, asserts before/after prompt results and one skill.step row per step, then passes those same rows to buildSkillEffectivenessReport and asserts executed-step effectiveness; removing any link fails that test"
+      proof: "unit test: test/skill-steps-run.test.ts"
+    - claim: "buildSkillEffectivenessReport uses skill.step rows when they exist"
+      proof: "unit test: test/skill-steps-report.test.ts"
+    - claim: "proof-preflight SKILL.md carries the rmd:proof directives"
+      proof: "grep: rmd:proof in .claude/skills/proof-preflight/SKILL.md"
+    - claim: "the worker harness calls the skill step runner from its task execution path"
+      proof: "grep: runSkillSteps( in src/run-task.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#fb-1791856366577-09684b
+  plan_refs: ["§7B"]
+  files: [src/lib/skill-steps.ts, src/lib/skill-workshop.ts, src/run-task.ts, .claude/skills/proof-preflight/SKILL.md, test/skill-steps.test.ts, test/skill-steps-run.test.ts, test/skill-steps-report.test.ts]
+  status: queued
+  attempts: 0
+  note: "Rule 19 merits: one integration test requires the skill fences, runner, harness prompt/ledger wiring and report consumer together to prove the same executed steps reach the effectiveness report; this invariant is unsatisfiable piecewise. verify:auto — pilot on proof-preflight only."

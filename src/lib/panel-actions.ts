@@ -39,7 +39,7 @@ import {
 } from "./assistant-action-discovery.js";
 import { appendLedger, RISK_OVERRIDE_RECORDED_STEP, RISK_OVERRIDE_REASON_CLASSES, RISK_OVERRIDE_DISPOSITIONS, type RiskOverrideReasonClass, type RiskOverrideDisposition } from "./ledger.js";
 import type { RiskJudgeVerdictLabel } from "./risk-judge.js";
-import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
+import { isPaused, isPrActionName, isPrActionSwitchedOff, isQuietHours, isStopped, isSafeTaskId, pauseActor, pauseDetail, requestDrainNow, requestKick, requestPrAction, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail, type FleetControlInfo, type PrActionName, type PrActionRequest, type ResumeResult } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
@@ -209,6 +209,7 @@ export function jsonAction<T extends object>(
 export interface FleetControlStatus {
   paused: boolean;
   pauseDetail?: string;
+  pauseActor?: string;
   stopped: boolean;
   stopDetail?: string;
   quietHours: boolean;
@@ -308,6 +309,7 @@ export function controlStatusBody(deps: ControlStatusDeps, lines?: ReadonlyArray
   return {
     paused: isPaused(deps.root),
     pauseDetail: pauseDetail(deps.root),
+    pauseActor: pauseActor(deps.root),
     stopped: isStopped(deps.root),
     stopDetail: stopDetail(deps.root),
     quietHours: isQuietHours(deps.root),
@@ -321,7 +323,7 @@ export function controlStatusBody(deps: ControlStatusDeps, lines?: ReadonlyArray
 /** The pause route's whole side effect, shared with action-executor.ts (W1-T4657) so both run ONE path. */
 export function armPause(deps: Pick<PanelActionDeps, "root" | "ledgerPath">, reason: string | undefined, origin: string, extra: Record<string, unknown> = {}): { info: FleetControlInfo; row: PanelLedgerRow } {
   const info = requestPause(deps.root, reason);
-  const row = appendPanelLedger(deps.ledgerPath, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra });
+  const row = appendPanelLedger(deps.ledgerPath, "panel.pause_requested", PANEL_TASK_ID, origin, { reason: info.reason ?? null, ...extra, actor_evidence: info.actor_evidence });
   return { info, row };
 }
 
