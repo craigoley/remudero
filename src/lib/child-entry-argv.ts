@@ -10,6 +10,7 @@
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import { defaultChildEntryStoreRoot, materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 
 interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
@@ -43,6 +44,161 @@ export function bundledWorkerUrl(selfUrl: string | URL, check?: WorkerBundleChec
 
 const loadWorkerBundleCheck = (): WorkerBundleCheck =>
   (createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as { workerBundle: WorkerBundleCheck }).workerBundle;
+
+/** W1-T9370: the off switch for starting a tsx parent's workers from bundles; "0" starts every worker from its .ts source. */
+export const BUNDLED_WORKERS_ENV = "RMD_BUNDLED_WORKERS";
+export type WorkerEntryLog = (step: string, extra: Record<string, unknown>) => void;
+/** W1-T9370: what one module's worker start was decided to be, for the process's life. */
+interface WorkerEntryDecision { kind: "bundle" | "tsx"; reason: string; url?: URL }
+/** startWorker's third parameter. */
+type StartWorkerOpts = NonNullable<Parameters<typeof startWorker>[2]>;
+
+let entryLog: WorkerEntryLog | undefined;
+/** Where each module's first worker.entry_resolved row goes; serve sets its ledger log at boot. */
+export function setWorkerEntryLog(log: WorkerEntryLog | undefined): void {
+  entryLog = log;
+}
+const decisions = new Map<string, WorkerEntryDecision>();
+const treeHashes = new Map<string, string>();
+const materialized = new Set<string>();
+/**
+ * Flags a Worker refused in its execArgv: V8 and process-wide options, such as serve's `--expose-gc`. A worker cannot
+ * take them, and needs none: they are in force for the whole process, so a worker started without one still has it.
+ */
+const refusedWorkerFlags = new Set<string>();
+/** A preload in `argv` that only tsx can load (`--import x.ts`), which a bundle-started worker without tsx would die on. */
+function typescriptPreload(argv: readonly string[]): string | undefined {
+  const isTs = (value: string | undefined): boolean => value !== undefined && /\.[cm]?tsx?$/.test(value);
+  for (let at = 0; at < argv.length; at++) {
+    const flag = argv[at]!;
+    if (/^(--import|--loader|--experimental-loader|--require|-r)$/.test(flag) && isTs(argv[at + 1])) return argv[at + 1];
+    const joined = /^--(?:import|loader|experimental-loader|require)=(.+)$/.exec(flag)?.[1];
+    if (isTs(joined)) return joined;
+  }
+  return undefined;
+}
+/** The flags node names in ERR_WORKER_INVALID_EXEC_ARGV, or none when the error is any other. */
+function refusedFlagsOf(err: unknown): string[] {
+  if ((err as { code?: unknown })?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return [];
+  const named = /invalid execArgv flags: (.+)$/.exec(String((err as Error).message))?.[1];
+  return named ? named.split(", ").filter((flag) => flag.startsWith("-")) : [];
+}
+
+/** `argv` without tsx's loader flags (`--import tsx`, `--import=…/tsx/…`, `--loader`, `--require`): a bundle needs none. */
+export function execArgvWithoutTsx(argv: readonly string[]): string[] {
+  const isTsx = (value: string | undefined): boolean => value !== undefined && /(^|[\\/=])tsx($|[\\/])/.test(value);
+  const out: string[] = [];
+  for (let at = 0; at < argv.length; at++) {
+    const flag = argv[at]!;
+    if (/^(--import|--loader|--experimental-loader|--require|-r)$/.test(flag) && isTsx(argv[at + 1])) {
+      at++;
+      continue;
+    }
+    if (/^--(import|loader|experimental-loader|require)=/.test(flag) && isTsx(flag)) continue;
+    out.push(flag);
+  }
+  return out;
+}
+
+function decide(module: string, root: string, opts: StartWorkerOpts): WorkerEntryDecision {
+  const script = (): { workerBundle: NonNullable<StartWorkerOpts["check"]>; sourceHash: (root: string) => string } =>
+    createRequire(import.meta.url)("../../scripts/build-child-entries.mjs");
+  const check = opts.check ?? ((r, m, o) => script().workerBundle(r, m, o));
+  const hashOf = (): string => treeHashes.get(root) ?? (treeHashes.set(root, (opts.hash ?? ((r) => script().sourceHash(r)))(root)), treeHashes.get(root)!);
+  let verdict = check(root, module, { treeHash: hashOf() });
+  const storeRoot = opts.storeRoot ?? defaultStoreRoot();
+  if (!verdict.current && storeRoot !== false && !materialized.has(root)) {
+    materialized.add(root);
+    const lookup = materializeFromStore(root, storeRoot);
+    if (lookup.outcome === "hit") verdict = check(root, module, { treeHash: hashOf() });
+    else verdict = { ...verdict, reason: `${verdict.reason}; store ${lookup.reason}` };
+  }
+  return verdict.current && typeof verdict.bundle === "string"
+    ? { kind: "bundle", reason: verdict.reason, url: pathToFileURL(verdict.bundle) }
+    : { kind: "tsx", reason: verdict.reason };
+}
+
+/**
+ * W1-T9370: start the worker a module starts from its own URL (`selfUrl`, its `import.meta.url`). A bundled isolate
+ * starts its worker bundle (bundledWorkerUrl). A tsx parent starts the tree's current worker bundle with tsx dropped
+ * from the worker's execArgv, decided once per module for the process's life, and the .ts source as before on every
+ * doubt: the switch off, no current bundle after one store lookup, a parent that preloads a TypeScript file, a
+ * constructor that throws (once it has dropped any
+ * flag node names as invalid in a worker, which it retries without), or a bundle-started
+ * worker's non-zero exit before its first message, which demotes that module to its source for the rest of the process.
+ */
+export function startWorker(
+  selfUrl: string | URL,
+  options: WorkerOptions = {},
+  opts: {
+    /** A caller's own worker URL (a test's): started as given, as before W1-T9370. */
+    override?: string | URL;
+    env?: NodeJS.ProcessEnv;
+    /** The store a miss materializes from; `false` never asks it. Default: this instance's. */
+    storeRoot?: string | false;
+    check?: (root: string, module: string, opts: { treeHash?: string }) => ChildEntryCurrency;
+    hash?: (root: string) => string;
+    construct?: (url: string | URL, options: WorkerOptions) => Worker;
+  } = {},
+): Worker {
+  const construct = opts.construct ?? ((url: string | URL, workerOptions: WorkerOptions) => new Worker(url, workerOptions));
+  if (opts.override) return construct(opts.override, options);
+  if (runsBundled()) return construct(bundledWorkerUrl(selfUrl), options);
+  const self = new URL(selfUrl);
+  const path = fileURLToPath(self);
+  const at = path.lastIndexOf(`${sep}src${sep}`);
+  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return construct(self, options);
+  const root = path.slice(0, at);
+  const module = relative(root, path).split(sep).join("/");
+  let decision = decisions.get(path);
+  if (!decision) {
+    decision = (() => {
+      try {
+        return decide(module, root, opts);
+      } catch (err) {
+        return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
+      }
+    })();
+    decisions.set(path, decision);
+    entryLog?.("worker.entry_resolved", { module, kind: decision.kind, reason: decision.reason });
+  }
+  // A start node refuses for flags it names is retried once without them; any other refusal demotes the module.
+  for (let attempt = 0; decision.kind === "bundle" && decision.url && attempt < 2; attempt++) {
+    const execArgv = execArgvWithoutTsx(options.execArgv ?? process.execArgv).filter((flag) => !refusedWorkerFlags.has(flag));
+    const preload = typescriptPreload(execArgv);
+    if (preload !== undefined) {
+      // Never dropped silently: the parent asked every worker to run it, so the worker keeps its source and tsx.
+      demote(path, module, `parent-preloads-typescript: ${preload.slice(-80)}`);
+      break;
+    }
+    try {
+      const worker = construct(decision.url, { ...options, execArgv });
+      // A bundle that cannot load never speaks: a non-zero exit before its first message demotes the module. An exit,
+      // not an `error` listener (that would swallow an error the caller never handles); and a lane terminated after
+      // it worked (terminate() exits 1) keeps its bundle.
+      let spoke = false;
+      worker.once("message", () => { spoke = true; });
+      worker.once("exit", (code) => { if (code !== 0 && !spoke) demote(path, module, `bundle-worker-exit-before-first-message: ${code}`); });
+      return worker;
+    } catch (err) {
+      const fresh = refusedFlagsOf(err).filter((flag) => execArgv.includes(flag) && !refusedWorkerFlags.has(flag));
+      if (attempt === 0 && fresh.length > 0) {
+        for (const flag of fresh) refusedWorkerFlags.add(flag);
+        continue;
+      }
+      demote(path, module, `bundle-start-refused: ${String((err as Error)?.message ?? err).slice(0, 80)}`);
+      break;
+    }
+  }
+  return construct(self, options);
+}
+
+/** Keyed by the module's absolute path: two trees in one process never share a decision. */
+function demote(path: string, module: string, reason: string): void {
+  if (decisions.get(path)?.kind === "tsx") return;
+  decisions.set(path, { kind: "tsx", reason });
+  entryLog?.("worker.entry_resolved", { module, kind: "tsx", reason });
+}
 /**
  * Loaded on demand, not imported: the emitter must still load in a tree that carries src/ but not scripts/
  * (a consumer checkout, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts), where the

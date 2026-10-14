@@ -636,3 +636,14 @@
     shared pre-push steps, not a verified per-PR cause.
   src: "ci-learning:10339:Scan"
   cited: "2026-10-11"
+
+# ── docs-index-check refusal (ci-learning:11388:docs-index-check, PRs #11388 and #11524) ──
+- id: docs-index-stale-after-doc-edit
+  subsystem: ci
+  lifecycle: active
+  files: ["docs/**", "docs/docs-index.json", "docs/README.md", "scripts/generate-docs-index.mjs"]
+  fact: >-
+    Any edit under docs/**/*.md makes the committed docs/docs-index.json STALE, and the docs-index:check gate refuses the PR; before pushing a docs change run `npm run --silent docs-index`, commit the regenerated docs/docs-index.json, then confirm `npm run --silent docs-index:check` prints OK.
+  evidence: "ci-learning:11388:docs-index-check: the docs-index-check gate refused #11388 and #11524 because docs/docs-index.json did not match a fresh regeneration from docs/**/*.md (scripts/generate-docs-index.mjs --check exits 1 with 'is STALE'). The ci-learning note records the #11388 repair as regenerating docs/docs-index.json, editing docs/README.md, and touching three tests (a-refused-green-merge-records-why-and-reruns-a-stale-check, daemon-worktrees-pushes-and-arms-never-block-the-loop, run-task); that repair was NOT re-read from the PRs in this run. Also run `npm run --silent docs-index:check-paths` when a mermaid block cites a path."
+  src: "ci-learning:11388:docs-index-check"
+  cited: "2026-10-14"

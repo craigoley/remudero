@@ -258,7 +258,9 @@ export function buildIntoStore(treeRoot: string, opts: BuildIntoStoreOptions): P
   const pass = buildIntoStoreUnlogged(resolve(treeRoot), opts)
     .catch((err: unknown): StoreBuildResult => ({ kind: "failed", reason: String((err as Error)?.message ?? err).slice(0, 400) }))
     .then((result) => {
-      if (result.kind === "built") log("child_entry.store_built", { hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "built") log("child_entry.store_built", { reason: "new-build", hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "present") log("child_entry.store_present", { reason: "source-hash-already-present", hash: result.hash });
+      if (result.kind === "skipped") log("child_entry.store_build_skipped", { reason: result.reason });
       if (result.kind === "failed") log("child_entry.store_build_failed", { reason: result.reason, hash: result.hash });
       if (result.kind !== "skipped") prune(opts, log);
       return result;

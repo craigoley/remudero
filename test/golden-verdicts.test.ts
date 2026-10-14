@@ -411,6 +411,19 @@ test("GOLDEN — PROOF-DISCRIMINATION LESSON: the cited incident executes and th
   }
 });
 
+test("GOLDEN — DOCS-INDEX LESSON: the cited incident executes and a docs edit's lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-docs-index-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["docs/README.md", "docs/docs-index.json", "docs/architecture.md", "scripts/generate-docs-index.mjs"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "docs-index-stale-after-doc-edit"), taskFile);
+  }
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
