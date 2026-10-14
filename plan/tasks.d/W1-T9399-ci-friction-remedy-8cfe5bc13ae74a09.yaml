@@ -41,3 +41,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing requests preventing dispatch or self-healing an entire cause, but its recent rounds name different failures; the supplied evidence does not establish a shared mechanism or specify a bounded remedy.; on the change's description/files alone, no diff was read — Acceptance supplies only a grep for a test declaration, which cannot verify that fix rounds are prevented while legitimate failures remain handled.; on the change's description/files alone, no diff was read — The escalation rule explicitly requires HIGH when the finding cannot be verified from what is shown; the recurrence counts and import relationship do not verify the proposed causal diagnosis."
+    judged_at: "2026-10-14T08:52:24.963Z"
+    pin: "a09e1c261dbd13024b5eb5c2365b257e5fc6d50fcf0d073e600b315ce2b5eee4"
