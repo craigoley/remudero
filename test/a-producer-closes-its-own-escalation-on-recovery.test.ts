@@ -12,6 +12,7 @@ import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger
 import { ORACLE_AGREE_RUNS_TO_CLEAR, READ_MODEL_CONSISTENCY_CLEARED_STEP, runConsistencyCheck, type ConsistencyCheckOptions } from "../src/lib/read-model-consistency.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-09-20T00:00:00Z");
@@ -170,6 +171,38 @@ test("W1-T8866: a producer closes its own escalation on recovery", async (t) => 
       assert.throws(() => viaPorts.closeIssue!("https://github.com/o/r/issues/7", "x"), /injected/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("the default closeIssue port runs the real gh issue gateway: `gh issue close <url> --comment`", () => {
+    const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}producer-closes-default-`));
+    const shim = ghShim([], { kind: "producer-closes-default-gh" });
+    const savedPath = process.env.PATH;
+    try {
+      const ports = productionGardenerOverseerPorts({ stateDir: dir, repoRoot: dir, owner: "o", repo: "r", fetch: () => ({}), log: () => {} });
+      process.env.PATH = `${shim.dir}:${savedPath}`;
+      ports.closeIssue!("https://github.com/o/r/issues/7", "the gardener recovered");
+      assert.deepEqual(shim.calls(), ["issue close https://github.com/o/r/issues/7 --repo o/r --comment the gardener recovered"]);
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(shim.dir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("the default closeIssue port surfaces a gh failure instead of reporting a phantom close", () => {
+    const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}producer-closes-default-fail-`));
+    const shim = ghShim([{ when: "issue close", stderr: "gh: HTTP 502 (fixture)", exit: 1 }], { kind: "producer-closes-default-fail-gh" });
+    const savedPath = process.env.PATH;
+    try {
+      const ports = productionGardenerOverseerPorts({ stateDir: dir, repoRoot: dir, owner: "o", repo: "r", fetch: () => ({}), log: () => {} });
+      process.env.PATH = `${shim.dir}:${savedPath}`;
+      assert.throws(() => ports.closeIssue!("https://github.com/o/r/issues/7", "x"));
+      assert.equal(shim.calls().length, 1, "gh was invoked once and its failure propagated");
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(shim.dir, { recursive: true, force: true });
     }
   });
 
