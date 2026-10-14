@@ -1,5 +1,5 @@
 import {
-  checkProofCommand, checkProofChildArgv, checkProofTimeoutMs,
+  checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
@@ -231,7 +231,7 @@ import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } fro
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
-import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
+import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
@@ -907,6 +907,7 @@ import {
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
+  recordRowThreadEvents,
   refusalReason,
   renderInbox,
   renderRatifyTelemetry,
@@ -1031,6 +1032,7 @@ import {
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   bodyWithFailingProofAtOpen,
+  checkProofLaunchArgv,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -15164,7 +15166,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofChildArgv(proof, mergeBase, input.childRoot), {
+      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -19811,6 +19813,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
     await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
+  }
+  // W1-T8776: a checkout now at main fills the shared child-entry store once per main revision, in a child process
+  // and unawaited, so every worktree cut at this source hash can copy the bundle instead of cold-starting tsx. A hash
+  // already stored is a no-op; a failed build is ledgered and changes nothing (children keep running tsx).
+  if (checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded") {
+    void buildIntoStore(repoDir, {
+      storeRoot: childEntryStoreRoot(config.root),
+      log,
+      liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
+    });
   }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
@@ -29629,6 +29641,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(checkoutRoot, rel));
     opts.knownRepos = knownRepos;
+    // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
+    // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
+    opts.addedTaskIds = newTaskIds ?? new Set<string>();
     // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
     // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
     // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
@@ -29922,6 +29937,8 @@ export interface PreflightProofsDeps {
   git?: (args: string[]) => string;
   /** The reviewer's OWN resolver, injected so a test can vary the criteria without a plan. */
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
+  /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
+  childRoot?: string;
 }
 
 /**
@@ -30004,7 +30021,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      checkProofChildArgv(proof, mergeBase),
+      checkProofLaunchArgv(proof, mergeBase, deps.childRoot),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
@@ -39993,6 +40010,8 @@ export async function daemonCommand(
           ledgerPath,
           readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
           reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
+          // W1-T9252: the boot backfill, then the live tail, of operator actions and fleet outcomes onto threads.
+          syncEvents: createThreadEventSync({ ledgerPath, threadStorePath: inboxThreadStorePath(config.root), stateDir: join(config.root, "state"), log }).sync,
           decide: inboxThreadDecider(config, log),
         },
         runPrAction: async (request) => {
@@ -52421,6 +52440,9 @@ export function approveParkedTask(
     /** The operator's own release, kept where rotation cannot shed it until the machine-filing
      *  judge pins it on the record (operator ruling 2026-09-29). */
     recordDurableRelease?: (taskId: string) => void;
+    /** W1-T9252: told of the release row once it is written, so the release lands on every open ask about the
+     *  task; a failure here never fails the release. */
+    recordThreadRow?: (row: Record<string, unknown>) => void;
   },
 ): { code: number; message: string; released?: boolean } {
   const task = deps.plan.byId.get(taskId);
@@ -52460,13 +52482,15 @@ export function approveParkedTask(
         `false) — staged ${proposal.id} as a proposal instead of releasing ${taskId} directly`,
     };
   }
-  (deps.append ?? appendLedger)(deps.ledgerPath, {
+  const releaseRow = {
     run_id: deps.runId,
     task_id: taskId,
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
     ...(deps.provenance ?? {}),
-  });
+  };
+  (deps.append ?? appendLedger)(deps.ledgerPath, releaseRow);
+  deps.recordThreadRow?.(releaseRow);
   if (!deps.provenance) deps.recordDurableRelease?.(taskId);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
@@ -52505,7 +52529,12 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       return { exists: proposal !== undefined, classification };
     },
-    (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
+    (step, id, reason) => {
+      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason });
+      // W1-T9252: the action also lands on the item's thread; a store fault never fails the verb.
+      recordRowThreadEvents({ ...row, task_id: id, origin: "rmd-cli", reason }, [{ id }], { threadStorePath: inboxThreadStorePath(config.root) },
+        (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
+    },
   );
 }
 
@@ -52543,6 +52572,33 @@ export function approveCiNotGreenExit(
 export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => void): void {
   commit();
   ledger();
+}
+
+/**
+ * `rmd approve`. W1-T9252: whatever the run ledgered for the proposals it named (approved, filed, refused) is
+ * also mirrored onto each proposal's thread, once the run ends — the ledger rows stay the record, and the
+ * mirror is keyed on them, so the daemon's live tail and boot backfill add nothing a second time.
+ */
+export async function approveCommandMirrored(rest: string[], deps: NonNullable<Parameters<typeof approveCommand>[1]> = {}): Promise<number> {
+  const startedAt = (deps.clock ?? systemClock).now();
+  const code = await approveCommand(rest, deps);
+  const ids = rest.filter((token) => !token.startsWith("--") && !namesATask(token));
+  if (ids.length === 0) return code;
+  try {
+    const config = deps.config ?? loadConfig();
+    const proposals = parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json")));
+    const named = new Set(ids);
+    for (const row of readLedgerLines(ledgerPathFor(config))) {
+      const rowIds = [row.task_id, row.proposal_id, ...(Array.isArray(row.proposal_ids) ? row.proposal_ids : [])];
+      if (typeof row.ts !== "string" || Date.parse(row.ts) < startedAt || !rowIds.some((id) => typeof id === "string" && named.has(id))) continue;
+      recordRowThreadEvents(row, proposals, { threadStorePath: inboxThreadStorePath(config.root) }, (step, extra) =>
+        console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`));
+    }
+  } catch (error) {
+    // deliberate: the thread mirror is a courtesy of the verb; the daemon's live tail mirrors what this missed.
+    console.error(`rmd approve: could not mirror the run onto its thread: ${String((error as Error)?.message ?? error)}`);
+  }
+  return code;
 }
 
 export async function approveCommand(
@@ -52586,6 +52642,14 @@ export async function approveCommand(
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
       recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
+      recordThreadRow: (row) =>
+        void recordRowThreadEvents(
+          // The row as the ledger stamped it: the event's key is the stored row's `ts`, which this call never chose.
+          readLedgerLines(ledgerPathFor(config)).filter((line) => line.step === row.step && line.run_id === row.run_id && line.task_id === row.task_id).at(-1) ?? row,
+          parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          { threadStorePath: inboxThreadStorePath(config.root) },
+          (step, extra) => console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`),
+        ),
     });
     console.log(outcome.message);
     // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the
@@ -53571,7 +53635,7 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   updateProposalRegistry(registryPath, (current) => {
     const freshProposal = current.find((p) => p.id === proposalId);
     if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
-    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId }, supersedes);
+    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root) }, supersedes);
     return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
   });
   if (!reframed) {
@@ -56705,6 +56769,7 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -57401,7 +57466,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
         console.error(USAGE);
         return 2;
       }
-      return await approveCommand(rest);
+      return await approveCommandMirrored(rest);
     },
   ],
   ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],

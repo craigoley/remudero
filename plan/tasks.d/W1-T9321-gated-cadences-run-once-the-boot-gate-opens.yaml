@@ -1,0 +1,110 @@
+- id: W1-T9321
+  title: "THE GATED CADENCES RUN ONCE THE BOOT GATE OPENS, NOT AT A SECOND TICK THAT NEVER COMES — since W1-T9072 (#11351) every core daemon process ran exactly one tick, so ledger compaction, the retro trigger, auto-triage, measurement, digest and the other BOOT_GATED_CADENCES have not run since 2026-10-13T14:22Z"
+  repo: remudero
+  depends_on: []  # urgent silent outage; touches the boot-gate / due-rungs-timer region of runDaemon only. Queued daemon.ts tasks (W1-T9119, W1-T9069, W1-T9086) edit other regions; serialize by hand if the operator prefers
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the cadences W1-T9072 deferred actually run after the gate opens; dispatch on tick 1 is unchanged
+  band_meaning: span
+  origin: "found 2026-10-13 ~22:40Z by an operator session diagnosing why ledger compaction stopped after #11355 merged; operator standing direction: fix at the root, no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T9072, W1-T7690, W1-T9225, W1-T5720, W1-T3368, W1-T4262, W1-T9119, W1-T9113]
+  files:
+    - src/lib/daemon.ts
+    - test/gated-cadences-run-once-the-boot-gate-opens.test.ts
+    # W1-T9072's "never run beside a tick-1 lane" test asserts measurement and retro run only after lane A ends, at the next iteration top; that ordering is the defect, so its assertions change (its test title, and so its plan proof, stay)
+    - test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
+  status: merged
+  priority: 0.5  # silent outage of every gated cadence on the core daemon since 2026-10-13T14:22Z: compaction (corpus 515 -> 523 archives and climbing), the retro trigger, auto-triage, intake rungs, measurement, digest, ci-learning, board review, benchmark cohort, wipe-test
+  attempts: 0
+  rationale: |
+    READ on origin/main bbab8894f (src/lib/daemon.ts), against the core ledger on host remudero (~/rmd-state2/state,
+    read 2026-10-13 22:38-22:41Z, niced, read-only). Symbols, not lines.
+    WHAT THE CODE DOES. In runDaemon's loop, `cadencesThisTick = bootWaitsFor.length === 0`, where `bootWaitsFor` holds
+    `first_full_pass` while `bootGateTrigger` is unset and `boot_review_pass` while `bootReviewInFlight`. Every gated
+    cadence is behind `cadencesThisTick`: the per-iteration orphan and feedback-landing sweeps, `checkGithubPosture`,
+    the `readOnlyRungs` flight (measurement, digest, ledger compaction, benchmark cohort, ci-learning, board review),
+    `checkRetroTrigger`, `checkAutoTriage`, and `if (cadencesThisTick) startDueRungsTimer()`, the W1-T7690 timer that
+    drives `readOnlyRungs`, `intakeRungs` and `wipeTestRung` beside a long tick. `openBootGate` starts the deferred
+    gardens and nothing else. So after W1-T9072 (933ca7bbc, #11351) made tick 1 dispatch with the gate still closed,
+    the gated cadences, AND the timer that would have run them, wait for the top of tick 2.
+    WHY TICK 2 NEVER COMES. Tick 1 does not return until the lanes it admitted settle, and the freshness restart
+    replaces the process first. MEASURED, every core daemon process since the first boot on a head containing
+    933ca7bbc (2026-10-13T14:24:17Z, head 1b2ed6481), 10 boots through 22:19:52Z (newest head 9daab6370): each wrote
+    exactly ONE `daemon.tick` row. The 9 that were not the first half of a double boot (17:38Z, replaced at 17:40Z)
+    each wrote one `daemon.tick_phases` row with `ms_in_cadences: 0` and a `daemon.boot_gate.opened` row 6-11 min
+    after boot (backstop or first_pass), then lived 25-80 min to the next `daemon.boot` with no second tick. Positive control:
+    the last pre-W1-T9072 process (pid 438741, boot 13:06:16Z) opened the gate in tick 1, wrote `ms_in_cadences:
+    54075`, and its timer fired `ledger_compaction.fired` at 13:14:43Z, 13:40:03Z and 14:06:08Z.
+    WHAT STOPPED. Rows per rotation, today's 9 .gz rotations from 13:58Z plus the live file (0 plain rotations exist):
+      - `ledger_compaction.*`: 2 fired + 2 run_failed + 18 skipped in the 13:58Z rotation; 1 + 1 + 10 in 15:21Z; ZERO
+        rows of any ledger_compaction step from 14:22:53Z (last `skipped`, pid 438741) to the read at 22:41Z. The
+        live file carries only the 200 retained `ledger_compaction.fired` markers, newest 14:06:08Z.
+      - `measurement_cadence.*` and `digest_cadence.*`: present in the 13:58Z and 15:21Z rotations (the old process's
+        rows), absent from every later rotation.
+      - `daemon.retro_trigger.*`: newest 13:14:38Z (`deferred_ledger_pressure`). `auto_triage.*`: newest 13:15:15Z.
+    COST. Ledger compaction: the corpus was 515 archives at 14:06Z and is 523 at 22:38Z (bound 400), growing about 1
+    an hour, and every union reader (the daemon's ledger-union reads, `rmd ledger-grep`, the retro) opens all of
+    them. #11355 (d0f9cc49f, collision-safe compaction output names) merged 14:04Z to clear the 10-08..10-13
+    "refusing to overwrite unselected archive ledger.2026-09-17T23-44-53-740Z.ndjson.gz" failure, but the first boot
+    containing it is also the first containing 933ca7bbc, so it has NEVER run on the live corpus. The retro trigger
+    (already deferred on ledger pressure since 10-06, W1-T9119) is now not even evaluated, so W1-T9119 cannot show
+    its effect until this lands. Auto-triage, intake rungs and the digest are silent with no row saying why.
+    THROWAWAY REPRO (not committed): runDaemon with fake deps, a first full pass that never settles, the backstop at
+    50 ms, poll 5 ms, `checkLedgerCompaction` and `checkMeasurementCadence` wired, and one task whose `runOne` stays
+    in flight for 1.5 s (about 300 poll intervals after the gate opens). origin/main: events were `daemon.tick,
+    lane-start:A, daemon.boot_gate.opened` and the compaction check never ran (assertion red). Same test with
+    `git show 933ca7bbc^:src/lib/daemon.ts`: the check and measurement ran on every timer interval beside the lane
+    (green). That discriminates the regression to W1-T9072.
+    COVERAGE. W1-T9072's own design says "once the gate is open they run at the next iteration top, as on every later
+    tick"; that assumption is what the measurement falsifies. W1-T9119 (retro read cost) and W1-T9113 (retro paging)
+    fix what the retro does when it runs, not whether it runs. W1-T9225 (merged 3eb5e1a4c, #11417) added the
+    `boot_review_pass` wait to the same `bootWaitsFor` and shares this file surface; it does not start the timer or
+    run any cadence after the gate opens, which is this task's whole change. Sweep for `startDueRungsTimer|cadencesThisTick|
+    bootWaitsFor` in src/lib/daemon.ts and those plus "boot gate|boot_gate" in plan/tasks.d, over origin/main and
+    all 348 remote heads (228 carry src/lib/daemon.ts; main's counts 15 and 9 are the control): no head exceeds
+    main, so no head carries a fix or a shard.
+  design: |
+    Operator rulings: no hard threshold or cap, keep automated flow.
+    1. THE GATE OPENING STARTS THE CADENCES. When the boot gate is open AND the boot review pass has settled
+       (whichever happens last, `openBootGate` or the `bootReviewInFlight = false` settle), start the due-rungs timer
+       (`startDueRungsTimer`) at once, without waiting for an iteration top. The timer's existing single-flight
+       slots (`rungFlight`) and `spendGatesOpen` gating stay as they are: the spending rungs (intake, wipe-test) still
+       run only after an admission decision passed the headroom, cost and WIP governors.
+    2. THE TICK-ONLY CADENCES GET A RUN POINT TOO. `checkRetroTrigger`, `checkAutoTriage`, `checkGithubPosture` and
+       the per-iteration orphan and feedback-landing sweeps run today only at an iteration top. Give each a run
+       point that does not depend on tick 1 returning: for example, drive them from the same due timer, behind
+       `spendGatesOpen` for the two that spend (retro, auto-triage), with the same single-flight discipline. Keep
+       the ledger-pressure deferral of the retro (`ledgerCompactionDecision?.overBound`) wherever it moves.
+    3. DISPATCH IS UNCHANGED. Tick 1 still dispatches with the gate closed (W1-T9072), the deferral rows are still
+       written once per boot, and nothing gated runs before the gate opens and the boot review settles.
+    4. NAME IT IF IT HAPPENS AGAIN. When a process exits (freshness restart, stop) having opened its boot gate but
+       never run a gated cadence, the existing exit/drain row says so (a field, not a new threshold), so a repeat of
+       this outage is one grep away.
+    Tests go in the new file test/gated-cadences-run-once-the-boot-gate-opens.test.ts with `test(` titles exactly as
+    in the proofs below. Drive runDaemon with fake deps as test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
+    does (`gatedBoot`), with a first full pass that never settles and a tick-1 lane that stays in flight past the gate.
+    No live ledger, wall clock or network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/gated-cadences-run-once-the-boot-gate-opens.test.ts"
+    - claim: "with tick 1's lane still in flight after the gate opens, the ledger compaction check and measurement run before that lane ends"
+      proof: 'grep: test("W1-T9321: the due rungs run while a tick-1 lane outlives the boot gate" in test/gated-cadences-run-once-the-boot-gate-opens.test.ts'
+    - claim: "the retro trigger and auto-triage run after the gate opens while tick 1's lane is in flight, and only behind the spend gates"
+      proof: 'grep: test("W1-T9321: the retro trigger and auto-triage run without a second tick" in test/gated-cadences-run-once-the-boot-gate-opens.test.ts'
+    - claim: "no gated cadence runs before the gate opens and the boot review pass settles"
+      proof: 'grep: test("W1-T9321: nothing gated runs before the gate opens and the boot review settles" in test/gated-cadences-run-once-the-boot-gate-opens.test.ts'
+  falsifier: |
+    Fake deps: a first full pass that never settles, the backstop a few poll intervals away, `checkLedgerCompaction`,
+    `checkMeasurementCadence`, `checkRetroTrigger` and `checkAutoTriage` wired, and one task whose runOne stays in
+    flight until the test releases it, well after the gate opens. At origin/main none of the four checks runs before
+    the release (the throwaway repro in the rationale shows exactly this). With the change each runs at least once
+    before the release. Remove the timer start from the gate-open path and the first test reds; drop the retro /
+    auto-triage run point and the second reds; start the timer at boot instead of at the gate and the third reds.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: `ledger_compaction.fired` /
+    `.ran` / `.run_failed` rows reappear within one poll interval of each `daemon.boot_gate.opened`; whether #11355
+    clears the "refusing to overwrite unselected archive" refusal is then observable for the first time, and the
+    archive count (`ls ledger.*.ndjson.gz | wc -l`, 523 at 2026-10-13T22:38Z) should fall. `measurement_cadence.*`,
+    `digest_cadence.*`, `daemon.retro_trigger.*` and `auto_triage.*` rows reappear per process, not only per tick.

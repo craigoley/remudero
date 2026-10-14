@@ -1,15 +1,19 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry } from "./inbox.js";
+import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
+import type { VerifyHumanRuling } from "./verify-human-judge.js";
 import { machineTokens, plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   appendThreadMessage,
+  hasThreadEvent,
   inboxThreadId,
   inboxThreadIdentity,
   proposalIdOfThread,
@@ -85,6 +89,7 @@ export interface ThreadDetailView extends ThreadSummaryView {
 }
 
 export type AttentionSourceState = "observed" | "partial" | "unavailable";
+export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
   views: ThreadSummaryView[];
@@ -93,7 +98,7 @@ export interface AttentionCensusInput {
   releasedTaskIds: ReadonlySet<string>;
   releaseReceipts?: ReadonlyMap<string, string>;
   mergedTaskIds?: ReadonlySet<string>;
-  judgeByTask: ReadonlyMap<string, { decision: string; reason: string }>;
+  judgeByTask: ReadonlyMap<string, AttentionJudgment>;
   sources: {
     plan: AttentionSourceState;
     registry: AttentionSourceState;
@@ -127,6 +132,9 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     const taskId = humanTaskId ?? deriveTaskReferent(view.proposalId);
     const task = taskId ? input.taskFacts.get(taskId) : undefined;
     const judge = taskId ? input.judgeByTask.get(taskId) : undefined;
+    const judgment: VerifyHumanRuling | undefined = judge?.state !== undefined ? judge :
+      humanTaskId || judge ? { state: "unclassified", reason: judge ?
+        `prior evidence omitted judgement state; refresh required: ${judge.reason}`.slice(0, 300) : "no judge verdict recorded" } : undefined;
     const released = humanTaskId !== undefined && input.releasedTaskIds.has(humanTaskId);
     const sourceFacts: Array<{ source: string; detail: string }> = [];
     if (classification) sourceFacts.push({ source: "classification", detail: `${view.proposalId}: ${classification.state}${classification.reasons.length ? `; predicates: ${classification.reasons.map((reason) => reason.predicate).join(", ")}` : ""}` });
@@ -134,7 +142,7 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     if (task?.status === "blocked" && task.retirement) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: status blocked; retirement ${task.retirement}` });
     if (task?.dispatchHold) sourceFacts.push({ source: "plan-lifecycle", detail: `${taskId}: dispatch_hold: true; a release receipt alone cannot make this task dispatchable` });
     if (task?.risk === "high") sourceFacts.push({ source: "plan", detail: `${taskId}: risk: high in the filed task` });
-    if (judge) sourceFacts.push({ source: "judge", detail: `${humanTaskId ? "" : "Task verification context, not a proposal ruling: "}${judge.decision}: ${judge.reason.slice(0, 300)}` });
+    if (judgment) sourceFacts.push({ source: "judge", detail: `${humanTaskId ? "" : "Task verification context, not a proposal ruling: "}${judgment.state === "judged" ? judgment.decision : "unclassified"}: ${judgment.reason.slice(0, 300)}` });
     if (released) sourceFacts.push({ source: "ledger", detail: input.releaseReceipts?.get(taskId!) ?? `${taskId}: ratify.approved released verify-human` });
     if (taskId && input.mergedTaskIds?.has(taskId)) sourceFacts.push({ source: "githubProjection", detail: `${taskId}: merged task credit observed` });
     if (classification?.retiredReason) sourceFacts.push({ source: "classification", detail: classification.retiredReason });
@@ -143,6 +151,8 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
         ? `Proposal ${view.proposalId} references ${taskId}; its recommendation requires review. The task's verification mode is context, not approval of this proposal.`
         : task?.dispatchHold
         ? `${taskId} still has an explicit dispatch hold. A release receipt does not lift it; the operator must review the held task.`
+        : judgment?.state === "unclassified"
+        ? `${taskId}'s verification judgement is unclassified; triage its evidence before treating it as a verified need for an operator decision.`
         : `${taskId} requires an operator decision${task ? ` (verify: ${task.verify})` : "; task evidence unavailable"}.`
         : `Proposal ${view.proposalId} is ready for an operator decision.`
       : view.attention === "reply" ? `Proposal ${view.proposalId} asks for an operator reply.`
@@ -153,19 +163,21 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
       threadId: view.threadId, proposalId: view.proposalId, ...(taskId ? { taskId } : {}),
       kind: inboxKind(view.proposalId), waitingOn: view.waitingOn, attention: view.attention,
       classification: classification?.state ?? "unavailable", whyMe, sourceFacts,
+      ...(judgment ? { judgment } : {}),
       ...(classification?.retiredReason ? { retiredReason: classification.retiredReason } : {}),
     };
   }).sort((a, b) => a.proposalId.localeCompare(b.proposalId));
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
   // A human-attention label is not proof that the proposal is prepared for approval. Keep the
   // observed decision total, but expose that distinction before a UI calls it actionable.
-  const decisionReadiness = { ready: 0, needsPreparation: 0, unknown: 0 };
+  const decisionReadiness = { ready: 0, needsPreparation: 0, needsTriage: 0, unknown: 0 };
   const kinds: Record<string, number> = {};
   for (const item of items) {
     counts[item.attention] += 1;
     kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
     if (item.attention === "decision") {
-      if (item.classification === "ready") decisionReadiness.ready += 1;
+      if (item.proposalId.startsWith("verify-human:") && item.judgment?.state === "unclassified") decisionReadiness.needsTriage += 1;
+      else if (item.classification === "ready") decisionReadiness.ready += 1;
       else if (item.classification === "not_ready" || item.classification === "drafting") decisionReadiness.needsPreparation += 1;
       else decisionReadiness.unknown += 1;
     }
@@ -228,8 +240,20 @@ export function markThreadRead(path: string, threadId: string, seq: number): voi
   writeAtomic(path, JSON.stringify(marks, null, 2) + "\n");
 }
 
+/** W1-T9252: replies and answers read in the order they were stored; an EVENT is stored when it is mirrored or
+ *  backfilled, which can be after later messages, so each one is placed by its own time instead. */
+function inTimeOrder(stored: ThreadMessageView[]): ThreadMessageView[] {
+  const events = stored.filter((m) => m.extra?.event).sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.seq - b.seq);
+  const ordered = stored.filter((m) => !hasThreadEvent(m.extra)).sort((a, b) => a.seq - b.seq);
+  for (const event of events) {
+    const at = ordered.findIndex((m) => !hasThreadEvent(m.extra) && (m.ts ?? 0) > (event.ts ?? 0));
+    ordered.splice(at === -1 ? ordered.length : at, 0, event);
+  }
+  return ordered;
+}
+
 function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMarks): ThreadDetailView {
-  const messages = [openingMessage(item), ...stored.map(storedMessageView)];
+  const messages = [openingMessage(item), ...inTimeOrder(stored.map(storedMessageView))];
   const last = messages[messages.length - 1]!;
   const threadId = inboxThreadId(item.proposalId);
   return {
@@ -249,6 +273,8 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
 
 function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSummaryView["attention"] {
   if (item.state === "retired") return "history";
+  // A recorded decline is the end of the item's story, not a reply the daemon owes an answer to.
+  if (item.state === "declined" && last.extra?.event) return "history";
   if (last.from === "operator") return "awaiting_daemon";
   if (last.extra?.question === true) return "reply";
   if (item.state === "declined") return "history";
@@ -279,7 +305,7 @@ export function listThreadViews(
   marks: ReadMarks,
 ): ThreadSummaryView[] {
   const views = items
-    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.length ?? 0) > 0))
+    .filter((item) => item.state !== "retired" && (item.state !== "declined" || (threads.get(inboxThreadId(item.proposalId))?.some((m) => !hasThreadEvent(m.extra)) ?? false)))
     .map((item) => {
       const { details: _details, messages: _messages, ...summary } = detailFor(item, threads.get(inboxThreadId(item.proposalId)) ?? [], marks);
       return summary;
@@ -360,6 +386,9 @@ export interface InboxResponderDeps {
   readItems: () => InboxThreadItem[];
   /** Hand a redraft to the existing reframe flow. */
   reframe: (proposalId: string, feedback: string) => void;
+  /** W1-T9252: mirror the ledger rows the fleet wrote since the last tick (a redraft, a filed task, a refusal)
+   *  onto their items' threads. Returns how many events it wrote. */
+  syncEvents?: () => number | Promise<number>;
   /** The model reader; absent → {@link keywordDecision}. */
   decide?: (ctx: ThreadDecisionContext) => unknown | Promise<unknown>;
   clock?: Clock;
@@ -393,6 +422,9 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
 
   const detail = threadDetailView(item, all.threads, {});
   let decision = await decideFor({ item, messages: detail.messages, replyText: last.body }, deps);
+  // W1-T9252: a reply that is no decline, restore, approval or clarifying question is the operator's DIRECTION for
+  // the item: it goes to the same redraft `rmd reframe` starts, rather than back to the operator as a question.
+  if ((decision.action === "question" && !decision.reply) || decision.action === "none") decision = { action: "edit", reply: "", note: last.body };
   const questionsAsked = stored.filter((m) => m.role === "escalation" && m.extra?.question).length;
   if (decision.action === "question" && questionsAsked >= MAX_THREAD_QUESTIONS) decision = { action: "none", reply: "" };
   // Only what the item's state allows; anything else becomes a question.
@@ -442,6 +474,14 @@ export function startInboxResponder(
   const tick = () => {
     if (running) return;
     running = (async () => {
+      if (deps.syncEvents) {
+        try {
+          const mirrored = await deps.syncEvents();
+          if (mirrored > 0) log("inbox.thread_events_mirrored", { count: mirrored });
+        } catch (error) {
+          log("inbox.thread_event_sync_failed", { error: String((error as Error)?.message ?? error) });
+        }
+      }
       const all = readAllThreads({ threadStorePath: deps.threadStorePath });
       if (all.status === "unresolved") throw new Error(all.reason);
       for (const [threadId, messages] of all.threads) {
@@ -527,4 +567,91 @@ export function realThreadDecider(opts: {
       return null;
     }
   };
+}
+
+// ── W1-T9252: the operator's actions and the fleet's outcomes, mirrored onto the item's thread ─────────────
+
+export interface ThreadEventSync {
+  /** One walk of the ledger UNION (live + archives) for every operator-action and outcome row; safe to repeat.
+   *  Streams, so the daemon's loop is not held for the whole corpus. */
+  backfill(): Promise<number>;
+  /** The live ledger's rows appended since the last call (or since the backfill read it). */
+  poll(): number;
+  /** The daemon's timer: the backfill on its first call (boot), then {@link poll}. */
+  sync(): Promise<number>;
+}
+
+/** The registry's operator-owned proposals: the only items that have a thread. */
+function operatorProposals(stateDir: string): Proposal[] {
+  const path = join(stateDir, "inbox-proposals.json");
+  return parseProposalRegistry(existsSync(path) ? readFileSync(path, "utf8") : undefined).filter((p) => inboxOwner(p) === "operator");
+}
+
+export function createThreadEventSync(opts: {
+  ledgerPath: string;
+  threadStorePath: string;
+  /** The proposal registry's state directory; defaults to the ledger's own. */
+  stateDir?: string;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}): ThreadEventSync {
+  const stateDir = opts.stateDir ?? dirname(opts.ledgerPath);
+  const store = { threadStorePath: opts.threadStorePath };
+  let offset = -1;
+  const liveSize = (): number => {
+    try {
+      return statSync(opts.ledgerPath).size;
+    } catch (error) {
+      // deliberate: no live ledger yet reads as empty; the next tick looks again.
+      void error;
+      return 0;
+    }
+  };
+  const mirror = (rows: ReadonlyArray<Record<string, unknown>>): number => {
+    const proposals = operatorProposals(stateDir);
+    let written = 0;
+    for (const row of rows) written += recordRowThreadEvents(row, proposals, store, opts.log);
+    return written;
+  };
+  let booted = false;
+  const api: ThreadEventSync = {
+    backfill: async () => {
+      booted = true;
+      offset = liveSize();
+      const rows = await readLedgerUnionRecords(stateDir, { step: [...THREAD_EVENT_STEPS] });
+      rows.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+      return mirror(rows);
+    },
+    sync: async () => (booted ? api.poll() : api.backfill()),
+    poll: () => {
+      const size = liveSize();
+      if (offset < 0) {
+        offset = size;
+        return 0;
+      }
+      if (size < offset) offset = 0; // the ledger was rotated; what rotated out is the next boot backfill's
+      if (size === offset) return 0;
+      const buffer = Buffer.alloc(size - offset);
+      const fd = openSync(opts.ledgerPath, "r");
+      let read: number;
+      try {
+        read = readSync(fd, buffer, 0, buffer.length, offset);
+      } finally {
+        closeSync(fd);
+      }
+      const complete = buffer.subarray(0, read).lastIndexOf(0x0a) + 1;
+      if (complete === 0) return 0;
+      offset += complete;
+      const rows: Array<Record<string, unknown>> = [];
+      for (const line of buffer.subarray(0, complete).toString("utf8").split("\n")) {
+        if (!THREAD_EVENT_STEPS.some((step) => line.includes(`"${step}"`))) continue;
+        try {
+          rows.push(JSON.parse(line) as Record<string, unknown>);
+        } catch (error) {
+          opts.log?.("inbox.thread_event_row_unreadable", { error: String((error as Error)?.message ?? error) });
+        }
+      }
+      return rows.length === 0 ? 0 : mirror(rows);
+    },
+  };
+  return api;
 }

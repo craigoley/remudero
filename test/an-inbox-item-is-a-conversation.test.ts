@@ -151,7 +151,8 @@ test("W1-T4088: a thread holds several rounds back and forth", async () => {
     appendThreadMessage(inboxThreadIdentity(VH), "reply", text, store);
     return answerThread(threadId, f.responder());
   };
-  assert.equal(await say("hmm, not sure"), "question");
+  // W1-T9252: a reply the reader cannot place as a decline or restore is direction, so it is a redraft, not a question.
+  assert.equal(await say("hmm, not sure"), "edit");
   assert.equal(await say("drop it, we fixed this another way"), "decline");
   assert.equal(await say("actually, bring it back"), "restore");
   assert.equal(await say("change it to cover only the older machines instead"), "edit");
@@ -160,7 +161,7 @@ test("W1-T4088: a thread holds several rounds back and forth", async () => {
   const messages = all.status === "ok" ? all.threads.get(threadId)! : [];
   assert.equal(messages.length, 8, "four replies, four answers, one thread");
   assert.deepEqual(messages.map((m) => m.role), ["reply", "escalation", "reply", "escalation", "reply", "escalation", "reply", "escalation"]);
-  assert.deepEqual(f.reframed, [[VH, "change it to cover only the older machines instead"]], "the edit went to the redraft flow");
+  assert.deepEqual(f.reframed, [[VH, "hmm, not sure"], [VH, "change it to cover only the older machines instead"]], "both edits went to the redraft flow");
 });
 
 test("W1-T4088: an answer is written while the main loop is busy", async () => {
@@ -236,8 +237,9 @@ test("W1-T4088: an ambiguous reply gets one clarifying question", async () => {
   const f = fixture();
   const threadId = inboxThreadId(VH);
   const store = { threadStorePath: inboxThreadStorePath(f.root) };
+  const unsure = () => f.responder(async () => ({ action: "question", reply: "Should the fleet go ahead, drop this, or change it?" }));
   appendThreadMessage(inboxThreadIdentity(VH), "reply", "hmm", store);
-  assert.equal(await answerThread(threadId, f.responder()), "question");
+  assert.equal(await answerThread(threadId, unsure()), "question");
   const all = readAllThreads(store);
   const asked = all.status === "ok" ? all.threads.get(threadId)!.at(-1)! : undefined;
   assert.equal(asked?.extra?.question, true);
@@ -245,10 +247,10 @@ test("W1-T4088: an ambiguous reply gets one clarifying question", async () => {
   // The questions are bounded: after MAX_THREAD_QUESTIONS it points at the buttons instead.
   for (let i = 1; i < MAX_THREAD_QUESTIONS; i++) {
     appendThreadMessage(inboxThreadIdentity(VH), "reply", "still unsure", store);
-    assert.equal(await answerThread(threadId, f.responder()), "question");
+    assert.equal(await answerThread(threadId, unsure()), "question");
   }
   appendThreadMessage(inboxThreadIdentity(VH), "reply", "no idea", store);
-  assert.equal(await answerThread(threadId, f.responder()), "none");
+  assert.equal(await answerThread(threadId, unsure()), "none");
 });
 
 test("W1-T4088: the thread list shows who each thread is waiting on and what is unread", async () => {
@@ -322,11 +324,11 @@ test("W1-T4088: the responder keeps to what the item allows and to plain text", 
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "bring it back", store);
   assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => { throw new Error("down"); })), "restore");
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "hmm", store);
-  assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "question", reply: "" }))), "question");
+  assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "question", reply: "" }))), "edit", "W1-T9252: an empty question is direction");
   // A request that is not allowed once the questions are used up points at the buttons.
   for (const text of ["?", "??"]) {
     appendThreadMessage(inboxThreadIdentity(RULING), "reply", text, store);
-    await answerThread(inboxThreadId(RULING), f.responder());
+    await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "question", reply: "Which would you like?" })));
   }
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "restore", store);
   assert.equal(await answerThread(inboxThreadId(RULING), f.responder(async () => ({ action: "restore", reply: "ok" }))), "none");

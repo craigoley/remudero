@@ -1,0 +1,170 @@
+- id: W1-T9310
+  title: "A HOST-ONLY TEST NAMES ITS HOST THROUGH ONE HELPER — three tests fail on a clean origin/main on the operator Mac and pass in CI (a bwrap-refusing check runner, a /proc sampler, a GNU `cp -t` in a ci.yml step a test runs), so every session-built PR's author preflight is red and operators learn to ignore it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high # the two fold-debt collect steps in .github/workflows/ci.yml run on every PR and main push; every other edit is test/
+  band_meaning: span
+  origin: "operator session 2026-10-13: three reds on a clean origin/main checkout on the operator Mac block local author preflight on every session-built PR"
+  plan_refs: [W1-T8380, W1-T9080, W1-T7853, W1-T7811, W1-T6002, W1-T2234]
+  files:
+    - .github/workflows/ci.yml
+    - test/helpers/host-requirement.ts
+    - test/a-host-only-test-names-its-host-through-one-helper.test.ts
+    - test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts
+    - test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts
+    - test/ci-filed-fold-debt-reaches-the-daemon.test.ts
+    - test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts
+    - test/a-local-gate-run-has-no-bound-of-its-own.test.ts
+    - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
+    - test/heavy-build-reservation.test.ts
+    - test/state-backup.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 ~21:50Z on the operator Mac (darwin, Node 24), in a clean detached worktree of
+    origin/main cd8e00b7c, one file at a time with
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>` and a private TMPDIR:
+    - test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts: tests 3, fail 1.
+      "W1-T8380: an open-weight unit_test check that stops before its summary reports a failure" fails
+      "the output carries the judge's line" with EMPTY output.
+    - test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts: tests 7, fail 1.
+      "run-child reservation uses the real process identity and sampler" throws
+      `TypeError: Cannot read properties of undefined (reading 'peakMib')`.
+    - test/ci-filed-fold-debt-reaches-the-daemon.test.ts: tests 8, fail 1.
+      "W1-T7853: both CI runs that file fold debt upload it as an artifact" fails on the step's exit
+      status with `cp: illegal option -- t`.
+    All three pass in CI (ubuntu-latest). All three are days old (#11022 W1-T8380, #11424 W1-T9080,
+    #11459 W1-T7853), so the class regrows about as fast as tests are written.
+
+    ATTRIBUTED.
+    1. The test plants a pass-through `bwrap` shim on PATH and drives the real open-weight tool loop.
+       But `runOpenWeightCheck` (src/lib/worker-provider.ts) builds its argv through
+       `openWeightCheckSandboxArgv`, which THROWS "cash RunCheck requires Linux bubblewrap; refusing an
+       unsandboxed local check" when `process.platform !== "linux"`. That happens before any spawn, so
+       the shim never runs. The error carries no stdout, so `run_check` returns `exitCode: 1` with
+       `output: ""`. The exit-code assertion passes by accident and the judge-line assertion fails.
+       The refusal is correct production behaviour. The test is what is not portable. The repo
+       already has the portable idiom: `openWeightCheckSandboxArgv` takes a test-only `platform` port,
+       `spawnOpenWeightWorker` takes a test-only `runCheck` port, and
+       test/the-harness-commits-for-a-worker-with-no-shell.test.ts already passes `platform: "linux"`.
+       PROVEN IN A THROWAWAY EDIT (not committed): passing
+       `runCheck: (input) => runOpenWeightCheck({ ...input, platform: "linux" })` makes the file pass on
+       darwin, so the real runner, the real `node --test` child and the real judge all run through the shim.
+    2. `createTreePeakSampler()` (src/lib/host-memory-learning.ts) reads each member's peak from
+       `/proc/<pid>/status` VmHWM. darwin has no /proc. The sampler "NEVER throws" by design, so it
+       records no sample, `readPeakSamples("fix", …)` is empty, and `[0]!.peakMib` throws. The subject
+       IS the real /proc sampler, so this test cannot become portable. It is Linux-only by construction.
+    3. The test extracts the REAL `run:` body of the "Collect the fold debt …" steps from
+       .github/workflows/ci.yml (two steps, in the `ci` and `commitlint` jobs) and runs it under the
+       host's bash. Both bodies end `xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"`. `-t` is GNU-only, and
+       BSD cp rejects it. PROVEN IN A THROWAWAY EDIT: `xargs -0 -r -I{} cp {} "$RUNNER_TEMP/fold-debt/"`
+       makes the file pass on darwin, and it copies the same set of files on the GNU runner.
+
+    SWEPT FOR MORE OF THE SAME KIND, bounded. 68 test files: every file that plants a `bwrap` shim or
+    uses the pass-through sandbox, every file naming a `/proc/` path, every file reaching
+    `createTreePeakSampler`/`defaultProbe`/`defaultGeneration`, the 21 files that run a workflow
+    step's `run:` body under bash, the field-trials-refresh (flock) file, and the two files
+    HOST_PARITY_BASELINE declares for the mini. One run on the same tree gave tests 725, pass 716,
+    fail 3, skipped 6. The 3 failures are exactly the three above. No other darwin-only red exists in
+    these kinds.
+    The 6 skips are hand-rolled host checks. Across test/ there are eight such `skip:` sites in five
+    files, written four different ways:
+    `skip: !existsSync("/proc/self/stat")` (three tests in
+    test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts), a bare
+    `skip: process.platform !== "linux"` with no reason (test/a-local-gate-run-has-no-bound-of-its-own.test.ts),
+    and named-reason forms in test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
+    and test/heavy-build-reservation.test.ts. test/state-backup.test.ts skips on win32.
+    The existsSync form is the dangerous one. A Linux host that lost /proc would SKIP those tests, not
+    fail them.
+    GNU-only flags in workflow `run:` bodies, measured over `cp -t`, `sed -i` with no suffix,
+    `readlink -f`, `date -d`, `stat -c`, `find … -printf` and `grep -P`: exactly the two `cp -t` lines.
+    In test sources: zero command uses. The only hits are BSD-stub argument checks such as
+    `"$a" = "-printf"`, and the census must not match those.
+
+    OVERLAP CHECKED, none. plan/ on origin/main and the shard diffs of all 24 remote heads that touch
+    plan/tasks.d were grepped for darwin, macOS, process.platform, /proc/, bwrap, `cp -t`, GNU-only
+    and "off linux". The positive control matched 224 lines for "test" over the same head diffs.
+    Nearest relatives, all merged: W1-T7811 (one seam for the wired queue-governor /proc read),
+    W1-T6002 (six author-fixture portability repairs) and W1-T2234/W1-T2776/W1-T2785
+    (HOST_CAUSED_SUITE_REDS). That registry only REPORTS darwin reds by file and count. It turns no red
+    green, so preflight stays red. No open head touches the three test files except
+    run-W1-T8380-1791777753459, a stale branch of the merged #11022.
+
+    NOT IN SCOPE, NOTED: in the same sweep, all four `mini` entries of HOST_PARITY_BASELINE
+    (src/lib/host-parity.ts) PASS on darwin: the two fleet-heartbeat BSD_DATE tests and the two
+    worker-credential-preflight tests. So does test/fleet-heartbeat.test.ts, which
+    HOST_CAUSED_SUITE_REDS (src/lib/ci-parity.ts) declares at count 2 for darwin. Those are stale
+    declarations, and that is a separate item.
+  design: |
+    1. ONE HELPER, test/helpers/host-requirement.ts. `requiresLinux(reason)` returns `false` when
+       `process.platform === "linux"`, unconditionally. On any other platform it returns
+       `"Linux-only: <reason>"`, to be used as `test(title, { skip: requiresLinux("…") }, …)`.
+       Take an optional `{ platform }` port so its own test drives both arms.
+       It keys on the PLATFORM, never on a capability probe like `existsSync("/proc/…")`. On Linux it
+       never skips, so a Linux host that lacks /proc, bwrap or GNU tools FAILS the test loudly rather
+       than skipping it. That is how CI behaviour stays unchanged.
+       A sibling for a non-Linux set (state-backup's win32 case) uses the same shape and the same
+       never-skip-on-the-required-platform rule.
+    2. TEST 1 BECOMES PORTABLE. Pass `runCheck: (input) => runOpenWeightCheck({ ...input, platform: "linux" })`
+       to `spawnOpenWeightWorker`. The existing bwrap pass-through shim then runs the real runner and
+       judge on every host. Production is untouched: the refusal off Linux stays, and the
+       `platform`/`runCheck` ports are already declared test-only.
+    3. TEST 2 DECLARES ITS HOST: `skip: requiresLinux("the real tree-peak sampler reads /proc/<pid>/status")`.
+    4. TEST 3 BECOMES PORTABLE AT THE SOURCE. Both ci.yml collect steps copy without `cp -t`, using a
+       form that BSD and GNU both accept (for example `xargs -0 -r -I{} cp {} "$RUNNER_TEMP/fold-debt/"`).
+       The W1-T7853 test already runs the real step body and asserts the exact copied file set, so it
+       is the evidence that CI behaviour is unchanged.
+    5. MIGRATE the eight hand-rolled `skip:` host checks in the five files named in the rationale to
+       the helper. Each one names its reason, and the three `existsSync("/proc/self/stat")` skips stop
+       being able to hide a Linux failure.
+    6. THE CENSUS, test/a-host-only-test-names-its-host-through-one-helper.test.ts. It walks
+       `git ls-files test .github/workflows` and refuses three things:
+       (a) a test's `skip:` option or `t.skip(` guard whose expression reads `process.platform` or a
+           `/proc` path anywhere except the helper;
+       (b) a test file that reaches a real procfs default (`createTreePeakSampler()` with no overrides,
+           `defaultProbe`, `defaultGeneration`, or a `readFileSync`/`existsSync`/`readdirSync` of a
+           "/proc…" literal) and neither imports the helper nor appears in a declared allowlist. Each
+           allowlist entry is file plus reason and says why that file is green off Linux. This is the
+           shape of test/host-capability-fixtures.test.ts: declared sites, no numeric cap.
+       (c) a GNU-only flag in shell text a test can execute: workflow `run:` bodies, plus command
+           strings in test sources. The token set is `cp -t`, `sed -i` with no suffix, `readlink -f`,
+           `date -d`, `stat -c`, `find … -printf` and `grep -P`. It must not match BSD-stub argument
+           checks such as `"$a" = "-printf"`. deploy/ scripts are out of scope here, because
+           host-capability-fixtures' `platform-tool` kind and the stat/date fallbacks already cover them.
+       The census plants one violation of each kind in a fixture tree and asserts it reddens (the
+       falsifier).
+  acceptance:
+    - claim: "the open-weight unit_test check test drives the real runner and judge on every host through the existing test-only platform port"
+      proof: 'grep: platform: "linux" in test/a-filing-gardener-or-worker-test-run-passes-only-when-every-file-reports.test.ts'
+    - claim: "that test still proves an exit-0 run with no summary is a red unit_test check"
+      proof: "unit test: W1-T8380: an open-weight unit_test check that stops before its summary reports a failure"
+      kind: guard
+    - claim: "the real-sampler run-child test declares its Linux requirement through the shared helper"
+      proof: 'grep: requiresLinux( in test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts'
+    - claim: "the real-sampler run-child test still passes where /proc exists"
+      proof: "unit test: run-child reservation uses the real process identity and sampler"
+      kind: guard
+    - claim: "the fold-debt collect step bodies still copy exactly the entries the run filed"
+      proof: "unit test: W1-T7853: both CI runs that file fold debt upload it as an artifact"
+      kind: guard
+    - claim: "the helper never skips on Linux, and names its reason on any other platform"
+      proof: 'grep: test("W1-T9310: requiresLinux never skips on Linux and names its reason elsewhere" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
+    - claim: "no test guards a host requirement with process.platform or a /proc probe outside the helper"
+      proof: 'grep: test("W1-T9310: a test names its host requirement only through the shared helper" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
+    - claim: "no workflow step body or test command string uses a GNU-only flag"
+      proof: 'grep: test("W1-T9310: no shell text a test can run uses a GNU-only flag" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
+    - claim: "the census reddens on a planted platform skip, a planted procfs default and a planted cp -t step"
+      proof: 'grep: test("W1-T9310: the census reddens on each planted violation" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
+  falsifier: |
+    Revert test 1's `runCheck` port, and on darwin the judge-line assertion fails again with empty output.
+    Put `cp -t` back in either ci.yml collect step, and the census's GNU-flag test fails on every host,
+    and the W1-T7853 test fails on darwin.
+    Make `requiresLinux` return a reason on Linux, and its own test fails, because on Linux it must
+    return false.
+    CLOSE THIS TASK if, at build time, the three tests already pass on a clean origin/main darwin
+    checkout AND no hand-rolled `process.platform`/`/proc` skip remains in test/.

@@ -994,6 +994,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
+    readSource: (file) => git(["show", `${pinned()}:${file}`]),
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -1084,6 +1085,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
         if (!m) return [];
         const file = m[1]!;
+        if (/^src\/lib\/ci-friction-[^/]+\.ts$/.test(file)) return [];
         // A test file is evidence, never an owner — under a test/ directory or named *.test.*.
         if (/(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file)) return [];
         return [{ file, hits: Number(m[2]) }];

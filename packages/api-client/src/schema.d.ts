@@ -663,6 +663,10 @@ export interface components {
       notReady: number;
       declined: number;
       fleet: number;
+      /** W1-T8831 -- items the operator archived; counted here and in no other lane. */
+      archived?: number;
+      /** W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane. */
+      snoozed?: number;
       needsYou: {
         ready: number;
         drafting: number;
@@ -678,6 +682,10 @@ export interface components {
       notReady?: (InboxNotReadyItem)[];
       declined?: (InboxDeclinedItem)[];
       fleet?: (InboxFleetItem)[];
+      /** W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`. */
+      archived?: (InboxViewItem)[];
+      /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
+      snoozed?: (InboxViewItem)[];
       needsYou?: InboxNeedsYou;
       counts: InboxCounts;
       page?: ReadPage;
@@ -3548,6 +3556,10 @@ export interface components {
           proposalId: string;
         };
       };
+      /** W1-T8831 -- when the operator archived this item (RFC 3339 UTC); present while archived, in the `archived` section only. */
+      archivedAt?: string;
+      /** W1-T8831 -- when this item's snooze ends (RFC 3339 UTC); present while snoozed, in the `snoozed` section only. */
+      snoozedUntil?: string;
       /** A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340). */
       classification?: "ASK" | "RECORD";
     };
@@ -3569,7 +3581,7 @@ export interface components {
       /** `inbox-store:core`: when the slow lane last classified. */
       sources: (ViewSource)[];
       data: {
-        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet";
+        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed";
         items: (InboxViewItem)[];
         counts: InboxCounts;
         page: ViewPage;
@@ -4422,6 +4434,10 @@ export interface components {
       declined?: (InboxDeclinedItem)[];
       needsYou?: InboxNeedsYou;
       fleet?: (InboxFleetItem)[];
+      /** W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`. */
+      archived?: (InboxViewItem)[];
+      /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
+      snoozed?: (InboxViewItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
       /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
@@ -4513,6 +4529,14 @@ export interface components {
       whyMe: string;
       sourceFacts: (InboxAttentionCensusFact)[];
       retiredReason?: string;
+      judgment?: InboxAttentionJudgment;
+    };
+    /** Current task-verification evidence; unclassified is never an operator ruling. */
+    InboxAttentionJudgment: {
+      state: "judged" | "unclassified";
+      reason: string;
+      decision?: "needs_operator" | "automate" | "backlog";
+      at?: string | null;
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
@@ -4542,6 +4566,8 @@ export interface components {
       decisionReadiness: {
         ready: number;
         needsPreparation: number;
+        /** Human-verification asks with unclassified judgement evidence. */
+        needsTriage: number;
         unknown: number;
       };
       /** Conservative lower bounds; zero when any needed source is partial. */
@@ -4651,6 +4677,32 @@ export interface components {
       proposalId: string;
       /** The operator's feedback, captured verbatim; must be non-blank. */
       feedback: string;
+    };
+    /** POST /v1/inbox/archive's body (src/lib/panel-graph.ts's `validateArchiveProposal`). */
+    InboxArchiveRequest: {
+      proposalId: string;
+      /** true sets the item aside; false brings it back. */
+      archived: boolean;
+    };
+    /** POST /v1/inbox/archive's 200 body. */
+    InboxArchiveResult: {
+      ok: boolean;
+      proposalId: string;
+      archived: boolean;
+      /** Present while archived; the first archive's instant */
+      archivedAt?: string;
+    };
+    /** POST /v1/inbox/snooze's body (src/lib/panel-graph.ts's `validateSnoozeProposal`). */
+    InboxSnoozeRequest: {
+      proposalId: string;
+      /** RFC 3339 UTC time in the future when the item returns; null wakes it now. */
+      until: string | null;
+    };
+    /** POST /v1/inbox/snooze's 200 body. */
+    InboxSnoozeResult: {
+      ok: boolean;
+      proposalId: string;
+      snoozedUntil: string | null;
     };
     /** POST /v1/inbox/decline's and POST /v1/inbox/restore's body (src/lib/panel-graph.ts's `validateDeclineProposal`, shared by both). `reason` is required on restore too. */
     InboxVerdictRequest: {
@@ -6601,6 +6653,28 @@ export interface paths {
     post: {
       responses: {
           "200": InboxProposalStartedResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/archive": {
+    post: {
+      responses: {
+          "200": InboxArchiveResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/snooze": {
+    post: {
+      responses: {
+          "200": InboxSnoozeResult;
           "400": Error;
           "401": Error;
           "403": Error;
