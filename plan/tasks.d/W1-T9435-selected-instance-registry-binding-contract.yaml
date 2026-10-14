@@ -11,7 +11,7 @@
   priority: 2
   origin: operator#2026-10-14-public-private-ops-compatibility
   plan_refs: [W1-T4227, W1-T4265, W1-T4266, W1-T7727, W1-T9410]
-  files: [src/lib/instance-registry-selection.ts, test/one-registry-for-the-fleet.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  files: [src/lib/instance-registry-selection.ts, src/lib/serve.ts, test/one-registry-for-the-fleet.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
   status: queued
   attempts: 0
   rationale: |
@@ -28,9 +28,14 @@
     module/document are explicitly absent; the inspected plan subject blobs and
     actual merge-base diffs have no new selected-binding implementation. W9410's
     recycler repair is separately claimed and remains outside this task. This
-    first package supplies a composable public read/binding contract only; later
-    consumer wiring, lifecycle grammar and private promotion require their own
-    governed scope and current evidence. It does not certify a completed split.
+    first package supplies a public read/binding contract and a real explicit
+    opt-in caller through the existing read-only registry route. Later daemon,
+    effect and lifecycle wiring or private promotion require their own governed
+    scope and current evidence. It does not certify a completed split. The first
+    committed proposal failed the unchanged call-site guard; its complete native
+    receipt is retained. The exact proposal rejection was reproduced by the
+    actual unchanged c375 linter, with existing fixture controls and complete TAP,
+    before adding this real consumer scope and executable call-site criterion.
   design: |
     1. Add a small typed contract in instance-registry-selection.ts using the
        existing identity parser. Resolve explicit CLI selection first, then
@@ -65,18 +70,29 @@
        fixtures. Delete the actual selection/binding fix and observe failures,
        then restore exactly and pass. Prove existing parser/projection behavior
        remains compatible; selected unknown never means trusted or permission.
-    5. Document expand readers -> stage immutable data -> migrate one instance ->
+    5. Wire readSelectedInstanceRegistry into buildRegistryRoute in serve.ts only
+       when its caller supplies an explicit selection input. An explicit binding
+       wins before any legacy file or served-view cache; unknown/refused selected
+       evidence produces a path-free refusal, never a cached legacy success.
+       Successful selected identity data uses the existing public projection,
+       with no private path or permission grant. Absent this input, preserve the
+       existing route's read-model, drift, status and clock behavior. Exercise the
+       actual route with real bounded filesystem defaults; deleting its selected
+       call must fail the behavioral trap. Do not merely add a symbol comment or
+       import to satisfy the call-site proof. This does not activate a selected
+       deployment/configuration or change any worker/effect admission boundary.
+    6. Document expand readers -> stage immutable data -> migrate one instance ->
        retire old consumers -> remove active public values. State WORKERS CONTINUE,
        DRAIN ONE INSTANCE, PAUSE FLEET NEW ADMISSION and FULL AFFECTED WRITER STOP
        distinctly, with exact-target human approval and rollback requirements.
        A pause is not zero writers; existing owner holds and current-effect checks
        remain authoritative. Update only the generated docs index for this document.
-       Do not wire production consumers, move values, change legacy instance modes,
+       Do not wire daemon/lifecycle/effect consumers, move values, change instance modes,
        activate admission, stop workers, create schedules, alter claims/locks/state
        formats, waive gates or rebuild W9410. All new admission behavior remains
        opt-in SHADOW ONLY; full public Apache functionality and owner/admin override
        remain intact. Later out-of-scope wiring requires a normally merged scope.
-    6. Commit before mapped coverage and instrument every changed source SF. Use
+    7. Commit before mapped coverage and instrument every changed source SF. Use
        verified paths and shipped host admission; prove real defaults and every
        catch. Run one native author per distinct committed tree, reproduce every
        new failure on its actual unchanged pinned base and retain unknown causes.
@@ -93,3 +109,7 @@
       proof: 'unit test: selected registry compatibility preserves legacy input and refuses unsupported capabilities'
     - claim: Public projections expose no private path or publication permission
       proof: 'unit test: selected registry public projection grants no private publication permission'
+    - claim: The real read-only route honors explicit selection before any legacy or cached answer
+      proof: 'unit test: selected registry route refuses selected failure without legacy or cache fallback'
+    - claim: The selected reader is reached by a real production source caller
+      proof: 'grep: readSelectedInstanceRegistry( in src/lib/serve.ts'
