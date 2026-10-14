@@ -898,7 +898,9 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
-  pruneOrphanedDrafts,
+  createProposalShardReader,
+  proposalShardDir,
+  pruneOrphanedDraftsAsync,
   parseProposalRegistry,
   parseSupersedesExpr,
   deriveTaskReferent,
@@ -14326,6 +14328,12 @@ export async function runFixRung(opts: {
       }
       if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
+      // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
+      // repaired; re-read the PR once at this head rather than stand down for a person.
+      if (shouldRecheckAfterNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
+        deps.say("fix rung: the worker reported FIXED but changed nothing — re-reading the PR once before standing down");
+        continue;
+      }
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
@@ -22388,7 +22396,7 @@ export function materializeReviewWorktree(
   const removeWorktree = deps.removeWorktree ?? worktreeRemove;
 
   try {
-    deps.fetch(repoDir, prNumber);
+    deps.fetch(repoDir, prNumber, headSha);
   } catch (e) {
     // Nothing was created yet — no cleanup needed, only a named reason.
     return {
@@ -22772,7 +22780,7 @@ interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string, prNumber: number) => void;
+  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
   /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
@@ -23360,7 +23368,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(subjectRepoDir, view.number);
+    fetchHead(subjectRepoDir, view.number, view.headRefOid);
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -51156,6 +51164,9 @@ export function buildInboxDraftHook(
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
+  // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
+  // full sweep reads, off the loop, only the shard files that changed since the one before.
+  const shardReader = createProposalShardReader(proposalShardDir(join(config.root, "state", "inbox-proposals.json")), { log });
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -51164,7 +51175,7 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
-      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
@@ -57944,3 +57955,8 @@ export {
   type BranchCitationHit,
   type ReverseBranchDrift,
 } from "./lib/branch-reaper.js";
+
+/** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
+export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
+}

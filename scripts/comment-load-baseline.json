@@ -134,7 +134,7 @@
   "src/lib/host-parity.ts": 249,
   "src/lib/image-drift.ts": 93,
   "src/lib/inbox-thread.ts": 96,
-  "src/lib/inbox.ts": 1017,
+  "src/lib/inbox.ts": 1250,
   "src/lib/inflight-lock.ts": 93,
   "src/lib/init.ts": 98,
   "src/lib/install-hash.ts": 30,
