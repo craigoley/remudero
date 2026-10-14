@@ -54,9 +54,10 @@ function board(t: { after: (fn: () => void) => void }, blobs: boolean): BoardPro
   mkdirSync(ledgerDir, { recursive: true });
   appendFileSync(join(ledgerDir, "ledger.ndjson"), rows(blobs).map((x) => `${JSON.stringify({ ...x, host: "h1" })}\n`).join(""));
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
+  // W1-T9436: every row kept, so each fat row's kept shape is visible; the retention rules keep a subset of these same rows.
   const b = createBoardProjection({
     db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1",
-    readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "", keepEveryRow: true,
   });
   let n = 0;
   while (!b.update({ force: true }).caughtUp && n++ < 100) { /* to caught up */ }

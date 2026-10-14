@@ -4301,7 +4301,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   proofCwd: worktreePath,
                 });
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body }, { log });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
                   // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
                   // and no amendment row settles this source run, so a later pass asks again.
@@ -4311,7 +4311,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
                   try {
                     base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
-                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body });
+                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body }, { log });
                     base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
                   } catch (e) {
                     const reason = String((e as Error)?.message ?? e);
@@ -4660,7 +4660,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body }, { log });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           // A check that ran out of its budget spends no strike: recorded as such, and the next pass asks again.
