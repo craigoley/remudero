@@ -1,0 +1,29 @@
+- id: W1-T9351
+  title: Add src/entrypoint.ts cleanup entrypoint and wire it into the serve path
+  repo: remudero
+  depends_on: [W1-T9350]
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/entrypoint.ts
+    - src/lib/serve.ts
+  acceptance:
+    - claim: The cleanup entrypoint runs the useless-expression cleanup
+      proof: "unit test: cleanUselessExpressions runs cleanup"
+    - claim: The cleanup function is called from a different src file than the one defining it
+      proof: "grep: cleanUselessExpressions( in src/lib/serve.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-10-14 proposal on codeql-quality:js/useless-expression, ratified via rmd
+    approve:
+  
+    CodeQL quality debt for rule js/useless-expression: 1 open alert tagged quality and
+    maintainability (#357). Propose one bounded cleanup task for this rule; do not auto-fix or
+    dismiss alerts.
+  
+    CodeQL-Snapshot:
+    {"proposalId":"codeql-quality:js/useless-expression","ruleId":"js/useless-expression","alertNumbers":["357"]}
