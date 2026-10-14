@@ -163,10 +163,23 @@ test("run-child reservation uses the real process identity and sampler", async (
   run.bindRoot(child.pid!);
   run.releaseOccupancy();
   assert.equal(readMemoryLedger(ledger)!.entries.length, 1);
-  assert.ok(readPeakSamples("fix", f.store)[0]!.peakMib > 0);
+  const samples = readPeakSamples("fix", f.store);
+  if (process.platform === "linux") {
+    assert.ok(samples[0]!.peakMib > 0, "Linux must positively measure the real child's VmHWM");
+  } else {
+    assert.deepEqual(samples, [], "without Linux /proc the real sampler records no invented peak measurement");
+  }
   child.kill("SIGKILL");
   await exited;
-  assert.equal(sweepMemoryReservations(ledger)!.released[0]!.rule, "tree-gone");
+  const swept = sweepMemoryReservations(ledger)!;
+  if (process.platform === "linux") {
+    assert.equal(swept.released[0]!.rule, "tree-gone");
+  } else {
+    assert.deepEqual(swept.released, [], "an incomplete native tree census never proves every descendant exited");
+    assert.equal(swept.reading.entries[0]!.status, "uncertain");
+    assert.equal(swept.reading.entries[0]!.walkComplete, false);
+    assert.equal(swept.reading.entries[0]!.occupancyReleased, true);
+  }
 });
 
 test("a reserved run child still discovers and learns its nested test reservation", async (t) => {

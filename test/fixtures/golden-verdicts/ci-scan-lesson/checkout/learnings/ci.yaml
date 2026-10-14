@@ -1,0 +1,6 @@
+- id: scan-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files: [scripts/comment-load-baseline.json, scripts/source-size-baseline.json, "plan/tasks.d/**"]
+  fact: Before the first push, run the two cheap ratchets, rule15-precheck for plan/ changes, and rmd census-membership.
+  src: "ci-learning:10339:Scan"

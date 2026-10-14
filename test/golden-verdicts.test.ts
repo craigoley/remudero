@@ -359,6 +359,19 @@ test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task 
   }
 });
 
+test("GOLDEN — SCAN LESSON: the cited incident executes and the matched lane arms (W1-T7651)", () => {
+  const { verdict, golden } = judgeCase("ci-scan-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T7651.yaml", "scripts/comment-load-baseline.json", "src/lib/policy.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "scan-gate-refusals-repaired-by-hand"), taskFile);
+  }
+});
+
 test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {
   const { verdict, golden } = judgeCase("ci-remudero-review-lesson");
   assert.equal(golden.violation, "none");

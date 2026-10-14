@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: blast-radius
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=ec01324e8e546f64
   attempts: 0
   files:
     - src/lib/transcript.ts
