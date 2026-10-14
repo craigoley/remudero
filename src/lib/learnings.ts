@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
@@ -1739,13 +1739,50 @@ export interface LearningsIndex {
   bySubsystem: Record<string, string[]>;
 }
 
-/** Parse a `learnings/index.json`. Returns `null` on any missing/malformed index (non-fatal — callers fall back to a full corpus scan rather than fail closed on a lookup optimization). */
+/**
+ * W1-T7954: the index `scripts/generate-learnings-index.mjs` would write for `dir`, built in memory from both storage
+ * forms. `null` when `dir` holds no learnings source or its corpus does not parse (a duplicate id included), the
+ * same non-fatal answer a missing index gives.
+ */
+export function buildLearningsIndex(dir: string): LearningsIndex | null {
+  const sources = learningsSourceFiles(dir);
+  if (sources.length === 0) return null;
+  const files: LearningsIndex["files"] = {};
+  const bySubsystem: Record<string, string[]> = {};
+  const seen = new Set<string>();
+  try {
+    for (const { filename } of sources) {
+      const path = join(dir, filename);
+      const entries = parseLearningsDoc(parseYaml(readFileSync(path, "utf8")), path, seen);
+      for (const entry of entries) {
+        if (!entry.subsystem) continue;
+        const list = bySubsystem[entry.subsystem] ?? (bySubsystem[entry.subsystem] = []);
+        if (!list.includes(filename)) list.push(filename);
+      }
+      files[filename] = {
+        entries: entries.map((entry) => entry.id).sort(),
+        globs: [...new Set(entries.flatMap((entry) => entry.files))].sort(),
+        symbols: [...new Set(entries.flatMap((entry) => entry.symbols ?? []))].sort(),
+        error_signatures: [...new Set(entries.flatMap((entry) => entry.errorSignatures ?? []))].sort(),
+      };
+    }
+  } catch {
+    return null;
+  }
+  for (const list of Object.values(bySubsystem)) list.sort();
+  return { files, bySubsystem };
+}
+
+/** Parse a `learnings/index.json`. Returns `null` on any missing/malformed index (non-fatal — callers fall back to a full corpus scan rather than fail closed on a lookup optimization).
+ *  W1-T7954: the index is no longer committed, so an ABSENT `<dir>/index.json` is built from `<dir>`'s corpus
+ *  ({@link buildLearningsIndex}) — a reader such as the wipe-test cadence then still sees every shard. */
 export function loadLearningsIndex(path: string): LearningsIndex | null {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    const absent = (error as NodeJS.ErrnoException).code === "ENOENT";
+    return absent && basename(path) === "index.json" ? buildLearningsIndex(dirname(path)) : null;
   }
   try {
     const raw = JSON.parse(text) as unknown;

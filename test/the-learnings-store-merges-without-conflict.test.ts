@@ -173,3 +173,31 @@ test("W1-T7954: selection without a committed index matches the indexed selectio
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("W1-T7954: an absent index.json is built from the corpus, exactly as the generator would write it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-lesson-built-index-"));
+  try {
+    writeLesson(dir, "ci.yaml", "old");
+    writeLesson(dir, "ci.d/new.yaml", "new", { files: ["other.ts"], symbols: ["measureLesson"] });
+    writeLesson(dir, "testing.d/error.yaml", "error", { files: [], error_signatures: ["fixture failure"], subsystem: "testing" });
+    generate(dir);
+    const written = JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as learnings.LearningsIndex;
+    rmSync(join(dir, "index.json"));
+    assert.deepEqual(learnings.loadLearningsIndex(join(dir, "index.json")), written,
+      "a reader of the retired index (the wipe-test cadence) still sees every shard and per-entry file");
+    assert.equal(learnings.loadLearningsIndex(join(dir, "other.json")), null, "only the index's own name is built");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const empty = mkdtempSync(join(tmpdir(), "rmd-lesson-no-corpus-"));
+  try {
+    assert.equal(learnings.loadLearningsIndex(join(empty, "index.json")), null, "no corpus, no index");
+    writeLesson(empty, "a.yaml", "dup");
+    writeLesson(empty, "b.yaml", "dup");
+    assert.equal(learnings.loadLearningsIndex(join(empty, "index.json")), null, "a corpus that does not parse builds none");
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+  assert.ok(Object.keys(learnings.loadLearningsIndex(join(root, "learnings", "index.json"))?.files ?? {}).length > 0,
+    "this repo's own learnings home yields an index with the committed file retired");
+});

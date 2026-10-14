@@ -133,7 +133,25 @@ function main(argv) {
   }
 
   if (values.check) {
-    console.log(`generate-learnings-index: OK -- ${values.dir} corpus builds an index.`);
+    // W1-T7954: the default <dir>/index.json is an optional local artifact, so --check alone proves only that the
+    // corpus builds. An index NAMED with --out is one the caller asked to verify, and a stale one fails.
+    if (values.out === undefined) {
+      console.log(`generate-learnings-index: OK -- ${values.dir} corpus builds an index.`);
+      process.exitCode = 0;
+      return;
+    }
+    let existing;
+    try {
+      existing = readFileSync(outPath, "utf8");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    if (existing !== fresh) {
+      console.error(`generate-learnings-index: ${outPath} is STALE or missing -- run \`npm run learnings-index\`.`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`generate-learnings-index: OK -- ${outPath} is fresh.`);
     process.exitCode = 0;
     return;
   }
