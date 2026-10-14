@@ -37,6 +37,7 @@ import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.j
 import type { GitHub } from "./status.js";
 import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 /** BACKSTOP: the lane's heap; a unit that outgrows it kills this thread, never serve's. */
@@ -344,7 +345,7 @@ export function threadSlowLane(opts: {
   let respawn: NodeJS.Timeout | undefined;
   const spawn = (): void => {
     const data: SlowLaneData = { ...opts.config, kind: SLOW_LANE_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
     worker = spawned;
     spawned.unref();
     // What the thread said it was doing, held HERE, so a thread that dies mid-unit still names it.

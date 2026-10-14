@@ -8,11 +8,41 @@
 // W1-T8776: a tree with no current bundle first asks the shared store (src/lib/child-entry-store.ts) for a build at
 // its own source hash; a hit is copied into the tree and re-judged by childEntryIsCurrent before it runs.
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { defaultChildEntryStoreRoot, materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 
 interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
 type CurrencyCheck = (root: string, name: string) => ChildEntryCurrency;
+/** W1-T8777: scripts/build-child-entries.mjs's workerBundle, as a seam. */
+export type WorkerBundleCheck = (root: string, module: string, opts: { verifySource: boolean }) => ChildEntryCurrency;
+
+/** W1-T8777: true in an isolate running a bundle (its banner sets the flag), which has no tsx loader. */
+export const runsBundled = (): boolean => (globalThis as { __rmd_bundled?: unknown }).__rmd_bundled === true;
+
+/**
+ * W1-T8777: where to start the worker a module starts from its own URL (`selfUrl`, its `import.meta.url`).
+ * Unbundled, that URL, as before. Bundled, the module's own worker bundle from the same build: the isolate has no
+ * tsx loader, so the .ts source cannot load, and a bundled process that has no such bundle throws rather than try.
+ * The tree root is everything before `selfUrl`'s `/src/`, where a bundle resolves each module's source.
+ */
+export function bundledWorkerUrl(selfUrl: string | URL, check?: WorkerBundleCheck): URL {
+  const self = new URL(selfUrl);
+  if (!runsBundled()) return self;
+  const path = fileURLToPath(self);
+  const at = path.lastIndexOf(`${sep}src${sep}`);
+  if (at < 0) throw new Error(`a bundled process cannot start ${path} as a worker: it is not under a src/ directory (W1-T8777)`);
+  const root = path.slice(0, at);
+  const module = relative(root, path).split(sep).join("/");
+  const verdict = (check ?? loadWorkerBundleCheck())(root, module, { verifySource: false });
+  if (!verdict.current || typeof verdict.bundle !== "string") {
+    throw new Error(`a bundled process cannot start ${module} as a worker: ${verdict.reason} (W1-T8777)`);
+  }
+  return pathToFileURL(verdict.bundle);
+}
+
+const loadWorkerBundleCheck = (): WorkerBundleCheck =>
+  (createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as { workerBundle: WorkerBundleCheck }).workerBundle;
 /**
  * Loaded on demand, not imported: the emitter must still load in a tree that carries src/ but not scripts/
  * (a consumer checkout, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts), where the
