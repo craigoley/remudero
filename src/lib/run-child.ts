@@ -12,9 +12,9 @@ import { join } from "node:path";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
-import { defaultInstance } from "./host-memory-ledger.js";
+import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
 import {
-  createTreePeakSampler, openLearnedReservation, type LearnedReservation, type TreePeakSampler,
+  createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
@@ -90,6 +90,7 @@ export function writePlanSnapshot(stateRoot: string, tasks: readonly unknown[]):
  */
 export function prunePlanSnapshots(stateRoot: string): string[] {
   const dir = planSnapshotsDir(stateRoot);
+  if (!existsSync(dir)) return [];
   const files = readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => ({ name, path: join(dir, name), at: statSync(join(dir, name)).mtimeMs }));
   if (files.length === 0) return [];
   const named = new Set<string>();
@@ -159,6 +160,9 @@ export interface RunChildProbeSeams {
   spawn?: (command: string, args: readonly string[], options: { cwd: string }) => ChildProcess;
   sampler?: TreePeakSampler;
   reserve?: (entryKind: RunChildEntryKind, sampler: TreePeakSampler) => LearnedReservation;
+  /** Where the default reservation writes its ledger entry and learns its peak; by default the host-wide locations. */
+  ledger?: HostMemoryLedgerOptions;
+  store?: PeakStoreOptions;
   clock?: () => number;
   timeoutMs?: number;
   planWaitMs?: number;
@@ -269,7 +273,8 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     const base = seams.sampler ?? createTreePeakSampler();
     const sampler: TreePeakSampler = { ...base, finish: (id) => { peakMib = base.finish(id); return peakMib; } };
     reservation = (seams.reserve ?? ((entryKind, s) => openLearnedReservation(
-      { workerClass: "run-child-probe", root: input.root, entryKind }, { sampler: s },
+      { workerClass: "run-child-probe", root: input.root, entryKind },
+      { sampler: s, ...(seams.ledger ? { ledger: seams.ledger } : {}), ...(seams.store ? { store: seams.store } : {}) },
     )))(launch.kind, sampler);
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
