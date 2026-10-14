@@ -132,7 +132,9 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-memory-policy.js";
+import {
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, type DaemonMemoryGovernor, type HeapShadowOptions,
+} from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -1134,6 +1136,8 @@ export interface DaemonDeps {
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
    *  awaits it, and the NEXT row's fields carry what it found. */
   readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
+  /** W1-T8883: the heap-ceiling shadow's heap reading and process id; absent, this process's own. A test seam. */
+  heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1724,6 +1728,8 @@ interface InterphaseReviewClock {
  *  the watchdog and doctor read, so its error rides the row instead of escaping the tick. */
 function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">): Record<string, unknown> {
   if (!deps.readMemoryTelemetry) return {};
+  // W1-T8883: the same heartbeat feeds the heap-ceiling shadow (rate-limited there); it never costs the heartbeat.
+  try { installedHeapShadow()?.sampleNow(); } catch { /* Reason: observability only; the shadow is report-only. */ }
   try {
     return deps.readMemoryTelemetry();
   } catch (e) {
@@ -3525,6 +3531,26 @@ export async function runDaemon(
   // The Clock port (W1-T2897): `deps.now` keeps its legacy `() => Date` shape (many tests inject
   // it directly), adapted here once for every reading this loop needs.
   const daemonClock: Clock = clockFromDateFn(deps.now);
+  // W1-T8883: the heap-ceiling shadow learns from live heap samples kept across boots (7 days) and ledgers the ceiling
+  // it would propose, at start and hourly. REPORT ONLY: the ceiling in force is unchanged. Needs the state directory.
+  const heapShadowStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  const heapShadow = heapShadowStateDir === undefined || !deps.readMemoryTelemetry ? undefined : createHeapShadow({
+    path: heapSamplePath(heapShadowStateDir),
+    clock: daemonClock,
+    ...deps.heapShadowSeams,
+    onPersistError: (reason) => emitLog("daemon.heap_samples_persist_failed", { reason }),
+    onProposal: (proposal) => log("daemon.heap_ceiling_shadow", { basis: "hourly", ...proposal }),
+  });
+  if (heapShadow) {
+    installHeapShadow(heapShadow);
+    try {
+      log("daemon.heap_ceiling_shadow", {
+        basis: "learned", ...heapShadow.propose(), ...(heapShadow.loadError === undefined ? {} : { samples_unread: heapShadow.loadError }),
+      });
+    } catch (e) {
+      log("daemon.heap_ceiling_shadow_failed", { reason: String((e as Error)?.message ?? e).slice(0, 160) });
+    }
+  }
   // W1-T4390: the SRE governor's port — injected, else over the fleet lane's state root (see DaemonDeps.sreGovernor).
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
@@ -3579,6 +3605,10 @@ export async function runDaemon(
     if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
     clearTimeout(bootGateTimer);
     bootGateTrigger ??= "exited";
+    if (heapShadow) {
+      try { heapShadow.flush(); } catch { /* Reason: report-only samples; a failed flush loses at most one persist gap. */ }
+      if (installedHeapShadow() === heapShadow) installHeapShadow(undefined);
+    }
     const failures: unknown[] = [];
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
