@@ -28,6 +28,6 @@
     action: escalate
     confidence: 0.91
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The title and acceptance require a delta reflecting P25 scope and dependencies, but the supplied rationale concerns daemon-hook research and provides no P25 scope or dependency details.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for W1-T9391 in plan/tasks.yaml; that presence cannot establish the claimed P25 alignment. The operator escalation rule explicitly classifies unverifiable findings as HIGH."
-    judged_at: "2026-10-14T06:04:33.620Z"
-    pin: "9c622fc6cdd0abb4278e2cbff804050ffa49dc6758990741c17046e4b20b8c65"
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The title requests a P25 plan delta, but the filed rationale concerns daemon-hook research and supplies no connection to P25 scope or dependencies; planRefs is empty.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for W1-T9391 in plan/tasks.yaml. That presence check cannot establish the claimed P25 scope or dependency alignment, which the supplied record does not specify."
+    judged_at: "2026-10-14T06:49:06.503Z"
+    pin: "bda7796691415aa1ee8afa1ceda3a84753d78e6ab16bce13585b89c4abde6333"
