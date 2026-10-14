@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; this is step 0 of the split (W1-T9332, W1-T9333, W1-T9337, W1-T9338, W1-T9339)"
   plan_refs: [W1-T2883, W1-T2893, W1-T26, W1-T8502, W1-T9332, W1-T9333, W1-T9337, W1-T9338, W1-T9339]
   files: [.dependency-cruiser.cjs, test/src-cli-never-imports-the-cli-entrypoint.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

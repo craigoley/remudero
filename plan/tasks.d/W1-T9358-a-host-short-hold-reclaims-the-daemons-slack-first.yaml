@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, never raise core memory.max, reduce usage and let the memory governor set lane count"
   plan_refs: [W1-T8401, W1-T7243, W1-T321, W1-T9097, W1-T9080, W1-T9102, W1-T9352]
   files: [src/lib/sweep.ts, src/lib/daemon-memory-policy.ts, test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts]
-  status: queued
+  status: merged
   priority: 1.5  # measured 38 lane-min in one window (00:19:14-00:31:48Z, 3 lanes empty behind host-short holds)
   attempts: 0
   rationale: |
