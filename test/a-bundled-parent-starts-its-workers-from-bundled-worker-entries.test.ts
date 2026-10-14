@@ -76,6 +76,7 @@ test("W1-T8777: the build emits and lists a bundle per named worker entry", asyn
   assert.equal(mod.workerBundle(root, WORKER, { verifySource: false }).reason, "bundle-intact", "a bundled process judges only integrity");
   assert.equal(mod.workerBundle(root, "src/lib/absent.ts").reason, "worker-not-built");
   assert.equal(mod.workerBundle(root, "../outside.ts").reason, "worker-module-invalid");
+  await assert.rejects(mod.buildChildEntries({ root, entries: [{ name: "absent", source: "src/absent.ts" }], workers: [] }), /absent: source src\/absent\.ts does not exist/, "a declared entry must exist");
 });
 
 test("W1-T8777: a bundled parent starts its worker from the bundled worker entry", async (t) => {
