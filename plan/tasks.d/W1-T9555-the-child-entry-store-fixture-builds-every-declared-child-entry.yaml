@@ -1,0 +1,42 @@
+- id: W1-T9555
+  title: "THE CHILD-ENTRY STORE FIXTURE HARD-CODES ITS ENTRIES — test/the-core-fleet-fills-the-child-entry-store.test.ts writes each child entry source by hand, so #11744 adding src/run-child-main.ts to CHILD_ENTRIES broke every store build in it on main until #11782 added the file by hand; the fixture writes a stub for every entry scripts/build-child-entries.mjs exports in CHILD_ENTRIES"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low  # one test file's fixture; no production code
+  band_meaning: blast-radius
+  origin: "operator 2026-10-14: the #11758/#11744 main red that W1-T9532 misfiled as a flake"
+  plan_refs: [W1-T9374, W1-T9082, W1-T9532]
+  files: [test/the-core-fleet-fills-the-child-entry-store.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14: #11744 added `{ name: "run-child", source: "src/run-child-main.ts" }` to `CHILD_ENTRIES`
+    (scripts/build-child-entries.mjs). `buildChildEntries` throws "source ... does not exist" for any declared
+    entry missing from the tree, and the store-fill fixture's `populate()` in
+    test/the-core-fleet-fills-the-child-entry-store.test.ts copies the real build script but writes only the
+    entry sources it names by hand. Main went red; #11782 (f19b8c887) fixed it by adding one more hand-written
+    line, `writeFileSync(join(tree, "src/run-child-main.ts"), ...)`. The next new child entry breaks it the
+    same way.
+  design: |
+    1. `populate()` imports `CHILD_ENTRIES` from scripts/build-child-entries.mjs (the script it already copies
+       into the tree) and writes a small stub for every declared entry's `source`, keeping the marker body for
+       `src/check-proof-main.ts` (the entry the tests launch). The hand-written run-task and run-child lines go.
+    2. `WORKER_ENTRIES` stay unwritten: the build already skips a declared worker missing from a fixture tree.
+    3. A test asserts that a populated tree holds every `CHILD_ENTRIES` source, so a fixture that drifts from the
+       real list fails by name instead of as a store build error.
+    Out of scope (observed, not filed here): other fixtures that copy the build script and hand-write
+    src/run-child-main.ts, e.g. test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts and
+    test/a-run-child-owns-its-github-token-and-credential-socket.test.ts.
+  acceptance:
+    - claim: "the store-fill fixture writes every declared child entry source from CHILD_ENTRIES"
+      proof: 'grep: test("W1-T9555: the store-fill fixture writes every declared child entry source" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+    - claim: "the fixture reads the real CHILD_ENTRIES list rather than hard-coding entries"
+      proof: 'grep: import { CHILD_ENTRIES } from "\.\./scripts/build-child-entries\.mjs" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+  falsifier: |
+    Delete the CHILD_ENTRIES loop from populate() and restore one hand-written entry: the new test names the
+    missing source and fails. At origin/main the fixture has no CHILD_ENTRIES import and no such test.

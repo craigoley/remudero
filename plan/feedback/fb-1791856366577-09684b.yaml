@@ -66,10 +66,33 @@ raw: >-
   at current main first (they were read at origin/main efd226b50).
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11803
+summary:
+  headline: Reframe W1-T9538 acceptance before filing
+  what_happened: Current main confirms the proof-preflight steps, the
+    self-reported `skills.used` row, and the report’s selection-and-verdict
+    inputs. The drafted task corrects the shifted citations, but its three
+    unit-test proofs point to test files that do not yet exist, so executable
+    acceptance has not been established.
+  decision: Reframe the task with executable, discriminating acceptance and verify
+    the stored block before filing it through triage and the machine-filing
+    judge.
+  options:
+    - label: Reframe
+      consequence: Make acceptance executable first; keep the proof-preflight pilot
+        and scope limits.
+      intent: reframe
+    - label: File as drafted
+      consequence: The machine judge may refuse proofs that do not resolve to existing
+        tests.
+      intent: approve
+    - label: Decline
+      consequence: No harness-run skill steps or execution-based effectiveness report
+        will be built.
+      intent: decline
 expansion: null
 submission_key: nanoclaw-2026-10-13/harness-run-skill-steps
 thread_id: null
+answered_by: null
