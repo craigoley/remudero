@@ -155,6 +155,7 @@ export interface ReadModelInstance {
   repo?: string;
   planPath?: string;
   feedbackRoot?: string;
+  inbox?: NonNullable<SlowLaneConfig["inbox"]> & { instance: string };
 }
 
 export type ReadModelViewMode = ViewSwitchMode;
@@ -1928,12 +1929,14 @@ export function runReadModelWorker(
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
       slowLane?.views(m.switches.views);
-      slowLane?.lease(m.instances[0]?.lease === "held");
+      slowLane?.lease(m.instances[0]?.lease === "held", m.instances.filter(i => i.lease === "held").map(i => i.instance));
       views.state(m.instances);
     }
     port.postMessage(m);
   };
-  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
+  const slowLaneConfig = data.slowLane && { ...data.slowLane,
+    instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
+    analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } };
   let snapshotWrites = Promise.resolve();
   if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {
     snapshotWrites = snapshotWrites.then(async () => {

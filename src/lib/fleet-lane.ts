@@ -110,6 +110,7 @@ export function persistedInboxPath(stateDir: string): string {
 
 /** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
 export interface PersistedInboxContent extends ClassificationEvidence {
+  sourceIdentity?: InboxSourceIdentity;
   proposals: Proposal[];
   classifications: InboxClassification[];
   /** The only ledger rows the readers take from a pass: fleet-lane decisions and verify-human releases. */
@@ -120,6 +121,16 @@ export interface PersistedInboxContent extends ClassificationEvidence {
   attentionEvidence?: InboxAttentionEvidence;
   /** The decision and plain-message stores the pass's lanes were built with; absent from a file written before they were carried. */
   stores?: { fleetDecisions: DecisionStore; plainMessages: PlainStore };
+}
+
+/** The owned inputs of a non-core classification; a different source is never a substitute. */
+export interface InboxSourceIdentity {
+  instance: string;
+  repository: string;
+  root: string;
+  planPath: string;
+  ledgerPath: string;
+  inboxRoot: string;
 }
 
 export interface InboxAttentionEvidence {

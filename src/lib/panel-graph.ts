@@ -104,7 +104,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -153,6 +153,8 @@ import {
 } from "./inbox.js";
 
 export interface PanelGraphDeps {
+  inboxSourceIdentity?: InboxSourceIdentity;
+  inboxMayPersist?: () => boolean;
   /** Repo root — where plan/feedback/ lives. */
   /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
   projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
@@ -2734,7 +2736,10 @@ export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefin
   const held = slowLaneInboxes.get(deps);
   if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
   const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
-  const read = persisted && slowLaneInboxOf(deps, persisted);
+  const identity = deps.inboxSourceIdentity;
+  const sourceMatches = !identity || Object.entries(identity).every(([key, value]) =>
+    persisted?.sourceIdentity?.[key as keyof InboxSourceIdentity] === value);
+  const read = persisted && sourceMatches ? slowLaneInboxOf(deps, persisted) : undefined;
   slowLaneInboxes.set(deps, { stamp, read });
   return read;
 }
