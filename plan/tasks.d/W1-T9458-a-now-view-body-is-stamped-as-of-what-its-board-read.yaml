@@ -46,8 +46,8 @@
     3. Nothing else changes: the same sources, names and staleness budgets; only the ledger source's asOf moves back
        to the board stage's.
   acceptance:
-    - claim: "a verdict ingested after the board stage and before assemble leaves the body's ledger source as of the board stage, so the task's phase diff classifies timing, not real"
+    - claim: "a verdict ingested after the board stage and before assemble leaves the body's ledger source as of the board stage, so the verdict the board never read falls inside the shadow's gap window (view asOf, legacy asOf]"
       proof: 'grep: test("W1-T9458: a now-view body is stamped as of what its board read" in test/a-now-view-body-is-stamped-as-of-what-its-board-read.test.ts'
   falsifier: |
-    Build the ledger source from the slot state at assemble time again: the fixture's verdict lands in neither the
-    board nor the gap window, the phase diff classifies real, and the test fails.
+    Build the ledger source from the slot state at assemble time again: the body is stamped as of the verdict its
+    board never read, the verdict leaves the gap window, and the test fails.
