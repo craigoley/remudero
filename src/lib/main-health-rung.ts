@@ -35,11 +35,21 @@ import {
   REQUIRED_CHECK_FAIL,
   requeuedCheckKeysFromLedger,
   type CiFailure,
+  describeMainRed,
+  mainRedFields,
+  mainRedOfRow,
+  mainRedSignature,
+  mainRedSignaturesMatch,
+  type MainRedSignature,
   type MainHealthFirstRedCommit,
   type MainHealthObservation,
   type MainHealthRunHistoryEntry,
   type RollupCheckEntry,
 } from "./sweep.js";
+
+// W1-T8042: the red signature moved to sweep.ts, which classifies a red shared across open PRs by it and
+// cannot import this module back; re-exported so every existing importer keeps its path.
+export { describeMainRed, mainRedSignature, mainRedSignaturesMatch, type MainRedSignature };
 
 /** Stable referent for the one repo-wide default-branch health incident. */
 export const MAIN_HEALTH_TASK_ID = "MAIN-HEALTH";
@@ -613,62 +623,6 @@ export interface MainRepairAttempt {
   reason?: string;
 }
 
-/**
- * The red a repair is for, independent of which merge the locator names: the failing checks (a
- * matrix shard's index folded away) and what the failing logs said — the gates they named BLOCKED
- * and the tests they reported `not ok`. `detail` is absent when no failing log was readable, and
- * the signature is then the failing check set alone.
- */
-export interface MainRedSignature {
-  readonly checks: readonly string[];
-  readonly detail?: readonly string[];
-}
-
-const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
-const SHARD_INDEX = / \(\d+\/\d+\)$/;
-const BLOCKED_GATE = [/^main-ceiling-drift: (\S+) BLOCKED\b/, /^([A-Za-z0-9_.-]+): BLOCKED\b/];
-const NOT_OK_TITLE = /^\s*not ok\s+\d+\s+-\s+(.+?)\s*$/i;
-
-/** The {@link MainRedSignature} of failing checks `failingChecks` whose logs `failures` were read. */
-export function mainRedSignature(failingChecks: readonly string[], failures: readonly CiFailure[] | undefined): MainRedSignature {
-  const checks = [...new Set(failingChecks.map((name) => name.replace(SHARD_INDEX, "")))].sort();
-  const readable = (failures ?? []).filter((failure) => !failure.logUnavailable && failure.logTail.trim() !== "");
-  if (readable.length === 0) return { checks };
-  const detail = new Set<string>();
-  for (const failure of readable) {
-    for (const raw of failure.logTail.split("\n")) {
-      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "");
-      const gate = BLOCKED_GATE.map((pattern) => pattern.exec(line)?.[1]).find((name) => name !== undefined);
-      if (gate !== undefined) detail.add(`BLOCKED ${gate}`);
-      const title = NOT_OK_TITLE.exec(line)?.[1];
-      if (title !== undefined) detail.add(`not ok ${title}`);
-    }
-  }
-  return { checks, detail: [...detail].sort() };
-}
-
-/** One red, or not: the same failing checks, and the same log detail wherever both sides read one. */
-export function mainRedSignaturesMatch(a: MainRedSignature, b: MainRedSignature): boolean {
-  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
-  return same(a.checks, b.checks) && (a.detail === undefined || b.detail === undefined || same(a.detail, b.detail));
-}
-
-export function describeMainRed(red: MainRedSignature): string {
-  return `${red.checks.join(", ")}${red.detail ? ` [${red.detail.join("; ") || "no gate or test named"}]` : " [no log read]"}`;
-}
-
-function redOfRow(line: Record<string, unknown>): MainRedSignature | undefined {
-  if (!Array.isArray(line.red_checks)) return undefined;
-  return {
-    checks: line.red_checks.map(String),
-    ...(Array.isArray(line.red_detail) ? { detail: line.red_detail.map(String) } : {}),
-  };
-}
-
-function redFields(red: MainRedSignature): Record<string, unknown> {
-  return { red_signature: describeMainRed(red), red_checks: [...red.checks], red_detail: red.detail ? [...red.detail] : null };
-}
-
 /** W1-T6403 — every offending merge this lane has acted on, keyed by its sha. The ledger, not
  *  memory, is the dedupe: a restarted daemon must not open a second fix PR for the same merge. */
 export function mainRepairRecordsFromLedger(lines: readonly Record<string, unknown>[]): Map<string, MainRepairRecord> {
@@ -679,7 +633,7 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     const record = records.get(sha);
     if (line.step === "main.repair.located") {
       if (!record || record.resolved) {
-        const red = redOfRow(line);
+        const red = mainRedOfRow(line);
         records.set(sha, {
           offendingSha: sha,
           ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}),
@@ -1269,7 +1223,7 @@ export function buildMainHealthRung(
       ...at,
       head_sha: request.headSha,
       failing_checks: request.failingChecks,
-      ...(red ? redFields(red) : {}),
+      ...(red ? mainRedFields(red) : {}),
     });
     fixInFlight.add(request.offendingSha);
     void Promise.resolve()
@@ -1495,7 +1449,7 @@ export function buildMainHealthRung(
       return true;
     }
     if (!proof.proven) {
-      repairRow("main.repair.revert_withheld", { ...at, reason: proof.reason, why_fix_insufficient: stalled, ...redFields(red) });
+      repairRow("main.repair.revert_withheld", { ...at, reason: proof.reason, why_fix_insufficient: stalled, ...mainRedFields(red) });
       withheldNote = `the repair lane withheld its revert of \`${record.offendingSha}\`: ${proof.reason}`;
       return false;
     }
@@ -1725,7 +1679,7 @@ export function buildMainHealthRung(
     const record = first ? (active.find((r) => r.offendingSha === first.headSha) ?? owning) : (owning ?? active[active.length - 1]);
     if (record) {
       if (first && record.offendingSha !== first.headSha) {
-        deps.log("main.repair.same_red", { head_sha: sha, offending_sha: record.offendingSha, located_sha: first.headSha, ...redFields(red) });
+        deps.log("main.repair.same_red", { head_sha: sha, offending_sha: record.offendingSha, located_sha: first.headSha, ...mainRedFields(red) });
       }
       return advanceRepair(lane, record, ctx);
     }
@@ -1769,7 +1723,7 @@ export function buildMainHealthRung(
       test_files: request.testFiles,
       method: located.method,
       ...located.fields,
-      ...redFields(red),
+      ...mainRedFields(red),
     });
     dispatchFix(lane, request, red);
     return true;
