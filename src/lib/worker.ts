@@ -1,6 +1,6 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
-  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_BOUNDARY, type WorkerMcpExposure, type WorkerMcpIsolation,
+  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
@@ -253,7 +253,7 @@ export interface WorkerResult {
   mcpIsolation?: WorkerMcpIsolationEvidence;
   /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
    * ones without a date cutoff. Absent on Codex/cash calls and on hand-built fixtures. */
-  mcpBoundary?: typeof WORKER_MCP_BOUNDARY;
+  mcpBoundary?: typeof WORKER_MCP_STRICT;
   /** W1-T9489: present when the init inventory showed a capability outside the boundary (`exposed`, the run then earns no
    * success credit) or gave no complete inventory to judge (`unknown`). Absent means observed and clean. */
   mcpExposure?: WorkerMcpExposure;
@@ -588,7 +588,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
   mcp_isolation?: WorkerMcpIsolationEvidence;
-  mcp_boundary?: typeof WORKER_MCP_BOUNDARY;
+  mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
   worker_exit?: WorkerExit["kind"];
@@ -3216,8 +3216,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (args.mcpIsolation) applyWorkerMcpIsolation(options);
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
-      applyWorkerMcpBoundary(options);
-      const boundaryServers = Object.keys(options.mcpServers ?? {});
+      const boundaryServers = applyWorkerMcpBoundary(options);
       const liveQuery = runQuery({ prompt: args.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3262,7 +3261,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
       // W1-T9489: the tripwire at the producer. A worker offered anything outside its own server map is ledgered as exposed
       // and earns no success credit: the subtype changes too, because callers grade `{isError, subtype: "success"}` as clean.
-      result.mcpBoundary = WORKER_MCP_BOUNDARY;
+      result.mcpBoundary = WORKER_MCP_STRICT;
       const exposure = workerMcpExposure(result.initSummary, boundaryServers);
       if (exposure?.state === "exposed") {
         exposure.original_subtype = result.subtype;
@@ -3330,7 +3329,7 @@ export interface UsageProbeSession {
  * SpawnWorkerArgs.queryFn}. */
 export type UsageProbeQueryFn = (params: {
   prompt: AsyncIterable<never>;
-  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable" | "strictMcpConfig" | "mcpServers">;
+  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable"> & ReturnType<typeof workerMcpProbeBoundary>;
 }) => UsageProbeSession;
 
 /** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to

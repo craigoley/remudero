@@ -77,7 +77,7 @@ export function workerMcpIsolationEvidence(summary: WorkerInitSummary | undefine
  * review and recon worker ran under bypassPermissions with all eight `mcp__claude_ai_Claude_Docs__*` tools, because the
  * CLI attaches the fleet account's claude.ai connectors to any session that is not strict (120 ledger rows, 2026-10-13/14).
  */
-export const WORKER_MCP_BOUNDARY = "strict" as const;
+export const WORKER_MCP_STRICT = "strict" as const;
 /** The tool-name prefix every claude.ai account connector is offered under ("claude.ai X" normalizes to `claude_ai_X`). */
 export const ACCOUNT_CONNECTOR_TOOL_PREFIX = "mcp__claude_ai_";
 /**
@@ -96,11 +96,13 @@ export const ACCOUNT_CONNECTOR_DENY: readonly string[] = [
 ];
 
 /** Apply the boundary to a spawn's final options: strict MCP config with an explicit server map (whatever the spawn
- * already declared, else none) and the connector denies MERGED with any caller list, never replacing it. */
-export function applyWorkerMcpBoundary(options: Options): void {
+ * already declared, else none) and the connector denies MERGED with any caller list, never replacing it. Returns the
+ * server names the spawn may legitimately report, for {@link workerMcpExposure}. */
+export function applyWorkerMcpBoundary(options: Options): string[] {
   options.strictMcpConfig = true;
   options.mcpServers = { ...options.mcpServers };
   options.disallowedTools = [...new Set([...(options.disallowedTools ?? []), ...ACCOUNT_CONNECTOR_DENY])];
+  return Object.keys(options.mcpServers);
 }
 
 /** The same boundary for the control-only usage probe, which declares no server of its own. */
