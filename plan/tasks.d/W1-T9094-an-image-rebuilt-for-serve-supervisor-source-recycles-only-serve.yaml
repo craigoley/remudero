@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T3240, W1-T4061, W1-T5367, W1-T8171, W1-T4267]
   files: [src/lib/deployer.ts, src/lib/deploy-judge.ts, test/an-image-rebuilt-for-serve-supervisor-source-recycles-only-serve.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

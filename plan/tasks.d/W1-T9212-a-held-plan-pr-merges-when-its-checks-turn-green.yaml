@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13 (\"go ahead with your recommended follow ups to fix and improve all of this\"): #11371 sat all-green and unmerged"
   plan_refs: [W1-T5615, W1-T5901, W1-T6595, W1-T5733, W1-T5782]
   files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts, test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts, test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escalated.test.ts]
-  status: queued
+  status: merged
   priority: 0.9 # operator-2026-10-13: green plan PRs (filings, gardener PRs) wait a light pass or more to merge; 10 waited over 15 min today, #11322 97 min
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: #11255 stuck about 14 h on 'promised follow-ups reported for harvest' after W1-T9001 fixed the harvest timeout"
   plan_refs: [W1-T8779, W1-T8775, W1-T9001]
   files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, test/a-follow-up-promise-is-owed-by-the-pr-that-adds-it.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: this guard blocked the core memory cut (#11255) for half a day
   attempts: 0
   rationale: |

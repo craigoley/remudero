@@ -11,7 +11,7 @@
   origin: "operator request 2026-10-11 (detect, then route): idle-capacity detector"
   plan_refs: [W1-T4837, W1-T4939, W1-T4384, W1-T7697, W1-T8139, W1-T8198, W1-T8233]
   files: [src/lib/idle-capacity-detector.ts, src/lib/sre-lane.ts, test/idle-capacity-behind-a-hold-is-an-incident.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

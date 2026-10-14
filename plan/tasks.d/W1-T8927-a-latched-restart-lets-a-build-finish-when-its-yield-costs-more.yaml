@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: PR-flow re-measure against the 2026-09-24 baseline (operator: go with all of your recommendations); measurement in ~/Remudero-notes/flow-remeasure-2026-10-13/RESULTS.md"
   plan_refs: [W1-T8198, W1-T7806, W1-T8139, W1-T6274, W1-T5345, W1-T8164, W1-T8240, W1-T6093, W1-T4945, W1-T147]
   files: [src/lib/daemon.ts, src/run-task.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts]
-  status: queued
+  status: merged
   priority: 0.9 # operator-2026-10-13: PRs opened/day fell 88 (10-09) -> 32 (10-12); 75% of tasks need >1 start; each of ~16 real restarts/day yields every in-flight run and resumes wait a median 62 min (~37,140 task-min)
   attempts: 0
   rationale: |

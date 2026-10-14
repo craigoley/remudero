@@ -12,7 +12,7 @@
   files:
     - src/run-task.ts
     - test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts
-  status: queued
+  status: merged
   priority: 1  # every concurrent pair of fleet approves on one plan PR kills the one that was working; W1-T9065 made approves reach this step for the first time since 2026-10-08
   attempts: 0
   rationale: |

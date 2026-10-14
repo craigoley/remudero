@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: escalations #10838 and #10530 triage"
   plan_refs: [W1-T5995, W1-T5454, W1-T5539]
   files: [src/lib/plan.ts, test/a-gardener-draft-passes-machine-filing-admission.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

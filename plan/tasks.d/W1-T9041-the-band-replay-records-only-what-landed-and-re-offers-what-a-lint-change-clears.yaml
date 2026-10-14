@@ -16,7 +16,7 @@
     - src/lib/escalation-catalogue.ts
     - src/run-task.ts
     - test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts
-  status: queued
+  status: merged
   priority: 1  # the replay reports itself nearly done while none of its 18 re-drafted proposals has reached a plan PR
   attempts: 0
   rationale: |

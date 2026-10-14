@@ -12,7 +12,7 @@
   origin: operator#2026-10-12-console-followup-filing-failure
   plan_refs: [W1-T509, W1-T3100, W1-T7727, W1-T2552]
   files: [src/lib/task-id-reservation.ts, test/task-id-reservation.test.ts, test/next-task-id-reserve.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     During console follow-up filing, next-task-id printed RESERVED from a read-only cross-user
