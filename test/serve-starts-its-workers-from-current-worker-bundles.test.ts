@@ -12,7 +12,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Worker, WorkerOptions } from "node:worker_threads";
-import { execArgvWithoutTsx, setWorkerEntryLog, startWorker, type StartWorkerDeps } from "../src/lib/child-entry-argv.js";
+import { execArgvWithoutTsx, setWorkerEntryLog, startWorker } from "../src/lib/child-entry-argv.js";
+
+type StartWorkerOpts = NonNullable<Parameters<typeof startWorker>[2]>;
 import { spawnSite } from "../src/lib/worker-heaps.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,7 +46,7 @@ const selfUrl = (root: string): string => pathToFileURL(join(root, WORKER)).href
  * Starts the fixture worker from this tsx test process, as serve's main thread starts its own. The execArgv is given,
  * not inherited: this runner preloads test/setup/tmp-hygiene.ts, a TypeScript preload serve never has (case 6).
  */
-function run(root: string, deps: StartWorkerDeps = {}, options: WorkerOptions = { execArgv: ["--import", "tsx"] }): Promise<{ bundled: boolean; execArgv: string[] }> {
+function run(root: string, deps: StartWorkerOpts = {}, options: WorkerOptions = { execArgv: ["--import", "tsx"] }): Promise<{ bundled: boolean; execArgv: string[] }> {
   return new Promise((resolve, reject) => {
     const worker = startWorker(selfUrl(root), options, { storeRoot: false, ...deps });
     worker.once("message", (m) => { void worker.terminate(); resolve(m as { bundled: boolean; execArgv: string[] }); });
@@ -81,7 +83,7 @@ test("W1-T9370: serve starts its workers from current worker bundles", async (t)
   const refused = makeTree(t);
   await build(refused);
   let attempts = 0;
-  const refuse: StartWorkerDeps["construct"] = (url, options) => {
+  const refuse: StartWorkerOpts["construct"] = (url, options) => {
     attempts++;
     if (String(url).endsWith(".mjs")) throw Object.assign(new Error("invalid execArgv"), { code: "ERR_WORKER_INVALID_EXEC_ARGV" });
     return startWorker(url, options, { override: url });
@@ -112,7 +114,7 @@ test("a bundle-started worker that exits before it speaks demotes its module; on
   const root = makeTree(t);
   await build(root);
   const started: string[] = [];
-  const fake = (speak: boolean): StartWorkerDeps["construct"] => (url) => {
+  const fake = (speak: boolean): StartWorkerOpts["construct"] => (url) => {
     started.push(String(url).endsWith(".mjs") ? "bundle" : "source");
     const w = new EventEmitter() as unknown as Worker;
     setImmediate(() => { if (speak) w.emit("message", {}); w.emit("exit", 1); });

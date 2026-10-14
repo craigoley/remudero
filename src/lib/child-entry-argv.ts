@@ -50,16 +50,8 @@ export const BUNDLED_WORKERS_ENV = "RMD_BUNDLED_WORKERS";
 export type WorkerEntryLog = (step: string, extra: Record<string, unknown>) => void;
 /** W1-T9370: what one module's worker start was decided to be, for the process's life. */
 interface WorkerEntryDecision { kind: "bundle" | "tsx"; reason: string; url?: URL }
-export interface StartWorkerDeps {
-  /** A caller's own worker URL (a test's): started as given, as before W1-T9370. */
-  override?: string | URL;
-  env?: NodeJS.ProcessEnv;
-  /** The store a miss materializes from; `false` never asks it. Default: this instance's. */
-  storeRoot?: string | false;
-  check?: (root: string, module: string, opts: { treeHash?: string }) => ChildEntryCurrency;
-  hash?: (root: string) => string;
-  construct?: (url: string | URL, options: WorkerOptions) => Worker;
-}
+/** startWorker's third parameter. */
+type StartWorkerOpts = NonNullable<Parameters<typeof startWorker>[2]>;
 
 let entryLog: WorkerEntryLog | undefined;
 /** Where each module's first worker.entry_resolved row goes; serve sets its ledger log at boot. */
@@ -108,13 +100,13 @@ export function execArgvWithoutTsx(argv: readonly string[]): string[] {
   return out;
 }
 
-function decide(module: string, root: string, deps: StartWorkerDeps): WorkerEntryDecision {
-  const script = (): { workerBundle: NonNullable<StartWorkerDeps["check"]>; sourceHash: (root: string) => string } =>
+function decide(module: string, root: string, opts: StartWorkerOpts): WorkerEntryDecision {
+  const script = (): { workerBundle: NonNullable<StartWorkerOpts["check"]>; sourceHash: (root: string) => string } =>
     createRequire(import.meta.url)("../../scripts/build-child-entries.mjs");
-  const check = deps.check ?? ((r, m, o) => script().workerBundle(r, m, o));
-  const hashOf = (): string => treeHashes.get(root) ?? (treeHashes.set(root, (deps.hash ?? ((r) => script().sourceHash(r)))(root)), treeHashes.get(root)!);
+  const check = opts.check ?? ((r, m, o) => script().workerBundle(r, m, o));
+  const hashOf = (): string => treeHashes.get(root) ?? (treeHashes.set(root, (opts.hash ?? ((r) => script().sourceHash(r)))(root)), treeHashes.get(root)!);
   let verdict = check(root, module, { treeHash: hashOf() });
-  const storeRoot = deps.storeRoot ?? defaultStoreRoot();
+  const storeRoot = opts.storeRoot ?? defaultStoreRoot();
   if (!verdict.current && storeRoot !== false && !materialized.has(root)) {
     materialized.add(root);
     const lookup = materializeFromStore(root, storeRoot);
@@ -135,21 +127,34 @@ function decide(module: string, root: string, deps: StartWorkerDeps): WorkerEntr
  * flag node names as invalid in a worker, which it retries without), or a bundle-started
  * worker's non-zero exit before its first message, which demotes that module to its source for the rest of the process.
  */
-export function startWorker(selfUrl: string | URL, options: WorkerOptions = {}, deps: StartWorkerDeps = {}): Worker {
-  const construct = deps.construct ?? ((url: string | URL, opts: WorkerOptions) => new Worker(url, opts));
-  if (deps.override) return construct(deps.override, options);
+export function startWorker(
+  selfUrl: string | URL,
+  options: WorkerOptions = {},
+  opts: {
+    /** A caller's own worker URL (a test's): started as given, as before W1-T9370. */
+    override?: string | URL;
+    env?: NodeJS.ProcessEnv;
+    /** The store a miss materializes from; `false` never asks it. Default: this instance's. */
+    storeRoot?: string | false;
+    check?: (root: string, module: string, opts: { treeHash?: string }) => ChildEntryCurrency;
+    hash?: (root: string) => string;
+    construct?: (url: string | URL, options: WorkerOptions) => Worker;
+  } = {},
+): Worker {
+  const construct = opts.construct ?? ((url: string | URL, workerOptions: WorkerOptions) => new Worker(url, workerOptions));
+  if (opts.override) return construct(opts.override, options);
   if (runsBundled()) return construct(bundledWorkerUrl(selfUrl), options);
   const self = new URL(selfUrl);
   const path = fileURLToPath(self);
   const at = path.lastIndexOf(`${sep}src${sep}`);
-  if ((deps.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return construct(self, options);
+  if ((opts.env ?? process.env)[BUNDLED_WORKERS_ENV] === "0" || at < 0) return construct(self, options);
   const root = path.slice(0, at);
   const module = relative(root, path).split(sep).join("/");
   let decision = decisions.get(path);
   if (!decision) {
     decision = (() => {
       try {
-        return decide(module, root, deps);
+        return decide(module, root, opts);
       } catch (err) {
         return { kind: "tsx" as const, reason: `decision-failed: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
       }
