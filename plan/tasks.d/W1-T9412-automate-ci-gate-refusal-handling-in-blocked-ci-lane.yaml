@@ -1,0 +1,31 @@
+- id: W1-T9412
+  title: Automate ci-gate refusal handling in blocked_ci lane
+  repo: remudero
+  depends_on:
+    - W1-T100
+    - W1-T107
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-14 proposal on verify-human-automate:W1-T5875, ratified via rmd approve:
+  
+    One cross-file invariant that can't be satisfied piecewise: a ci-gate refusal must flow from
+    ci-gate.ts through blocked-ci.ts and ci-manager.ts into the fix path, and a single test needs
+    all three files together. Run-task.ts must also reach it.
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/ci-gate.ts
+    - src/lib/blocked-ci.ts
+    - src/lib/ci-manager.ts
+    - src/run-task.ts
+  origin: "W1-T3814"
+  acceptance:
+    - claim: ci-gate refusal is automatically routed to the fix path without manual intervention
+      proof: "unit test: ci-gate refusal triggers automated fix path"
+    - claim: ci-gate refusal handling is invoked by the CI manager
+      proof: "grep: handleRefusal( in src/lib/ci-manager.ts"
+    - claim: the production run path (run-task.ts, a different src file from the new modules) calls into the CI manager, so the new modules are reached by more than their tests
+      proof: "grep: handleRefusal( in src/run-task.ts"
