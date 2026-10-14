@@ -17177,6 +17177,33 @@ export function refreshManagedCheckout(
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
 }
 
+/**
+ * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
+ * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
+ * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
+ */
+export async function buildEngineAfterStore(
+  repoDir: string,
+  stateRoot: string,
+  storeRoot: string,
+  stored: StoreBuildResult,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
+  seams: Partial<Pick<EngineDeps, "git" | "linkNodeModules" | "materialize" | "clock">> = {},
+): Promise<void> {
+  if (stored.kind !== "built" && stored.kind !== "present") return;
+  try {
+    const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
+    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
+    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...seams });
+    if (built.kind === "failed") return;
+    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git });
+    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
+  } catch (error) {
+    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
+  }
+}
+
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
 async function refreshHeldManagedCheckout(
   repoDir: string,
@@ -19822,7 +19849,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       storeRoot: childEntryStoreRoot(config.root),
       log,
       liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
-    });
+    }).then((stored) => buildEngineAfterStore(repoDir, join(config.root, "state"), childEntryStoreRoot(config.root), stored, log));
   }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
@@ -56769,7 +56796,8 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
+import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineDeps } from "./lib/engine-tree.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

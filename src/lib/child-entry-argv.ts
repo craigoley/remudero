@@ -8,7 +8,7 @@
 // W1-T8776: a tree with no current bundle first asks the shared store (src/lib/child-entry-store.ts) for a build at
 // its own source hash; a hit is copied into the tree and re-judged by childEntryIsCurrent before it runs.
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { defaultChildEntryStoreRoot, materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 
 interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
@@ -56,6 +56,8 @@ export function childEntryArgv(
   currencyCheck?: CurrencyCheck,
   /** The shared store; by default this instance's, and never consulted when `currencyCheck` replaces the judgement. */
   store: ChildEntryStoreOptions = {},
+  /** W1-T9077: a tree to resolve tsx from (a run child's engine tree); by default this package's own. */
+  tsxFrom?: string,
 ): ChildEntryLaunch {
   const judge = (): ChildEntryCurrency => {
     try {
@@ -82,8 +84,46 @@ export function childEntryArgv(
       return { argv: [after.bundle, ...args], kind: "bundle", reason: "store-hit", store: lookup };
     }
   }
-  const tsx = createRequire(import.meta.url).resolve("tsx");
-  return { argv: ["--import", tsx, resolve(root, sourceEntry), ...args], kind: "tsx", reason: verdict.reason, ...(lookup ? { store: lookup } : {}) };
+  const fromEngine = tsxFrom === undefined ? undefined : resolveTsxFrom(tsxFrom);
+  const tsx = fromEngine ?? createRequire(import.meta.url).resolve("tsx");
+  const reason = tsxFrom !== undefined && fromEngine === undefined ? `${verdict.reason}; tsx-not-in-engine` : verdict.reason;
+  return { argv: ["--import", tsx, resolve(root, sourceEntry), ...args], kind: "tsx", reason, ...(lookup ? { store: lookup } : {}) };
+}
+
+/** tsx as the tree at `root` resolves it, or undefined when that tree cannot (no node_modules, or no tsx in it). */
+function resolveTsxFrom(root: string): string | undefined {
+  try {
+    return createRequire(join(resolve(root), "package.json")).resolve("tsx");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "MODULE_NOT_FOUND") {
+      process.stderr.write(`tsx unresolvable from ${root}: ${String((err as Error)?.message ?? err).slice(0, 120)}\n`);
+    }
+    return undefined;
+  }
+}
+
+/** W1-T9077: a launch pinned to an engine tree: where to run it from and which tree that is. */
+export interface EngineChildLaunch extends ChildEntryLaunch {
+  /** The working directory the child starts in: the engine root, never the daemon's checkout. */
+  cwd: string;
+  engineRoot: string;
+}
+
+/**
+ * The argv for a RUN child, which outlives the daemon and so runs from its engine tree (src/lib/engine-tree.ts), not from
+ * the daemon's own checkout that sync_tree moves. A current bundle in the engine tree is named by its path inside it;
+ * otherwise the child runs the engine's source entry under the tsx the engine tree resolves, and `kind` / `reason` say so.
+ */
+export function engineChildEntryArgv(
+  engineRoot: string,
+  name: string,
+  sourceEntry: string,
+  args: readonly string[],
+  currencyCheck?: CurrencyCheck,
+  store: ChildEntryStoreOptions = {},
+): EngineChildLaunch {
+  const root = resolve(engineRoot);
+  return { ...childEntryArgv(root, name, sourceEntry, args, currencyCheck, store, root), cwd: root, engineRoot: root };
 }
 
 /** This instance's store, or `false` when its config cannot be read: the store is advisory and a miss runs tsx. */
