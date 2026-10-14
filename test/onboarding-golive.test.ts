@@ -6,7 +6,9 @@
  * ledger. Shadow rows are read from a throwaway `ledger.ndjson` seeded by the shared ledger fixture.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { appendFileSync, rmSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -21,7 +23,7 @@ import {
   type GoLiveDeps,
 } from "../src/lib/onboarding-golive.js";
 import { buildOnboardingGoLiveRoutes, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
+import { createService, createConfirmNonceStore, makeConfirmNonceRoute, type Route, type IdentityProvider } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { writeLedger as seedLedgerRows } from "./helpers/ledger-fixture.js";
@@ -402,5 +404,181 @@ test("the composed serve route table carries the onboarding routes for each live
   for (const name of ["core", "widgets", "gadgets"]) {
     assert.ok(paths.includes(`GET /v1/i/${name}/shadow-evidence`), name);
     assert.ok(paths.includes(`POST /v1/i/${name}/go-live`), name);
+  }
+});
+
+interface SelectedFixtureOptions {
+  repository?: string;
+  filePath?: string;
+  text?: string;
+  change?: (call: FakeCall, value: unknown, read: number) => unknown;
+}
+
+function selectedApi(options: SelectedFixtureOptions = {}) {
+  const repository = options.repository ?? "acme/registry", filePath = options.filePath ?? "ops/fleet registry.yaml";
+  const bytes = Buffer.from(options.text ?? REGISTRY), blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+  const baseSha = "c".repeat(40), parts = filePath.split("/"), trees = parts.map((_, i) => String(i + 1).repeat(40));
+  const repo = `repos/${repository}`, contentPath = `${repo}/contents/${parts.map(encodeURIComponent).join("/")}`;
+  const calls: FakeCall[] = [];
+  let read = 0;
+  const api: GoLiveApi = async (method, path, body) => {
+    const call = { method, path, ...(body ? { body: structuredClone(body) } : {}) }; calls.push(call);
+    let value: unknown;
+    if (method === "GET") {
+      read++;
+      if (path === repo) value = { id: 91, full_name: repository, default_branch: "main" };
+      else if (path === `${repo}/git/ref/heads/main`) value = { object: { type: "commit", sha: baseSha } };
+      else if (path === `${repo}/git/commits/${baseSha}`) value = { sha: baseSha, tree: { sha: trees[0] } };
+      else if (path === `${contentPath}?ref=${baseSha}`) value = { type: "file", path: filePath, encoding: "base64", size: bytes.length, sha: blob, content: bytes.toString("base64") };
+      else {
+        const index = trees.findIndex(sha => path === `${repo}/git/trees/${sha}`);
+        assert.ok(index >= 0, `unexpected selected read ${path}`);
+        value = { sha: trees[index], truncated: false, tree: [{ path: parts[index], type: index === parts.length - 1 ? "blob" : "tree", mode: index === parts.length - 1 ? "100644" : "040000", sha: index === parts.length - 1 ? blob : trees[index + 1] }] };
+      }
+    } else if (path === `${repo}/pulls`) value = { number: 83, html_url: `https://github.com/${repository}/pull/83` };
+    else if ((method === "POST" && path === `${repo}/git/refs`) || (method === "PUT" && path === contentPath)) value = {};
+    else assert.fail(`unexpected selected effect ${method} ${path}`);
+    const changed = options.change ? options.change(call, value, read) : value;
+    if (changed instanceof Error) throw changed;
+    return changed;
+  };
+  return { api, calls, repository, filePath, blob, baseSha, contentPath };
+}
+
+function selectedDeps(fixture: ReturnType<typeof selectedApi>, registryTarget: unknown = { repository: fixture.repository, filePath: fixture.filePath }) {
+  return Object.assign(goLiveDeps(fixture.api), { registryTarget });
+}
+
+test("registry writer explicit target wins and never falls back", async () => {
+  for (const repository of ["acme/registry", "other/ops"]) {
+    const f = selectedApi({ repository });
+    const result = await requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f));
+    assert.equal(result.pr_url, `https://github.com/${repository}/pull/83`);
+    assert.ok(f.calls.every(c => c.path.startsWith(`repos/${repository}`)));
+  }
+  const f = selectedApi({ change: () => new Error("selected outage; legacy is healthy") });
+  const legacy = fakeApi(), calls: FakeCall[] = [];
+  const api: GoLiveApi = async (method, path, body) => { calls.push({ method, path }); return path.startsWith("repos/acme/fleet") ? legacy.api(method, path, body) : f.api(method, path, body); };
+  const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, Object.assign(goLiveDeps(api), { registryTarget: { repository: f.repository, filePath: f.filePath } })));
+  assert.equal(error.code, "registry_target_unavailable");
+  assert.equal(legacy.calls.length, 0); assert.equal(calls.length, 1);
+});
+
+test("registry writer legacy target keeps existing requests", async () => {
+  const f = fakeApi();
+  const receipt = await requestGoLive({ instance: "widgets", actor: "owner" }, goLiveDeps(f.api));
+  assert.deepEqual(receipt, { status: "review_pending", instance: "widgets", pr_url: "https://github.com/acme/fleet/pull/42", pr_number: 42 });
+  assert.deepEqual(f.calls.map(c => [c.method, c.path]), [
+    ["GET", "repos/acme/fleet"], ["GET", "repos/acme/fleet/git/ref/heads/main"],
+    ["GET", "repos/acme/fleet/contents/.remudero/daemon-instances.yaml?ref=base-sha"],
+    ["POST", "repos/acme/fleet/git/refs"], ["PUT", "repos/acme/fleet/contents/.remudero/daemon-instances.yaml"], ["POST", "repos/acme/fleet/pulls"],
+  ]);
+});
+
+test("registry writer invalid or stale selected target makes no writes", async () => {
+  const invalid = [null, "", {}, { repository: "acme/registry" }, { repository: "bad repo", filePath: "x.yaml" },
+    ...["", " ", "/host/registry.yaml", "../x", "ops/../x", "ops/./x", "ops//x", "ops/x/", "ops/x?ref=main", "ops/x#head", "ops\\x", "C:/x", "ops/%2e%2e/x", "ops/\0x", "ops/x\n", Array(18).fill("dir").join("/")].map(filePath => ({ repository: "acme/registry", filePath }))];
+  for (const target of invalid) {
+    const f = selectedApi();
+    assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f, target)))).code, "registry_target_invalid", JSON.stringify(target));
+    assert.equal(f.calls.length, 0);
+  }
+  for (const revise of [
+    (v: Record<string, unknown>) => ({ ...v, id: 92 }),
+    (v: Record<string, unknown>) => ({ ...v, default_branch: "other" }),
+  ]) {
+    let reads = 0;
+    const f = selectedApi({ change: (call, value) => call.path === "repos/acme/registry" && ++reads > 1 ? revise(value as Record<string, unknown>) : value });
+    assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)))).code, "registry_target_stale");
+    assert.ok(f.calls.every(c => c.method === "GET"));
+  }
+});
+
+test("registry writer checks regular file identity and revision before writes", async () => {
+  for (const fault of ["symlink", "submodule", "directory", "truncated", "missing", "duplicate", "wrong-sha", "wrong-bytes", "wrong-repo", "stale-ref", "unreadable"]) {
+    let refReads = 0;
+    const f = selectedApi({ change: (call, value) => {
+      const v = value as Record<string, unknown>;
+      if (fault === "wrong-repo" && call.path === "repos/acme/registry") return { ...v, full_name: "other/ops" };
+      if (fault === "stale-ref" && call.path.includes("/git/ref/") && ++refReads > 1) return { object: { type: "commit", sha: "d".repeat(40) } };
+      if (call.path.includes("/git/trees/")) {
+        if (fault === "unreadable") return new Error("tree outage");
+        if (fault === "truncated") return { ...v, truncated: true };
+        const tree = v.tree as Array<Record<string, unknown>>;
+        if (tree[0].type === "blob") {
+          if (fault === "missing") return { ...v, tree: [] };
+          if (fault === "duplicate") return { ...v, tree: [...tree, tree[0]] };
+          if (["symlink", "submodule", "directory"].includes(fault)) return { ...v, tree: [{ ...tree[0], type: fault === "directory" ? "tree" : fault === "submodule" ? "commit" : "blob", mode: fault === "symlink" ? "120000" : fault === "submodule" ? "160000" : "040000" }] };
+        }
+      }
+      if (call.path.includes("/contents/")) {
+        if (fault === "wrong-sha") return { ...v, sha: "e".repeat(40) };
+        if (fault === "wrong-bytes") return { ...v, content: Buffer.from(REGISTRY + "# revised\n").toString("base64") };
+      }
+      return value;
+    } });
+    await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+    assert.ok(f.calls.every(c => c.method === "GET"), fault);
+  }
+});
+
+test("registry writer targets only chosen repo path and file SHA", async () => {
+  for (const instance of ["widgets", "gadgets"]) {
+    const f = selectedApi({ filePath: "private/registry-ü.yaml" }), deps = selectedDeps(f);
+    const receipt = await requestGoLive({ instance, actor: "owner" }, deps);
+    const writes = f.calls.filter(c => c.method !== "GET");
+    assert.deepEqual(writes.map(c => [c.method, c.path]), [["POST", "repos/acme/registry/git/refs"], ["PUT", f.contentPath], ["POST", "repos/acme/registry/pulls"]]);
+    const branch = String(writes[0].body?.ref).replace("refs/heads/", "");
+    assert.equal(writes[0].body?.sha, f.baseSha); assert.equal(writes[1].body?.branch, branch); assert.notEqual(branch, "main");
+    assert.equal(writes[1].body?.sha, f.blob);
+    const expected = instance === "widgets" ? REGISTRY.replace("mode: shadow # flips via PR", "mode: live # flips via PR") : REGISTRY.replace("github_repo: acme/gadgets\n    mode: shadow", "github_repo: acme/gadgets\n    mode: live");
+    assert.equal(Buffer.from(String(writes[1].body?.content), "base64").toString("utf8"), expected);
+    assert.equal(receipt.status, "review_pending");
+    const binding = (receipt as unknown as { binding: { target_digest: string; content_digest: string; publication_permission: string } }).binding;
+    assert.equal(binding.content_digest, createHash("sha256").update(REGISTRY).digest("hex"));
+    assert.match(binding.target_digest, /^[a-f0-9]{64}$/); assert.equal(binding.publication_permission, "not-granted");
+    assert.ok(!JSON.stringify(binding).includes(f.filePath));
+    assert.ok(!JSON.stringify(deps.written).includes(f.filePath));
+  }
+});
+
+test("registry writer route snapshots target without weakening operator confirmation", async (t) => {
+  const f = selectedApi(), target = { repository: f.repository, filePath: f.filePath };
+  const wiring = Object.assign(goLiveDeps(f.api), { registryTarget: target });
+  const route = find(buildOnboardingGoLiveRoutes(routeDeps(t, { onboardingGoLive: wiring })), "POST", "/v1/i/widgets/go-live");
+  target.repository = "other/ops"; target.filePath = "wrong.yaml";
+  assert.equal(route.scope, "write"); assert.equal(route.tier, "high");
+  assert.equal((await invoke(route)).status, 403); assert.equal(f.calls.length, 0);
+  const store = createConfirmNonceStore();
+  const provider: IdentityProvider = { name: "fixture-operator", grant: () => undefined, authorize: req => req.headers["x-owner"] === "yes" ? { scopes: new Set(["read", "write"]), tier: "high", ...(req.headers["x-shared"] ? {} : { actor: "owner" }) } : undefined };
+  const server = createService({ tokens: { read: "read", write: "write" }, routes: [makeConfirmNonceRoute(store), route], providers: [provider], enforceWriteTiers: true, confirmNonces: store });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`, headers = { "x-owner": "yes", "content-type": "application/json" };
+    const missing = await fetch(base + route.path, { method: "POST", headers, body: "{}" });
+    assert.equal(missing.status, 403); assert.equal(f.calls.length, 0);
+    const confirm = async (shared = false) => {
+      const r = await fetch(base + "/v1/confirm", { method: "POST", headers: { ...headers, ...(shared ? { "x-shared": "yes" } : {}) }, body: JSON.stringify({ method: "POST", path: route.path, payload: "{}" }) });
+      assert.equal(r.status, 200); return (await r.json() as { nonce: string }).nonce;
+    };
+    const shared = await fetch(base + route.path, { method: "POST", headers: { ...headers, "x-shared": "yes", "x-confirm-nonce": await confirm(true) }, body: "{}" });
+    assert.equal(shared.status, 403); assert.equal(f.calls.length, 0);
+    const nonce = await confirm();
+    const good = await fetch(base + route.path, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: "{}" });
+    assert.equal(good.status, 202); assert.equal((await good.json() as { status: string }).status, "review_pending");
+    const replay = await fetch(base + route.path, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: "{}" });
+    assert.equal(replay.status, 403); assert.ok(f.calls.every(c => c.path.startsWith("repos/acme/registry")));
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+});
+
+test("registry writer refuses partial failure without publishing success receipt", async () => {
+  for (const phase of ["branch", "file", "pr"]) {
+    const f = selectedApi({ change: (call, value) => call.method === "POST" && call.path.endsWith("/git/refs") && phase === "branch" || call.method === "PUT" && phase === "file" || call.method === "POST" && call.path.endsWith("/pulls") && phase === "pr" ? new Error("effect outcome unknown") : value });
+    const deps = selectedDeps(f), error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, deps));
+    assert.equal(error.code, "go_live_proposal_incomplete");
+    const receipt = error.receipt as { status: string; phase: string; outcome: string };
+    assert.equal(receipt.status, "proposal_incomplete"); assert.equal(receipt.phase, phase); assert.equal(receipt.outcome, "unknown");
+    assert.equal(f.calls.filter(c => c.method !== "GET").length, phase === "branch" ? 1 : phase === "file" ? 2 : 3);
+    assert.equal(deps.written.length, 0);
   }
 });
