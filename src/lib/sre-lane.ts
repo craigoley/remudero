@@ -512,10 +512,10 @@ export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.sta
  * the root is /home/node/Remudero; mountinfo reads the filesystem-relative source (/state2), so the
  * host path cannot be recovered in there either. MEASURED 2026-10-14: 63 `sre_lane.disabled` rows
  * and 0 `sre_lane.started` on core. So `deploy/recycle-container.sh --instance` and the installed
- * launcher pass `RMD_INSTANCE_NAME`, and a set name wins: it must name exactly one parsed row, and a
- * name the registry does not hold resolves false naming it — never a fallback to the root match,
- * which would hide a misconfigured creator. With no name (a host-side caller), the root match runs
- * as before. `env` defaults to `process.env`: the daemon's callers (src/run-task.ts and
+ * launcher pass `RMD_INSTANCE_NAME`, and a set name wins: it must name a parsed row (the parser
+ * refuses a name declared twice), and a name the registry does not hold resolves false naming it —
+ * never a fallback to the root match, which would hide a misconfigured creator. With no name (a
+ * host-side caller), the root match runs as before. `env` defaults to `process.env`: the daemon's callers (src/run-task.ts and
  * {@link daemonSreLaneInput}) read it from the container's own environment.
  */
 export function resolveSreLaneInstance(input: {
@@ -536,22 +536,15 @@ export function resolveSreLaneInstance(input: {
   if (name === undefined) {
     return { resolved: false, resolvedBy, why: `state root ${input.stateRoot} is not exactly one instance's state_dir in ${input.registryPath}` };
   }
-  let rows: RegistryInstance[];
+  let row: RegistryInstance | undefined;
   try {
-    rows = parseInstanceRegistry(text).instances.filter((instance) => instance.name === name);
+    // The parser refuses a name declared twice (duplicate_instance), so a found row is the only one.
+    row = parseInstanceRegistry(text).instances.find((instance) => instance.name === name);
   } catch (error) {
     return { resolved: false, why: `the instance registry ${input.registryPath} is refused: ${(error as Error).message}` };
   }
-  if (rows.length !== 1) {
-    return {
-      resolved: false,
-      resolvedBy,
-      why: named === undefined
-        ? `instance '${name}' is not a parsed row of ${input.registryPath}`
-        : `RMD_INSTANCE_NAME '${name}' names ${rows.length === 0 ? "no instance" : `${rows.length} instances`} in ${input.registryPath}`,
-    };
-  }
-  const [row] = rows;
+  if (row === undefined && named !== undefined) return { resolved: false, resolvedBy, why: `RMD_INSTANCE_NAME '${name}' names no instance in ${input.registryPath}` };
+  if (row === undefined) return { resolved: false, resolvedBy, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
   return { resolved: true, resolvedBy, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
 }
 
