@@ -3162,7 +3162,11 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
     }
   }
   return async () => {
-    await fs.promises.unlink(lockPath).catch(() => undefined); // already gone — idempotent
+    try {
+      await fs.promises.unlink(lockPath);
+    } catch {
+      // already gone — idempotent, mirrors updateProposalRegistry's own lock cleanup
+    }
   };
 }
 
