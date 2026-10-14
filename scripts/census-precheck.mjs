@@ -728,6 +728,43 @@ const GIT_LEAF_CENSUS_PATHS = [
   "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
 ];
 
+/**
+ * #11677 (2026-10-14): a build adding a raw `git worktree add` site (src/lib/engine-tree.ts::buildEngine) was
+ * refused by test/worktree-creation-census.test.ts only in CI's rule-checks, costing a fix round. The census
+ * keys each raw site by its enclosing declaration, so the trigger reads the same key: the shape is
+ * src/lib/worktree-sites.ts's RAW_WORKTREE_ADD_RE and the two declaration patterns its enclosingSiteName scans
+ * upward for (test/the-precheck-asks-the-worktree-creation-census.test.ts holds both copies equal on the real tree).
+ */
+export const RAW_WORKTREE_ADD_SHAPE = /["']worktree["']\s*,\s*["']add["']/;
+const SITE_FUNCTION_RE = /^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/;
+const SITE_METHOD_RE = /^\s*(\w+)\s*:\s*\(/;
+const WORKTREE_CENSUS_PATHS = ["src/lib/worktree-sites.ts", "src/lib/worker.ts", "test/worktree-creation-census.test.ts"];
+
+/** The census key of each raw site in `text`: its enclosing declaration's name, sorted, comment lines skipped. */
+export function rawWorktreeAddSiteKeys(text) {
+  const lines = String(text ?? "").split("\n");
+  const keys = [];
+  lines.forEach((line, i) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
+    if (!RAW_WORKTREE_ADD_SHAPE.test(line)) return;
+    let site = "";
+    for (let j = i; j >= 0 && site === ""; j--) {
+      site = SITE_FUNCTION_RE.exec(lines[j])?.[1] ?? SITE_METHOD_RE.exec(lines[j])?.[1] ?? "";
+    }
+    keys.push(site);
+  });
+  return keys.sort();
+}
+
+/** True when the diff touches the registry, the canonical sites or the census, or moves a src/ raw site's key. */
+export function worktreeCreationTrigger({ changed, readHead, readBase }) {
+  if (changed.some((p) => WORKTREE_CENSUS_PATHS.includes(p))) return true;
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  return changed.filter((p) => CLOCK_SCOPE_RE.test(p)).some((p) =>
+    rawWorktreeAddSiteKeys(readHead(p)).join("\n") !== rawWorktreeAddSiteKeys(readBase(p)).join("\n"));
+}
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
@@ -785,6 +822,8 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
+  { testFile: "test/worktree-creation-census.test.ts", script: "census:worktree-creation", trigger: worktreeCreationTrigger,
+    remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
 /**
