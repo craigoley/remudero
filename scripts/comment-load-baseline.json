@@ -23,6 +23,7 @@
   "deploy/serve-container.sh": 265,
   "deploy/verify-image.sh": 322,
   "hooks/commit-msg": 37,
+  "hooks/deny-floor.sh": 500,
   "hooks/mkdtemp-allowlist.txt": 0,
   "scripts/acceptance-author-gate.mjs": 500,
   "scripts/assertion-discrimination-baseline.json": 0,
