@@ -3474,6 +3474,324 @@ components:
         evidenceRef:
           type: string
 
+    # ── W1-T3956 -- automation-trigger-v1: named scheduled, webhook and manual starts above the
+    # cadence and event-wake mechanisms, with bounded run history (src/lib/automation-trigger.ts).
+    AutomationTriggerDefinition:
+      type: object
+      description: >
+        An immutable automation-trigger-v1 definition (`validateAutomationTriggerDefinition`). Its
+        activation mode never changes after registration; pause/resume is registry state. A
+        definition, like every trigger request, is a closed whitelist: a command, credential, raw
+        prompt or model instruction is refused by name, and any unnamed field is refused.
+      required: [version, triggerId, flowId, activation, scope, profileId, limits, expirySeconds, staleAfterSeconds, concurrencyKey]
+      properties:
+        version:
+          type: string
+          enum: [automation-trigger-v1]
+        triggerId:
+          type: string
+          maxLength: 160
+        flowId:
+          type: string
+          maxLength: 160
+          description: A registered flow whose automation-action-v1 contract and capability grant already exist.
+        activation:
+          type: object
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [schedule, webhook, manual]
+            scheduleId:
+              type: string
+              description: Schedule only -- the cadence entry (W1-T2923) this trigger runs on.
+            timezone:
+              type: string
+              description: Schedule only -- an IANA timezone.
+            dst:
+              type: string
+              enum: [skip-gap, shift-gap]
+              description: >
+                Schedule only. A non-existent (spring-forward) wall time is skipped or shifted; an
+                ambiguous (fall-back) wall time fires once, at its first occurrence.
+            event:
+              type: string
+              description: Webhook only -- the authenticated event (W1-T2568) this trigger accepts.
+        scope:
+          type: object
+          properties:
+            repo:
+              type: string
+            instance:
+              type: string
+        profileId:
+          type: string
+          description: The environment/policy profile, resolved at execution time, never at registration.
+        limits:
+          type: object
+          required: [maxQueued, maxInFlight]
+          properties:
+            maxQueued:
+              type: integer
+              minimum: 1
+              maximum: 100
+            maxInFlight:
+              type: integer
+              minimum: 1
+              maximum: 20
+        expirySeconds:
+          type: integer
+          minimum: 1
+          maximum: 604800
+        staleAfterSeconds:
+          type: integer
+          minimum: 1
+          maximum: 604800
+        concurrencyKey:
+          type: string
+          description: Runs sharing this key share one in-flight bound; defaults to the triggerId.
+
+    AutomationTriggerRunEvent:
+      type: object
+      description: One append-only history entry. Nothing ever rewrites an earlier event.
+      required: [kind, at, reason]
+      properties:
+        kind:
+          type: string
+          enum: [queued, refused, start-refused, started, heartbeat, success, failed, expired, cancelled]
+        at:
+          type: string
+          format: date-time
+        code:
+          type: string
+        reason:
+          type: string
+          maxLength: 320
+        receiptId:
+          type: string
+          description: The linked automation-action-v1 completion receipt.
+        profile:
+          type: object
+          required: [profileId, revision]
+          properties:
+            profileId:
+              type: string
+            revision:
+              type: string
+
+    AutomationTriggerRun:
+      type: object
+      description: >
+        One bounded run as read now. `stale` (in progress with no observation inside the trigger's
+        staleAfterSeconds) and `unknown` (the latest observation is dated after this read) are
+        derived at read time; every other state is the run's latest stored event. A manual replay
+        is a NEW run linked by `replayOf`; the original is never modified.
+      required: [version, runId, triggerId, flowId, actionId, approvalPolicy, activationMode, source, scope, profileId,
+        idempotencyKey, requestedAt, expiresAt, concurrencyKey, state, reason, observedAt, freshness, events]
+      properties:
+        version:
+          type: string
+          enum: [automation-trigger-v1]
+        runId:
+          type: string
+        triggerId:
+          type: string
+        flowId:
+          type: string
+        actionId:
+          type: string
+          description: The flow's automation-action-v1 contract; executing it still passes that contract's preflight and approval gate.
+        approvalPolicy:
+          type: string
+          enum: [none, human]
+        activationMode:
+          type: string
+          enum: [schedule, webhook, manual]
+        source:
+          type: string
+          enum: [schedule, webhook, manual]
+        scope:
+          type: object
+          properties:
+            repo:
+              type: string
+            instance:
+              type: string
+        timezonePolicy:
+          type: object
+          required: [timezone, dst]
+          properties:
+            timezone:
+              type: string
+            dst:
+              type: string
+              enum: [skip-gap, shift-gap]
+        profileId:
+          type: string
+        resolvedProfile:
+          type: object
+          required: [profileId, revision]
+          properties:
+            profileId:
+              type: string
+            revision:
+              type: string
+        idempotencyKey:
+          type: string
+        deliveryId:
+          type: string
+        scheduledFor:
+          type: string
+          format: date-time
+        requestedBy:
+          type: string
+          description: Manual only -- the verified request identity, never a body field.
+        requestedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        concurrencyKey:
+          type: string
+        replayOf:
+          type: string
+        state:
+          $ref: "#/components/schemas/AutomationTriggerRunState"
+        code:
+          type: string
+        reason:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: object
+          required: [ageSeconds, status]
+          properties:
+            ageSeconds:
+              type: integer
+              minimum: 0
+            status:
+              type: string
+              enum: [fresh, stale, unknown]
+        receiptId:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationTriggerRunEvent"
+
+    AutomationTriggerRunState:
+      type: string
+      description: The bounded run-history states of automation-trigger-v1.
+      enum: [refused, queued, in-progress, success, failed, expired, cancelled, stale, unknown]
+
+    AutomationTriggerHistory:
+      type: object
+      required: [version, generatedAt, triggers, runs]
+      properties:
+        version:
+          type: string
+          enum: [automation-trigger-v1]
+        generatedAt:
+          type: string
+          format: date-time
+        triggers:
+          type: array
+          items:
+            type: object
+            required: [trigger, state, reason, changedAt, source, queued, inFlight]
+            properties:
+              trigger:
+                $ref: "#/components/schemas/AutomationTriggerDefinition"
+              state:
+                type: string
+                enum: [active, paused]
+              reason:
+                type: string
+              changedAt:
+                type: string
+                format: date-time
+              source:
+                type: object
+                description: The trigger's external source as last observed; `unknown` when never observed, never a quiet success.
+                required: [status, reason]
+                properties:
+                  status:
+                    type: string
+                    enum: [available, unavailable, unknown]
+                  observedAt:
+                    type: string
+                    format: date-time
+                  reason:
+                    type: string
+              queued:
+                type: integer
+              inFlight:
+                type: integer
+                description: In-progress and stale runs -- running work stays visible on a paused trigger.
+        runs:
+          type: array
+          description: Newest first.
+          items:
+            $ref: "#/components/schemas/AutomationTriggerRun"
+
+    AutomationTriggerSubmission:
+      type: object
+      description: >
+        `submitAutomationTrigger`'s answer. `queued` admitted a new run; `duplicate` returns the
+        run a repeated idempotency key or delivery id already started; `refused` names its code
+        (e.g. unregistered-trigger, source-not-permitted, trigger-paused, request-expired,
+        queue-full, history-full, journal-unavailable) and, against a known trigger, the refused
+        run recorded in history.
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [queued, duplicate, refused]
+        run:
+          $ref: "#/components/schemas/AutomationTriggerRun"
+        code:
+          type: string
+        reason:
+          type: string
+        field:
+          type: string
+
+    AutomationTriggerRunRequest:
+      type: object
+      additionalProperties: false
+      required: [triggerId, idempotencyKey]
+      properties:
+        triggerId:
+          type: string
+        idempotencyKey:
+          type: string
+
+    AutomationTriggerActivationRequest:
+      type: object
+      additionalProperties: false
+      required: [triggerId, state]
+      properties:
+        triggerId:
+          type: string
+        state:
+          type: string
+          enum: [active, paused]
+        reason:
+          type: string
+
+    AutomationTriggerReplayRequest:
+      type: object
+      additionalProperties: false
+      required: [runId, idempotencyKey]
+      properties:
+        runId:
+          type: string
+        idempotencyKey:
+          type: string
+
     OperatorAgentActionHistory:
       type: object
       required: [action, state, approval, receipts]
@@ -15003,6 +15321,164 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EmergencyStopAdmissionRefusal"
+
+  /v1/automation/triggers:
+    get:
+      summary: W1-T3956 -- read every automation-trigger-v1 trigger and its bounded run history.
+      description: >
+        `readAutomationTriggerHistory` over this process's registry. Triggers read `active` or
+        `paused` with their reason and source health; runs read refused, queued, in-progress,
+        success, failed, expired, cancelled, stale or unknown, each with its source, observedAt,
+        freshness and reason. An unavailable profile or source reads as such, never as success.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: Trigger registry and run history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerHistory"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/automation/triggers/run:
+    post:
+      summary: W1-T3956 -- start a named trigger manually (MIDDLE write tier).
+      description: >
+        Submits a `manual` automation-trigger-v1 request through `submitAutomationTrigger`, the one
+        entry schedule and verified-webhook starts take too. The body names only a trigger and an
+        idempotency key; the requester is the verified request identity, so a body can never claim
+        a webhook or schedule source, nor carry a command, credential, prompt or model instruction.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationTriggerRunRequest"
+      responses:
+        "202":
+          description: A new run was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "200":
+          description: The idempotency key already started a run; that run is returned and nothing is appended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The trigger is not registered (`unregistered-trigger`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "409":
+          description: Refused by name (paused, expired, queue full, history full, unregistered flow); the refused run is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "503":
+          description: The trigger journal could not be written (`journal-unavailable`); nothing was admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+
+  /v1/automation/triggers/activation:
+    post:
+      summary: W1-T3956 -- pause or resume a trigger (MIDDLE write tier).
+      description: >
+        Pause stops new admission and new starts; already-running work keeps running and stays
+        visible. Resume admits again.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationTriggerActivationRequest"
+      responses:
+        "200":
+          description: Activation state recorded.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The trigger is not registered.
+        "503":
+          description: The trigger journal could not be written; nothing changed.
+
+  /v1/automation/triggers/replay:
+    post:
+      summary: W1-T3956 -- replay a finished run as a new linked manual run (MIDDLE write tier).
+      description: >
+        Only a terminal run is replayable. The replay is a NEW manual run with `replayOf` naming the
+        original, admitted through `submitAutomationTrigger` -- so a paused trigger, a full queue and
+        a repeated idempotency key refuse or dedupe it -- and the original run, its events and its
+        receipt are never modified.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationTriggerReplayRequest"
+      responses:
+        "202":
+          description: A linked replay run was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "200":
+          description: This idempotency key already replayed the run; that replay is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The run does not exist (`unknown-run`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "409":
+          description: Refused by name (run-not-terminal, trigger-paused, queue-full, ...).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
+        "503":
+          description: The trigger journal could not be written; nothing was admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationTriggerSubmission"
 
   /v1/operator-agent/actions:
     get:

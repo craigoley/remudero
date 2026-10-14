@@ -1599,14 +1599,24 @@ pid_ledger_activity() {
 
 # The worktree(s) a lock's holder was using: checked out at the claimed branch for a
 # `fix-branch--<owner>--<repo>--<branch>` claim, or named `run-|sweep-<taskId>-*` for a task lock.
+#
+# W1-T9410: EVERY READ HERE IS BEST-EFFORT, as in lock_host_field. OBSERVED 2026-10-14: all six
+# worktree dirs on the host named a git admin dir that had been pruned, so `sed` on "${gitdir}/HEAD"
+# exited 2 (GNU; BSD exits 1), the unguarded assignment tripped `set -e`, and the STALLED recycle died
+# mid-reclaim with its lock unmoved and its PAUSE on disk. An unreadable `.git` file, or a gitdir with
+# no HEAD, now gives an empty ref: the worktree cannot match a fix-branch claim and is skipped there,
+# while a task lock still matches by the worktree's NAME, which needs no admin dir.
 holder_worktrees() {
   local key d gitdir ref found=""
   key="$(basename "$1" .lock)"
   for d in "${STATE_DIR}/worktrees"/*; do
     [ -f "${d}/.git" ] || continue
-    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1)"
+    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1 || true)"
     case "${gitdir}" in "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;; esac
-    ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g')"
+    ref=""
+    if [ -n "${gitdir}" ] && [ -f "${gitdir}/HEAD" ]; then
+      ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g' || true)"
+    fi
     case "${key}" in
       fix-branch--*) [ -n "${ref}" ] && [ "${key%"--${ref}"}" != "${key}" ] || continue ;;
       *) case "$(basename "${d}")" in "run-${key}-"*|"sweep-${key}-"*) : ;; *) continue ;; esac ;;
@@ -1656,15 +1666,18 @@ reclaim_frozen_daemon_holdings() {
     reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
     mkdir -p "${reclaimed_dir}"
     reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    # W1-T9410: the reason is written to a `.partial` name and renamed only AFTER the lock has moved,
+    # so a write that dies part-way can never leave a `.reason` beside a lock that was never moved.
     {
       printf 'reclaimed by recycle-container.sh (W1-T6597) pid %s at %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
       printf 'verdict: %s\nholder: pid %s host %s — the drain.lock holder, no ledger row in %ss\n' \
         "${RECYCLE_VERDICT}" "${dpid}" "${dhost}" "${STALL_BOUND_S}"
       holder_worktrees "${f}"
       printf 'kept: worktrees, worker homes and logs are untouched — recover the work from the worktree above\n'
-    } > "${reclaimed_path}.reason"
+    } > "${reclaimed_path}.reason.partial"
     mv "${f}" "${reclaimed_path}"
-    sed 's/^/    /' "${reclaimed_path}.reason" >&2
+    mv "${reclaimed_path}.reason.partial" "${reclaimed_path}.reason"
+    sed 's/^/    /' "${reclaimed_path}.reason" >&2 2>/dev/null || true
   done
   while read -r cpid cppid; do
     [ "${cppid:-}" = "${dpid}" ] || continue
