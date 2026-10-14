@@ -195,8 +195,9 @@ export interface ReaskRecord {
  * parked record in that family.
  */
 export function reaskIntervalMs(family: ReaskRecord | undefined, repeats: number): number {
-  const p = (1 + (family?.flipped ?? 0)) / (2 + (family?.asked ?? 0));
-  return MACHINE_JUDGE_REASK_SCALE_MS * ((1 - p) / p) * 2 ** repeats;
+  // The odds against a flip, (1 + held) / (1 + flipped), taken over whole counts so an interval is exact.
+  const flipped = family?.flipped ?? 0;
+  return MACHINE_JUDGE_REASK_SCALE_MS * ((1 + (family?.asked ?? 0) - flipped) / (1 + flipped)) * 2 ** repeats;
 }
 
 /** `<planDir>/tasks.d/<file>` for a record that lives in a shard, taken from the record's own
@@ -620,6 +621,9 @@ async function reaskParkedEscalations(c: {
   state.reask = Object.fromEntries(
     Object.entries(state.reask ?? {}).filter(([id]) => plan.byId.get(id)?.status === "queued" && plan.byId.get(id)?.retirement === undefined),
   );
+  // Every record's cadence reads the family's history as it stood when the pass began, so a re-ask
+  // answered earlier in this pass never shifts a sibling's wait, and plan order cannot change who is asked.
+  const cadence: Record<string, ReaskRecord> = structuredClone(state.reaskRecord ?? {});
   const pending = new Map<string, PendingReask>();
   let room = c.room;
   for (const task of plan.tasks) {
@@ -637,7 +641,7 @@ async function reaskParkedEscalations(c: {
     const entry = prior?.pin === pin ? prior : { pin, inputs, askedAt: task.risk_ruling!.judged_at, repeats: 0 };
     state.reask[task.id] = entry;
     const moved = movedEvidence(entry.inputs, inputs);
-    const intervalMs = reaskIntervalMs(state.reaskRecord?.[family], entry.repeats);
+    const intervalMs = reaskIntervalMs(cadence[family], entry.repeats);
     // Written as "not yet due" negated, so an unparseable judged_at (NaN) reads as due and is asked.
     const cadenceDue = !(Date.parse(entry.askedAt) + intervalMs > ports.clock.now());
     if (moved.length === 0 && !cadenceDue) continue;
