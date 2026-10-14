@@ -850,7 +850,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   const repairLadder = (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   switch (path) {
     case "/v1/status":
-      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder, fleetRuntimeHealth: (deps.fleetRuntimeHealth?.read ?? readFleetRuntimeHealth)(deps.fleetControlRoot, nowMs) };
+      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder, fleetRuntimeHealth: runtimeHealthFor(deps, nowMs) };
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -884,6 +884,12 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
  */
 export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLadderState): Route {
   return spliceJsonField(route, "repairLadder", read);
+}
+
+/** W1-T2858: the production reader (one shared-state file read) unless a test injects one. */
+function runtimeHealthFor(deps: ServeDeps, nowMs: number): FleetRuntimeHealth {
+  const inject = deps.fleetRuntimeHealth?.read;
+  return inject ? inject(deps.fleetControlRoot, nowMs) : readFleetRuntimeHealth(deps.fleetControlRoot, nowMs);
 }
 
 /**
@@ -2867,7 +2873,7 @@ function assembleServeRoutes(
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   const reportRuntimeHealth = fleetRuntimeHealthTelemetry();
   const readRuntimeHealth = (nowMs: number): FleetRuntimeHealth =>
-    reportRuntimeHealth((deps.fleetRuntimeHealth?.read ?? readFleetRuntimeHealth)(deps.fleetControlRoot, nowMs));
+    reportRuntimeHealth(runtimeHealthFor(deps, nowMs));
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
