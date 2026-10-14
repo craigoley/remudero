@@ -36,7 +36,9 @@ export function applyWorkerMcpIsolation(options: Options): void {
   const allowed = new Set(tools);
   options.strictMcpConfig = true;
   options.settings = { ...settings, disableClaudeAiConnectors: true };
-  options.env = { ...options.env, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
+  // Preserve the shared child-env object: the collector records keys from this same object.
+  options.env ??= {};
+  options.env.ENABLE_CLAUDEAI_MCP_SERVERS = "false";
   options.hooks = { ...options.hooks, PreToolUse: [...(options.hooks?.PreToolUse ?? []), {
     matcher: ".*",
     hooks: [async input => {

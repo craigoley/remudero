@@ -32,11 +32,13 @@ test("repo/knowledge SDK policy preserves floor and egress while denying unexpec
   const options: Options = { tools: ["Read", "Bash", rule], mcpServers: { knowledge: { type: "sdk", name: "knowledge", instance: {} as never } },
     settings: { sandbox, permissions: { deny: ["Bash(rm *)"] } }, env: { SAFE: "kept", ENABLE_CLAUDEAI_MCP_SERVERS: "true" },
     hooks: { PreToolUse: [prior] }, disallowedTools: ["Write"] };
+  const originalEnv = options.env;
   applyWorkerMcpIsolation(options);
   assert.equal(options.strictMcpConfig, true);
   assert.deepEqual(options.settings, { sandbox, permissions: { deny: ["Bash(rm *)"] }, disableClaudeAiConnectors: true });
   assert.deepEqual(options.disallowedTools, ["Write"]);
   assert.deepEqual(options.env, { SAFE: "kept", ENABLE_CLAUDEAI_MCP_SERVERS: "false" });
+  assert.equal(options.env, originalEnv, "collector and SDK share one authoritative child environment");
   assert.equal(options.hooks?.PreToolUse?.[0], prior);
   const callback = options.hooks!.PreToolUse!.at(-1)!.hooks[0]!;
   for (const name of ["Read", "Bash", rule]) {
@@ -117,6 +119,7 @@ test("repo/knowledge isolation reaches the real SDK spawn boundary and retains t
   const { options, result } = await capture(t, true, [{ type: "system", subtype: "init", mcp_servers: [{ name: "knowledge" }], tools: ["Read", "Bash", rule] }], true);
   assert.equal(options.strictMcpConfig, true);
   assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+  assert.ok(result.childEnvKeys.includes("ENABLE_CLAUDEAI_MCP_SERVERS"), "effective child-env key reaches collector provenance");
   assert.deepEqual(options.tools, ["Read", "Bash", rule]);
   assert.ok(options.mcpServers?.knowledge);
   assert.equal(result.isError, false);
