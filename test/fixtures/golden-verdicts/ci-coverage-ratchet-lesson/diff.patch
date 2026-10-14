@@ -1,0 +1,11 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -0,0 +1,6 @@
++- id: coverage-ratchet-refusals-repaired-by-hand
++  subsystem: ci
++  lifecycle: active
++  files: [scripts/coverage-ratchet.mjs, scripts/coverage-baseline.json]
++  fact: Build the lcov before pushing and never lower the baseline to clear a refusal.
++  src: "ci-learning:6062:coverage-ratchet"

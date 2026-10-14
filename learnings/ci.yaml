@@ -542,3 +542,26 @@
     causal or incidental repairs is not established.
   src: "ci-learning:10516:coverage-session-blanking"
   cited: "2026-10-11"
+
+- id: coverage-ratchet-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/coverage-ratchet.mjs"
+    - "scripts/coverage-baseline.json"
+    - "scripts/diff-coverage.mjs"
+  fact: >-
+    The coverage-ratchet gate refused 13 pull requests in one window (#6062 to #6156), and each was repaired after
+    the refusal. The gate is an aggregate: it sums lines and branches across the whole lcov run and refuses when the
+    total falls below scripts/coverage-baseline.json, so a change that adds source lines with no test lowers the total
+    even when the lines it touched are covered. Before pushing, build the lcov from your committed tree with
+    `rmd preflight --coverage` (its shards run one at a time) and compare it to the baseline with
+    `node scripts/coverage-ratchet.mjs --lcov <path>`. Do not lower the baseline to clear a refusal; add a test that
+    drives the new lines.
+  evidence: >-
+    The refusals are recorded as ci-learning:6062:coverage-ratchet (PRs 6062, 6077 (listed twice), 6088, 6092, 6096,
+    6098, 6099, 6113, 6135, 6138, 6154, 6156). The repairs touched a wide, unrelated file set, so the shared surface
+    is the aggregate total, not any one lane. Recon did not fetch each PR's failure log, so this entry names the gate's
+    mechanism and the pre-push check, not a verified per-PR trigger.
+  src: "ci-learning:6062:coverage-ratchet"
+  cited: "2026-10-14"
