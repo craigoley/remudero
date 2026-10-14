@@ -138,7 +138,16 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
 
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
 export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
-  "operator_human" | "operator_ai" | "unknown" | "operator";
+  "operator_human" | "operator_ai" | "unknown" | "operator" | "run_child";
+
+/** W1-T9085: the marker a run child (src/run-child-main.ts) carries. The daemon spawns it, so it inherits the daemon's own markers and
+ *  {@link deriveLedgerActor} checks this one before them (ADR 0007 A.3). */
+export const RUN_CHILD_PROCESS_ENV = "REMUDERO_RUN_CHILD";
+
+/** Mark THIS process as a run child: every ledger row it writes from here on reports `actor: "run_child"`. */
+export function markRunChildProcessActor(env: NodeJS.ProcessEnv = process.env): void {
+  env[RUN_CHILD_PROCESS_ENV] = "1";
+}
 
 export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation"): void {
   process.env.REMUDERO_PROCESS_ACTOR = actor;
@@ -171,6 +180,7 @@ export function deriveLedgerActor(
 ): LedgerActor {
   if (env.NODE_TEST_CONTEXT) return "test";
   if (env[WORKER_SCOPE_ENV]) return "worker";
+  if (env[RUN_CHILD_PROCESS_ENV]) return "run_child";
   const kind = env.REMUDERO_PROCESS_ACTOR;
   if (kind === "service" || kind === "host_automation" || kind === "daemon") return kind;
   if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
@@ -187,7 +197,7 @@ export type LedgerRowActor = LedgerActor;
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   switch (line.actor) {
     case "daemon": case "worker": case "service": case "host_automation": case "test":
-    case "operator_human": case "operator_ai": case "operator": return line.actor;
+    case "operator_human": case "operator_ai": case "operator": case "run_child": return line.actor;
     default: return "unknown";
   }
 }

@@ -1,9 +1,11 @@
 // src/run-child-main.ts — W1-T9082. Decision record: docs/adr/0007-build-runs-outlive-the-daemon.md (A.1, A.9).
 //
-// The run child's entry (`CHILD_ENTRIES` name `run-child`). Only `--probe` is implemented: the shadow probe a daemon starts
-// beside an in-process run (src/lib/run-child.ts). It reads the spec the daemon wrote, loads what a run loads, reads the
-// plan snapshot the spec names, writes its status through the run-child contract and exits. It never touches a task.
-// The verb that runs a task arrives with the spawn task; until then it refuses, loudly, rather than pretend.
+// The run child's entry (`CHILD_ENTRIES` name `run-child`). `--probe` (W1-T9082) is the shadow probe a daemon starts beside an
+// in-process run (src/lib/run-child.ts): it reads the spec, loads what a run loads, reads the plan snapshot the spec names,
+// writes its status through the run-child contract and exits, never touching a task.
+// Without `--probe` (W1-T9085) it RUNS the task: `runTask` with the spec's options and the plan snapshot as its plan, under the
+// spec's reservation, as the actor `run_child`. It awaits the run's fire-and-forget work (the paired trials) before its terminal
+// status, and SIGTERM aborts the run through the AbortController the worker spawns chain (ADR 0007 A.7).
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +13,10 @@ import { isMainThread } from "node:worker_threads";
 
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { RUN_CHILD_PROCESS_ENV, markRunChildProcessActor } from "./lib/ledger.js";
+import type { Plan, Task } from "./lib/plan.js";
+import { withRunChildReservation } from "./lib/run-child-reservation.js";
+import type { RunResult } from "./lib/run-result.js";
 import {
   RUN_CHILD_DIR_ENV, RUN_CHILD_SOCKET_ENV, startRunChildGitCredentialSocket, type CredentialHelperSocketHandle,
 } from "./lib/secret-boundary.js";
@@ -28,7 +34,23 @@ export interface ProbeStatusExtras {
   maxRssBytes?: number;
 }
 
+/** The slice of `runTask` this entry drives; the real one is loaded from the run path, a test injects its own. */
+export type RunChildRunTask = (taskId: string, options: Record<string, unknown>) => Promise<RunResult>;
+
+/** The signals this entry listens on; the default is the process itself. */
+export interface RunChildSignalSource {
+  on(signal: "SIGTERM", handler: () => void): unknown;
+  off(signal: "SIGTERM", handler: () => void): unknown;
+}
+
+/** How often a running child rewrites its status, so `heartbeatAt` moves while the run does. */
+export const RUN_CHILD_HEARTBEAT_MS = 15_000;
+
 export interface RunChildMainPorts {
+  /** The run to execute; the default is the `runTask` the loaded run path exports. */
+  runTask?: RunChildRunTask;
+  signals?: RunChildSignalSource;
+  heartbeatMs?: number;
   /** Loads the modules a run loads. The default imports the run path's entry module, whose static graph is that set. */
   loadRunPath?: () => Promise<unknown>;
   clock?: () => number;
@@ -48,7 +70,7 @@ function argValue(argv: readonly string[], flag: string): string | undefined {
 }
 
 /** The plan snapshot's task count, or why it cannot be read. The daemon writes `{ schema, tasks }` (run-child.ts). */
-function readPlanSnapshot(path: string): { tasks: number } | { error: string } {
+function readPlanSnapshot(path: string): { tasks: number; list: Task[] } | { error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
@@ -56,7 +78,7 @@ function readPlanSnapshot(path: string): { tasks: number } | { error: string } {
     return { error: `plan snapshot ${path} unreadable: ${(error as Error).message}` };
   }
   const tasks = (parsed as { tasks?: unknown } | null)?.tasks;
-  return Array.isArray(tasks) ? { tasks: tasks.length } : { error: `plan snapshot ${path} holds no tasks array` };
+  return Array.isArray(tasks) ? { tasks: tasks.length, list: tasks as Task[] } : { error: `plan snapshot ${path} holds no tasks array` };
 }
 
 /** Runs the verb; resolves to the process exit code. NEVER rejects: every failure is written to the status first. */
@@ -67,10 +89,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     stderr("run-child: --run-dir <dir> is required\n");
     return 2;
   }
-  if (!argv.includes("--probe")) {
-    stderr("run-child: only --probe is implemented; running a task as a child arrives with the spawn task (W1-T9082)\n");
-    return 2;
-  }
+  const probeMode = argv.includes("--probe");
   const clock = deps.clock ?? Date.now;
   const runId = basename(dir);
   const identity = childIdentity(process.pid, deps.probe) ?? {
@@ -83,6 +102,12 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
   const previousSocket = process.env[RUN_CHILD_SOCKET_ENV];
   let credentialsEntered = false;
   let credentialFailure: RunChildFailure | undefined;
+  // A SIGTERM is an abort. It is heard from the first moment, so one that lands during credentials or load still ends as `aborted`.
+  const abort = new AbortController();
+  const signals: RunChildSignalSource = deps.signals ?? process;
+  const onTerm = (): void => abort.abort();
+  if (!probeMode) signals.on("SIGTERM", onTerm);
+  const previousActor = process.env[RUN_CHILD_PROCESS_ENV];
   const cleanup = async (): Promise<void> => {
     try {
       try { refresh?.stop?.(); }
@@ -96,12 +121,72 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       throw error;
     }
   };
-  const status = (state: RunChildStatus["state"], phase: string, extras: Partial<ProbeStatusExtras>, failure?: RunChildFailure): void => {
+  const status = (
+    state: RunChildStatus["state"], phase: string, extras: Partial<ProbeStatusExtras>, failure?: RunChildFailure, result?: RunResult,
+  ): void => {
     const next: RunChildStatus = {
       schema: RUN_CHILD_SCHEMA, runId, identity, engineSha, entryKind: runsBundled() ? "bundle" : "tsx",
-      phase, heartbeatAt: clock(), state, ...(failure ? { failure } : {}),
+      phase, heartbeatAt: clock(), state, ...(failure ? { failure } : {}), ...(result ? { result } : {}),
     };
-    writeStatus(dir, { ...next, probe: true, ...extras } as RunChildStatus);
+    writeStatus(dir, (probeMode ? { ...next, probe: true, ...extras } : next) as RunChildStatus);
+  };
+  /** The run verb: load the run path, run the task under the spec's reservation, await its background work, write the terminal status. */
+  const runTaskInChild = async (): Promise<number> => {
+    const spec = readSpec(dir);
+    if (!spec.ok) throw new Error(`spec unreadable after it was read: ${spec.detail}`);
+    const options = spec.value.options;
+    let planSnapshot: ((o: { allowStale?: boolean }) => { plan: Plan; staleDispatch: boolean }) | undefined;
+    if (!options.skipGitSync) {
+      const snapshot = readPlanSnapshot(spec.value.planSnapshotPath);
+      if ("error" in snapshot) {
+        await cleanup();
+        status("failed", "plan", {}, { class: "unknown", reasonClass: "plan_snapshot_unreadable", message: snapshot.error });
+        return 1;
+      }
+      const plan: Plan = { tasks: snapshot.list, byId: new Map(snapshot.list.map((task) => [task.id, task])) };
+      planSnapshot = () => ({ plan, staleDispatch: false });
+    }
+    status("starting", "load", {});
+    const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runTask?: RunChildRunTask } | undefined;
+    const runTask = deps.runTask ?? loaded?.runTask;
+    if (runTask === undefined) throw new Error("the loaded run path exports no runTask");
+    markRunChildProcessActor();
+    const background: Promise<unknown>[] = [];
+    const beat = setInterval(() => status("running", "run", {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
+    beat.unref();
+    let outcome: { result: RunResult } | { error: unknown };
+    try {
+      status("running", "run", {});
+      outcome = abort.signal.aborted
+        ? { error: Object.assign(new Error("aborted before the run started"), { name: "AbortError" }) }
+        : { result: await withRunChildReservation(spec.value, () => runTask(spec.value.taskId, {
+          ...(options.planPath !== undefined ? { planPath: options.planPath } : {}),
+          ...(options.owner !== undefined ? { owner: options.owner } : {}),
+          ...(options.allowStale !== undefined ? { allowStale: options.allowStale } : {}),
+          ...(options.skipGitSync !== undefined ? { skipGitSync: options.skipGitSync } : {}),
+          ...(options.handOffAtPrOpen !== undefined ? { handOffAtPrOpen: options.handOffAtPrOpen } : {}),
+          ...(options.pairedTrialHost !== undefined ? { pairedTrialHost: options.pairedTrialHost } : {}),
+          ...(planSnapshot ? { planSnapshot } : {}),
+          abortSignal: abort.signal,
+          onBackgroundWork: (work: Promise<unknown>) => { background.push(work); },
+        })) };
+    } catch (error) {
+      outcome = { error };
+    } finally {
+      clearInterval(beat);
+    }
+    // The paired trials outlive runTask's return, so a child that exited on it would cut them off. An abort does not wait for them.
+    if (!abort.signal.aborted) await Promise.allSettled(background);
+    await cleanup();
+    if ("result" in outcome) {
+      status("done", "done", {}, undefined, outcome.result);
+      return 0;
+    }
+    if (abort.signal.aborted) {
+      status("aborted", "aborted", {}, { ...toRunChildFailure(outcome.error), class: "aborted", reasonClass: "aborted" });
+      return 3;
+    }
+    throw outcome.error;
   };
   try {
     const spec = readSpec(dir);
@@ -135,6 +220,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       status("failed", "credentials", {}, { class: "spawn_infra_blocked", reasonClass: "spawn_infra_blocked", message: `credential startup failed: ${String(error)}` });
       return 1;
     }
+    if (!probeMode) return await runTaskInChild();
     status("starting", "load", {});
     const loadStart = clock();
     await (deps.loadRunPath ?? defaultLoadRunPath)();
@@ -156,13 +242,18 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     }
     const failure = credentialFailure ?? toRunChildFailure(error);
     try {
-      status("failed", "probe", {}, failure);
+      status("failed", probeMode ? "probe" : "run", {}, failure);
     } catch (writeError) {
       stderr(`run-child: could not write the failed status: ${(writeError as Error).message}\n`);
     }
-    stderr(`run-child: probe failed: ${(error as Error)?.stack ?? String(error)}\n`);
+    stderr(`run-child: ${probeMode ? "probe" : "run"} failed: ${(error as Error)?.stack ?? String(error)}\n`);
     return 1;
   } finally {
+    if (!probeMode) {
+      signals.off("SIGTERM", onTerm);
+      if (previousActor === undefined) delete process.env[RUN_CHILD_PROCESS_ENV];
+      else process.env[RUN_CHILD_PROCESS_ENV] = previousActor;
+    }
     if (credentialsEntered) {
       if (previousDir === undefined) delete process.env[RUN_CHILD_DIR_ENV];
       else process.env[RUN_CHILD_DIR_ENV] = previousDir;

@@ -461,6 +461,7 @@ import {
   resolveFleetControlHold,
   runDaemon,
   RESTART_HISTORY_WINDOW_MS,
+  restartWorkHistory,
   type CrashLoopVerdict,
   type DaemonFreshness,
   type DaemonOpts,
@@ -18116,6 +18117,12 @@ async function runTask(
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
      *  `rmd run-task` keeps the ambient helper byte-for-byte. */
     gitCredentialSocketPath?: string;
+    /** W1-T9085: a run child's cancel, chained into every worker spawn's own `signal` (W1-T5659): an abort ends the worker query at its
+     *  next safe point and `withWorkerGroupTeardown` tears its process group down. Omitted, no spawn gets one. */
+    abortSignal?: AbortSignal;
+    /** W1-T9085: receives the fire-and-forget work this run starts and does not await (the paired trial, the prospective A/A pair), so a
+     *  run child can await it before its terminal status. Omitted, the work is detached exactly as before. */
+    onBackgroundWork?: (work: Promise<unknown>) => void;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -18178,9 +18185,9 @@ async function runTask(
     noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
     const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
-    const spawnArgs = socketPath
+    const spawnArgs = chainAbortSignal(socketPath
       ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
-      : requestedSpawnArgs;
+      : requestedSpawnArgs, opts.abortSignal);
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
@@ -18481,17 +18488,19 @@ async function runTask(
     }
     throw e;
   }
-  void runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
+  // W1-T9085: both start unawaited and run past this function's return; a run child hands them to `onBackgroundWork` to await them.
+  const detach = (work: Promise<unknown>): void => opts.onBackgroundWork?.(work);
+  detach(runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
     ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo), spawn: rawSpawn,
       maxBudgetUsd: task.budget_usd ?? DEFAULT_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
+    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
   // W1-T4647: a registered prospective A/A pairs the task on its one pinned stack, subscription only; inert otherwise.
-  void runProspectiveAaPair({ ...(opts.pairedTrialHost === "daemon"
+  detach(runProspectiveAaPair({ ...(opts.pairedTrialHost === "daemon"
     ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", rawSpawn), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), task, lane: "implement", stateDir: join(config.root, "state"), config,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
+    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
   return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
       restartPhase,
@@ -39948,13 +39957,26 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId, runOptions) => {
+        runOne: async (taskId, runOptions) => {
+          const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
+          // W1-T9085: under sweep.runChild.mode on the run executes in a detached child and this promise settles from its status file.
+          // A child that cannot be started (no engine tree, an explicit --plan, an unreadable policy) runs the task in-process as before.
+          const childMode = runChildModeIsOn();
+          if (childMode.unreadable !== undefined) log(RUN_CHILD_FALLBACK_STEP, { task_id: taskId, reason: `sweep.runChild.mode unreadable: ${childMode.unreadable}` });
+          if (childMode.on && childOptions.skipGitSync) log(RUN_CHILD_FALLBACK_STEP, { task_id: taskId, reason: "an explicit --plan is read literally; the run stays in-process" });
+          if (childMode.on && !childOptions.skipGitSync) {
+            const launched = await spawnRunChild({
+              taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, log, options: childOptions,
+              plan: async () => planSyncCoalescer.sync({ allowStale }),
+            }, { abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(config))), Date.now()).yieldCost.ms } });
+            if (launched.started) return launched.settled;
+          }
           // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
           // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
-            options: { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" },
+            options: childOptions,
           });
           return runTaskFn(taskId, {
             planPath: target.planPath,
@@ -56999,7 +57021,9 @@ import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js"
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
-import { createAdmittedPlanSlot, startRunChildProbe, tapPlanSnapshot } from "./lib/run-child.js";
+import {
+  RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
+} from "./lib/run-child.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
