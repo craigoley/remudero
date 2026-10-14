@@ -398,6 +398,19 @@ test("GOLDEN — MUTATION-RATCHET LESSON: the cited incident executes and the mu
   }
 });
 
+test("GOLDEN — PROOF-DISCRIMINATION LESSON: the cited incident executes and the proof-writing lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-proof-discrimination-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T9000.yaml", "test/new-proof.test.ts", "src/lib/proof-grammar.ts", "src/run-task.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "proof-discrimination-refusal-repair-lane"), taskFile);
+  }
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
