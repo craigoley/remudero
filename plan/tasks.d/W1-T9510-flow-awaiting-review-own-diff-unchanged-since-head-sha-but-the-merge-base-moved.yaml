@@ -1,0 +1,26 @@
+- id: W1-T9510
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — awaiting-review:own diff unchanged since head <sha> but the merge base moved cost 2.61 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:awaiting-review:own diff unchanged since head <sha> but the merge base moved"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved.test.ts
+  acceptance:
+    - claim: "awaiting-review:own diff unchanged since head <sha> but the merge base moved is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T9510: flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved clears without a person\" in test/flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    awaiting-review:own diff unchanged since head <sha> but the merge base moved cost 2.61 PR-hours; owner review-lane
+    Owner review-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #11710: 1.73 PR-hours — own diff unchanged since head 3189f4c but the merge base moved — re-running discrimination alone, not the whole review (W1-T3704)
+    - PR #11629: 0.91 PR-hours — own diff unchanged since head 1ccf26c but the merge base moved — re-running discrimination alone, not the whole review (W1-T3704)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
