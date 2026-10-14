@@ -5,7 +5,9 @@
   type: recon
   verify: "human"
   risk: "low"
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=69f0b80d6c299e69
   attempts: 0
   files:
     - docs/ratification/p25_briefing.md

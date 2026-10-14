@@ -5,7 +5,9 @@
   type: implement
   verify: "human"
   risk: "medium"
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=0e079ac997fd547e
   attempts: 0
   files:
     - plan/tasks.yaml
