@@ -1219,6 +1219,14 @@ release_host_recycle_lock() {
 RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
 PULL_LOG=""
 recycle_cleanup_tmp() {
+  local exit_status=$?
+  # W1-T9409: an ERROR exit while nothing has been stopped takes this run's own PAUSE with it, as a
+  # signal already does (W1-T5281). On 2026-10-14 a `set -e` abort (rc=2) in the wait left the PAUSE
+  # holding core dispatch for ~2h45m. A no-op unless the file still holds the exact body this run wrote.
+  if [ "${exit_status}" -ne 0 ] && [ "${RECYCLE_SIGNAL_PHASE:-}" = "waiting" ] && [ -n "${RECYCLE_PAUSE_BODY:-}" ] &&
+     [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ]; then
+    clear_own_pause "recycle-container: pause removed — the recycle exited ${exit_status} before stopping ${CONTAINER_NAME}, which is untouched and still running" >&2
+  fi
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
@@ -1387,7 +1395,13 @@ mkdir -p "$(dirname "${PAUSE_FILE}")"
 if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
   echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
 else
-  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\"}"
+  # W1-T9409: the body also names the container this run would stop, the writer's own start time and
+  # its phase, so the watchdog tick (deploy/release-orphan-recycle-pause.sh) can PROVE a dead writer
+  # stopped nothing — the one case no trap covers (SIGKILL). `reason` is unchanged: W1-T5127 and
+  # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
+  RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
+  RECYCLE_WRITER_START="$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ 2>/dev/null | tr -s ' \t' '  ' | sed 's/^ *//; s/ *$//' | tr -d '"\\' || true)"
+  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"phase\":\"waiting\"}"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
@@ -1599,14 +1613,24 @@ pid_ledger_activity() {
 
 # The worktree(s) a lock's holder was using: checked out at the claimed branch for a
 # `fix-branch--<owner>--<repo>--<branch>` claim, or named `run-|sweep-<taskId>-*` for a task lock.
+#
+# W1-T9410: EVERY READ HERE IS BEST-EFFORT, as in lock_host_field. OBSERVED 2026-10-14: all six
+# worktree dirs on the host named a git admin dir that had been pruned, so `sed` on "${gitdir}/HEAD"
+# exited 2 (GNU; BSD exits 1), the unguarded assignment tripped `set -e`, and the STALLED recycle died
+# mid-reclaim with its lock unmoved and its PAUSE on disk. An unreadable `.git` file, or a gitdir with
+# no HEAD, now gives an empty ref: the worktree cannot match a fix-branch claim and is skipped there,
+# while a task lock still matches by the worktree's NAME, which needs no admin dir.
 holder_worktrees() {
   local key d gitdir ref found=""
   key="$(basename "$1" .lock)"
   for d in "${STATE_DIR}/worktrees"/*; do
     [ -f "${d}/.git" ] || continue
-    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1)"
+    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1 || true)"
     case "${gitdir}" in "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;; esac
-    ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g')"
+    ref=""
+    if [ -n "${gitdir}" ] && [ -f "${gitdir}/HEAD" ]; then
+      ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g' || true)"
+    fi
     case "${key}" in
       fix-branch--*) [ -n "${ref}" ] && [ "${key%"--${ref}"}" != "${key}" ] || continue ;;
       *) case "$(basename "${d}")" in "run-${key}-"*|"sweep-${key}-"*) : ;; *) continue ;; esac ;;
@@ -1656,15 +1680,18 @@ reclaim_frozen_daemon_holdings() {
     reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
     mkdir -p "${reclaimed_dir}"
     reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    # W1-T9410: the reason is written to a `.partial` name and renamed only AFTER the lock has moved,
+    # so a write that dies part-way can never leave a `.reason` beside a lock that was never moved.
     {
       printf 'reclaimed by recycle-container.sh (W1-T6597) pid %s at %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
       printf 'verdict: %s\nholder: pid %s host %s — the drain.lock holder, no ledger row in %ss\n' \
         "${RECYCLE_VERDICT}" "${dpid}" "${dhost}" "${STALL_BOUND_S}"
       holder_worktrees "${f}"
       printf 'kept: worktrees, worker homes and logs are untouched — recover the work from the worktree above\n'
-    } > "${reclaimed_path}.reason"
+    } > "${reclaimed_path}.reason.partial"
     mv "${f}" "${reclaimed_path}"
-    sed 's/^/    /' "${reclaimed_path}.reason" >&2
+    mv "${reclaimed_path}.reason.partial" "${reclaimed_path}.reason"
+    sed 's/^/    /' "${reclaimed_path}.reason" >&2 2>/dev/null || true
   done
   while read -r cpid cppid; do
     [ "${cppid:-}" = "${dpid}" ] || continue
@@ -2046,6 +2073,16 @@ COMMISSION_PHASE="replace"
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
   RECYCLE_SIGNAL_PHASE="stopping"
+  # W1-T9409: and the PAUSE says so BEFORE the stop, so the tick's release check never frees a PAUSE
+  # whose old container may already be down. Only our own body is rewritten, and RECYCLE_PAUSE_BODY
+  # follows it so clear_own_pause below still recognises its own.
+  if [ -n "${RECYCLE_PAUSE_BODY}" ] && [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ] &&
+     [ "${RECYCLE_PAUSE_BODY%\"phase\":\"waiting\"\}}" != "${RECYCLE_PAUSE_BODY}" ]; then
+    RECYCLE_PAUSE_STOPPING="${RECYCLE_PAUSE_BODY%\"phase\":\"waiting\"\}}\"phase\":\"stopping\"}"
+    printf '%s\n' "${RECYCLE_PAUSE_STOPPING}" > "${PAUSE_FILE}.stopping.$$"
+    mv -f "${PAUSE_FILE}.stopping.$$" "${PAUSE_FILE}"
+    RECYCLE_PAUSE_BODY="${RECYCLE_PAUSE_STOPPING}"
+  fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"

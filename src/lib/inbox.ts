@@ -28,6 +28,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -3391,6 +3392,10 @@ export function approveProposal(
     ...(adopted ? { adopted: true } : {}),
     ...(joinedPr ? { joined: true } : {}),
   };
+}
+
+export function approvePrTitle(proposalId: string): string {
+  return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
 
 /** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`

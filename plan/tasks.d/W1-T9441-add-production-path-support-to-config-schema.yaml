@@ -12,7 +12,9 @@
     rmd approve:
   
     changes span config schema and review usage
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T9441 — It depends on W1-T9440, which will never be built.
   attempts: 0
   files:
     - src/lib/config.ts

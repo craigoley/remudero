@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -161,6 +164,127 @@ test("W1-T926: snapshots notice binary bytes, executable modes, empty directorie
     symlinkSync("another-target", join(root, "link"));
     assert.notDeepEqual(snapshotTree(root), linked);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot byte reads retain the opened inode when its pathname becomes an outside symlink", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-snapshot-race-"));
+  const outside = mkdtempSync(join(tmpdir(), "rmd-snapshot-sentinel-"));
+  const file = join(root, "inside");
+  const realRead = fs.readFileSync;
+  const realStat = fs.fstatSync;
+  let swapped = false;
+  try {
+    writeFileSync(file, "owned inside bytes");
+    writeFileSync(join(outside, "sentinel"), "outside sentinel bytes");
+    const inode = fs.statSync(file);
+    fs.readFileSync = ((input: Parameters<typeof realRead>[0], ...args: unknown[]) => {
+      const stat = typeof input === "number" ? realStat(input) : undefined;
+      if (!swapped && (input === file || (stat?.dev === inode.dev && stat?.ino === inode.ino))) {
+        swapped = true;
+        fs.renameSync(file, join(root, "moved"));
+        symlinkSync(join(outside, "sentinel"), file);
+      }
+      return Reflect.apply(realRead, fs, [input, ...args]);
+    }) as typeof realRead;
+    syncBuiltinESMExports();
+    const rows = snapshotTree(root) as { path: string; bytes?: string }[];
+    assert.equal(swapped, true, "positive control: the byte-read boundary must swap the owned pathname");
+    assert.equal(rows.find((row) => row.path === "inside")?.bytes,
+      Buffer.from("owned inside bytes").toString("base64"));
+    assert.ok(!JSON.stringify(rows).includes(Buffer.from("outside sentinel bytes").toString("base64")));
+  } finally {
+    fs.readFileSync = realRead;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+for (const operation of ["fstatSync", "readFileSync"] as const) {
+  test(`snapshot closes its descriptor when ${operation} fails`, () => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-snapshot-close-"));
+    const file = join(root, "inside");
+    const realOpen = fs.openSync;
+    const realOperation = fs[operation];
+    const realStat = fs.fstatSync;
+    let opened: number | undefined;
+    try {
+      writeFileSync(file, "owned bytes");
+      fs.openSync = ((path: Parameters<typeof realOpen>[0], flags: Parameters<typeof realOpen>[1]) => {
+        const fd = realOpen(path, flags);
+        if (path === file) opened = fd;
+        return fd;
+      }) as typeof realOpen;
+      fs[operation] = ((input: unknown, ...args: unknown[]) => {
+        if (opened !== undefined && input === opened) throw new Error(`owned ${operation} failure`);
+        return Reflect.apply(realOperation, fs, [input, ...args]);
+      }) as typeof fs.fstatSync & typeof fs.readFileSync;
+      syncBuiltinESMExports();
+      assert.throws(() => snapshotTree(root), new RegExp(`owned ${operation} failure`));
+      assert.notEqual(opened, undefined, "positive control: the real owned file was opened");
+      assert.throws(() => realStat(opened!), { code: "EBADF" });
+    } finally {
+      fs.openSync = realOpen;
+      fs[operation] = realOperation as typeof fs.fstatSync & typeof fs.readFileSync;
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("snapshot refuses unsupported FIFO entries without blocking or leaking a descriptor", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-snapshot-fifo-"));
+  try {
+    execFileSync("mkfifo", [join(root, "pipe")], { timeout: 2_000 });
+    assert.throws(() => snapshotTree(root), /unsupported fixture entry: pipe/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot propagates vanished entries instead of returning an empty successful observation", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-snapshot-vanished-"));
+  const file = join(root, "inside");
+  const realOpen = fs.openSync;
+  try {
+    writeFileSync(file, "owned bytes");
+    fs.openSync = ((path: Parameters<typeof realOpen>[0], ...args: unknown[]) => {
+      if (path === file) rmSync(file);
+      return Reflect.apply(realOpen, fs, [path, ...args]);
+    }) as typeof realOpen;
+    syncBuiltinESMExports();
+    assert.throws(() => snapshotTree(root), { code: "ENOENT" });
+  } finally {
+    fs.openSync = realOpen;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot refuses a non-symlink ELOOP observation and uses both safe open flags", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-snapshot-flags-"));
+  const file = join(root, "inside");
+  const realOpen = fs.openSync;
+  let observedFlags: number | undefined;
+  try {
+    writeFileSync(file, "owned bytes");
+    fs.openSync = ((path: Parameters<typeof realOpen>[0], flags: Parameters<typeof realOpen>[1]) => {
+      if (path === file) {
+        observedFlags = Number(flags);
+        throw Object.assign(new Error("owned simulated ELOOP"), { code: "ELOOP" });
+      }
+      return realOpen(path, flags);
+    }) as typeof realOpen;
+    syncBuiltinESMExports();
+    assert.throws(() => snapshotTree(root), /fixture entry changed during symlink observation/);
+    assert.notEqual(observedFlags, undefined, "positive control: the owned path reached open");
+    assert.equal(observedFlags! & fs.constants.O_NOFOLLOW, fs.constants.O_NOFOLLOW);
+    assert.equal(observedFlags! & fs.constants.O_NONBLOCK, fs.constants.O_NONBLOCK);
+  } finally {
+    fs.openSync = realOpen;
+    syncBuiltinESMExports();
     rmSync(root, { recursive: true, force: true });
   }
 });
