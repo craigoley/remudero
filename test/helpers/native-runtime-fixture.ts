@@ -7,7 +7,7 @@ export function makeRuntimeFixture(fail = false) {
   for (const dir of ['scripts', 'test/setup', 'src']) mkdirSync(join(f.dir, dir), { recursive: true });
   writeFileSync(join(f.dir, '.nvmrc'), process.versions.node + '\n');
   writeFileSync(join(f.dir, '.gitignore'), 'coverage\nnode_modules\n');
-  writeFileSync(join(f.dir, 'package-lock.json'), '{}\n');
+  writeFileSync(join(f.dir, 'package-lock.json'), readFileSync(join(process.cwd(), 'package-lock.json')));
   symlinkSync(join(process.cwd(), 'node_modules'), join(f.dir, 'node_modules'));
   writeFileSync(join(f.dir, 'scripts/test-duration-reporter.mjs'), readFileSync(join(process.cwd(), 'scripts/test-duration-reporter.mjs')));
   writeFileSync(join(f.dir, 'scripts/test-tier-manifest.json'), JSON.stringify({ version: 1, thresholdMs: 10_000,
