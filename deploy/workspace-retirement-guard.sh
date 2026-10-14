@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Shared, read-only publication proof. Cached remote-tracking refs and task
+# trailers are NOT proof that a workspace's current commits were pushed.
+# Source this file; callers still own age, activity, data and lender guards.
+# Bash 3.2 compatible, no fetch, no persisted publication cache.
+RMD_PUB_URLS=(); RMD_PUB_ROWS=()
+# RMD_PUB_REASON is the public output inspected by sourcing callers.
+# shellcheck disable=SC2034
+RMD_PUB_REFS=""; RMD_PUB_REASON="publication-unverified"
+rmd_retirement_git() {
+  local repo="$1" top
+  shift
+  top=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || return 128
+  GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$top" -C "$repo" "$@"
+}
+rmd_publication_snapshot() {
+  local repo="$1" refresh="${2:-0}" url rows i
+  RMD_PUB_REASON="publication-unverified"; RMD_PUB_REFS=""
+  url=$(rmd_retirement_git "$repo" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  for ((i=0; i<${#RMD_PUB_URLS[@]}; i++)); do
+    if [ "$refresh" = 0 ] && [ "${RMD_PUB_URLS[$i]}" = "$url" ]; then
+      RMD_PUB_REFS="${RMD_PUB_ROWS[$i]}"; return 0
+    fi
+  done
+  # Pull-request head refs preserve exact pushed tips after a branch is
+  # deleted on squash merge. An ancestor is accepted only against a freshly
+  # advertised head/tag whose commit is locally readable.
+  rows=$(rmd_retirement_git "$repo" -c http.lowSpeedLimit=1 -c http.lowSpeedTime=20 \
+    ls-remote origin 'refs/heads/*' 'refs/tags/*' 'refs/pull/*/head' 2>/dev/null) || return 1
+  [ -n "$rows" ] || return 1
+  RMD_PUB_REFS="$rows"
+  for ((i=0; i<${#RMD_PUB_URLS[@]}; i++)); do
+    if [ "${RMD_PUB_URLS[$i]}" = "$url" ]; then RMD_PUB_ROWS[i]="$rows"; return 0; fi
+  done
+  RMD_PUB_URLS+=("$url"); RMD_PUB_ROWS+=("$rows")
+}
+rmd_commit_published() {
+  local repo="$1" commit="$2" oid ref
+  RMD_PUB_REASON="publication-unverified"
+  rmd_retirement_git "$repo" cat-file -e "$commit^{commit}" 2>/dev/null || return 1
+  if printf '%s\n' "$RMD_PUB_REFS" | awk -v c="$commit" '$1 == c { yes=1 } END { exit !yes }'; then return 0; fi
+  while read -r oid ref; do
+    case "$ref" in refs/heads/*|refs/tags/*) ;; *) continue ;; esac
+    rmd_retirement_git "$repo" cat-file -e "$oid^{commit}" 2>/dev/null || continue
+    if rmd_retirement_git "$repo" merge-base --is-ancestor "$commit" "$oid" 2>/dev/null; then return 0; fi
+  done <<< "$RMD_PUB_REFS"
+  RMD_PUB_REASON="not-proven-published"
+  return 1
+}
+rmd_workspace_published() {
+  local repo="$1" scope="${2:-head}" refresh="${3:-0}" head refs oid ref
+  rmd_publication_snapshot "$repo" "$refresh" || return 1
+  head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) || return 1
+  rmd_commit_published "$repo" "$head" || return 1
+  [ "$scope" = head ] && return 0
+  # Standalone deletion must preserve ALL refs, including stash and tags.
+  refs=$(rmd_retirement_git "$repo" for-each-ref --format='%(objectname) %(refname)' 2>/dev/null) || return 1
+  while read -r oid ref; do
+    [ -n "$oid" ] || continue
+    case "$ref" in refs/remotes/*) continue ;; esac
+    if ! rmd_commit_published "$repo" "$oid"; then
+      # shellcheck disable=SC2034
+      RMD_PUB_REASON="not-proven-published:$ref"; return 1
+    fi
+  done <<< "$refs"
+  refs=$(rmd_retirement_git "$repo" reflog show --all --format=%H 2>/dev/null) || return 1
+  while IFS= read -r oid; do
+    [ -n "$oid" ] || continue
+    if ! rmd_commit_published "$repo" "$oid"; then
+      # shellcheck disable=SC2034
+      RMD_PUB_REASON="not-proven-published:reflog"; return 1
+    fi
+  done <<< "$refs"
+}
+
+# Tab-separated receipt, with escaped controls; preserve the full human
+# message instead of guessing where a path containing spaces ends.
+rmd_decision_record() {
+  local file="$1" message="$2" code=other action=info encoded
+  case "$message" in
+    KEEP*|SKIP*) action=keep ;;
+    WOULD-*|DRYRUN*) action=planned ;;
+    REMOVE*|PRUNE*|ARCHIVE*) action=remove ;;
+  esac
+  case "$message" in
+    *not-proven-published*|*unpublished*|*unsaved\ refs*) code=unpublished ;;
+    *publication-unverified*) code=publication_unknown ;;
+    *Git\ metadata*|*git-unverified*|*Git\ status\ failed*) code=git_unknown ;;
+    *live*|*held\ open*|*SKIP\ open*|*SKIP\ cwd*|*Docker\ mount*|*container\ mount*) code=active ;;
+    *young*|*recent*|*written\ within*) code=younger_than_guard ;;
+    *dirty*|*uncommitted*) code=dirty ;;
+    *ignored*) code=ignored_data ;;
+    *locked*) code=locked ;;
+    *lends*|*borrow*|*linked\ worktree*|*git-lender*) code=git_lender ;;
+    *protected*|*dependency\ seed*) code=protected ;;
+    *unknown-directory*) code=unknown_directory ;;
+    *scan*failed*|*unverified*|*unknown*) code=probe_unknown ;;
+    *owner=*) code=other_owner ;;
+  esac
+  encoded=${message//%/%25}; encoded=${encoded//$'\t'/%09}; encoded=${encoded//$'\n'/%0A}; encoded=${encoded//$'\r'/%0D}
+  printf '%s\t%s\t%s\t%s\t%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$code" "$encoded" >> "$file"
+}
+rmd_decision_summary() {
+  awk -F '\t' -v pid="$$" '$1 == pid && $3 == "keep" { n[$4]++ } END { for (k in n) printf "retirement skips: %s=%d\n", k, n[k] }' "$1" 2>/dev/null | sort
+}
+

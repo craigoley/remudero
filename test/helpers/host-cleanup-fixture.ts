@@ -82,9 +82,13 @@ export function fixture(): Fixture {
   const lsof = join(bin, "lsof");
   writeFileSync(lsof, `#!/usr/bin/env bash\nif [ "\${FAKE_LSOF_FAIL:-0}" = 1 ]; then exit 1; fi\nwhile IFS= read -r p; do [ -n "$p" ] && printf 'p1\\nn%s\\n' "$p"; done < "${lsofList}"\n`);
   const fsid = join(bin, "fsid");
+  // Fixtures can backdate mtime but cannot backdate kernel ctime. Supply
+  // their aged ctime from mtime; the default real find is exercised separately.
+  const findAge = join(bin, "find-age");
+  writeFileSync(findAge, '#!/bin/bash\nargs=(); for arg; do if [ "$arg" = -cmin ]; then args+=(-mmin); else args+=("$arg"); fi; done\nexec find "${args[@]}"\n');
   writeFileSync(fsid, `#!/usr/bin/env bash\nif [ "$1" = "${rootfs}" ] || [[ "$1" = "${scratch}"* ]]; then echo 1; else echo "\${FAKE_ARCHIVE_FSID:-2}"; fi\n`);
   writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\nexit 0\n");
-  for (const f of [df, lsof, fsid, join(bin, "docker")]) chmodSync(f, 0o755);
+  for (const f of [df, lsof, fsid, findAge, join(bin, "docker")]) chmodSync(f, 0o755);
   const port = hostFlock(bin);
 
   return {
@@ -104,6 +108,7 @@ export function fixture(): Fixture {
       RMD_CLEANUP_ROOT_FS: rootfs,
       RMD_CLEANUP_DF: df,
       RMD_CLEANUP_LSOF: lsof,
+      RMD_CLEANUP_FIND: findAge,
       RMD_CLEANUP_FSID: fsid,
       RMD_CLEANUP_WATCH_ROOTS: "",
       // the clone roots and coverage caches default to the real home; a case that sweeps them

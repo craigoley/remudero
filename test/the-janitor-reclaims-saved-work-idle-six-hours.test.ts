@@ -45,7 +45,7 @@ test("W1-T8863: the janitor reclaims saved work idle six hours wherever it sits"
 
     const r = run(fx, { IDLE_MINUTES: "", RMD_CLEANUP_LIVE_CHECKOUTS: live });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(existsSync(abandoned), false, r.stdout);
+    assert.equal(existsSync(abandoned), true, "unverifiable orphan payload stays in place");
     assert.equal(existsSync(clean), false, r.stdout);
     assert.equal(existsSync(hidden), false, r.stdout);
     assert.equal(existsSync(live), true);
@@ -53,16 +53,8 @@ test("W1-T8863: the janitor reclaims saved work idle six hours wherever it sits"
     assert.equal(existsSync(recent), true);
     assert.equal(readFileSync(join(dirty, "README"), "utf8"), "local edits\n");
     assert.match(r.stdout, /retention idle 6 h, scratch 6 h, tsx 6 h/);
-    const saved = archives(fx);
-    assert.equal(saved.length, 1, r.stdout);
-    const listing = execFileSync("tar", ["-tf", saved[0]], { encoding: "utf8" });
-    assert.ok(listing.includes("./.git"), listing);
-    assert.ok(listing.includes("./unsaved"), listing);
-    assert.doesNotMatch(listing, /node_modules|coverage/);
-    assert.equal(execFileSync("tar", ["-xOf", saved[0], "./unsaved"], { encoding: "utf8" }), "recover this payload\n");
-    const audit = readFileSync(join(fx.home, ".local/state/remudero/janitor-audit.log"), "utf8");
-    assert.ok(audit.includes(`ARCHIVE-WORKTREE ${abandoned}`), audit);
-    assert.ok(audit.indexOf(`ARCHIVE-WORKTREE ${abandoned}`) < audit.indexOf(`REMOVE ${abandoned}`), audit);
+    assert.deepEqual(archives(fx), []);
+    assert.equal(readFileSync(join(abandoned, "unsaved"), "utf8"), "recover this payload\n");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
@@ -171,7 +163,7 @@ test("W1-T8863: nested scanning excludes tracked children, submodules, deeper cl
     assert.ok(git(live, "ls-files").includes("tracked/keep"), "fixture tracks a file inside the child clone");
     git(tracked, "init", "-b", "main");
     const submodule = join(live, "submodule");
-    git(live, "-c", "protocol.file.allow=always", "submodule", "add", join(fx.root, "origin.git"), submodule);
+    git(live, "-c", "protocol.file.allow=always", "submodule", "add", join(fx.root, "origin.git"), "submodule");
     const moduleGitdir = readFileSync(join(submodule, ".git"), "utf8").trim().slice("gitdir: ".length);
     rmSync(join(submodule, ".git"));
     renameSync(join(submodule, moduleGitdir), join(submodule, ".git"));
@@ -186,21 +178,20 @@ test("W1-T8863: nested scanning excludes tracked children, submodules, deeper cl
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("W1-T8863: orphan archives expire after archive retention", () => {
+test("orphan archives with unknown publication never expire automatically", () => {
   const fx = fixture();
   try {
-    orphan(fx);
+    const root = join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "orphans");
+    mkdirSync(root, { recursive: true });
+    const saved = join(root, "only-work-copy.tar");
+    writeFileSync(saved, "unknown publication");
+    age(saved, 32 * 24);
     assert.equal(run(fx).status, 0);
-    const saved = archives(fx);
-    assert.equal(saved.length, 1);
-    age(saved[0], 32 * 24);
-    const r = run(fx);
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.deepEqual(archives(fx), []);
+    assert.equal(readFileSync(saved, "utf8"), "unknown publication");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("W1-T8863: an orphan reached through a scratch root is archived before removal too", () => {
+test("an orphan reached through a scratch root stays in place", () => {
   const fx = fixture();
   try {
     const path = join(fx.scratch, "orphan");
@@ -208,14 +199,13 @@ test("W1-T8863: an orphan reached through a scratch root is archived before remo
     age(path, 7);
     const r = run(fx, { RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(existsSync(path), false, r.stdout);
-    const saved = archives(fx);
-    assert.equal(saved.length, 1, r.stdout);
-    assert.equal(execFileSync("tar", ["-xOf", saved[0], "./unsaved"], { encoding: "utf8" }), "recover this payload\n");
+    assert.equal(existsSync(path), true, r.stdout);
+    assert.deepEqual(archives(fx), []);
+    assert.equal(readFileSync(join(path, "unsaved"), "utf8"), "recover this payload\n");
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
-test("W1-T8863: nested clones retain unsaved refs unless a verified bundle preserves them", () => {
+test("nested clones retain unsaved refs regardless of archive availability", () => {
   for (const sameFs of [false, true]) {
     const fx = fixture();
     try {
@@ -229,11 +219,11 @@ test("W1-T8863: nested clones retain unsaved refs unless a verified bundle prese
       age(path, 7);
       const r = run(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: live, ...(sameFs ? { FAKE_ARCHIVE_FSID: "1" } : {}) });
       assert.equal(r.status, 0, r.stderr + r.stdout);
-      assert.equal(existsSync(path), sameFs, r.stdout);
+      assert.equal(existsSync(path), true, r.stdout);
       const root = fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT;
       const saved = existsSync(root) ? readdirSync(root).filter(n => n.endsWith(".bundle")) : [];
-      assert.equal(saved.length, sameFs ? 0 : 1, r.stdout);
-      if (!sameFs) assert.ok(git(fx.root, "bundle", "list-heads", join(root, saved[0])).includes(`${tip} refs/heads/local-only`));
+      assert.equal(saved.length, 0, r.stdout);
+      assert.equal(git(path, "rev-parse", "local-only").trim(), tip);
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
   }
 });
