@@ -1,0 +1,26 @@
+- id: W1-T9532
+  title: "FLAKE INCIDENT — 'W1-T9374: a filled store makes a fresh preflight tree launch the bundle' failed CI on 3 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/the-core-fleet-fills-the-child-entry-store.test.ts#W1-T9374: a filled store makes a fresh preflight tree launch the bundle"
+  files:
+    - test/the-core-fleet-fills-the-child-entry-store.test.ts
+  acceptance:
+    - claim: "the cause of the intermittent failure W1-T9532 records in test/the-core-fleet-fills-the-child-entry-store.test.ts is fixed, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T9532 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/the-core-fleet-fills-the-child-entry-store.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T9532 pins the cause of the intermittent failure\" in test/the-core-fleet-fills-the-child-entry-store.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'W1-T9374: a filled store makes a fresh preflight tree launch the bundle' (test/the-core-fleet-fills-the-child-entry-store.test.ts)
+    Failed CI on 3 distinct pull requests whose changed files include neither the test file nor a module it imports: #11705, #11735, #11769.
+    CI runs: 38621549967, 38622613135, 38623398070.
+    Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
+    Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.

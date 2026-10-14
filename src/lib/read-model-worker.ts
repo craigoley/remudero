@@ -79,7 +79,7 @@ import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeap
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
-import { bundledWorkerUrl } from "./child-entry-argv.js";
+import { startWorker } from "./child-entry-argv.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -520,7 +520,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
   const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = new Worker(workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } });
+    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -555,7 +555,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = new Worker(workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request } });
+    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -624,7 +624,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = new Worker(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
+    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -1829,7 +1829,7 @@ export function threadViews(opts: {
   };
   const spawnLane = (lane: Lane, restoreCosts = true): void => {
     const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
-    const spawned = lane === fast ? spawnViews(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), data) : spawnHeavyViews(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), data);
+    const spawned = lane === fast ? spawnViews(opts.workerUrl, data) : spawnHeavyViews(opts.workerUrl, data);
     lane.worker = spawned;
     lane.building = undefined;
     lane.holds = undefined;
@@ -1917,8 +1917,8 @@ export function threadViews(opts: {
   };
 }
 
-const spawnViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
-const spawnHeavyViews = (url: URL, data: ReadModelViewsData): Worker => new Worker(url, { workerData: data, env: SHARE_ENV });
+const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
+const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
   kind: typeof READ_MODEL_WORKER_KIND;
@@ -2375,7 +2375,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
     // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
-    const spawned = new Worker(opts.workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: data, env: SHARE_ENV });
+    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();

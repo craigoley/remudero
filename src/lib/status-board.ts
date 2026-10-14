@@ -59,6 +59,7 @@ import {
   type OperatorMessagePart,
 } from "./operator-message.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { describeActorEvidence } from "./actor-evidence.js";
 import { IDLE_REASON_ID_CAP, runBranchTaskIds, runnableCandidates, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import { heldDependencyRoots, type HeldDependencyRoot } from "./held-dependency-roots.js";
 import {
@@ -1162,7 +1163,7 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
     path: pauseFilePath,
     consequence: (json) => {
       const reason = typeof json?.reason === "string" ? json.reason : undefined;
-      return `no new task spawns until \`rmd resume\`${reason ? ` (${reason})` : ""} — any in-flight task still completes`;
+      return `no new task spawns until \`rmd resume\`${reason ? ` (${reason})` : ""} — any in-flight task still completes; actor: ${describeActorEvidence(json?.actor_evidence)}`;
     },
   },
   {

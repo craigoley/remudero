@@ -137,6 +137,50 @@ test("scratch is reclaimed, and a running session, any git checkout, or a Claude
   }
 });
 
+test("owner is checked before recursive age scans, and stale safe symlink scratch is reclaimable", () => {
+  const fx = fixture();
+  try {
+    const foreign = join(fx.root, "foreign-owned");
+    const internal = join(fx.root, "internal-link-tree");
+    const dangling = join(fx.root, "dangling-temp-link-tree");
+    const external = join(fx.root, "external-link-tree");
+    const externalTarget = join(fx.base, "external-target");
+    mkdirSync(foreign);
+    writeFileSync(join(foreign, "f"), "owned by another account\n");
+    mkdirSync(join(internal, "coverage"), { recursive: true });
+    writeFileSync(join(internal, "coverage", "data"), "regenerable\n");
+    symlinkSync(join(internal, "coverage"), join(internal, "test-link"));
+    mkdirSync(dangling);
+    symlinkSync(join(fx.root, "not-created-node-coverage"), join(dangling, "test-link"));
+    mkdirSync(external);
+    writeFileSync(externalTarget, "must remain\n");
+    symlinkSync(externalTarget, join(external, "node_modules"));
+    for (const path of [foreign, internal, dangling, external]) age(path, HOURS_AGO(8));
+
+    const realStat = spawnSync("/bin/sh", ["-c", "command -v stat"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(realStat, "the platform stat utility exists");
+    writeFileSync(join(fx.bin, "stat"), [
+      "#!/bin/sh",
+      "last=",
+      'for arg do last="$arg"; done',
+      'if [ "${last##*/}" = "foreign-owned" ]; then printf "craigoleyagent\\n"; exit 0; fi',
+      `exec ${JSON.stringify(realStat)} "$@"`,
+    ].join("\n") + "\n", { mode: 0o755 });
+
+    const applied = reclaim(fx, 40, true);
+    assert.ok(existsSync(foreign), "a foreign-owned tree is not traversed or deleted");
+    assert.match(applied.report, /owned by craigoleyagent; age check requires owner account.*foreign-owned/);
+    assert.doesNotMatch(applied.report, /age scan unavailable.*foreign-owned/);
+    assert.equal(existsSync(internal), false, "an old candidate with only an in-tree link can be removed");
+    assert.equal(existsSync(dangling), false, "a dangling alias to a temp-root path can be removed");
+    assert.ok(existsSync(external), "a live external symlink target keeps its candidate");
+    assert.ok(existsSync(externalTarget), "removing a candidate never deletes its external target");
+    assert.match(applied.report, /contains symlink outside cleanup root: .*external-link-tree/);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
 test("an old dir a process is working in, or holds a file open in, is kept and reported", () => {
   const fx = fixture();
   try {
