@@ -16,6 +16,7 @@
 import { join } from "node:path";
 import { ENV_REGISTRY, type EnvRegistryEntry } from "./config-schema.js";
 import { LIVE_LEDGER_DENY_ROOT_ENV } from "./live-write-guard.js";
+import { GARDENER_ORIGIN_ENV, gardenerOriginEnv, readGardenerOrigin } from "./worker-containment.js";
 
 // Why: why USER/CLAUDE_CODE_OAUTH_TOKEN/GH_TOKEN are each safe to copy, and the container-parity
 // incident behind GH_TOKEN — docs/forensics/env.md#allowlist (W1-T236, W1-T258).
@@ -75,7 +76,17 @@ export function buildWorkerEnv(
   }
 
   for (const [key, val] of Object.entries(extra)) {
-    child[key] = val;
+    if (key !== GARDENER_ORIGIN_ENV) child[key] = val;
+  }
+  // Correlation carries no authority. A present ambient parent (including invalid)
+  // wins over extras; absent parents retain validated explicit-extra compatibility.
+  // The decoder closes and bounds input before the serializer sees it. Never pass
+  // rejected bytes onward: "null" preserves the existing invalid-not-missing state.
+  const gardenerOrigin = readGardenerOrigin(parent) ?? readGardenerOrigin(extra);
+  if (gardenerOrigin !== undefined) {
+    child[GARDENER_ORIGIN_ENV] = gardenerOrigin.state === "linked"
+      ? gardenerOriginEnv(gardenerOrigin.name, gardenerOrigin.passId)!
+      : "null";
   }
   const liveDenyRoot = parent[LIVE_LEDGER_DENY_ROOT_ENV];
   if (typeof liveDenyRoot === "string" && liveDenyRoot.length > 0) child[LIVE_LEDGER_DENY_ROOT_ENV] = liveDenyRoot;
