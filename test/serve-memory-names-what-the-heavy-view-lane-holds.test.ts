@@ -199,19 +199,21 @@ test("W1-T9403: serve.memory names the used heap of each thread and each held bo
 
 test("W1-T9403: a thread's used heap is read beside its committed heap, and an unreadable thread has none", async () => {
   const stats = { total_heap_size: 1_000, used_heap_size: 600, external_memory: 50 };
-  const thread = (threadId: number, read: () => Promise<typeof stats>): WorkerThread =>
+  const thread = (threadId: number, read: () => Promise<Partial<typeof stats>>): WorkerThread =>
     ({ threadId, getHeapStatistics: read, once: () => undefined }) as unknown as WorkerThread;
   const read = readWorkerHeaps as unknown as (w: Parameters<typeof readWorkerHeaps>[0], ms: number, holds?: (id: number) => Part["holds"]) => Promise<Reading[]>;
   const readings = await read([
     { kind: "probe:views", thread: thread(7, async () => stats) },
     { kind: "probe:views", thread: thread(8, async () => { throw new Error("thread is gone"); }) },
+    { kind: "probe:views", thread: thread(9, async () => ({ total_heap_size: 300, external_memory: 20 })) },
   ], 1_000, (id) => (id === 7 ? { "board:core": { entries: 3, bytes: 120 } } : undefined));
   assert.equal(readings.length, 1);
   const [reading] = readings;
-  assert.equal(reading!.bytes, 1_050, "the committed heap is unchanged: total + external");
-  assert.equal(reading!.used_bytes, 650, "the used heap is used + external, summed like bytes");
+  assert.equal(reading!.bytes, 1_370, "the committed heap is unchanged: total + external");
+  assert.equal(reading!.used_bytes, 650, "the used heap is used + external, summed over the parts that report one");
   assert.deepEqual(reading!.parts!["thread-7"], { entries: 1, bytes: 1_050, used_bytes: 650, holds: { "board:core": { entries: 3, bytes: 120 } } });
   assert.deepEqual(reading!.parts!["thread-8"], { entries: 1, bytes: 0 }, "an unreadable thread has no used_bytes: absent, never zero");
+  assert.deepEqual(reading!.parts!["thread-9"], { entries: 1, bytes: 320 }, "a runtime that reports no used heap leaves it absent, never NaN");
   assert.match(reading!.error ?? "", /thread 8 unsized: thread is gone/);
 });
 

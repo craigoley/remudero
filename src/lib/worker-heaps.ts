@@ -120,7 +120,7 @@ async function within<T>(read: () => Promise<T>, timeoutMs: number, late: T): Pr
   }
 }
 
-type ThreadHeap = { bytes: number; used_bytes: number } | { error: string };
+type ThreadHeap = { bytes: number; used_bytes?: number } | { error: string };
 
 async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<ThreadHeap> {
   const unsized = (why: string): string => `thread ${thread.threadId} unsized: ${why}`;
@@ -128,7 +128,9 @@ async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<Thre
   try {
     const read = async (): Promise<ThreadHeap> => {
       const heap = await thread.getHeapStatistics();
-      return { bytes: heap.total_heap_size + heap.external_memory, used_bytes: heap.used_heap_size + heap.external_memory };
+      const bytes = heap.total_heap_size + heap.external_memory;
+      // A runtime that does not report the used heap leaves it unknown: absent, never NaN or zero.
+      return Number.isFinite(heap.used_heap_size) ? { bytes, used_bytes: heap.used_heap_size + heap.external_memory } : { bytes };
     };
     return await within(read, timeoutMs, { error: unsized(`no heap statistics within ${timeoutMs}ms`) });
   } catch (e) {
@@ -209,7 +211,7 @@ export async function readWorkerHeaps(
   ]);
   const own = heaps.map((heap): WorkerHeapReading => {
     const bytes = "bytes" in heap ? heap.bytes : 0;
-    const used = "used_bytes" in heap ? { used_bytes: heap.used_bytes } : {};
+    const used = "used_bytes" in heap && heap.used_bytes !== undefined ? { used_bytes: heap.used_bytes } : {};
     const held = holds?.(heap.threadId);
     return {
       name: `${WORKER_HEAP_PREFIX}${heap.kind}`, kind: "worker-heap", entries: 1, bytes, ...used,
