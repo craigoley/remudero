@@ -12,7 +12,7 @@
   origin: "2026-10-13 operator-approved Inbox adoption verification"
   plan_refs: ["W1-T5886", "W1-T9285", "CONSOLE-T132"]
   files: ["src/lib/instance-gateway.ts", "src/lib/read-model-slow-lane.ts", "src/lib/read-model-worker.ts", "src/lib/serve.ts", "src/lib/inbox-view.ts", "src/lib/fleet-lane.ts", "src/lib/panel-graph.ts", "test/a-non-core-inbox-has-its-own-classification-producer.test.ts", "test/read-model-worker.test.ts"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     At serving source bbab8894fc5801bfab324561aae8ef5faa814937, the instance capability view advertised site and console proposal lanes and reframe. Both real authenticated GET /v1/i/<instance>/inbox reads returned 503 inbox_not_ready. Their state roots lacked inbox-classification.json and inbox-classified.json; the core root had both fresh files. defaultInstanceInboxSources requires inboxFromSlowLane, while the maintained slow-lane Inbox configuration names only the core root. A route existing and proposal fixture tests passing do not prove instance-owned lane availability. This blocks the publication gate filed as CONSOLE-T132.
