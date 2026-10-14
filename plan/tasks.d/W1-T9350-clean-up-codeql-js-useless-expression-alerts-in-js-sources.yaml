@@ -1,0 +1,26 @@
+- id: W1-T9350
+  title: Clean up CodeQL js/useless-expression alerts in JS sources
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/**/*.js
+  acceptance:
+    - claim: All js/useless-expression alerts in src JS files are resolved or documented
+      proof: "unit test: js/useless-expression alerts resolved"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-14 proposal on codeql-quality:js/useless-expression, ratified via rmd
+    approve:
+  
+    CodeQL quality debt for rule js/useless-expression: 1 open alert tagged quality and
+    maintainability (#357). Propose one bounded cleanup task for this rule; do not auto-fix or
+    dismiss alerts.
+  
+    CodeQL-Snapshot:
+    {"proposalId":"codeql-quality:js/useless-expression","ruleId":"js/useless-expression","alertNumbers":["357"]}
