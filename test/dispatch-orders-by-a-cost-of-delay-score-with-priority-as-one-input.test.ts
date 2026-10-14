@@ -56,20 +56,16 @@ test("W1-T9323: between equally old tasks the higher priority dispatches first",
   assert.deepEqual(dispatchOrder([low, high], tied).map(t => t.id), [high.id, low.id]);
 });
 
-test("W1-T9323: a priority below the queue head buys only the share it newly outranks", () => {
+// Hand correction: priority now weights urgency by 2^-tierGap instead of adding the share of the queue a task
+// outranks, so a sub-1 priority buys its own small tier gap (test/priority-weights-dispatch-urgency-so-age-cannot-swamp-intent.test.ts).
+test("W1-T9323: a priority below the queue head buys only its own tier gap", () => {
   const others = Array.from({ length: 8 }, (_, i) => task(`W1-T710${i}`, { priority: 1 }));
   const age = Object.fromEntries([...others.map(t => [t.id, 4 * HOUR]), ["W1-T7200", 4 * HOUR], ["W1-T7201", 4 * HOUR]]);
   const half = task("W1-T7200", { priority: 0.5 });
   const nine = task("W1-T7201", { priority: 0.9 });
   const context = calibrate([...others, half, nine], age);
-  // 0.5 outranks the 9 tasks behind it, 0.9 outranks 8: one rank (a tenth of the queue) apart, not 0.4 of anything.
-  const unit = 1 + 4 * HOUR / MEDIAN_WAIT;
   const ratio = context.costOfDelayByTaskId!.get(half.id)! / context.costOfDelayByTaskId!.get(nine.id)!;
-  assert.ok(Math.abs(ratio - (unit + 0.9) / (unit + 0.8)) < 1e-9, `ratio ${ratio}`);
-  // Minting a smaller number than the head's own buys nothing more: the same share, the same pass.
-  const minted = task("W1-T7200", { priority: 0.0001 });
-  const mintedContext = calibrate([...others, minted, nine], age);
-  assert.equal(mintedContext.stridePassByTaskId!.get(minted.id), context.stridePassByTaskId!.get(half.id));
+  assert.ok(Math.abs(ratio - 2 ** 0.4) < 1e-9, `ratio ${ratio}`);
 });
 
 test("W1-T9323: an undatable open task is scored at age zero and named as imputed", () => {

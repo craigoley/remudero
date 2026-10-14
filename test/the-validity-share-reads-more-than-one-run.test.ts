@@ -42,8 +42,8 @@ test("W1-T9038: the validity share pools the runs nearest a task age, not the on
   const result = calibrate([t], history, [AGE]);
   const estimate = result.estimates.get("src")!;
   const classFactor = result.context.scoreByClass.get("src")! * estimate.alpha / (estimate.alpha + estimate.beta);
-  // W1-T9323: the score also carries urgency 1 + age / median wait + head start (a lone task has none).
-  const urgency = 1 + AGE / (AGE + 12_000);
+  // The score also carries the urgency of its age in median waits (a lone task has no tier gap).
+  const urgency = value.dispatchUrgency(0, AGE / (AGE + 12_000));
   const probability = result.context.costOfDelayByTaskId!.get(t.id)! / classFactor / urgency;
   const prior = 25 / 27;
   assert.ok(Math.abs(probability - (4 + value.DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (5 + value.DISPATCH_VALUE_PRIOR_WEIGHT)) < 1e-12);
@@ -81,7 +81,7 @@ test("W1-T9038: empty history retains zero evidence and the fleet prior", () => 
   const t = task("W1-T101");
   const result = calibrate([t], history, [AGE]);
   const estimate = result.estimates.get("src")!;
-  const expected = 0.5 * result.context.scoreByClass.get("src")! * (estimate.alpha / (estimate.alpha + estimate.beta)) * (1 + AGE / AGE);
+  const expected = 0.5 * result.context.scoreByClass.get("src")! * (estimate.alpha / (estimate.alpha + estimate.beta)) * value.dispatchUrgency(0, AGE / AGE);
   assert.equal(result.context.costOfDelayByTaskId!.get(t.id), expected);
 });
 
