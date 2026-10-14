@@ -268,6 +268,7 @@ import {
   startProviderAuthSession,
   type ProviderAuthProfile,
 } from "./provider-auth-sessions.js";
+import { setWorkerEntryLog } from "./child-entry-argv.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -2129,6 +2130,11 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
     if (!(error instanceof GoLiveError)) throw error;
     return { status: error.status, body: { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) } };
   };
+  const selected = deps.onboardingGoLive?.registryTarget;
+  const onboardingGoLive = selected === undefined ? undefined : {
+    ...deps.onboardingGoLive,
+    registryTarget: selected && typeof selected === "object" ? Object.freeze({ ...selected }) : selected,
+  };
   return registry.instances.filter((instance) => instance.live).flatMap((instance): Route[] => {
     const stateDir = instance.name === (deps.instances?.coreInstance ?? CORE_INSTANCE)
       ? dirname(deps.ledgerPath)
@@ -2151,9 +2157,10 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
           const actor = verifiedActor(req);
           if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
           try {
-            const registryRepository = deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
+            const registryRepository = onboardingGoLive ? onboardingGoLive.registryRepository
+              : deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
             const receipt = await requestGoLive({ instance: instance.name, actor }, {
-              ...deps.onboardingGoLive, registryRepository, stateDir, ledgerPath: deps.ledgerPath,
+              ...(onboardingGoLive ?? deps.onboardingGoLive), registryRepository, stateDir, ledgerPath: deps.ledgerPath,
             });
             sendJson(res, 202, receipt);
           } catch (cause) {
@@ -3277,6 +3284,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
+  // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
+  setWorkerEntryLog(deps.log);
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));

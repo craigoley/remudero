@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: the live memory-budget read after #11004 (eacc28b41)"
   plan_refs: [W1-T7093, W1-T7094]
   files: [src/lib/host-memory-shadow.ts, test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

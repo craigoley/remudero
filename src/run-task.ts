@@ -893,6 +893,7 @@ import {
   createAnchorGrepCache,
   readOriginMainSha,
   inboxDraftPrompt,
+  checkoutRepoFacts,
   isDraftStale,
   isRatifiedInLedger,
   materializeDraftTaskIds,
@@ -1035,9 +1036,12 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
+import type { ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
+  defaultProofRunner,
+  defaultProofRunnerAsync,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -1433,7 +1437,7 @@ import {
   workerAllowlistFromSettings,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -3233,6 +3237,7 @@ import {
   stopDetail,
 } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
+import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import {
   readGithubWebhookSecret,
   resolveGithubWebhookSecretFilePath,
@@ -3242,7 +3247,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
+import { LEDGER_REQUEST_STEP, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -5202,9 +5207,10 @@ export function ghPrCreateFillCommand(
   title?: string,
   bodyOverride?: string,
   proofRunner?: OpenPullRequestProofRunner,
+  childStore: ChildEntryStoreOptions = {},
 ): PrCreateCommand {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
-  const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
+  const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner ?? ((proof, base, root, target) => defaultProofRunner(proof, base, root, target, process.execPath, undefined, childStore)), { owner, repo });
   return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
@@ -5219,11 +5225,12 @@ export async function ghPrCreateFillCommandAsync(
   runProofAsync?: AsyncOpenPullRequestProofRunner,
   /** A finished build whose only defect is a failing filed proof is opened with that proof named, never stranded. */
   openOnFailingProof = false,
+  childStore: ChildEntryStoreOptions = {},
 ): Promise<PrCreateCommand> {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
   let checkedBody: string;
   try {
-    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
+    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
   } catch (err) {
     if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
     const opened: PrCreateDiagnostic = {
@@ -6938,7 +6945,9 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
-  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
+    ? preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName })
+    : planPrPreflightAtCommitAsync(tree, sha, { ...meta, headRef: pr.headRefName }, { log: deps.log });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
   let roundId: string | undefined;
   const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -13958,6 +13967,7 @@ export async function runFixRung(opts: {
         roundStartSha,
         stageable: proofRepairStageable,
         proofs: proofDiscriminationNow.proofs.map((p) => p.proof),
+        childStore: { log: deps.log },
       });
       if (gate !== undefined) {
         harnessCommitRefusalReason = gate.reason;
@@ -15200,6 +15210,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
   proofs: readonly string[];
   /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
   childRoot?: string;
+  childStore?: ChildEntryStoreOptions;
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
     hostWorktreeGit(input.worktreePath, args).trim();
@@ -15217,7 +15228,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot), {
+      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot, [], input.childStore), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -18166,8 +18177,9 @@ async function runTask(
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
     noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
-    const spawnArgs = opts.gitCredentialSocketPath
-      ? withGitCredentialSocket(requestedSpawnArgs, opts.gitCredentialSocketPath)
+    const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
+    const spawnArgs = socketPath
+      ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
       : requestedSpawnArgs;
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
@@ -19893,16 +19905,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
-  // W1-T8776: a checkout now at main fills the shared child-entry store once per main revision, in a child process
-  // and unawaited, so every worktree cut at this source hash can copy the bundle instead of cold-starting tsx. A hash
-  // already stored is a no-op; a failed build is ledgered and changes nothing (children keep running tsx).
-  if (checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded") {
-    void buildIntoStore(repoDir, {
-      storeRoot: childEntryStoreRoot(config.root),
-      log,
-      liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
-    }).then((stored) => buildEngineAfterStore(repoDir, join(config.root, "state"), childEntryStoreRoot(config.root), stored, log));
-  }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
   // after a full run as the scope guard's "forged merge-base" misdiagnosis. Verdict stays
@@ -19984,6 +19986,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   } finally {
     checkoutRefresh.release();
   }
+  // W1-T9374: this fresh main worktree has a usable install even when repos/<repo> is unborrowed.
+  // Fill the shared store off-loop and unawaited; the builder writes its own --out, never this tree.
+  log("child_entry.store_build_requested", { source: "run-worktree", tree: worktreePath, checkout_kind: checkoutRefresh.kind });
+  void buildIntoStore(worktreePath, {
+    storeRoot: childEntryStoreRoot(config.root),
+    log,
+    liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
+  }).then((stored) => buildEngineAfterStore(worktreePath, join(config.root, "state"), childEntryStoreRoot(config.root), stored, log));
   // W1-T2626 (design note (iii)): a single unreadable remote head is already ledgered --
   // `worktree.add`'s `remote_head: "unreadable"` plus its `worktree.base_uncheckable`
   // companion, both from worktreeAdd itself -- but nothing yet distinguished "this happened
@@ -21272,7 +21282,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log });
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -30078,6 +30088,7 @@ export interface PreflightProofsDeps {
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
   /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
   childRoot?: string;
+  childStore?: ChildEntryStoreOptions;
 }
 
 /**
@@ -30160,7 +30171,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      checkProofLaunchArgv(proof, mergeBase, deps.childRoot),
+      checkProofLaunchArgv(proof, mergeBase, deps.childRoot, [], deps.childStore),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
@@ -34176,7 +34187,7 @@ async function retroCommand(
     }
 
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath), undefined, undefined, { log });
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
@@ -38086,7 +38097,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
     git,
     fetcher: opts.fetcher ?? ghJson,
     docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
-    preflight: opts.preflight ?? planPrPreflight,
+    preflight: opts.preflight ?? ((input) => planPrPreflight(input, { log: opts.log })),
   };
   return {
     root,
@@ -38104,7 +38115,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
-    preflight: opts.preflight ?? planPrPreflightAsync,
+    preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
   };
   return {
     root,
@@ -39937,8 +39948,15 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId, runOptions) =>
-          runTaskFn(taskId, {
+        runOne: (taskId, runOptions) => {
+          // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
+          // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
+          const admittedPlan = createAdmittedPlanSlot();
+          void startRunChildProbe({
+            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
+            options: { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" },
+          });
+          return runTaskFn(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
@@ -39956,7 +39974,7 @@ export async function daemonCommand(
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
             // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
-            planSnapshot: planSyncCoalescer.sync,
+            planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
@@ -39966,7 +39984,8 @@ export async function daemonCommand(
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
             ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
-          }),
+          });
+        },
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
         // processes already announced, so a restart does not re-announce. Read ONCE at daemon
@@ -49164,6 +49183,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       pushed: result.pushed,
       reason: reason ?? null,
       session_id: result.sessionId,
+      actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
       requested_by_pid: process.pid,
     });
@@ -49190,6 +49210,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     resolved_by: target.resolvedBy,
     reason: reason ?? null,
     session_id: info.sessionId ?? null,
+    actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
     requested_by_pid: info.pid,
   });
@@ -49221,6 +49242,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
       step: "fleet.resume",
       scope: "fleet",
       cleared_shared_pause: cleared,
+      actor_evidence: gatherActorEvidence(),
+      session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+      requested_by_pid: process.pid,
     });
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
@@ -49238,6 +49262,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     resolved_by: target.resolvedBy,
     cleared_stop: result.clearedStop,
     cleared_pause: result.clearedPause,
+    actor_evidence: gatherActorEvidence(),
+    session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+    requested_by_pid: process.pid,
   });
   console.log(
     `### rmd resume — instance '${target.instance}' cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +
@@ -50267,7 +50294,7 @@ async function triageCommandLocked(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], undefined, undefined, { log });
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
@@ -50720,7 +50747,7 @@ export async function planCommand(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
@@ -50823,6 +50850,8 @@ export function buildInboxDraftSpawnArgs(args: {
   config: Config;
   disallowedTools: readonly string[];
   proposalId?: string;
+  proposal?: Proposal;
+  currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats;
 }): SpawnWorkerArgs {
@@ -50848,9 +50877,12 @@ export function buildInboxDraftSpawnArgs(args: {
       log: args.draftRoutingLog,
       readStats: args.draftRoutingReadStats,
       evaluate: (worker: WorkerResult) => {
-        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
+        const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
-          clean: parsed !== null && lintDraftedFragment(parsed.fragmentYaml, args.proposalId!, parsed.stampLine).length === 0 };
+          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
+            args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
+            facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
       },
     } } : {}),
   };
@@ -50977,11 +51009,12 @@ export async function draftProposalBatch(
   const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
-    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
     return await runDraftRung(
       toDraft,
       planText,
       {
+        repoFacts: checkoutRepoFacts(worktreePath),
         spawn: (proposal, prompt) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -50990,6 +51023,8 @@ export async function draftProposalBatch(
             config,
             prompt,
             proposalId: proposal.id,
+            proposal,
+            currentPlanText: planText,
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
@@ -50998,12 +51033,14 @@ export async function draftProposalBatch(
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined }),
         ...(inboxDraftMount.provider === "cash" ? {
-          escalate: (_proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
+          escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
             config,
             prompt,
+            proposal,
+            currentPlanText: planText,
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
         } : {}),
@@ -52852,6 +52889,16 @@ export async function approveCommand(
     return 2;
   }
 
+  if (classification.state === "ready" && classification.releaseTaskId) {
+    const code = await approveCommand([classification.releaseTaskId], deps);
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath)).has(classification.releaseTaskId)) {
+      appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
+        step: "ratify.approved", release_task_id: classification.releaseTaskId });
+      approveNoteChain(rest, proposalId, config, deps);
+    }
+    return code;
+  }
+
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
 
@@ -53023,7 +53070,7 @@ export async function approveCommand(
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
   const preflightApprovePush = (path: string, branch: string, id: string): void =>
-    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }), { lane: "approve", branch, log });
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }, { log }), { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -56952,6 +56999,7 @@ import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js"
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { createAdmittedPlanSlot, startRunChildProbe, tapPlanSnapshot } from "./lib/run-child.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

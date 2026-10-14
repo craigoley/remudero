@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: docs/adr/0006-precompiled-daemon-child-entries.md's fourth unfiled follow-up (W1-T7729, #11136)"
   plan_refs: [W1-T7729, W1-T8775, W1-T8776, W1-T8777]
   files: [src/lib/garden-registry.ts, src/lib/preopen-gate.ts, src/lib/child-entry-argv.ts, test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts, test/a-garden-child-runs-under-a-heap-cap-at-low-priority.test.ts, test/a-build-is-gated-on-the-fast-preflight-before-its-pr-opens.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: ADR 0007 runs every build on this bundle; it is on the chain that offsets the new per-lane child memory
   attempts: 0
   rationale: |
