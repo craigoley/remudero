@@ -499,7 +499,7 @@ test("a real selector report clears a prior failure through the production overs
     h.rows.push(row("selector-shadow.gardener_failed", now - HOUR, { error: "Bad credentials" }));
     flush();
     runGardenerOverseer(deps);
-    assert.equal(episodes()["selector-shadow"].kind, "failure", "positive failure control");
+    assert.equal(episodes().flake_incident.kind, "failure", "positive failure control");
     const report = await runSelectorShadowGardener({
       stateDir: h.dir, repoRoot: h.dir,
       openWorkspace: () => { throw new Error("the empty report must open no workspace"); },
@@ -509,7 +509,7 @@ test("a real selector report clears a prior failure through the production overs
     flush();
     assert.ok(ports.readRows().some((r) => r.step === "selector-shadow.report"), "the real raw-line filter must retain the producer's report");
     runGardenerOverseer(deps);
-    assert.equal(episodes()["selector-shadow"], undefined, "the old failure episode recovers");
+    assert.equal(episodes().flake_incident, undefined, "the old failure episode recovers");
     assert.equal(h.steps("gardener_overseer.healed").length, 0);
     assert.equal(h.escalations.length, 0);
     assert.equal(classifyGardenerStep("unrelated.report"), undefined, "arbitrary reports cannot clear a failure");
@@ -518,7 +518,7 @@ test("a real selector report clears a prior failure through the production overs
     h.rows.push(row("selector-shadow.gardener_failed", now + 1, { error: "filing failed after reporting" }));
     flush();
     runGardenerOverseer(deps);
-    assert.equal(episodes()["selector-shadow"].kind, "failure", "a later failure remains visible");
+    assert.equal(episodes().flake_incident.kind, "failure", "a later failure remains visible");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
