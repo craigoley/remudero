@@ -2119,6 +2119,13 @@ export interface ReadModelWorkerHandle {
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
+  /**
+   * W1-T9508, memory tier 2: {@link stop}, without blocking serve's loop, and undone by {@link resume}. The worker and every
+   * thread it spawned (views lanes, slow lane, oracle) exit; serve keeps the bodies it holds. True when a worker was running.
+   */
+  pause?(): Promise<boolean>;
+  /** Starts a worker {@link pause} stopped; a no-op when none was paused. */
+  resume?(): void;
   /** Re-reads the committed bodies the worker has not replaced; a promoted standby calls it, so it never serves its boot-time copies. */
   reload(): number;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
@@ -2222,6 +2229,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
   let stopping = false;
+  let paused = false;
+  let started = false;
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
   const clock = opts.clock ?? systemClock;
@@ -2396,7 +2405,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     });
   };
 
-  return {
+  const handle: ReadModelWorkerHandle = {
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
@@ -2448,7 +2457,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       worker.postMessage({ type: "read", path });
     },
     start: () => {
-      if (worker || stopping) return;
+      if (worker || stopping || paused) return;
+      started = true;
       spawn();
       handGithub();
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
@@ -2474,5 +2484,38 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       opts.log?.("read_model.stop", { confirmed: waited !== "timed-out" });
       return waited !== "timed-out";
     },
+    pause: async () => {
+      if (stopping || paused || !started) return false;
+      paused = true;
+      stopSwitchWatch();
+      clearTimeout(respawnTimer);
+      const running = worker;
+      worker = undefined;
+      handGithub();
+      // A worker that died and awaits its respawn is paused too: the respawn is what resume starts.
+      const flag = signal;
+      if (!running || !flag) return false;
+      Atomics.store(flag, 0, 1);
+      const confirmed = await new Promise<boolean>((resolve) => {
+        const bound = setTimeout(() => resolve(false), opts.stopWaitMs ?? READ_MODEL_STOP_WAIT_MS);
+        bound.unref();
+        running.on("message", (msg: ReadModelWorkerMessage) => {
+          if (msg.type === "log" && msg.step === "read_model.stopped") {
+            clearTimeout(bound);
+            resolve(true);
+          }
+        });
+        running.postMessage({ type: "stop" });
+      });
+      await running.terminate();
+      opts.log?.("read_model.paused", { confirmed });
+      return true;
+    },
+    resume: () => {
+      if (!paused || stopping) return;
+      paused = false;
+      handle.start();
+    },
   };
+  return handle;
 }

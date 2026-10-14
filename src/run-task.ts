@@ -790,6 +790,7 @@ import {
   onDrainRequest,
   onShedRequest,
   onRestoreRequest,
+  onShedWorkersRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -41834,6 +41835,8 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
+    // W1-T9508: tier 2, which no generation answered (0 of 122 rows answered on 10-13/14), so every ask timed out.
+    onShedWorkersRequest(channel, { shed: () => generation?.shedWorkers(), restore: (reason) => generation?.restoreWorkers(reason) });
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
