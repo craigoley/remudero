@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.1
   status: queued
@@ -37,10 +37,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The title reports 470.9 PR minutes across 133 rounds and 82 PRs, but no supporting measurement is supplied; the escalation rule explicitly includes findings that cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance requires a grep match for a test declaration, which establishes text presence rather than verifying that the harness prevents the wasted fix round.; on the change's description/files alone, no diff was read — The declared files fit the stated task, but the record does not describe the prevention mechanism, leaving the proposed remedy insufficiently specified to assess its alignment with established practice."
-    judged_at: "2026-10-02T22:33:41.320Z"
-    pin: "623e39dfb09d5686f29eb804e7138f4820e8246baf275c1d54ae3a4cf1392e13"
+      - "The declared files are src/run-task.ts and one new test file. Neither is a secrets, auth, permissions, merge, deploy, infrastructure or review-policy path, going by the file names and description."
+      - "The task is a remedy to the dispatch path so a \"worker changed nothing\" fix round is prevented or self-healed. The description doesn't show it deleting data or branches, or taking an irreversible action, or needing an operator decision."
+      - "The acceptance criterion is a grep for a named test, so it can be verified automatically. The PR will still go through CI and review."
+      - "The family track record is weak (24 merged and 40 declined, Beta mean 0.61). The prior docs-only rung didn't fix the problem, and no change view was supplied. These are reasons to watch the result, but nothing in the text shows danger."
+    judged_at: "2026-10-14T18:49:12.731Z"
+    pin: "7d07eff1e3d87277207f42dac5bea4e4b3d6f1173237ca95e7d37c87752c8d8a"

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 (Craig: \"not sure reviews are happening\"); coordinator brief: file P1 if uncovered; standing rulings: no hard fixed thresholds, automated flow"
   plan_refs: [W1-T2490, W1-T4118, W1-T9240, W1-T9361, W1-T9390, W1-T9406, W1-T192]
   files: [src/lib/inbox.ts, src/run-task.ts, test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1  # P1: each full sweep pays it on the loop; it froze reviews and dispatch for minutes at a time on 2026-10-14
   attempts: 0
   rationale: |

@@ -98,15 +98,16 @@ test("W1-T7729: a child-entry build that cannot produce a bundle exits nonzero",
 test("W1-T8775: the build CLI run under plain node writes every declared bundle with its digest and a manifest", () => {
   const root = makeTree();
   try {
-    // The CLI builds the declared CHILD_ENTRIES, so the fixture supplies both sources.
+    // The CLI builds the declared CHILD_ENTRIES, so the fixture supplies every source.
     writeFileSync(join(root, "src", "run-task.ts"), 'export const runTask: string = "run-task";\nconsole.log(runTask);\n');
     writeFileSync(join(root, "src", "check-proof-main.ts"), 'export const checkProof: string = "check-proof-main";\nconsole.log(checkProof);\n');
+    writeFileSync(join(root, "src", "run-child-main.ts"), 'export const runChild: string = "run-child";\nconsole.log(runChild);\n');
     const r = spawnSync(process.execPath, [SCRIPT, "--root", root], { encoding: "utf8" });
     assert.equal(r.status, 0, `expected exit 0, got ${r.status}\n${r.stdout}\n${r.stderr}`);
     const manifest = JSON.parse(readFileSync(join(root, "dist", "child-entries", "manifest.json"), "utf8")) as Manifest & {
       entries: (ManifestEntry & { sha256: string })[];
     };
-    assert.deepEqual(manifest.entries.map((e) => e.name), ["run-task", "check-proof-main"]);
+    assert.deepEqual(manifest.entries.map((e) => e.name), ["run-task", "check-proof-main", "run-child"]);
     for (const e of manifest.entries) {
       const bytes = readFileSync(join(root, "dist", "child-entries", e.bundle));
       assert.ok(bytes.length > 0, `${e.name} bundle is empty`);
@@ -117,7 +118,7 @@ test("W1-T8775: the build CLI run under plain node writes every declared bundle 
     assert.match(r.stdout, new RegExp(`source hash ${manifest.sourceHash}`));
     const check = spawnSync(process.execPath, [SCRIPT, "--root", root, "--check"], { encoding: "utf8" });
     assert.equal(check.status, 0, `${check.stdout}\n${check.stderr}`);
-    assert.match(check.stdout, /run-task: current\ncheck-proof-main: current/);
+    assert.match(check.stdout, /run-task: current\ncheck-proof-main: current\nrun-child: current/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

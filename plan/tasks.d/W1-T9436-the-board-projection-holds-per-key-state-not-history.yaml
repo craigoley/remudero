@@ -17,7 +17,7 @@
     - src/lib/now-view.ts
     - src/lib/board.ts
     - test/the-board-projection-holds-per-key-state-not-history.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # measured: serve is back at 3.63 GB rss 12 min after a replace, the host's largest standing memory consumer, and board:core is the largest single holder in it
   attempts: 0
   rationale: |

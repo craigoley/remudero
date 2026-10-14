@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-14: 'go with your recommendation. It doesn't feel like a one way door. We can always undo it' (serve runs its workers from precompiled bundles); 'don't stop! Fix it!'"
   plan_refs: [W1-T9370, W1-T8777, W1-T8776, W1-T9374, W1-T7729]
   files: [src/lib/serve-slots.ts, src/lib/serve-supervisor-main.ts, test/a-serve-slot-builds-its-worker-bundles.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -12,7 +12,7 @@
   origin: operator#2026-10-14-public-private-ops-compatibility
   plan_refs: [W1-T4227, W1-T4265, W1-T4266, W1-T7727, W1-T9410]
   files: [src/lib/instance-registry-selection.ts, src/lib/serve.ts, test/one-registry-for-the-fleet.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     At main c3753e8f86581f5e0b7d4da5e05a8b2941c70481, daemonInstanceRegistryPath

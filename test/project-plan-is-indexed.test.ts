@@ -13,6 +13,7 @@ import {
   seedCountFromCircuitBreak,
   type DeriveDeps,
   type GitHub,
+  type InMemoryLedgerIndex,
   type LedgerIndex,
   type PrRef,
   type StatusProjection,
@@ -228,7 +229,7 @@ test("R-23 (a2) buildLedgerIndex preserves ledger order and never double-counts 
     { ts: "c", step: "dispatch.circuit_broken", task: "X", freshCount: 3 },
     { step: 7, task_id: "X" }, // non-string step: bucketed by task, absent from byStep
   ];
-  const index: LedgerIndex = buildLedgerIndex(rows);
+  const index: InMemoryLedgerIndex = buildLedgerIndex(rows);
   assert.equal(index.rows, rows, "the index names the exact array it was built over");
   // Same row object carrying the id in BOTH fields appears ONCE in that id's bucket.
   assert.deepEqual(index.byTask.get("X"), [rows[0], shared, rows[3], rows[4]]);

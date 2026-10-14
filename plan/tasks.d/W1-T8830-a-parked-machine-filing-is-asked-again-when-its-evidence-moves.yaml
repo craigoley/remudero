@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: console inbox review (18 machine-judge items parked, some since 2026-10-03)"
   plan_refs: [W1-T2977, W1-T5359, W1-T5406]
   files: [src/lib/machine-filing-judge.ts, test/a-parked-machine-filing-is-asked-again-when-its-evidence-moves.test.ts, test/the-machine-filing-judge-releases-or-escalates.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

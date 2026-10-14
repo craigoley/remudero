@@ -1,0 +1,37 @@
+- id: W1-T9510
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — awaiting-review:own diff unchanged since head <sha> but the merge base moved cost 2.61 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:awaiting-review:own diff unchanged since head <sha> but the merge base moved"
+  files:
+    - src/lib/sweep.ts
+    - test/flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved.test.ts
+  acceptance:
+    - claim: "awaiting-review:own diff unchanged since head <sha> but the merge base moved is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T9510: flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved clears without a person\" in test/flow-awaiting-review-own-diff-unchanged-since-head-sha-but-the-merge-base-moved.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    awaiting-review:own diff unchanged since head <sha> but the merge base moved cost 2.61 PR-hours; owner review-lane
+    Owner review-lane failed to clear eligible episodes.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #11710: 1.73 PR-hours — own diff unchanged since head 3189f4c but the merge base moved — re-running discrimination alone, not the whole review (W1-T3704)
+    - PR #11629: 0.91 PR-hours — own diff unchanged since head 1ccf26c but the merge base moved — re-running discrimination alone, not the whole review (W1-T3704)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description names a narrow defect: the review lane fails to clear \"own diff unchanged but merge base moved\" episodes. The declared files are src/lib/sweep.ts and one new test file. Neither involves secrets, auth, deletion of data or branches, or deploy or infrastructure changes."
+      - "The filed text says the fix targets re-running discrimination only, with a grep-verifiable acceptance test. That makes the result checkable from what is shown. The plan also names no operator-only decision."
+      - "Whether the change touches merge or review policy can't be confirmed, since no diff or change view was supplied. The sweep.ts target is a clearing or sweep routine, and the description gives no sign it alters policy. The task's own PR still has to pass CI and review."
+      - "The family record is 5 merged and 1 declined (Beta mean 0.75). That is mostly positive and not a concerning gates state."
+    judged_at: "2026-10-14T18:48:46.101Z"
+    pin: "b4b994334bde437c7b05f91ba1b8a199cc54e1a5115861deea22499ba8d4c533"
