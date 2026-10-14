@@ -17,6 +17,6 @@
     - plan/tasks.yaml
     - MASTER-PLAN.md
   acceptance:
-    - claim: "\"W1-T9486 provides a placeholder for an audit of W1-T9485's mapping to real W1-T IDs after operator approval\""
-      proof: "grep: ratification workflow in MASTER-PLAN.md"
+    - claim: "MASTER-PLAN.md records an audit step that maps the W1-T9485 ratification candidate to a real W1-T ID after operator approval"
+      proof: 'grep: ratification-audit: W1-T9485 in MASTER-PLAN.md'
   origin: "architect"
