@@ -174,3 +174,20 @@ test("W1-T9390: an issue born in the oldest rotation is still rejudged", async (
   assert.deepEqual(rejudgedUrls(fixture.path), [issueUrl(7)]);
   assert.deepEqual(failures, []);
 });
+
+test("W1-T9390: an unstattable rotation or an unlistable state dir is left to the union read", async (t) => {
+  const fixture = writeLedger([], { rotations: [{ at: daysAgo(30), gz: true, rows: [birth(3, daysAgo(31))] }] });
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const unstattable: LedgerGrepFsDeps = {
+    ...realLedgerFs,
+    statSync: (path) => {
+      if (/ledger\.[^/]*\.ndjson\.gz$/.test(path)) throw new Error("EACCES: stat refused");
+      return realLedgerFs.statSync(path);
+    },
+  };
+  const read = await createEscalationTriageHistoryReader({ fs: unstattable })(fixture.dir);
+  assert.deepEqual(read.rows.map((row) => row.issue_url), [issueUrl(3)], "the union reads an unstattable rotation inline");
+  const unlistable: LedgerGrepFsDeps = { ...realLedgerFs, readdirSync: () => { throw new Error("EACCES: readdir refused"); } };
+  const none = await createEscalationTriageHistoryReader({ fs: unlistable })(fixture.dir);
+  assert.deepEqual(none.rows, [], "an unlistable state dir yields no history");
+});
