@@ -193,7 +193,7 @@ The parts of the decision:
       worktree's own manifest names. There is no fixed count.
     - **Not proven.** The receipt proves isolation, not that blocks are
       physically shared. Whether a reflink happens depends on the host
-      filesystem.
+      filesystem;
   - emit the worker-thread entries (read models, slow lane, status, board)
     as their own bundles, located through the manifest, before any parent
     that starts them is bundled;
