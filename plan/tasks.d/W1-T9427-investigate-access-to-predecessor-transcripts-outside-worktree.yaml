@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: blast-radius
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=c59a07d1180b405a
   attempts: 0
   files:
     - scripts/fetch-transcripts.sh
