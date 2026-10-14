@@ -8733,18 +8733,22 @@ export function decidePlanRepair(
 ): PlanRepairDecision | undefined {
   const failures = pr.ciFailures ?? [];
   const head = `${pr.prNumber}@${pr.headSha}`;
-  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) {
-    return inheritedRedRefresh(pr, failures.map((f) => f.name), main, history, behindMain);
+  // The renumber and retitle rungs push to the lane's OWN branch, so only a fleet machine-lane head gets them.
+  const fleetLane = isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts.authorLogin);
+  if (fleetLane) {
+    const heldIds = heldTaskIdsFromCiFailures(failures);
+    if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
+      return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
+    }
+    const titleRed = titleOnlyCommitlintRed(failures);
+    const title = facts.title ?? "";
+    if (titleRed && title.length > CONVENTIONAL_LIMITS.headerMaxLength && !history.has(`${head}@title-length`)) {
+      return { signature: "title-length", action: "retitle", check: titleRed.name, title: fitPlanPrTitle(title), jobId: titleRed.jobId };
+    }
   }
-  const heldIds = heldTaskIdsFromCiFailures(failures);
-  if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
-    return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
-  }
-  const titleRed = titleOnlyCommitlintRed(failures);
-  const title = facts.title ?? "";
-  if (titleRed && title.length > CONVENTIONAL_LIMITS.headerMaxLength && !history.has(`${head}@title-length`)) {
-    return { signature: "title-length", action: "retitle", check: titleRed.name, title: fitPlanPrTitle(title), jobId: titleRed.jobId };
-  }
+  // W1-T9250: main's red is no filing's plan violation, whoever authored it (#11407, an operator
+  // plan-file-* head, was escalated twice while main was red on its one check). Every plan filing
+  // waits while main fails each of its checks, and is refreshed once main is green.
   const names = failures.map((f) => f.name);
   if (names.length === 0 || history.has(`${head}@base-red`)) return undefined;
   const check = names.join(", ");
@@ -8753,6 +8757,7 @@ export function decidePlanRepair(
   }
   if (main?.state !== "green") return undefined;
   if (history.has(`${head}@base-red-wait`)) return { signature: "base-red", action: "refresh", check, cause: "main-red" };
+  if (!fleetLane) return inheritedRedRefresh(pr, names, main, history, behindMain);
   const staleBase =
     names.every((n) => n === "proof-discrimination") &&
     pr.currentMergeBaseSha !== undefined &&
