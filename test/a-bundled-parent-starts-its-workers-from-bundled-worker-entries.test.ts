@@ -6,6 +6,7 @@
 // real build against fixture trees and run the bundled parent under plain node. ADR 0006 decision 4.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,7 +29,12 @@ interface BuildModule {
   sourceHash(root: string): string;
   workerBundle(root: string, module: string, opts?: { verifySource?: boolean }): { current: boolean; reason: string; bundle?: string };
 }
-const loadBuild = async (): Promise<BuildModule> => (await import(pathToFileURL(SCRIPT).href)) as BuildModule;
+/**
+ * Required, as src/lib/child-entry-argv.ts and the store require it, so this process holds ONE instance of the script.
+ * An import() beside those require()s made two, and the coverage merge keeps one instance per process
+ * (droppedRepeatInstances): the one it dropped was the one that built the worker bundles.
+ */
+const loadBuild = async (): Promise<BuildModule> => createRequire(import.meta.url)(SCRIPT) as BuildModule;
 
 const WORKER = "src/lib/fixture-worker.ts";
 const ENTRY = { name: "fixture-main", source: "src/main.ts" };
