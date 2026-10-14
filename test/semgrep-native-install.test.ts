@@ -143,3 +143,22 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
   assert.deepEqual(upload.with, { sarif_file: "semgrep.sarif", category: "semgrep" });
   assert.ok(fileURLToPath(root).endsWith("/"));
 });
+
+test("native Semgrep qualification runs in the existing Scan job before the advisory repository scan", () => {
+  const steps = load().jobs.semgrep!.steps;
+  const qualify = step("Qualify native engine, baseline and invalid-rule refusal");
+  assert.match(qualify.run!, /node scripts\/qualify-semgrep-native\.mjs --receipt "\$RUNNER_TEMP\/semgrep-qualification\.json"/);
+  assert.equal(qualify["continue-on-error"], undefined, "broken control behavior must not be reported as qualified");
+  // step() reparses the document; compare names in this physical source ordering.
+  assert.ok(steps.findIndex(candidate => candidate.name === qualify.name) <
+    steps.findIndex(candidate => candidate.name === "Run Semgrep"));
+  assert.ok(steps.findIndex(candidate => candidate.name === qualify.name) >
+    steps.findIndex(candidate => candidate.name === "Install hash-locked Community Edition"));
+  const scan = step("Run Semgrep");
+  assert.match(scan.run!, /--json-output "\$RUNNER_TEMP\/semgrep-scan\.json"/);
+  assert.match(scan.run!, /exit "\$SCAN_EXIT"/);
+  const inventory = step("Record scan inventory without findings or rule redistribution");
+  assert.equal(inventory["continue-on-error"], true);
+  assert.match(inventory.run!, /--exit "\$SCAN_EXIT"/);
+  assert.doesNotMatch(inventory.run!, /upload|curl|--config/);
+});
