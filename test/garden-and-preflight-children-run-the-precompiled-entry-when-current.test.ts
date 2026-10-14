@@ -8,7 +8,7 @@
 // worker from its own module URL, which a bundle cannot load without tsx.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -16,8 +16,10 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import * as workerThreads from "node:worker_threads";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CHILD_ENTRY_SPAWNED_STEP } from "../src/lib/child-entry-argv.js";
+import { FIXTURE_CONFIG_PATH_SEGMENTS } from "../src/lib/config.js";
 import { GARDEN_CHILD_HEAP_LIMIT_MB, REGISTERED_GARDEN_NAMES, gardenChildNodeArgv } from "../src/lib/garden-registry.js";
 import { preopenGateLaunch } from "../src/lib/preopen-gate.js";
+import { resolveProducerIdentity } from "../src/lib/producer-identity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { preflightCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
@@ -227,4 +229,39 @@ test("W1-T8778: every switched verb starts no self-URL worker", async (t) => {
     }
   });
   assert.deepEqual(control, { result: "threw", constructed: 1 });
+});
+
+/** Run the REAL default `ledgerGateLog` in a child whose HOME holds a fixture config naming `root`. */
+function ledgerGateLogChild(root: string): { status: number | null; stderr: string } {
+  const home = scratch("t8778-home");
+  const configFile = join(home, ...FIXTURE_CONFIG_PATH_SEGMENTS);
+  mkdirSync(dirname(configFile), { recursive: true });
+  writeFileSync(configFile, JSON.stringify({ claudeBin: "/bin/true", root }));
+  const source = pathToFileURL(join(REPO_ROOT, "src", "lib", "preopen-gate.ts")).href;
+  const script = `import { ledgerGateLog } from ${JSON.stringify(source)};\n` +
+    `ledgerGateLog(${JSON.stringify(CHILD_ENTRY_SPAWNED_STEP)}, { name: "run-task", verb: "preflight --fast", kind: "tsx", reason: "probe" });\n`;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home },
+  });
+  return { status: r.status, stderr: r.stderr };
+}
+
+test("W1-T8778: the default pre-open gate log writes one row under a declared sender, and a failed write is noted, never thrown", () => {
+  const root = scratch("t8778-ledger-root");
+  const ok = ledgerGateLogChild(root);
+  assert.equal(ok.status, 0, ok.stderr);
+  const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n");
+  assert.equal(lines.length, 1, "exactly one row");
+  const row = JSON.parse(lines[0]!) as Record<string, unknown>;
+  assert.equal(row.step, CHILD_ENTRY_SPAWNED_STEP);
+  assert.equal(row.kind, "tsx");
+  // The census in every-message-names-one-declared-sender.test.ts refuses an undeclared task_id; the row's sender must resolve.
+  assert.equal(resolveProducerIdentity(String(row.task_id)).id, "harness");
+
+  // A root that is a FILE cannot hold state/: the write fails, the gate goes on, and stderr names the step.
+  const blocked = join(scratch("t8778-blocked"), "not-a-dir");
+  writeFileSync(blocked, "");
+  const failed = ledgerGateLogChild(blocked);
+  assert.equal(failed.status, 0, "a failed ledger write is never the gate's failure");
+  assert.match(failed.stderr, new RegExp(`preopen gate: could not ledger ${CHILD_ENTRY_SPAWNED_STEP.replace(".", "\\.")}: `));
 });
