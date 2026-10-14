@@ -130,7 +130,7 @@ interface Fleet {
 }
 
 /** A worktree directory whose `.git` file names `${CONTAINER_GITDIR}/<name>`, in the container's view. */
-function addWorktree(state: string, name: string, head: string | undefined, adminDir = true): string {
+function placeWorkdir(state: string, name: string, head: string | undefined, adminDir = true): string {
   const wt = join(state, "worktrees", name);
   mkdirSync(wt, { recursive: true });
   writeFileSync(join(wt, ".git"), `gitdir: ${CONTAINER_GITDIR}/${name}\n`);
@@ -157,17 +157,17 @@ function fleet(opts: { strays: boolean; taskLock: boolean }): Fleet {
   writeFileSync(lockPath, JSON.stringify({ ...holder, run_id: "sweep-1791423000000", startedAt: isoAgo(120 * MIN) }));
   const taskLockPath = join(inflight, TASK_LOCK_NAME);
 
-  const worktree = addWorktree(state, WORKTREE_NAME, `ref: refs/heads/${BRANCH}\n`);
+  const worktree = placeWorkdir(state, WORKTREE_NAME, `ref: refs/heads/${BRANCH}\n`);
   writeFileSync(join(worktree, "half-merged.ts"), "<<<<<<< ours\n");
-  addWorktree(state, "run-W1-T1-1791000000000", "ref: refs/heads/run-W1-T1-1791000000000\n");
+  placeWorkdir(state, "run-W1-T1-1791000000000", "ref: refs/heads/run-W1-T1-1791000000000\n");
   if (opts.strays) {
-    addWorktree(state, STRAY_NO_ADMIN_DIR, undefined, false);
-    addWorktree(state, STRAY_NO_HEAD, undefined, true);
+    placeWorkdir(state, STRAY_NO_ADMIN_DIR, undefined, false);
+    placeWorkdir(state, STRAY_NO_HEAD, undefined, true);
   }
   let taskWorktree = "";
   if (opts.taskLock) {
     writeFileSync(taskLockPath, JSON.stringify({ ...holder, run_id: "run-W1-T7898", startedAt: isoAgo(100 * MIN) }));
-    taskWorktree = addWorktree(state, TASK_WORKTREE_NAME, undefined, false);
+    taskWorktree = placeWorkdir(state, TASK_WORKTREE_NAME, undefined, false);
   }
 
   const rows = [
