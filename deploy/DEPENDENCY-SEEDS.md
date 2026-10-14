@@ -28,6 +28,9 @@ The installers copy the guard before the janitor. No emergency mode reduces the 
 `remudero-dependencies sweep` is a dry run. Generation collection also requires six idle hours,
 no recorded checkout reference, no installer/collector lock, and an administrator's successful
 open-file scan. Missing or unreadable evidence keeps the generation. `--apply` is explicit.
+Consumer records bind the mount namespace too: a host collector must not mistake
+a container's invisible checkout paths for deleted checkouts. Foreign namespaces
+and older records without namespace evidence are retained for operator review.
 Busy locks are never stolen by age. Interrupted locks require operator investigation.
 
 Roll out new worktrees on craigoley, then craigoleyagent, then Azure. Validate independent file

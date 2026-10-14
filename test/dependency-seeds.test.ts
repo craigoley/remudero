@@ -243,6 +243,9 @@ test("dependency seed GC refuses malformed readiness and malformed consumer evid
   for (const name of ["package.json", "package-lock.json"]) writeFileSync(join(third, name), readFileSync(join(checkout, name)));
   assert.throws(() => materializeDependencySeed(third, { ...identityOptions, root: store, sourceDir: donor }), /metadata mismatch/);
   writeFileSync(ready, original);
+  const consumer = join(result.seed, "consumers", readdirSync(join(result.seed, "consumers"))[0]);
+  writeFileSync(consumer, JSON.stringify({ checkout, mountNamespace: "another container" }));
+  assert.equal(sweepDependencySeeds(store, { now: Date.now(), isOpen: () => false })[0].reason, "foreign or unverified consumer mount namespace");
   writeFileSync(join(result.seed, "consumers", "invalid.json"), '{"checkout":"relative"}');
   assert.match(sweepDependencySeeds(store, { now: Date.now(), isOpen: () => false })[0].reason, /unverified/);
 }));

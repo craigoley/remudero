@@ -1,7 +1,7 @@
 /** Account-owned dependency generations. Checkout workspaces and caches stay private. */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
@@ -110,7 +110,8 @@ function writeJsonAtomic(file: string, value: unknown): void {
 function registerConsumer(seed: string, checkout: string, modules: string, key: string, method: SeedMethod): void {
   writeJsonAtomic(join(modules, CONSUMER_MARKER), { version: VERSION, key, seed, checkout, method });
   const consumer = createHash("sha256").update(checkout).digest("hex");
-  writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout });
+  const mountNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
+  writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout, mountNamespace });
 }
 
 function workspaceLinks(checkout: string, modules: string, workspace = ""): void {
@@ -295,8 +296,10 @@ export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?
       if (meta.key !== key || meta.version !== VERSION || !Number.isFinite(meta.lastUsed)) throw new Error("invalid readiness metadata");
       if ((opts.now ?? systemClock.now()) - meta.lastUsed < DEPENDENCY_SEED_MIN_IDLE_MS) reason = "used within six hours";
       for (const name of readdirSync(join(seed, "consumers"))) {
-        const { checkout } = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8")) as { checkout: string };
+        const { checkout, mountNamespace } = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8")) as { checkout: string; mountNamespace?: string };
         if (typeof checkout !== "string" || !isAbsolute(checkout)) throw new Error("invalid consumer reference");
+        const currentNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
+        if (mountNamespace !== currentNamespace) { reason = "foreign or unverified consumer mount namespace"; continue; }
         const marker = join(checkout, "node_modules", CONSUMER_MARKER);
         let present = false;
         try { lstatSync(marker); present = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
