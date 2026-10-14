@@ -6,9 +6,7 @@
  * or webhook path keeps reconciling level-triggered and merely SUBMITS a named trigger request
  * here, and a missed event is recovered by the next cadence tick. It answers four questions in one
  * durable contract: what may start this flow, which repository/instance and policy profile apply,
- * what happened to each run, and how do we safely replay or stop it.
- *
- * INVARIANTS, each with a named refusal code:
+ * what happened to each run, and how do we safely replay or stop it. INVARIANTS (named refusals):
  *  - ONLY REGISTERED WORK STARTS. A trigger names a registered flow whose automation-action-v1
  *    contract and capability grants already exist; an unknown trigger or flow is refused.
  *  - A TRIGGER CARRIES NO AUTHORITY. Its request is a closed whitelist: a command, credential, raw
