@@ -2130,6 +2130,11 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
     if (!(error instanceof GoLiveError)) throw error;
     return { status: error.status, body: { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) } };
   };
+  const selected = deps.onboardingGoLive?.registryTarget;
+  const onboardingGoLive = selected === undefined ? undefined : {
+    ...deps.onboardingGoLive,
+    registryTarget: selected && typeof selected === "object" ? Object.freeze({ ...selected }) : selected,
+  };
   return registry.instances.filter((instance) => instance.live).flatMap((instance): Route[] => {
     const stateDir = instance.name === (deps.instances?.coreInstance ?? CORE_INSTANCE)
       ? dirname(deps.ledgerPath)
@@ -2154,7 +2159,7 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
           try {
             const registryRepository = deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
             const receipt = await requestGoLive({ instance: instance.name, actor }, {
-              ...deps.onboardingGoLive, registryRepository, stateDir, ledgerPath: deps.ledgerPath,
+              ...(onboardingGoLive ?? deps.onboardingGoLive), registryRepository, stateDir, ledgerPath: deps.ledgerPath,
             });
             sendJson(res, 202, receipt);
           } catch (cause) {
