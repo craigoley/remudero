@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -27,7 +28,9 @@ interface BuildModule {
   childEntryIsCurrent(root: string, name: string): Currency;
 }
 
-const loadBuild = async (): Promise<BuildModule> => (await import(pathToFileURL(SCRIPT).href)) as BuildModule;
+// Required, as src/lib/child-entry-argv.ts requires it, so this process holds ONE instance of the script: an import()
+// beside those require()s made two, and the coverage merge keeps one instance per process (droppedRepeatInstances).
+const loadBuild = async (): Promise<BuildModule> => createRequire(import.meta.url)(SCRIPT) as BuildModule;
 
 const ENTRIES = [{ name: "fixture-child", source: "src/child.ts" }];
 

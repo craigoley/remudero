@@ -7,6 +7,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
 import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -162,7 +163,7 @@ export function createBoardProjectionWorker(
         delayMs: options.delayMs ?? 0,
       };
       try {
-        thread = new Worker(options.workerUrl ?? new URL(import.meta.url), { workerData: data, transferList: [port2] });
+        thread = new Worker(options.workerUrl ?? bundledWorkerUrl(import.meta.url), { workerData: data, transferList: [port2] });
       } catch (error) {
         // A spawn failure is not an absent projection: it is surfaced to the caller below with its
         // cause as the `worker_spawn_failed` reason, so the board falls back knowingly.
