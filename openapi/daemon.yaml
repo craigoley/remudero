@@ -1668,6 +1668,8 @@ components:
         notReady: {type: integer}
         declined: {type: integer}
         fleet: {type: integer}
+        archived: {type: integer, description: "W1-T8831 -- items the operator archived; counted here and in no other lane."}
+        snoozed: {type: integer, description: "W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane."}
         needsYou:
           type: object
           required: [ready, drafting, notReady, declined]
@@ -1707,6 +1709,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        archived:
+          type: array
+          description: W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        snoozed:
+          type: array
+          description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         needsYou:
           $ref: "#/components/schemas/InboxNeedsYou"
         counts:
@@ -8398,6 +8410,14 @@ components:
               required: [proposalId]
               properties:
                 proposalId: {type: string}
+        archivedAt:
+          type: string
+          format: date-time
+          description: W1-T8831 -- when the operator archived this item (RFC 3339 UTC); present while archived, in the `archived` section only.
+        snoozedUntil:
+          type: string
+          format: date-time
+          description: W1-T8831 -- when this item's snooze ends (RFC 3339 UTC); present while snoozed, in the `snoozed` section only.
         classification:
           type: string
           description: A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340).
@@ -8444,7 +8464,7 @@ components:
           properties:
             section:
               type: string
-              enum: [needsYou, ready, drafting, notReady, declined, fleet]
+              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
             items:
               type: array
               items:
@@ -10275,6 +10295,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        archived:
+          type: array
+          description: W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        snoozed:
+          type: array
+          description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         counts:
           $ref: "#/components/schemas/InboxCounts"
         staleness:
@@ -10871,6 +10901,44 @@ components:
         feedback:
           type: string
           description: The operator's feedback, captured verbatim; must be non-blank.
+
+    InboxArchiveRequest:
+      type: object
+      description: POST /v1/inbox/archive's body (src/lib/panel-graph.ts's `validateArchiveProposal`).
+      required: [proposalId, archived]
+      properties:
+        proposalId: {type: string}
+        archived: {type: boolean, description: "true sets the item aside; false brings it back."}
+
+    InboxArchiveResult:
+      type: object
+      description: POST /v1/inbox/archive's 200 body.
+      required: [ok, proposalId, archived]
+      properties:
+        ok: {type: boolean}
+        proposalId: {type: string}
+        archived: {type: boolean}
+        archivedAt: {type: string, format: date-time, description: Present while archived; the first archive's instant, kept by a repeat.}
+
+    InboxSnoozeRequest:
+      type: object
+      description: POST /v1/inbox/snooze's body (src/lib/panel-graph.ts's `validateSnoozeProposal`).
+      required: [proposalId, until]
+      properties:
+        proposalId: {type: string}
+        until:
+          type: [string, "null"]
+          format: date-time
+          description: RFC 3339 UTC time in the future when the item returns; null wakes it now.
+
+    InboxSnoozeResult:
+      type: object
+      description: POST /v1/inbox/snooze's 200 body.
+      required: [ok, proposalId, snoozedUntil]
+      properties:
+        ok: {type: boolean}
+        proposalId: {type: string}
+        snoozedUntil: {type: [string, "null"], format: date-time}
 
     InboxVerdictRequest:
       type: object
@@ -15589,7 +15657,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
         - name: cursor
           in: query
           required: false
@@ -16687,10 +16755,11 @@ paths:
           required: false
           description: >
             `needsYou` (the operator's four lanes, not paged), or one list lane: `ready`,
-            `drafting`, `notReady`, `declined`, `fleet`.
+            `drafting`, `notReady`, `declined`, `fleet`, `archived`, `snoozed` (W1-T8831: items the
+            operator set aside, listed here and in no other lane or count).
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
         - name: limit
           in: query
           required: false
@@ -17117,6 +17186,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxProposalStartedResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/archive:
+    post:
+      summary: Archive an inbox item, or bring it back.
+      description: >
+        W1-T8831 (src/lib/panel-graph.ts's `buildArchiveProposalRoute`). Write tier: LOW -- it
+        decides nothing and changes no proposal state: approve, decline and restore still work on an
+        archived item, and acting on one un-archives it. Idempotent; ledgers `inbox.archived`. The mark
+        is kept in `state/inbox-triage.json` (ledger compaction cannot shed it), and the item moves to
+        the `archived` section, out of every other lane and count, on the slow lane's next pass. A
+        proposal that leaves the registry drops its mark.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxArchiveRequest"
+      responses:
+        "200":
+          description: The mark is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxArchiveResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/snooze:
+    post:
+      summary: Snooze an inbox item until a time, or wake it now.
+      description: >
+        W1-T8831 (src/lib/panel-graph.ts's `buildSnoozeProposalRoute`). Write tier: LOW. `until` is an
+        RFC 3339 UTC time in the future (400 otherwise); null wakes the item now. Idempotent; ledgers
+        `inbox.snoozed`. The item sits in the `snoozed` section, out of every other lane and count,
+        until the slow lane's first pass at or after `until` re-emits the pages. The view holds no clock.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxSnoozeRequest"
+      responses:
+        "200":
+          description: The snooze is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSnoozeResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

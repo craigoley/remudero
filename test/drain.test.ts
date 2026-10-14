@@ -1402,11 +1402,14 @@ test("W1-T343 acceptance: runDaemon at laneCount 2 dispatches two DISJOINT-files
     { max: 2, laneCount: 2 },
   );
 
-  // Let the tick's synchronous dispatch-set construction (the `.map` that calls `runOne` for
-  // every admitted lane) run before either lane's promise settles — the SAME idiom
-  // test/parallel-dispatch.test.ts's own W1-T172 acceptance 1 uses for runDrainLanes.
-  await Promise.resolve();
-  await Promise.resolve();
+  // Let the tick reach its dispatch-set construction (the `.map` that calls `runOne` for every
+  // admitted lane) before either lane's promise settles. The tick awaits the gated cadences
+  // (W1-T9321) first, so a fixed count of microtask turns is not a stable bound: yield whole
+  // macrotask turns instead, bounded, until both lanes are started. Neither deferred is resolved
+  // meanwhile, so "started before either resolves" is still what the assertion below proves.
+  for (let turns = 0; turns < 100 && started.length < 2; turns++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
   assert.deepEqual(started.sort(), ["A", "B"], "both admitted lanes are started before either resolves — true concurrency, not a sequential tick");
 
   deferreds.get("A")!.resolve(okResult("A"));

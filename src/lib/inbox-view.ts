@@ -12,7 +12,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot, writePersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -35,6 +35,8 @@ export interface InboxRefresh {
   /** The snapshot was written this pass: changed, or due a re-stamp. */
   written: boolean;
   pruned: number;
+  /** W1-T8831: the earliest snooze still ahead of this pass, when the next recompute is due for it; null when none is snoozed. */
+  nextSnoozeWakeAt: string | null;
   /** When the snapshot now on disk was written. */
   generatedAt: string | null;
 }
@@ -82,7 +84,10 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const now = clock.now();
   // W1-T8825: the slow lane alone records when the inbox first saw each id; a read only reads that record.
   recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
-  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines });
+  // W1-T8831: a proposal that left the registry drops its archive/snooze mark. An empty registry read prunes nothing: it may be a torn read.
+  if (proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
+  // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
+  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
   const content = persistedContent(classified, stores);
   const identity = persistedInboxIdentity(content);
   const changed = identity !== memo.identity;
@@ -96,7 +101,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   const generatedAt = fixedClock(memo.writtenAtMs!).iso();
   return {
     bodies: inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt)),
-    proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt,
+    proposals: proposals.length, changed, written, pruned: prunedIds.length, nextSnoozeWakeAt: nextInboxSnoozeWake(stateDir, now), generatedAt,
   };
 }
 
@@ -110,7 +115,7 @@ const INBOX_STORE_SOURCE = `inbox-store:${INBOX_VIEW_INSTANCE}`;
 function inboxStoreSource(generatedAt: string, state: ViewSource["state"] = "fresh"): ViewSource {
   return { name: INBOX_STORE_SOURCE, asOf: generatedAt, state };
 }
-export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet"] as const;
+export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"] as const;
 export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
 
 type Lanes = ReturnType<typeof inboxLanes>;
