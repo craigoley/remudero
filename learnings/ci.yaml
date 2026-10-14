@@ -227,7 +227,7 @@
 - id: mutation-ratchet-refusal-repair-lane
   subsystem: ci
   lifecycle: active
-  files: [src/lib/classify.ts, test/**, stryker.conf.json, scripts/mutation-baseline.json, .github/workflows/ci.yml]
+  files: [src/lib/classify.ts, "test/**", stryker.conf.json, scripts/mutation-baseline.json, .github/workflows/ci.yml]
   fact: >-
     When a PR diff can move the mutation score for src/lib/classify.ts, the mutation-ratchet job
     runs Stryker against its scoped tests and compares the result with the ratcheted baseline. Run
