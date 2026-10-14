@@ -104,6 +104,22 @@ test("W1-T8778: a garden child runs the current bundle with its heap cap last", 
   assert.deepEqual(legacy, ["--import", "tsx", CAP, "/h/src/run-task.ts", "garden", "run", "plan"]);
 });
 
+test("W1-T8778: inline `--flag=value` loader spellings drop only the tsx ones before the bundle", async () => {
+  const { root, bundle } = await builtTree();
+  const { log } = rows();
+  const argv = gardenChildNodeArgv(
+    "plan",
+    [],
+    GARDEN_CHILD_HEAP_LIMIT_MB,
+    { execArgv: ["--import=tsx", "--require=/h/node_modules/tsx/dist/preflight.cjs", "--import=./keep.mjs", "--expose-gc"], entry: "/h/src/run-task.ts" },
+    true,
+    log,
+    root,
+  );
+  assert.deepEqual(argv, ["--import=./keep.mjs", "--expose-gc", CAP, bundle, "garden", "run", "plan"],
+    "inline tsx loader flags are dropped, the inline non-tsx loader and other flags are kept");
+});
+
 test("W1-T8778: the pre-open preflight runs the bundle when current and bin/rmd otherwise", async () => {
   const { root, bundle } = await builtTree();
   mkdirSync(join(root, "bin"));
