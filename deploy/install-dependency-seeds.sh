@@ -6,6 +6,7 @@ NODE="${RMD_SEED_NODE:-$(command -v node)}"
 TOOL="$HOME/.local/share/remudero/dependency-seed-tool"
 mkdir -p "$TOOL/scripts" "$TOOL/src/lib" "$HOME/.local/bin"
 install -m 0644 "$HERE/src/lib/dependency-seeds.ts" "$TOOL/src/lib/dependency-seeds.ts"
+install -m 0644 "$HERE/src/lib/clock.ts" "$TOOL/src/lib/clock.ts"
 install -m 0755 "$HERE/scripts/dependency-seeds.mjs" "$TOOL/scripts/dependency-seeds.mjs"
 install -m 0755 "$HERE/deploy/dependency-seed-guard.sh" "$TOOL/dependency-seed-guard.sh"
 # A stable wrapper does not depend on the source checkout surviving janitor cleanup.

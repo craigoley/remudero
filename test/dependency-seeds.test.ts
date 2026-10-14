@@ -11,7 +11,7 @@ import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeed
 function writable(path: string): void {
   const s = lstatSync(path);
   if (s.isSymbolicLink()) return;
-  chmodSync(path, s.mode | 0o200);
+  chmodSync(path, s.mode | 0o700);
   if (s.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name));
 }
 function fixture(body: (root: string, donor: string, checkout: string) => void): void {
@@ -250,7 +250,7 @@ test("dependency seed concurrent builders install once and never expose a partia
         fs.appendFileSync(process.argv[3],'install\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,200);
         fs.mkdirSync(stage+'/node_modules'); }}); console.log(JSON.stringify(r));`;
     const run = promisify(execFile);
-    const results = await Promise.all([first, second].map(dir => run(process.execPath, ["--input-type=module", "-e", code, dir, join(root, "seeds"), calls], { timeout: 10_000 })));
+    const results = await Promise.all([first, second].map(dir => run(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, dir, join(root, "seeds"), calls], { timeout: 10_000 })));
     const a = JSON.parse(results[0].stdout), b = JSON.parse(results[1].stdout);
     assert.equal(a.seed, b.seed); assert.equal(readFileSync(calls, "utf8"), "install\n");
     assert.equal([a.installed, b.installed].filter(Boolean).length, 1);

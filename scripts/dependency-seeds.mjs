@@ -2,7 +2,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
-import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, sweepDependencySeeds } from '../src/lib/dependency-seeds.ts';
+import { registerHooks } from 'node:module';
+// Standalone installs use Node's native type stripping, including the repository Clock port.
+registerHooks({ resolve(specifier, context, next) {
+  return next(specifier === './clock.js' && context.parentURL?.endsWith('/dependency-seeds.ts') ? './clock.ts' : specifier, context);
+} });
+const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
 
 const [command, ...args] = process.argv.slice(2);
 const checkout = command === 'prime' ? args.shift() : undefined;

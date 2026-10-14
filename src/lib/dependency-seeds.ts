@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { systemClock } from "./clock.js";
 
 export const DEPENDENCY_SEED_MIN_IDLE_MS = 6 * 60 * 60 * 1000;
 const ROOT_MARKER = ".rmd-dependency-seed-root.json";
@@ -81,7 +82,7 @@ export function dependencySeedIdentity(checkout: string, opts: DependencySeedOpt
   const npm = opts.npmVersion ?? execFileSync("npm", ["--version"], { encoding: "utf8", env, timeout: 10_000 }).trim();
   const identity = { version: VERSION, files, policy: opts.proof ? "proof-ignore-scripts" : "development-ignore-scripts", platform: opts.platform ?? process.platform, arch: process.arch, node: process.version, abi: process.versions.modules, npm, npmConfig, nodeEnv: env.NODE_ENV ?? "" };
   const key = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
-  return { ...identity, key, lastUsed: opts.now ?? Date.now() };
+  return { ...identity, key, lastUsed: opts.now ?? systemClock.now() };
 }
 
 function ownedDirectory(path: string): void {
@@ -173,11 +174,11 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   const lock = join(root, `${meta.key}.lock`);
   let installed = false;
   // Serialize builders and GC. Never reclaim another installer's lock by timestamp.
-  const started = Date.now();
+  const started = systemClock.now();
   while (true) {
     try { mkdirSync(lock, { mode: 0o700 }); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() - started >= (opts.lockWaitMs ?? 120_000)) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || systemClock.now() - started >= (opts.lockWaitMs ?? 120_000)) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     }
   }
@@ -203,7 +204,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         const lockPackages = (JSON.parse(meta.files["package-lock.json"]) as { packages?: Record<string, { link?: boolean }> }).packages ?? {};
         for (const name of readdirSync(donor).filter(name => !name.startsWith("."))) {
           const entries = name.startsWith("@") ? readdirSync(join(donor, name)).map(pkg => `${name}/${pkg}`) : [name];
-          for (const entry of entries) if (lstatSync(join(donor, entry)).isSymbolicLink() && !lockPackages[`node_modules/${entry}`]?.link) {
+          for (const entry of entries) if (lstatSync(join(donor, entry)).isSymbolicLink() && lockPackages[`node_modules/${entry}`]?.link !== true) {
             throw new Error("dependency seed donor contains an external package link");
           }
         }
@@ -256,7 +257,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     const consumer = createHash("sha256").update(checkout).digest("hex");
     // Register before publication, under the GC lock. A failed publication leaves a harmless stale reference.
     writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout });
-    writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? Date.now() });
+    writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
     return { status: "materialized", key: meta.key, seed, method, installed };
@@ -281,7 +282,7 @@ export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?
       ownedDirectory(seed);
       const meta = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
       if (meta.key !== key || meta.version !== VERSION || !Number.isFinite(meta.lastUsed)) throw new Error("invalid readiness metadata");
-      if ((opts.now ?? Date.now()) - meta.lastUsed < DEPENDENCY_SEED_MIN_IDLE_MS) reason = "used within six hours";
+      if ((opts.now ?? systemClock.now()) - meta.lastUsed < DEPENDENCY_SEED_MIN_IDLE_MS) reason = "used within six hours";
       for (const name of readdirSync(join(seed, "consumers"))) {
         const { checkout } = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8")) as { checkout: string };
         if (typeof checkout !== "string" || !isAbsolute(checkout)) throw new Error("invalid consumer reference");
