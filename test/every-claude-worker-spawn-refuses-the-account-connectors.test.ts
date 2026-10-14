@@ -100,7 +100,8 @@ function sdkServersAnnounced(stdin: string): string[] {
   throw new Error(`no initialize request reached the CLI's stdin: ${stdin.slice(0, 200)}`);
 }
 
-test("every claude worker spawn passes strictMcpConfig with an explicit server map, knowledge-only when ruleLookup is set and empty otherwise", async t => {
+// Knowledge-only when ruleLookup is set, and empty otherwise; the usage probe gets the same boundary.
+test("every claude worker spawn passes strictMcpConfig with an explicit server map", async t => {
   const plain = await spawn(t, { events: [cleanInit(false)] });
   assert.equal(plain.options.strictMcpConfig, true);
   assert.deepEqual(plain.options.mcpServers, {});
