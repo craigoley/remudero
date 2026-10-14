@@ -8,6 +8,7 @@ import { dirname } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { validInboxDismissalAudit, type InboxDismissalAudit } from "./inbox-dismissal-audit.js";
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
@@ -119,6 +120,7 @@ export interface PersistedInboxContent extends ClassificationEvidence {
   projectionIndeterminate: boolean;
   /** Retained attention evidence read by the slow lane, never rescanned by a console request. */
   attentionEvidence?: InboxAttentionEvidence;
+  dismissalAudit?: InboxDismissalAudit;
   /** The decision and plain-message stores the pass's lanes were built with; absent from a file written before they were carried. */
   stores?: { fleetDecisions: DecisionStore; plainMessages: PlainStore };
 }
@@ -175,7 +177,8 @@ export function readPersistedInbox(stateDir: string): PersistedInbox | undefined
     const parsed = JSON.parse(raw) as Partial<PersistedInbox>;
     const valid = typeof parsed.identity === "string" && Number.isFinite(Date.parse(parsed.generatedAt ?? "")) && Array.isArray(parsed.proposals) &&
       Array.isArray(parsed.classifications) && Array.isArray(parsed.ledgerRows) && Array.isArray(parsed.mergedTaskIds) && typeof parsed.complete === "boolean";
-    return valid ? { ...parsed, attentionEvidence: validAttentionEvidence(parsed.attentionEvidence, parsed.proposals!.length) } as PersistedInbox : undefined;
+    return valid ? { ...parsed, attentionEvidence: validAttentionEvidence(parsed.attentionEvidence, parsed.proposals!.length),
+      dismissalAudit: validInboxDismissalAudit(parsed.dismissalAudit) } as PersistedInbox : undefined;
   } catch {
     // deliberate: a torn or foreign file is no classification, answered as not ready until the next pass rewrites it.
     return undefined;

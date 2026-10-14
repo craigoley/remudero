@@ -155,6 +155,7 @@ import {
 export interface PanelGraphDeps {
   inboxSourceIdentity?: InboxSourceIdentity;
   inboxMayPersist?: () => boolean;
+  inboxAuditScope?: { instance: string; repository: string };
   /** Repo root — where plan/feedback/ lives. */
   /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
   projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
@@ -2639,6 +2640,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: classified.mergedTaskIds,
+        dismissalAudit: classified.dismissalAudit,
         sources: {
           plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
@@ -2711,6 +2713,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit;
   proposals: Proposal[];
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
@@ -2751,6 +2754,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
     attentionEvidence: persisted.attentionEvidence,
+    dismissalAudit: persisted.dismissalAudit,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
     plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
     lanes: () => {

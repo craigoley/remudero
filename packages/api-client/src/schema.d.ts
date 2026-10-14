@@ -4538,8 +4538,71 @@ export interface components {
       decision?: "needs_operator" | "automate" | "backlog";
       at?: string | null;
     };
+    /** Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed. */
+    InboxDismissalAudit: {
+      contract: "inbox-dismissal-audit-v1";
+      state: "measured" | "unmeasurable";
+      scope: {
+        instance: string | null;
+        repository: string | null;
+      };
+      window: {
+        from: string;
+        to: string;
+      };
+      coverage: {
+        receipts: "observed" | "partial" | "unavailable";
+        outcomes: "observed" | "partial" | "unavailable";
+        plan: "observed" | "partial" | "unavailable";
+        registry: "observed" | "partial" | "unavailable";
+      };
+      controls: {
+        heldSecurity: {
+          observed: boolean;
+          passed: boolean;
+          taskId: "W1-T216";
+        };
+        terminalMechanical: {
+          observed: boolean;
+          passed: boolean;
+        };
+      };
+      /** Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped. */
+      denominator: {
+        eligible: number;
+        sampled: number;
+        returned: number;
+        unqualified: number;
+        foreign: number;
+        duplicates: number;
+        conflicting: number;
+      };
+      /** Observed lower bounds, never a certified zero without coverage. */
+      observed: {
+        falseDismissals: number;
+        terminalConfirmed: number;
+        restored: number;
+        unresolved: number;
+      };
+      measurement: {
+        falseDismissals: number | null;
+        falseDismissalRate: number | null;
+      };
+      items: ({
+        receiptId: string;
+        proposalId: string;
+        taskId: string | null;
+        snapshotKey: string;
+        retiredAt: string;
+        outcome: "false_dismissal" | "terminal_confirmed" | "unresolved";
+        restored: boolean;
+        evidence: (string)[];
+      })[];
+      truncated: boolean;
+    };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";
