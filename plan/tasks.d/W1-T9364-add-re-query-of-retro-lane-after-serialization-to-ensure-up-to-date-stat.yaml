@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=04a63f5c2db2d385
   attempts: 0
   files:
     - src/lib/retro.ts
