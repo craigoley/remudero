@@ -893,6 +893,7 @@ import {
   createAnchorGrepCache,
   readOriginMainSha,
   inboxDraftPrompt,
+  checkoutRepoFacts,
   isDraftStale,
   isRatifiedInLedger,
   materializeDraftTaskIds,
@@ -1433,7 +1434,7 @@ import {
   workerAllowlistFromSettings,
 } from "./lib/skill-workshop.js";
 import { buildBundle, renderBundle, verifyBundlePolicyProposalsPin } from "./lib/bundle.js";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary, providerEligibility, type ProviderCapacity } from "./lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
@@ -50823,6 +50824,8 @@ export function buildInboxDraftSpawnArgs(args: {
   config: Config;
   disallowedTools: readonly string[];
   proposalId?: string;
+  proposal?: Proposal;
+  currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats;
 }): SpawnWorkerArgs {
@@ -50848,9 +50851,12 @@ export function buildInboxDraftSpawnArgs(args: {
       log: args.draftRoutingLog,
       readStats: args.draftRoutingReadStats,
       evaluate: (worker: WorkerResult) => {
-        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
+        const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
-          clean: parsed !== null && lintDraftedFragment(parsed.fragmentYaml, args.proposalId!, parsed.stampLine).length === 0 };
+          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
+            args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
+            facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
       },
     } } : {}),
   };
@@ -50977,11 +50983,12 @@ export async function draftProposalBatch(
   const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
-    const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
+    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
     return await runDraftRung(
       toDraft,
       planText,
       {
+        repoFacts: checkoutRepoFacts(worktreePath),
         spawn: (proposal, prompt) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -50990,6 +50997,8 @@ export async function draftProposalBatch(
             config,
             prompt,
             proposalId: proposal.id,
+            proposal,
+            currentPlanText: planText,
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
@@ -50998,12 +51007,14 @@ export async function draftProposalBatch(
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined }),
         ...(inboxDraftMount.provider === "cash" ? {
-          escalate: (_proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
+          escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
             config,
             prompt,
+            proposal,
+            currentPlanText: planText,
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
         } : {}),
@@ -52850,6 +52861,16 @@ export async function approveCommand(
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;
+  }
+
+  if (classification.state === "ready" && classification.releaseTaskId) {
+    const code = await approveCommand([classification.releaseTaskId], deps);
+    if (code === 0 && releasedTaskIds(readLedgerRawLines(ledgerPath)).has(classification.releaseTaskId)) {
+      appendLedger(ledgerPath, { run_id: `APPROVE-${proposalId}`, task_id: proposalId,
+        step: "ratify.approved", release_task_id: classification.releaseTaskId });
+      approveNoteChain(rest, proposalId, config, deps);
+    }
+    return code;
   }
 
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
