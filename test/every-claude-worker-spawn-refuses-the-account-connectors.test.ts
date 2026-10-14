@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -206,4 +206,16 @@ test("the exposure census fails on a strict-boundary row that lists an account c
   const preFixOnly = run([preFix, strictClean]);
   assert.equal(preFixOnly.status, 0, preFixOnly.stdout + preFixOnly.stderr);
   assert.match(preFixOnly.stdout, /1 pre-fix row\(s\) \(1 of them exposed, reported only\)/);
+
+  // The union path: a state dir read through readLedgerUnionRawLinesSync, never a full-record union read.
+  const stateDir = join(dir, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "ledger.ndjson"), [preFix, strictLeak].map(row => JSON.stringify(row)).join("\n") + "\nnot json \"sdk_init_summary\"\n");
+  const union = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, "--state-dir", stateDir], { encoding: "utf8" });
+  assert.equal(union.status, 1, union.stdout + union.stderr);
+  assert.match(union.stdout, /1 strict-boundary row\(s\), 1 pre-fix row\(s\)/);
+  for (const argv of [[], ["--state-dir"]]) {
+    const usage = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...argv], { encoding: "utf8" });
+    assert.equal(usage.status, 2, `a usage error is neither clean nor exposed: ${usage.stdout}`);
+  }
 });
