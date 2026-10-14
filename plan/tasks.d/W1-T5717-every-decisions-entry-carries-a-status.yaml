@@ -11,8 +11,8 @@
   origin: "operator session 2026-10-04: DECISIONS.md status integrity (coordinator; the backfill is closed PR #9144, branch run-unfiled-1791141034897, 98a1f255)"
   plan_refs: [W1-T4096, W1-T352]
   files: [DECISIONS.md, src/spike.ts, test/every-decisions-entry-carries-a-status.test.ts]
-  status: queued
-  priority: 3
+  status: blocked
+  retirement: retired  # can never land as filed: files: [DECISIONS.md] is ruling-shaped, and an operator release renders it at verify: auto, which rulingVerifyViolation refuses, so the machine judge re-refused it about once a minute from 2026-10-13 12:03Z; operator 2026-10-14
   attempts: 0
   rationale: |
     READ 2026-10-04 on origin/main 3ae4a67a. `node --import tsx scripts/decisions-status.mjs

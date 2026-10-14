@@ -668,6 +668,12 @@
       "grepHint": "Bounded heavy READY reservations, v2"
     },
     {
+      "path": "docs/instance-registry-selection-contract.md",
+      "title": "Instance registry selection contract",
+      "summary": "W1-T9435 supplies an additive public read/binding contract and an explicitly opted-in",
+      "grepHint": "Instance registry selection contract"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",

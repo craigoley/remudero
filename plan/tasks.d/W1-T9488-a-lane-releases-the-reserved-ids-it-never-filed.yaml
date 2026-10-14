@@ -1,0 +1,58 @@
+- id: W1-T9488
+  title: "TRIAGE, PLAN AND APPROVE --BATCH STILL LEAK THE REMOTE TASK IDS THEY NEVER FILE — the 2026-10-14 census found 807 of triage's 843 refs/rmd-id reservations (96%) and 62 of plan's 80 held by no shard, branch or PR, because each lane pushes a whole block before its worker or gate decides what to file; release every reserved id the run's pushed branch does not declare, through the leased release the garden and approve lanes already use"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: medium  # one concern: which remote reservations a triage, plan or batch-approve run gives back when it ends
+  origin: "operator session 2026-10-14: rmd-id reservation census (7,130 refs, 3,885 orphaned) and the leased release in PR #11707"
+  plan_refs: [W1-T1011, W1-T2326, W1-T3300, W1-T949]
+  files: [src/run-task.ts, test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 with one `git ls-remote origin 'refs/rmd-id/*' 'refs/heads/*'` and a fetch of
+    every anchor into a scratch repository, classified against plan declarations on main and in plan
+    history, run-<id>-* branches, the anchor's live holder branch, and the 17 open PRs' text:
+    7,130 reservations, 3,885 held by nothing (only 19 of them under two hours old).
+
+        triage (run-TRIAGE-*) ... 807 of 843 orphaned (96%), 20-66 a day through 2026-10-14
+        plan (run-PLAN-*) ....... 62 of 80 orphaned (78%)
+        approve (run-APPROVE-*) . 354 of 459 orphaned (77%); the single-proposal lane is fixed by the
+                                  same PR, `approveBatchCommand` (lane approve-batch) is not
+
+    THE CAUSE IS THE ORDER, AND FOR TRIAGE THE ORDER IS DELIBERATE. W1-T2326 moved triage's remote
+    reservation before the worker spawn so the worker is prompted with the ids the lane holds; it named
+    the price in its own comment (`triageCommand`: "IT RE-OPENS W1-T1011 ... up to 219 more
+    permanently-held ids") on the ground that nothing could release a remote reservation. That ground
+    is gone: src/lib/task-id-release.ts now deletes a run's OWN claim, leased on the sha it pushed, and
+    ledgers task_id.reservation_released. Triage reserves `TRIAGE_MAX_NEW_TASKS` (3) and files 0-3;
+    `planCommand` reserves `PLAN_MAX_NEW_TASKS` (5); `approveBatchCommand` reserves each member's block.
+    The local `localIdBlock?.releaseAll()` in each `finally` already gives back the local half.
+  design: |
+    (i) Each lane keeps, beside its RemoteReservationBlock, the sha its reserver left on each ref
+    (`gitRemoteRefReserver.wonAnchor`, falling back to the handle's anchor).
+    (ii) When the run ends, in the same `finally` that releases the local block, it releases through
+    `releaseTaskIdReservation` (lane triage / plan / approve-batch) every reserved id that its PUSHED
+    branch does not declare: all of them when no branch was pushed (no_task, grill, refused, errored,
+    preflight-refused), and the unused tail when a branch was pushed (read the declared ids from the
+    pushed commit's plan diff, the way `branchFiledTaskIds` does for approve).
+    (iii) An id a pushed branch declares is never released, and a push whose outcome is unknown (it
+    threw) releases nothing: a branch may carry the id.
+    (iv) The reason names the run's outcome (e.g. "triage <feedback id>: verdict no_task", "plan:
+    preflight refused"), never a generic string.
+    (v) NOT IN SCOPE: deleting any reservation another run made, reaping existing orphans, or changing
+    when the ids are reserved.
+  acceptance:
+    - claim: "a triage run that files nothing releases all of its reserved remote ids, leased, with its verdict as the reason"
+      proof: 'grep: test("a triage run that files nothing releases every remote id it reserved" in test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts'
+    - claim: "a triage or plan run that files fewer ids than it reserved releases exactly the unused ones and keeps every id its pushed branch declares"
+      proof: 'grep: test("a lane that files fewer ids than it reserved releases only the unused ones" in test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts'
+    - claim: "a batch approve that fails before its push releases every member's remote reservation"
+      proof: 'grep: test("a batch approve that fails before its push releases every member''s reservation" in test/a-lane-releases-the-reserved-ids-it-never-filed.test.ts'
+  falsifier: |
+    Delete the release call in each lane's finally: the three tests must fail with the refs still on
+    the fixture origin.
