@@ -349,7 +349,11 @@ sweep_path() {
   # Generic temp globs must not bypass Git safety for a checkout or a unit
   # containing one. Incomplete walks are not permission to remove a tree.
   if [ -d "$p" ] && [ ! -L "$p" ]; then
-    if ! bare_repository_scan "$p"; then log "KEEP $p: bare repository or incomplete repository scan; Git history retained"; return; fi
+    bare_repository_scan "$p"; idle_status=$?
+    case "$idle_status" in
+      1) log "KEEP $p: bare repository; Git history retained"; return ;;
+      2) log "KEEP $p: repository scan failed (unknown)"; return ;;
+    esac
     entries=$(find "$p" \( -name node_modules -o -name .git \) -prune -a -name .git -print 2>/dev/null) || {
       log "KEEP $p: repository scan failed (unknown)"; return;
     }
@@ -369,7 +373,7 @@ sweep_path() {
 
 bare_repository_scan() {
   local root="$1" heads entry parent
-  heads=$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f -name HEAD -print 2>/dev/null) || return 1
+  heads=$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f -name HEAD -print 2>/dev/null) || return 2
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     parent=${entry%/HEAD}
@@ -812,7 +816,13 @@ sweep_scratch_unit() {
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
   if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return; fi
-  if [ -d "$p" ] && ! bare_repository_scan "$p"; then log "KEEP $p: bare repository or incomplete repository scan; Git history retained"; return; fi
+  if [ -d "$p" ]; then
+    bare_repository_scan "$p"; status=$?
+    case "$status" in
+      1) log "KEEP $p: bare repository; Git history retained"; return ;;
+      2) log "KEEP $p: repository scan failed (unknown)"; return ;;
+    esac
+  fi
   if ! entries="$(find "$p" -name node_modules -prune -o -name .git -prune -print 2>/dev/null)"; then
     log "KEEP $p: repository scan failed (unknown)"; return
   fi
