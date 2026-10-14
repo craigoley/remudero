@@ -145,9 +145,12 @@ function main(argv) {
       existing = readFileSync(outPath, "utf8");
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
+      console.log(`generate-learnings-index: OK -- ${values.dir} corpus builds an index (no ${outPath} to compare).`);
+      process.exitCode = 0;
+      return;
     }
     if (existing !== fresh) {
-      console.error(`generate-learnings-index: ${outPath} is STALE or missing -- run \`npm run learnings-index\`.`);
+      console.error(`generate-learnings-index: ${outPath} is STALE -- run \`npm run learnings-index\` or delete it.`);
       process.exitCode = 1;
       return;
     }
