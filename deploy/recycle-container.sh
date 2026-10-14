@@ -812,9 +812,13 @@ CAPTURED_get() { local ref="CAPTURED__$1"; printf '%s' "${!ref-}"; }
 CAPTURED_SOURCE_set() { printf -v "CAPTURED_SOURCE__$1" '%s' "$2"; }
 CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}"; }
 
+# W1-T9500: RMD_INSTANCE_NAME is THIS script's own derived name, set from --instance at the
+# replacement `docker run` below and never captured: a container carrying it is one a recycle
+# named, not drift. It is not in deploy/runtime-env-vars.sh, whose lists are pass-through and
+# scratch-derived names.
 is_declared_runtime_var() {
   local needle="$1" candidate
-  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}"; do
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
   return 1
@@ -2154,6 +2158,13 @@ if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
+fi
+# W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
+# /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
+# could not tell which instance it was and the SRE lane never started on core. A recycle run with
+# --instance holds the name; the legacy no-instance path has none to give and adds nothing.
+if [ -n "${INSTANCE_NAME}" ]; then
+  DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
 fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
