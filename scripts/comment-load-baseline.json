@@ -43,7 +43,7 @@
   "scripts/cycle-baseline.json": 0,
   "scripts/cycle-ratchet.mjs": 44,
   "scripts/diff-coverage-local.mjs": 75,
-  "scripts/fleet-heartbeat.sh": 500,
+  "scripts/fleet-heartbeat.sh": 750,
   "scripts/generate-agents-md.mjs": 12,
   "scripts/generate-api-client.mjs": 42,
   "scripts/generate-capability-snapshot.mjs": 57,

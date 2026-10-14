@@ -61,6 +61,48 @@ test("the agent badge counts the proposals the console engine would show", () =>
   assert.deepEqual(visible.length, 2);
 });
 
+test("complete detail generation keeps the badge's exact native IDs scores ordering and preferences", () => {
+  const snapshot = busySnapshot();
+  const scope = { repository: REPO, instanceId: "core" };
+  const rows = [history("operator-agent:other:x:optimize:token-burn", { decisionHistory: [{ decision: "rejected", at: "2026-09-29T01:00:00.000Z" }] })];
+  const before = operatorAgentCandidates(snapshot, scope, rows);
+  const withDetails = operatorAgentCandidates(snapshot, scope, rows, { now: NOW, sourceRepository: REPO, sourceInstance: "core", sourceState: "fresh" });
+  assert.deepEqual(withDetails.map(({ detail: _detail, ...rank }) => rank), before);
+  const settings = { enabled: true, confidenceThreshold: 0.9 };
+  assert.deepEqual(visibleOperatorAgentProposals(withDetails, rows, settings), visibleOperatorAgentProposals(before, rows, settings));
+  assert.equal(withDetails.find((c) => c.signal === "token-burn")!.confidence, 0.875);
+  const foreign = operatorAgentCandidates(snapshot, scope, [], { now: NOW, sourceRepository: REPO, sourceInstance: "other-instance", sourceState: "fresh" });
+  assert.ok(foreign.every((c) => c.detail?.state === "unavailable"), "same repository is not same source instance");
+  assert.notEqual(operatorAgentCandidates(snapshot, { ...scope, instanceId: "other-instance" }, [])[0]!.proposalId, before[0]!.proposalId);
+});
+
+test("the direct nav badge names malformed signal rows without a count", () => {
+  const snapshot = structuredClone(busySnapshot());
+  const agent = snapshot.consoleV1.operatorAgent;
+  agent.outcomes.classes = [{ verdictClass: "full-pass", total: 10, revertedCount: 3, followupFixedCount: 0, revertRate: 0.3, followupFixRate: 0, lanes: "run-task", taskIds: [] }];
+  agent.decisions.classes = [{ taskClass: "docs", approvedCount: 6, acceptedCount: 0, rejectedCount: 0, heldCount: 0, releasedCount: 0, approvalDenominator: 6, approvalRate: 1, taskIds: [], actorIds: [] }];
+  agent.capacity.measurements = [{ repo: REPO, configuredCapacity: 2, admittedLanes: 2, activeWorkers: 2, queuedWork: 9, utilizationRatio: 1, windowStart: new Date(NOW - 120_000).toISOString(), windowEnd: snapshot.asOf!, recommendation: "scale-up" }];
+  const scope = { repository: REPO, instanceId: "core" };
+  const goodRanks = operatorAgentCandidates(snapshot, scope, []);
+  const compute = (input: AnalyticsSnapshot) => navBadgeView({ inboxRoot: "/unused", clock: fixedClock(NOW), scopes: () => [{ ...scope, analytics: () => input, memory: readyMemory, ledgerPath: "/unused" }] }).compute(new URLSearchParams());
+  const positive = compute(snapshot);
+  assert.ok("data" in positive);
+  assert.equal(positive.data.agent.count, goodRanks.length);
+  for (const family of ["outcomes", "decisions", "capacity"] as const) {
+    const malformed = structuredClone(snapshot);
+    (malformed.consoleV1.operatorAgent[family] as any)[family === "capacity" ? "measurements" : "classes"] = [{}];
+    let result: ReturnType<typeof compute> | undefined;
+    assert.doesNotThrow(() => { result = compute(malformed); }, family);
+    assert.ok(result && "data" in result);
+    assert.equal(result.data.agent.count, undefined);
+    assert.equal(result.data.agent.atLeast, undefined);
+    assert.match(result.data.agent.instances[0]!.reason!, new RegExp("malformed.*" + family));
+    assert.equal(result.sources.find((source) => source.name === "analytics:core")!.state, "unavailable");
+    assert.throws(() => operatorAgentCandidates(malformed, scope, []), new RegExp("malformed.*" + family), "raw engine rejects unqualified input explicitly, not a slug TypeError");
+  }
+  assert.deepEqual(compute(snapshot), positive, "valid direct badge retains rank IDs and count");
+});
+
 test("a decided or rejected proposal leaves the agent badge", () => {
   const candidates = operatorAgentCandidates(busySnapshot(), { repository: REPO, instanceId: "core" }, []);
   const tokenBurn = candidates.find((c) => c.signal === "token-burn")!;
