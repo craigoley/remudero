@@ -208,3 +208,19 @@ test("W1-T9324: a re-offer releases the fleet lane hold from the draft it replac
   });
   assert.deepEqual(held.filed, [OLDER]);
 });
+
+test("W1-T9324: an unreadable replay store releases nothing — the lane holds the decision as before", () => {
+  const ID = "followup:W1-T9314:research";
+  const f = fixture({ [ID]: { family: "followup", invalidatedAt: at(0), reofferedAt: at(600), outcome: { outcome: "skipped_superseded", at: at(1) } } });
+  writeClassificationSnapshot(f.stateDir, [{ proposalId: ID, state: "ready" }]);
+  writeFileSync(fleetLaneStorePath(f.stateDir), JSON.stringify({ [ID]: { decision: "file", ts: at(540) } }));
+  // Not JSON: reading the replay store throws, so no re-offer time is known for the proposal.
+  writeFileSync(join(f.stateDir, BAND_MEANING_REPLAY_STORE), "{ not json");
+  const approved: string[] = [];
+  const lane = triageFleetLane({
+    stateDir: f.stateDir, ledgerPath: f.ledgerPath, mergedLastDay: () => 10, approve: (id) => void approved.push(id),
+    clock: fixedClock(SEED_MS + 640 * 60_000),
+  });
+  assert.deepEqual(lane.filed, [], "the day-old-in-minutes file decision still holds without a readable re-offer time");
+  assert.deepEqual(approved, []);
+});
