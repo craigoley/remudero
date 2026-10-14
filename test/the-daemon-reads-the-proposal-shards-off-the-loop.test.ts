@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import fs, { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -17,6 +17,7 @@ import {
   createProposalShardReader,
   loadProposalRegistry,
   proposalShardDir,
+  pruneOrphanedDraftsAsync,
   updateProposalRegistry,
   type DraftedCandidate,
   type Proposal,
@@ -204,4 +205,71 @@ test("W1-T9443: the draft rung prunes through the off-loop reader", async (t) =>
   assert.ok(again.length >= 1);
   assert.ok(again.every((l) => l.extra.read === 0 && l.extra.unchanged === 1), JSON.stringify(again));
   assert.equal(logs.filter((l) => l.step === "inbox.drafts_pruned").length, 0);
+});
+
+test("W1-T9443: a shard that vanishes mid-refresh drops out, and an unreadable one is refused", async () => {
+  const entry = { ino: 1n, size: 2n, mtimeNs: 3n };
+  const vanishing: ProposalShardReaderFs = {
+    readdir: async () => ["a.json", "b.json", "c.json", "notes.txt"],
+    stat: async (path) => (path.endsWith("b.json") ? Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" })) : entry),
+    readFile: async (path) =>
+      path.endsWith("c.json") ? Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" })) : JSON.stringify(proposal("A")),
+  };
+  const rows: Array<Record<string, unknown>> = [];
+  const population = await createProposalShardReader("/v", { fs: vanishing, log: (step, extra = {}) => void rows.push({ step, ...extra }) }).refresh();
+  assert.deepEqual([...population.keys()], ["A"], "a file unlinked between the listing and its read is gone, not a refusal");
+  assert.deepEqual({ ...rows[0], ms: 0 }, { step: "proposal_shards.refreshed", files: 1, read: 1, unchanged: 0, removed: 0, ms: 0 });
+
+  const unreadable: ProposalShardReaderFs = {
+    ...vanishing,
+    stat: async () => entry,
+    readFile: async () => Promise.reject(Object.assign(new Error("denied"), { code: "EACCES" })),
+  };
+  await assert.rejects(createProposalShardReader("/v", { fs: unreadable }).refresh(), /cannot read proposal shard \(\/v\/a\.json\)/);
+});
+
+test("W1-T9443: the off-loop prune waits out a live registry lock and looks again under it", async () => {
+  const { root, registryPath, shardDir } = seedRegistry(["LIVE"]);
+  const draftsPath = join(root, "state", "inbox-drafts.json");
+  const writeDrafts = (ids: string[]) => writeFileSync(draftsPath, JSON.stringify(Object.fromEntries(ids.map((id) => [id, cand(id)])), null, 2));
+  const lockPath = `${registryPath}.lock`;
+  const holdLock = () => writeFileSync(lockPath, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
+
+  // Nothing to look at: a torn registry or an absent drafts file is undefined, never "every draft is an orphan".
+  writeDrafts(["LIVE", "GONE"]);
+  const reader = createProposalShardReader(shardDir);
+  const torn = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t9443-torn-`));
+  writeFileSync(join(torn, "inbox-proposals.json"), "{ torn");
+  assert.equal(await pruneOrphanedDraftsAsync(draftsPath, join(torn, "inbox-proposals.json"), reader), undefined);
+  assert.equal(await pruneOrphanedDraftsAsync(join(root, "state", "absent.json"), registryPath, reader), undefined);
+  await assert.rejects(pruneOrphanedDraftsAsync(draftsPath, join(root, "state"), reader), /EISDIR/, "a registry that is not a file is a throw");
+
+  // A live holder that never lets go: the prune gives up at the same bound the sync writer uses, and writes nothing.
+  holdLock();
+  await assert.rejects(pruneOrphanedDraftsAsync(draftsPath, registryPath, reader, { maxWaitMs: 30, pollIntervalMs: 5 }), /timed out after 30ms/);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(draftsPath, "utf8")) as object).sort(), ["GONE", "LIVE"]);
+
+  // A holder that lets go while the prune waits: the prune takes the lock, prunes, and releases it.
+  setTimeout(() => fs.unlinkSync(lockPath), 20);
+  const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, reader, { maxWaitMs: 5000, pollIntervalMs: 5 });
+  assert.equal(pruned?.count, 1);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(draftsPath, "utf8")) as object), ["LIVE"]);
+  assert.equal(fs.existsSync(lockPath), false, "the lock is released");
+
+  // A holder that is dead is reclaimed, exactly as the sync writer reclaims it.
+  writeDrafts(["LIVE", "GONE"]);
+  writeFileSync(lockPath, JSON.stringify({ pid: 2 ** 22 + 7, host: hostname(), startedAt: new Date().toISOString() }));
+  assert.equal((await pruneOrphanedDraftsAsync(draftsPath, registryPath, reader, { isPidAlive: () => false }))?.count, 1);
+
+  // The second look, under the lock, wins: an orphan that became live, or a drafts file that went, writes nothing.
+  writeDrafts(["LIVE", "LATE"]);
+  let calls = 0;
+  const lateLive = { refresh: async () => new Map(calls++ === 0 ? [] : [["LATE", { proposal: proposal("LATE"), path: "/x", text: "" }]]) };
+  const before = readFileSync(draftsPath, "utf8");
+  assert.deepEqual(await pruneOrphanedDraftsAsync(draftsPath, registryPath, lateLive), { count: 0, bytesBefore: Buffer.byteLength(before), bytesAfter: Buffer.byteLength(before) });
+  assert.equal(readFileSync(draftsPath, "utf8"), before);
+  // The drafts file goes after the first look has read it: the look under the lock finds nothing to prune.
+  const draftsGone = { refresh: async () => (fs.existsSync(draftsPath) ? fs.unlinkSync(draftsPath) : undefined, new Map()) };
+  assert.equal(await pruneOrphanedDraftsAsync(draftsPath, registryPath, draftsGone), undefined);
+  assert.equal(fs.existsSync(lockPath), false);
 });
