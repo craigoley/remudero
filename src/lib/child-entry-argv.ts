@@ -86,6 +86,14 @@ export function childEntryArgv(
   return { argv: ["--import", tsx, resolve(root, sourceEntry), ...args], kind: "tsx", reason: verdict.reason, ...(lookup ? { store: lookup } : {}) };
 }
 
+/** W1-T8778: the ledger step both switched spawn sites write, so the bundle share is measurable on the host. */
+export const CHILD_ENTRY_SPAWNED_STEP = "child_entry.spawned";
+
+/** The one row shape for {@link CHILD_ENTRY_SPAWNED_STEP}: which entry ran which verb, as which kind, and why. */
+export function childEntrySpawnedRow(name: string, verb: string, launch: Pick<ChildEntryLaunch, "kind" | "reason">): Record<string, unknown> {
+  return { name, verb, kind: launch.kind, reason: launch.reason };
+}
+
 /** This instance's store, or `false` when its config cannot be read: the store is advisory and a miss runs tsx. */
 function defaultStoreRoot(): string | false {
   try {
