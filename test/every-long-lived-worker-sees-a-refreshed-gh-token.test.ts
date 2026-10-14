@@ -14,6 +14,9 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 // W1-T5736. TypeScript 7 ships no JS API and @swc/core's native addon is not loadable everywhere this runs,
 // so the "walk" is a small lexer that blanks comments, strings, template text and regex literals, then
 // parses each `new Worker(...)` argument list by balanced brackets — comments and strings never count.
+// W1-T9370: a `startWorker(selfUrl, options, …)` call (child-entry-argv.ts) takes Worker's options in the same place
+// and forwards them unchanged, so each call is censused at its call site like `new Worker`; startWorker's own spawn is
+// a pass-through exemption.
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -153,7 +156,7 @@ const SHARE = /^(?:\w+\.)?SHARE_ENV$/;
 function workerSites(file: string, src: string): Site[] {
   const masked = mask(src);
   const sites: Site[] = [];
-  for (const m of masked.matchAll(/\bnew\s+Worker\s*(?:<[^>(]*>)?\s*\(/g)) {
+  for (const m of masked.matchAll(/\b(?:new\s+Worker\s*(?:<[^>(]*>)?|(?<!function\s+)startWorker)\s*\(/g)) {
     const open = m.index! + m[0].length - 1;
     const args = splitTop(masked, open + 1, closeOf(masked, open) - 1);
     const line = masked.slice(0, m.index).split("\n").length;
@@ -186,7 +189,7 @@ function workerSites(file: string, src: string): Site[] {
   return sites;
 }
 
-type Exemption = { file: string; kind: string; why: "one-shot" | "no-github" | "proxied-to-parent" | "explicit-env"; reason: string };
+type Exemption = { file: string; kind: string; why: "one-shot" | "no-github" | "proxied-to-parent" | "explicit-env" | "pass-through"; reason: string };
 
 /** Every Worker spawn in src/ that is not `env: SHARE_ENV`, with why it does not need to be. */
 const EXEMPTIONS: Exemption[] = [
@@ -202,6 +205,7 @@ const EXEMPTIONS: Exemption[] = [
   { file: "src/lib/ledger-union.ts", kind: "ROTATION_DIGEST_CODEC", why: "no-github", reason: "rotation digest codec; hashing only, no GitHub call" },
   { file: "src/lib/config-gardener.ts", kind: "CONFIG_MEASUREMENT_WORKER_KIND", why: "one-shot", reason: "local measurement per spawn; no GitHub call" },
   { file: "src/lib/serve-plan-reload.ts", kind: "PLAN_RELOAD_WORKER_KIND", why: "one-shot", reason: "local plan read per spawn; no GitHub call" },
+  { file: "src/lib/child-entry-argv.ts", kind: "opaque-options", why: "pass-through", reason: "startWorker's default constructor: forwards each caller's options (env included) unchanged; every startWorker call is censused where it is made" },
 ];
 
 /** Failures by file and kind: a spawn that is neither SHARE_ENV nor exempt, and an exemption naming no live site. */

@@ -723,7 +723,7 @@ test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches m
   assert.deepEqual(s.attempted, ["A"]); // B (A's dependent) never spawns while paused
   const heartbeats = lines.filter((l) => l.step === "daemon.pause");
   assert.ok(heartbeats.length >= 3, "one daemon.pause heartbeat per idle tick, all within ONE process");
-  assert.equal(heartbeats[0].extra.detail, "PAUSE requested: quiet hours");
+  assert.match(String(heartbeats[0].extra.detail), /^PAUSE requested: quiet hours; actor: \S/, "W1-T7839: the detail names who set it");
   assert.ok(typeof heartbeats[0].extra.poll_interval_ms === "number", "the heartbeat names its own pacing");
   assert.ok(s.ticks >= 3, "ticks accumulate across the pause — proof no relaunch/boot-cycle occurred");
 });
