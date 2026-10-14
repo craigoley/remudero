@@ -1,0 +1,18 @@
+- id: W1-T9528
+  title: "REPAIR THE SELECTOR EDGE INTO test/the-core-fleet-fills-the-child-entry-store.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/the-core-fleet-fills-the-child-entry-store.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 38623398070 for PR #11705 at 8220ebda515eda04ff7aa9b9756fcc5f6d26b4fb: src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-heap-ceiling-shadow-learns-from-live-samples.test.ts -> test/the-core-fleet-fills-the-child-entry-store.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/the-core-fleet-fills-the-child-entry-store.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/the-core-fleet-fills-the-child-entry-store.test.ts when this edge is exercised"
+      proof: "grep: test/the-core-fleet-fills-the-child-entry-store\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/the-core-fleet-fills-the-child-entry-store.test.ts for each recorded edge"
+      proof: "grep: test/the-core-fleet-fills-the-child-entry-store\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
