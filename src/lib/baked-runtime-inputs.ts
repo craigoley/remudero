@@ -1,5 +1,6 @@
 /** Source executed by the image-resident serve supervisor; the closure test holds this list current. */
 export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
+  "src/lib/actor-evidence.ts",
   "src/lib/baked-runtime-inputs.ts",
   "src/lib/clock.ts",
   "src/lib/config-schema.ts",
