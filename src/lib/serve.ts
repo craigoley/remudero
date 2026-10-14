@@ -887,11 +887,6 @@ export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLa
 }
 
 /**
- * W1-T5373: `GET /v1/status` gains `needsYou`, the needs-you composite's decision count read through the
- * shared consumer -- the same number the badge, the composite and each instance's now view report. No
- * composite (no read model, or none composed yet) is a named lower bound, never a zero.
- */
-/**
  * W1-T2858: `GET /v1/status` gains `fleetRuntimeHealth`, the host heartbeat's runtime-contract verdict
  * (`healthy` | `drift` | `unknown`) read from shared state. One local file read: no Docker socket, no GitHub.
  */
@@ -899,6 +894,11 @@ export function withFleetRuntimeHealth(route: Route, read: (nowMs: number) => Fl
   return spliceJsonField(route, "fleetRuntimeHealth", read);
 }
 
+/**
+ * W1-T5373: `GET /v1/status` gains `needsYou`, the needs-you composite's decision count read through the
+ * shared consumer -- the same number the badge, the composite and each instance's now view report. No
+ * composite (no read model, or none composed yet) is a named lower bound, never a zero.
+ */
 export function withStatusNeedsYou(route: Route, read: () => HumanGateProjection | undefined): Route {
   return spliceJsonField(route, "needsYou", () => {
     const projection = read();
