@@ -10,7 +10,8 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -358,4 +359,119 @@ test("recycle-container and install-host-units accept the project layer's fields
   const installRefused = install(refused, "refused");
   assert.notEqual(installRefused.status, 0);
   assert.match(installRefused.stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
+});
+
+// W1-T9435: keep the old parser/route/shell controls above beside the explicit opt-in contract.
+test("selected registry precedence never falls back after explicit failure", async (t) => {
+  const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
+  const dir = fixtureDir(t), legacyPath = join(dir, "healthy-legacy.yaml"), selectedPath = join(dir, "selected.yaml");
+  writeFileSync(legacyPath, FLEET);
+  writeFileSync(selectedPath, registry(row("independent", { github_repo: "someone/independent" })));
+  for (const cliPath of ["", "relative.yaml", join(dir, "missing.yaml")]) {
+    const result = await readSelectedInstanceRegistry({ cliPath, envPath: selectedPath, configuredPath: legacyPath, legacyPath });
+    assert.ok(result.kind === "refused" || result.kind === "unknown", "explicit failure is never absence");
+    assert.doesNotMatch(JSON.stringify(result), /craigoley\/remudero/);
+  }
+  const cli = await readSelectedInstanceRegistry({ cliPath: selectedPath, envPath: legacyPath, legacyPath });
+  assert.equal(cli.kind, "ready");
+  if (cli.kind === "ready") assert.equal(cli.binding.instances[0].name, "independent");
+  const env = await readSelectedInstanceRegistry({ envPath: selectedPath, configuredPath: legacyPath, legacyPath });
+  assert.equal(env.kind, "ready");
+  if (env.kind === "ready") assert.equal(env.binding.source, "environment");
+  assert.equal((await readSelectedInstanceRegistry({ configuredPath: selectedPath, legacyPath })).kind, "ready");
+  assert.deepEqual(await readSelectedInstanceRegistry({ legacyPath }), { kind: "legacy" });
+});
+
+test("selected registry real reads bound input and name integrity failures", async (t) => {
+  const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
+  const dir = fixtureDir(t), path = join(dir, "selected.yaml");
+  writeFileSync(path, FLEET);
+  const digest = createHash("sha256").update(FLEET).digest("hex");
+  assert.equal((await readSelectedInstanceRegistry({ cliPath: path, expectedDigest: digest })).kind, "ready");
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, maxBytes: 8 }), { kind: "unknown", reason: "oversized" });
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: dir }), { kind: "unknown", reason: "not_regular" });
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, expectedDigest: "0".repeat(64) }), { kind: "unknown", reason: "digest_mismatch" });
+  const link = join(dir, "link.yaml"); symlinkSync(path, link);
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: link }), { kind: "unknown", reason: "not_regular" });
+  writeFileSync(path, "not a registry\n");
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path }), { kind: "unknown", reason: "malformed" });
+  writeFileSync(path, Buffer.from([0xff, 0xfe]));
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path }), { kind: "unknown", reason: "invalid_encoding" });
+});
+
+test("selected registry bindings retain immutable identities across revision changes", async (t) => {
+  const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
+  const dir = fixtureDir(t), path = join(dir, "registry.yaml");
+  writeFileSync(path, FLEET);
+  const input = { cliPath: path, requiredCapabilities: ["identity", "mode", "primary"] };
+  const result = await readSelectedInstanceRegistry(input);
+  assert.equal(result.kind, "ready");
+  if (result.kind !== "ready") return;
+  const binding = result.binding, original = JSON.stringify(binding);
+  assert.ok(Object.isFrozen(binding) && Object.isFrozen(binding.instances) && Object.isFrozen(binding.instances[0]));
+  assert.throws(() => Object.assign(binding.instances[0], { repo: "attacker/retarget" }), TypeError);
+  assert.deepEqual(await binding.recheck(), { kind: "unchanged" });
+  input.cliPath = join(dir, "new-selection.yaml"); input.requiredCapabilities.push("future-authority");
+  const replacement = join(dir, "replacement.yaml");
+  writeFileSync(replacement, registry(row("other", { github_repo: "other/independent" })));
+  renameSync(replacement, path);
+  assert.deepEqual(await binding.recheck(), { kind: "changed" });
+  assert.equal(JSON.stringify(binding), original, "recheck never retargets the existing run");
+  rmSync(path);
+  assert.deepEqual(await binding.recheck(), { kind: "unknown", reason: "missing" });
+});
+
+test("selected registry compatibility preserves legacy input and refuses unsupported capabilities", async (t) => {
+  const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
+  const dir = fixtureDir(t), path = join(dir, "registry.yaml");
+  writeFileSync(path, "version: 1\n" + registry(row("core", { github_repo: "a/b", mode: "shadow", primary: "true" })));
+  for (const contractVersion of [1, 2]) {
+    const result = await readSelectedInstanceRegistry({ cliPath: path, contractVersion, requiredCapabilities: ["identity", "mode", "primary"] });
+    assert.equal(result.kind, "ready");
+    if (result.kind === "ready") assert.deepEqual(result.binding.instances[0], { name: "core", project: "default", repo: "a/b", live: true, mode: "shadow", primary: true });
+  }
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, contractVersion: 3 }), { kind: "refused", reason: "unsupported_contract" });
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, requiredCapabilities: ["future-authority"] }), { kind: "refused", reason: "unsupported_capability" });
+  writeFileSync(path, registry(row("core", { github_repo: "a/b", future_safety_hold: "true" })));
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path }), { kind: "refused", reason: "unsupported_field" });
+});
+
+test("selected registry public projection grants no private publication permission", async (t) => {
+  const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
+  const dir = fixtureDir(t), path = join(dir, "private-selected.yaml");
+  writeFileSync(path, FLEET);
+  const result = await readSelectedInstanceRegistry({ cliPath: path });
+  assert.equal(result.kind, "ready");
+  if (result.kind !== "ready") return;
+  assert.equal(result.binding.publicationPermission, "not-granted");
+  assert.deepEqual(result.binding.publicProjection().projects[0].repos[0], { repo: "craigoley/remudero", instances: [{ name: "core", prefix: "/v1/i/core" }] });
+  const projection = result.binding.publicProjection(); projection.projects.length = 0;
+  assert.ok(result.binding.publicProjection().projects.length > 0, "a returned projection is not the bound identity storage");
+  for (const bytes of [JSON.stringify(result), JSON.stringify(result.binding.publicProjection())]) {
+    assert.ok(!bytes.includes(dir)); assert.ok(!bytes.includes("/home/operator")); assert.ok(!bytes.includes("azurecr"));
+  }
+});
+
+test("selected registry route refuses selected failure without legacy or cache fallback", async (t) => {
+  const dir = fixtureDir(t), missing = join(dir, "missing-selected.yaml");
+  const selection = { selectedRegistry: { cliPath: missing } };
+  assert.equal((await invoke(routeOver(dir, FLEET, FLEET))).status, 200, "real healthy legacy corpus control");
+  const refused = await invoke(routeOver(dir, FLEET, FLEET, selection));
+  assert.deepEqual(refused.body, { error: "selected_registry_unavailable", reason: "missing" });
+  assert.equal(refused.status, 503);
+  const cached = {
+    readModel: {
+      switches: () => ({ views: { instances: "serve" as const } }),
+      body: () => ({ view: "instances", key: "", version: 1, generation: 1, etag: "cached", body: {
+        view: "instances", version: 1, generatedAt: fixedClock(NOW).iso(), asOf: null, stale: false, sources: [],
+        data: { instances: [{ id: "cached", registered: true, project: "cache", repo: "cache/healthy" }], hostRegistry: "in_sync" },
+      } }),
+    },
+  };
+  assert.equal((await invoke(routeOver(dir, undefined, undefined, cached))).status, 200, "actual served cache corpus control");
+  assert.deepEqual(await invoke(routeOver(dir, FLEET, FLEET, { ...cached, ...selection })), refused);
+  const path = join(dir, "selected.yaml"); writeFileSync(path, FLEET);
+  const selected = await invoke(routeOver(dir, undefined, undefined, { ...cached, selectedRegistry: { cliPath: path } }));
+  assert.equal(selected.status, 200); assert.equal(selected.body.source, "selected");
+  assert.equal(selected.body.publicationPermission, "not-granted"); assert.ok(!selected.text.includes(dir));
 });
