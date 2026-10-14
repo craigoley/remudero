@@ -1,0 +1,53 @@
+- id: W1-T9458
+  title: "THE NOW VIEW'S SHADOW CALLS A ONE-BUILD LAG 'REAL', AND IT KEEPS THE LEGACY BOARD WORKER (~337 MB) ALIVE: the board stage derives from the fact table as it stood then, but the assemble stage stamps the body's ledger source with the projector's newestTs as it stands later, so a verdict that lands between the two is missing from the board yet falls outside the gap window the classifier reads: the body's ledger source is stamped with the newestTs its board stage read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which instant a now-view body says its ledger rows are as of
+  band_meaning: span
+  origin: "operator session 2026-10-14: now-view shadow went real=0 for four hours after W1-T9356, then 300 real diffs from one task"
+  plan_refs: [W1-T9356, W1-T5066, W1-T9357]
+  files: [src/lib/now-view.ts, test/a-now-view-body-is-stamped-as-of-what-its-board-read.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, view.shadow_summary for the now view on core:
+    - after W1-T9356 (#11542) reached serve, real diffs were 0 in every hourly summary from 09:22Z to 12:23Z,
+      with the clean streak growing from 37 to 681 samples;
+    - the 13:24Z summary had real 300 and the streak fell to 115.
+    Every real diff in that window (view.shadow_diff 12:42:24Z) traces to one task, W1-T8830: the view put it in
+    phase "review", legacy had no phase for it (queued), and counts, groups and the task-list cut followed from that
+    (queued 720 vs 700, running 1 vs 3, taskProjection.returned 74 vs 113).
+    W1-T8830's rows: implement.done 11:44:44Z, then run.freshness_handoff and `verdict {handed_off, freshness_yield}`
+    at 12:41:52Z, eight seconds before the sample. A new run started 13:03Z.
+    READ at origin/main f980515db:
+    - both sides derive phase with projectPlan -> deriveRunState (status.ts); LANE_TERMINAL_STEPS holds `verdict`
+      whatever its reason, so any verdict ends the run. Legacy's "queued" is the intended reading; daemon.ts agrees.
+      Neither derivation is wrong.
+    - now-view.ts's build runs in stages. "board" calls h.board.update({force: true}) and derives from the fact table
+      as ingested then. "assemble" runs later (decisions alone is up to 27 s at p99) and builds the body's ledger
+      source with opts.ledgerSource(state, now), whose asOf is the slot state's newestTs at that later moment.
+    - the shadow's gap window is (view asOf, legacy asOf] (readShadowEvidence, view-shadow.ts); legacy reads rows
+      stamped at or before builtMs.
+    INFERRED, and the falsifier settles it: the projector ingested the 12:41:52 verdict after the board stage and
+    before assemble, so the body claimed rows its board never read. The verdict fell outside the gap window, nothing
+    named W1-T8830, and classifyShadowDiff fell through to real. It needs a terminal row to land inside one build's
+    window, which fits four clean hours.
+    The now view's shadow readiness gates retiring the legacy board worker (~337 MB resident, serve.memory).
+  design: |
+    1. In the "board" stage, record the slot state's newestTs once h.board.update reports caughtUp, on the NowBuild.
+    2. In "assemble", build the ledger source from the slot state with newestTs replaced by that recorded value, so
+       the body's asOf is what its board read. builtLedgerSource (read-model-worker.ts) already models "built as of
+       X, the projector has newer rows" for other views; reuse its shape if the slot state carries what it needs.
+    3. Nothing else changes: the same sources, names and staleness budgets; only the ledger source's asOf moves back
+       to the board stage's.
+  acceptance:
+    - claim: "a verdict ingested after the board stage and before assemble leaves the body's ledger source as of the board stage, so the verdict the board never read falls inside the shadow's gap window (view asOf, legacy asOf]"
+      proof: 'grep: test("W1-T9458: a now-view body is stamped as of what its board read" in test/a-now-view-body-is-stamped-as-of-what-its-board-read.test.ts'
+  falsifier: |
+    Build the ledger source from the slot state at assemble time again: the body is stamped as of the verdict its
+    board never read, the verdict leaves the gap window, and the test fails.
