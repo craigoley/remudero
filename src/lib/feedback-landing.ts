@@ -288,7 +288,7 @@ async function driveLandingAsync<R>(steps: PreflightSteps<R>, preflight: PlanPrP
 }
 
 const syncPreflightOf = (root: string, opts: LandFeedbackOpts): PlanPrPreflightFn =>
-  opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
+  opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr, { log: opts.log }));
 
 function defaultGit(root: string): GitExec {
   return (args, opts) =>
@@ -1295,7 +1295,7 @@ export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLanding
  * network git/gh calls — fetch, ls-remote, push, PR list/create/refresh — are awaited off the loop (W1-T5672).
  */
 export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbackLandingAsyncOpts = {}): Promise<LandFeedbackResult> {
-  const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr));
+  const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
   const steps = sweepLandingSteps(root, { ...opts, ...asyncSeamsOf(root, opts) });
   return logLandingSweep(opts.log, await driveLandingAsync(steps, preflight));
 }
@@ -1859,7 +1859,7 @@ export async function landCiLearningShardsAsync(
   deps: LandCiLearningShardsAsyncOptions,
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
-  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr));
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr, { log: deps.log }));
   return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
 }
 
