@@ -8,7 +8,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
+import { prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -929,13 +929,16 @@ export function fileConsumerVia(openWorkspace: GardenWorkspacePort, mintTaskId: 
 
 function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: GardenTaskIdMinter, f: ConsumerFiling, log: (step: string, fields?: Record<string, unknown>) => void): Steps<string | undefined> {
   const ws = yield* step<GardenCheckout | GardenCheckoutAsync>(openWorkspace);
+  let unfiled = "the filing PR did not open (plan_pr.preflight_refused names why)";
   try {
     const ids = yield* step(() => prepareGardenTaskIds(ws, 1, mintTaskId, Boolean(mintTaskId.async)));
     return yield* step(() => landConsumerShard(ws, mintTaskId, f, ids[0]!));
   } catch (error) {
+    unfiled = String((error as Error)?.message ?? error);
     recordGardenMintTimeout(error, "host-resource", log);
     throw error;
   } finally {
+    yield* step(() => releaseGardenTaskIds(ws, `host-resource gardener: ${unfiled}`, Boolean(mintTaskId.async)));
     yield* step(() => ws.dispose());
   }
 }
