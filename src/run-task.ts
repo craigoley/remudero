@@ -14328,6 +14328,12 @@ export async function runFixRung(opts: {
       }
       if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
+      // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
+      // repaired; re-read the PR once at this head rather than stand down for a person.
+      if (shouldRecheckAfterNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
+        deps.say("fix rung: the worker reported FIXED but changed nothing — re-reading the PR once before standing down");
+        continue;
+      }
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
@@ -57940,3 +57946,8 @@ export {
   type BranchCitationHit,
   type ReverseBranchDrift,
 } from "./lib/branch-reaper.js";
+
+/** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
+export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
+}
