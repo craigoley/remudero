@@ -1220,8 +1220,9 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
-  /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits. Started once per cycle,
-   *  never awaited, and never overlapped, so a slow `ls-remote` cannot hold the loop. Optional. */
+  /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits (`releaseLandedDispatchClaims`:
+   *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
+   *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
   releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];

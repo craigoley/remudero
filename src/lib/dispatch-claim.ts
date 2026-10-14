@@ -186,7 +186,6 @@ export interface ClaimMintRow {
   readonly actor: string;
   readonly ts: string;
   readonly source: string;
-  /** W1-T8616: the minting run, so a `dispatch.rerun_override` row from the same run can be found. */
   readonly runId?: string;
 }
 
@@ -395,11 +394,9 @@ export interface DispatchClaimReserverAsync {
   lastAttemptStderr?(): string | undefined;
   anchorMessage?(taskId: string): Awaitable<string | undefined>;
   list?(): Awaitable<string[]>;
-  /** W1-T8616: every claim with the anchor sha the ONE listing saw; a failed listing says so, never `[]`. */
   listHeld?(): Awaitable<DispatchClaimListing>;
 }
 
-/** One claim as a listing saw it: the task and the anchor sha then at its ref. */
 export interface ListedDispatchClaim {
   readonly taskId: string;
   readonly holder: string;
@@ -586,7 +583,6 @@ export async function releaseDispatchClaimAsync(
     anchor?: string;
     evidenceObserved?: boolean;
     livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
-    /** W1-T8616: the anchor sha the caller judged; the evidence drop is leased to it, so a re-minted claim survives. */
     expect?: string;
   } = {},
 ): Promise<DispatchClaimReleaseResult> {
@@ -653,7 +649,6 @@ export function findClaimMintRow(
   return undefined;
 }
 
-/** W1-T8616: was this claim minted by a `--rerun` lane? Its mint row's run also wrote `dispatch.rerun_override`. */
 export function claimMintedByRerun(
   stateDir: string,
   taskId: string,
@@ -705,30 +700,19 @@ export function releaseReplacedContainerClaims(
   }));
 }
 
-export interface LandedClaimSweepDeps {
+export interface LandedClaimSweepInputs {
   isMerged: (taskId: string) => boolean;
   isIndeterminate: (taskId: string) => boolean;
-  /** The crediting PR, for the row; optional. */
   prUrlFor?: (taskId: string) => string | undefined;
-  /** True when the claim's mint row belongs to a `--rerun` lane ({@link claimMintedByRerun}). */
   isRerunClaim?: (taskId: string, anchor: ClaimAnchorIdentity) => Awaitable<boolean>;
-  /** The host whose ledger `isRerunClaim` reads; a claim minted on another host has no mint row there to find. */
   localHost?: string;
-  /** Holder shas whose rerun exception was already reported, so a long rerun lane writes one row. */
   reportedRerun?: Set<string>;
   log: (step: string, fields: Record<string, unknown>) => void;
 }
 
-/**
- * W1-T8616: THE TICK-SIDE SWEEP. Arm 2 (evidence) for every claim whose task the merged projection
- * credits and does not mark indeterminate. One `ls-remote` lists every claim with its anchor sha; each
- * drop is leased to that sha, so a claim re-minted after the listing survives. Any host may run it:
- * the evidence arm needs no liveness answer (W1-T396). An unmerged or indeterminate claim writes
- * nothing; a failed listing writes `dispatch.claim_sweep_failed`, never an empty list.
- */
 export async function releaseLandedDispatchClaims(
   reserver: DispatchClaimReserverAsync,
-  deps: LandedClaimSweepDeps,
+  deps: LandedClaimSweepInputs,
 ): Promise<Array<DispatchClaimReleaseResult & ListedDispatchClaim>> {
   const listing: DispatchClaimListing = reserver.listHeld
     ? await reserver.listHeld()
@@ -753,8 +737,9 @@ export async function releaseLandedDispatchClaims(
           dropped: false,
           reason: `${ref} was minted by a --rerun lane (dispatch.rerun_override), which dispatches a merged task on purpose — leaving it`,
         };
-        if (!deps.reportedRerun?.has(claim.holder)) {
-          deps.reportedRerun?.add(claim.holder);
+        const reported = deps.reportedRerun;
+        if (reported === undefined || !reported.has(claim.holder)) {
+          reported?.add(claim.holder);
           deps.log("dispatch.claim_released", { ...row, arm: left.arm, release: false, dropped: false, reason: left.reason });
         }
         results.push(left);
