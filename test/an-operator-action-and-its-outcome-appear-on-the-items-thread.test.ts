@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { createDemandBook } from "../src/lib/view-demand.js";
 import { createInboxThreadView, inboxThreadViewKey, type InboxThreadViewData } from "../src/lib/inbox-thread-view.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { answerThread, createThreadEventSync, registryThreadItems, type InboxResponderDeps, type ThreadDetailView } from "../src/lib/inbox-responder.js";
+import { answerThread, createThreadEventSync, registryThreadItems, startInboxResponder, type InboxResponderDeps, type ThreadDetailView } from "../src/lib/inbox-responder.js";
 import { parseProposalRegistry, recordRowThreadEvents, reframeProposal, type Proposal } from "../src/lib/inbox.js";
 import { appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, readThread, type ThreadMessage } from "../src/lib/inbox-thread.js";
 import { buildDeclineProposalRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildRestoreProposalRoute, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
@@ -262,6 +262,54 @@ test("W1-T9252: every needsYou item has a readable thread", async (t) => {
   } finally {
     db.close();
   }
+});
+
+test("W1-T9252: the tail treats a missing live ledger as empty and starts from its first sight", async (t) => {
+  const fx = await fixture(t, [{ id: HUMAN }]);
+  const missing = join(fx.root, "state", "not-yet", "ledger.ndjson");
+  const sync = createThreadEventSync({ ledgerPath: missing, threadStorePath: fx.threadStorePath, stateDir: fx.stateDir });
+  assert.equal(sync.poll(), 0, "no ledger yet: nothing to mirror, and the first poll only records where it stands");
+  mkdirSync(join(fx.root, "state", "not-yet"));
+  writeFileSync(missing, JSON.stringify({ ts: iso(0), run_id: "REFRAME-1", task_id: HUMAN, step: "ratify.reframed", feedback: "Name the repo." }) + "\n");
+  assert.equal(sync.poll(), 1, "a row that arrives after the first poll is mirrored from the start of the file");
+  assert.deepEqual(storedEvents(fx, HUMAN).map((m) => m.extra!.event!.kind), ["reframed"]);
+});
+
+test("W1-T9252: the tail reports a row it cannot read and still mirrors the rest", async (t) => {
+  const fx = await fixture(t, [{ id: HUMAN }]);
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const sync = createThreadEventSync({ ledgerPath: fx.ledgerPath, threadStorePath: fx.threadStorePath, log: (step, extra) => void logged.push([step, extra]) });
+  assert.equal(await sync.backfill(), 0);
+  appendFileSync(fx.ledgerPath, `{"step":"ratify.reframed", torn\n`);
+  appendFileSync(fx.ledgerPath, JSON.stringify({ ts: iso(0), run_id: "REFRAME-1", task_id: HUMAN, step: "ratify.reframed", feedback: "Name the repo." }) + "\n");
+  assert.equal(sync.poll(), 1);
+  assert.deepEqual(logged.map(([step]) => step), ["inbox.thread_event_row_unreadable"]);
+  assert.equal(typeof logged[0]![1]!.error, "string");
+  assert.deepEqual(storedEvents(fx, HUMAN).map((m) => m.extra!.event!.kind), ["reframed"]);
+});
+
+test("W1-T9252: the responder's timer logs a failing event sync and keeps answering", async (t) => {
+  const fx = await fixture(t, [{ id: "ruling:P5" }]);
+  const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+  let calls = 0;
+  const pump = startInboxResponder({
+    threadStorePath: fx.threadStorePath,
+    ledgerPath: fx.ledgerPath,
+    readItems: () => registryThreadItems(fx.stateDir, fx.ledgerPath),
+    reframe: () => {},
+    syncEvents: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("ledger union unreadable");
+      return 2;
+    },
+  }, 10, (step, extra) => void lines.push([step, extra]));
+  t.after(() => pump.stop());
+  await pump.settled();
+  assert.deepEqual(lines[0], ["inbox.thread_event_sync_failed", { error: "ledger union unreadable" }]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  pump.stop();
+  await pump.settled();
+  assert.ok(lines.some(([step, extra]) => step === "inbox.thread_events_mirrored" && extra?.count === 2), "a later tick mirrors again");
 });
 
 test("W1-T9252: a thread reply reaches the daemon as reframe direction", async (t) => {
