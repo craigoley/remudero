@@ -1,0 +1,63 @@
+- id: W1-T9536
+  title: "A BEHIND PR IS NOT DIRECT-MERGED AS-IS WHEN MAIN CHANGED ITS OWN FILES SINCE ITS CI BASE — `directMergePreflightSteps` merges a behind PR with no overlap check (an untouched PR merges at once; a plan PR merges when only its merged PLAN loads, W1-T5748), so on 2026-10-14 #11744 (W1-T9082) was direct-merged 23 commits behind on a 17:05Z base. The commits it skipped included #11758, which shares src/run-task.ts with it. Main went red at 19:08Z until #11782 at 20:10Z"
+  repo: remudero
+  depends_on: [W1-T5748, W1-T5780, W1-T5696]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — whether the direct REST merge refreshes a behind PR whose own files main changed; it decides merges unattended
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: main red 19:08-20:10Z (#11758 x #11744 child-entry collision), root-caused while confirming the main repair"
+  plan_refs: [W1-T5748, W1-T5780, W1-T5696, W1-T6022, W1-T7214, W1-T2855, W1-T3694]
+  files: [src/lib/arm-auto-merge.ts, src/lib/plan-pr-merge-safety.ts, test/a-behind-pr-is-not-direct-merged-when-main-changed-its-own-files.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14. Sources: the core ledger (read only), git, and ci.yml runs 38621918292 and 38623823389 on main.
+    - #11758 (W1-T9374) merged at 18:47:52Z. It added test/the-core-fleet-fills-the-child-entry-store.test.ts, whose fixture
+      hard-coded two child-entry sources.
+    - #11744 (W1-T9082) declared a third entry, `run-child` (src/run-child-main.ts), in scripts/build-child-entries.mjs.
+      Its head 4eca9e331 sat on a main merge from 17:05Z (978634157), and it was never refreshed.
+    - #11744's own files include src/run-task.ts and test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts.
+      #11758 changed both.
+    - The direct merge happened at 19:08:02Z. The ledger row was `automerge.armed` with outcome direct-merged, behind_by 23,
+      plan_touch touched, plan_pr_merge_safe merged_tree, mergeability MERGEABLE.
+    - Ledger rows for #11744 between #11758's merge and its own: `automerge.arm_skipped` plan-pr-held at 18:51:56Z, then the
+      direct merge. No update-branch and no refresh row of any kind.
+    - Result: four W1-T9374 tests fail on main with "CHILD-ENTRY BUILD FAILED: child entry run-child: source
+      src/run-child-main.ts does not exist" (ci-shard 4/8). The fleet's main-repair #11782 fixed it at 20:10Z.
+    WHY THE EXISTING GUARDS MISSED IT:
+    - `directMergePreflightSteps` (src/lib/arm-auto-merge.ts) is the last gate before every direct REST merge. For a behind,
+      mergeable PR, W1-T3694 merges an untouched PR as-is. W1-T5748/W1-T5780 merge a plan-touching PR when
+      `decidePlanPrMergeSafety` reads that the merged tree's PLAN loads.
+    - Neither path asks whether main changed the PR's own non-plan files since its CI base, which is the
+      `distanceRefreshCause` fact (W1-T5696).
+    - W1-T6022/W1-T7214's ready-overlap refresh is a sweep-side refresh, limited to ready PRs within
+      `reviewWaitingBranchRefreshThreshold`. It never fired for #11744.
+    - #10390's main-health rung only detects a red main after the merge.
+    - `planMergeSafetyInClone` already reads both compares the overlap needs: the PR's files (`compare/<base>...<head>`) and
+      main's since the merge base (`compare/<merge base>...<main tip>`). It keeps only the plan paths from each.
+  design: |
+    In `directMergePreflightSteps`, before either "merge a behind PR as-is" return (the untouched arm and the W1-T5748
+    plan-safe arm), read the PR's changed files and main's changed files since the merge base. For the plan arm, keep the
+    full lists in the readings `planMergeSafetyInClone` already makes. For the untouched arm, make the same two compare reads.
+    Apply W1-T5696's `distanceRefreshCause` to them:
+    - `distance-overlap` or `distance-baseline`: do not merge. Take the existing update-branch arm, under W1-T5921's one
+      update per (PR, head). Record `remedy: update-branch` and `reason: main_changed_own_files` with the matching files on
+      the evidence.
+    - A compare read that fails or is truncated, on a behind PR: refresh as well. Never merge on an unread overlap.
+    - No overlap: merge as today.
+    Keep W1-T5748's plan-load check beside the overlap check, not in place of it. A PR at behind_by 0 is unchanged.
+    No fixed count is added: the decision is the file intersection, not a distance.
+  acceptance:
+    - claim: "a behind PR whose own files main changed since its merge base is refreshed, not direct-merged, on both the untouched arm and the plan-safe arm; a behind PR with no overlap still merges as-is; an unreadable or truncated compare refreshes"
+      proof: "unit test: test/a-behind-pr-is-not-direct-merged-when-main-changed-its-own-files.test.ts"
+    - claim: "the suite names the W1-T9536 overlap refresh in a test title"
+      proof: "grep: W1-T9536: a behind PR whose own files main changed is refreshed in test/a-behind-pr-is-not-direct-merged-when-main-changed-its-own-files.test.ts"
+    - claim: "the refresh records reason main_changed_own_files with the overlapping files"
+      proof: "grep: main_changed_own_files in src/lib/arm-auto-merge.ts"
+  falsifier: |
+    Drop the overlap check from `directMergePreflightSteps`. A fixture PR is 23 behind, and main changed one of its own files
+    since the merge base. It is then direct-merged, and the test fails.
