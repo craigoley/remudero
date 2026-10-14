@@ -1,0 +1,29 @@
+- id: W1-T9533
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — base-red:required checks red cost 2.64 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:base-red:required checks red"
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - test/flow-base-red-required-checks-red.test.ts
+  acceptance:
+    - claim: "base-red:required checks red is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T9533: flow-base-red-required-checks-red clears without a person\" in test/flow-base-red-required-checks-red.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    base-red:required checks red cost 2.64 PR-hours; owner main-health
+    Owner main-health failed to clear eligible episodes.
+    Source owner: src/lib/fix-lane-gardener.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #11776: 0.53 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: coverage-shard (5/8) was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched
+    - PR #11777: 0.53 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: coverage-shard (5/8) was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched
+    - PR #11774: 0.53 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: ci-shard (4/8) was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched
+    - PR #11769: 0.53 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: coverage-shard (1/8) was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched
+    - PR #11710: 0.53 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: base red: ci-shard (7/8) was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

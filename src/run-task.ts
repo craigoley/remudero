@@ -3246,7 +3246,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
+import { LEDGER_REQUEST_STEP, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -18176,8 +18176,9 @@ async function runTask(
   const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
     noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
-    const spawnArgs = opts.gitCredentialSocketPath
-      ? withGitCredentialSocket(requestedSpawnArgs, opts.gitCredentialSocketPath)
+    const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
+    const spawnArgs = socketPath
+      ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
       : requestedSpawnArgs;
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
