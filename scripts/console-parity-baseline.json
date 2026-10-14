@@ -59,6 +59,7 @@
     "ops",
     "plan",
     "plan-reconcile",
+    "pr-checks",
     "pr-owner",
     "preflight",
     "progress-watchdog",

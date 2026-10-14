@@ -146,6 +146,9 @@ export const CLI_ONLY = {
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
       "pr-owner",
+      // W1-T3083: a terminal exit-code verb over one PR head's rollup, scripted from a shell; the console
+      // reads the same rollup through its own cached board surface.
+      "pr-checks",
       "hand-runs",
       // W1-T4574: an operator snapshot joining a host-local ledger with GitHub history; its only
       // export is a reviewed candidate release file, never a live console read.

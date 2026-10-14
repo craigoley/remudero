@@ -18,7 +18,7 @@
     - src/lib/inbox-thread-view.ts
     - src/run-task.ts
     - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
-  status: queued
+  status: merged
   priority: 0.9 # operator-2026-10-13: the console inbox thread view (CONSOLE-T129) waits on this core contract; at priority 1 it sat behind ~22 ready priority-1 tasks with no dispatch
   attempts: 0
   rationale: |
