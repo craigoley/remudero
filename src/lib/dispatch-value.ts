@@ -19,7 +19,7 @@ export interface DispatchValueTask {
   id: string;
   depends_on: readonly string[];
   files?: string[];
-  /** W1-T9323: dispatch priority (smaller outranks); absent ranks lowest. One bounded input to the cost-of-delay score. */
+  /** W1-T9323: dispatch priority (smaller outranks); absent ranks lowest. It weights the cost-of-delay urgency ({@link dispatchUrgency}). */
   priority?: number;
 }
 
@@ -334,6 +334,28 @@ export function buildDispatchValueContext(
   };
 }
 
+/**
+ * A task's urgency: `2^-tierGap * (1 + log2(1 + waits))`, `waits` being its age in measured median waits and
+ * `tierGap` how far its priority sits below the queue head. Each tier halves the weight and each doubling of the
+ * wait adds one unit, so against a fresh task a 1-tier gap closes after 1 median wait, 2 tiers after 7, 3 after
+ * 127: intent holds, and any finite gap still closes. MEASURED 2026-10-14 (median wait 9.5 h): the additive
+ * `1 + waits + headStart` scored 36-day-old priority-4 W1-T3083 at 14.7x day-old priority-0.92 W1-T8950.
+ */
+export function dispatchUrgency(tierGap: number, waits: number): number {
+  return 2 ** -Math.max(0, tierGap) * (1 + Math.log2(1 + Math.max(0, waits)));
+}
+
+/** Each open task's tier gap below the queue head (the smallest declared priority). An absent priority sits one
+ * tier below the lowest declared one, so it orders after every task that carries a priority, as `compareDispatch`
+ * and docs/forensics/plan.md#taskpriority have always said. A queue with no declared priority has no gap. */
+export function priorityTiers(open: readonly Pick<DispatchValueTask, "priority">[]): (task: Pick<DispatchValueTask, "priority">) => number {
+  const declared = open.map(task => task.priority).filter((p): p is number => typeof p === "number" && Number.isFinite(p));
+  if (declared.length === 0) return () => 0;
+  const head = declared.reduce((lo, p) => Math.min(lo, p), Number.POSITIVE_INFINITY);
+  const lowest = declared.reduce((hi, p) => Math.max(hi, p), Number.NEGATIVE_INFINITY);
+  return task => (typeof task.priority === "number" && Number.isFinite(task.priority) ? task.priority : lowest + 1) - head;
+}
+
 /** Pool ceil(sqrt(dated runs)) nearest runs, including every equal-distance group.
  * Grouped evidence retains its whole tally; no input order or fixed age bucket decides a tie. */
 export function validityShareNearAge(
@@ -430,19 +452,8 @@ function costOfDelayContext(
   const medianWaitMs = waits.length === 0 ? 0
     : waits.length % 2 === 1 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2;
   if (!(medianWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
-  // W1-T9323: priority's head start is the share of the open queue a task outranks (absent ranks lowest).
-  const openPriorities = tasks.filter(task => openIds.has(task.id))
-    .map(task => task.priority ?? Number.POSITIVE_INFINITY).sort((a, b) => a - b);
-  const priorityHeadStartOf = (task: DispatchValueTask): number => {
-    const own = task.priority ?? Number.POSITIVE_INFINITY;
-    let lo = 0, hi = openPriorities.length;
-    while (lo < hi) {
-      const mid = Math.floor((lo + hi) / 2);
-      if (openPriorities[mid] <= own) lo = mid + 1;
-      else hi = mid;
-    }
-    return (openPriorities.length - lo) / openPriorities.length;
-  };
+  // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
+  const tierOf = priorityTiers(tasks.filter(task => openIds.has(task.id)));
   const samples = [...ages].sort(([a], [b]) => a - b);
   const valid = samples.reduce((sum, [, tally]) => sum + tally.valid, 0);
   const total = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
@@ -467,8 +478,7 @@ function costOfDelayContext(
     // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
     // gives every class a share even when its raw merge count is zero.
     const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
-    const priorityHeadStart = priorityHeadStartOf(task);
-    const urgency = 1 + age / medianWaitMs + priorityHeadStart;
+    const urgency = dispatchUrgency(tierOf(task), age / medianWaitMs);
     const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability * urgency;
     // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
     // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
