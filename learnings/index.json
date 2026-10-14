@@ -91,6 +91,7 @@
         "hand-review-collides-with-the-daemon",
         "head-identity-gate-pre-push-identity",
         "inherited-violation-not-authors",
+        "leak-grep-refuses-plan-shard-token-text",
         "lease-is-not-a-supersession-guard",
         "light-gates-pre-push-ratchets",
         "lint-plan-refuses-before-pr",
@@ -110,6 +111,7 @@
       ],
       "globs": [
         ".github/**",
+        ".github/scripts/leak-grep.sh",
         ".github/workflows/ci-gate.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/codeql.yml",
@@ -164,7 +166,9 @@
         "test/setup/**"
       ],
       "symbols": [],
-      "error_signatures": []
+      "error_signatures": [
+        "leak-grep: possible secret matching"
+      ]
     },
     "failures.yaml": {
       "entries": [
