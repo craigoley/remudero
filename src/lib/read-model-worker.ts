@@ -249,10 +249,8 @@ export type ReadModelWorkerMessage =
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer
-  /** W1-T9403: after each build of a view that holds per-instance state, what the lane's views hold, by instance. */
   | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds };
 
-/** W1-T9403: per instance, the rows a view's held board projection keeps and their source bytes. */
 export type ReadModelViewHolds = Record<string, { rows: number; keptBytes: number }>;
 
 export interface ReadModelLaneMove {
@@ -284,7 +282,6 @@ export interface ReadModelView {
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
-  /** W1-T9403: what it holds for the thread's life, by instance; a views lane posts it after each build. */
   heldSizes?(): ReadModelViewHolds;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
   perInstance?: boolean;
@@ -1404,7 +1401,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     return undefined;
   }
-  /** W1-T9403: what every view this lane has made holds, by instance: a reading for serve.memory, never a bound. */
   function reportHolds(lane: "fast" | "heavy"): void {
     const holds: ReadModelViewHolds = {};
     for (const unit of units) {
@@ -1797,7 +1793,6 @@ export interface ReadModelViewLane {
   want(view: string, key: string): void;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
   read(path: string): void;
-  /** W1-T9403: what the lane on thread `threadId` last said its views hold, as serve.memory names it; undefined if nothing. */
   holdsOf(threadId: number): ThreadHolds | undefined;
   close(): void;
 }
