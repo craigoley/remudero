@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
-import { resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerHooks } from 'node:module';
 // Standalone installs use Node's native type stripping, including the repository Clock port.

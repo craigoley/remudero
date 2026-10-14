@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+// @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
 import { seedIsOpen } from "../scripts/dependency-seeds.mjs";
 
 test("dependency seed CLI requires administrator scans and distinguishes no-open-files from unknown", () => {
@@ -34,6 +35,7 @@ test("dependency seed CLI enables once, preserves configuration and defaults to 
     assert.equal(run("enable").status, 1);
     assert.equal(readFileSync(config, "utf8"), original);
     mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, ".rmd-dependency-seed-root.json"), '{"version":1}');
     const swept = run("sweep", "--root", store); assert.equal(swept.status, 0, swept.stderr);
     assert.deepEqual(JSON.parse(swept.stdout), []);
     const applied = run("sweep", "--apply", "--root", store); assert.equal(applied.status, 0, applied.stderr);
