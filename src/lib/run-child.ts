@@ -66,6 +66,16 @@ export function createAdmittedPlanSlot(): AdmittedPlanSlot {
   };
 }
 
+/** The run's plan-snapshot seam, handing each plan it reads to the probe's slot on the way past. The run gets exactly what `sync` returned
+ *  or threw: the tap changes neither. */
+export function tapPlanSnapshot<O, R extends AdmittedPlan | Promise<AdmittedPlan>>(slot: AdmittedPlanSlot, sync: (options: O) => R): (options: O) => R {
+  return (options) => {
+    const synced = sync(options);
+    slot.offer(synced);
+    return synced;
+  };
+}
+
 // ── the plan snapshot: one file per plan sha ─────────────────────────────────────────────────
 
 export const planSnapshotsDir = (stateRoot: string): string => join(stateRoot, PLAN_SNAPSHOTS_DIR);
@@ -149,7 +159,7 @@ export interface RunChildProbeInput {
   log: Log;
 }
 
-export interface RunChildProbeSeams {
+export interface RunChildProbePorts {
   /** `sweep.runChild.mode`; the default reads this installation's policy.yaml. */
   readMode?: () => RunChildMode;
   /** main's tip, for `newestCurrentEngine`. */
@@ -231,7 +241,7 @@ const failureClassOf = (value: unknown): RunChildFailureClass | "ok" => (value =
  * a caller starts it with `void` and the run goes on. `off` starts nothing and writes nothing; `on` and `auto` run as `shadow`
  * until their tasks land, and the row says so.
  */
-export async function startRunChildProbe(input: RunChildProbeInput, seams: RunChildProbeSeams = {}): Promise<RunChildProbeOutcome> {
+export async function startRunChildProbe(input: RunChildProbeInput, seams: RunChildProbePorts = {}): Promise<RunChildProbeOutcome> {
   const log: Log = (step, extra) => {
     try {
       input.log(step, extra);

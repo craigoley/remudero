@@ -39955,11 +39955,7 @@ export async function daemonCommand(
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
             // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
-            planSnapshot: (syncOptions) => {
-              const synced = planSyncCoalescer.sync(syncOptions);
-              admittedPlan.offer(synced);
-              return synced;
-            },
+            planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
@@ -56953,7 +56949,7 @@ import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js"
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
-import { createAdmittedPlanSlot, startRunChildProbe } from "./lib/run-child.js";
+import { createAdmittedPlanSlot, startRunChildProbe, tapPlanSnapshot } from "./lib/run-child.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

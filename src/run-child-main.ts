@@ -23,7 +23,7 @@ export interface ProbeStatusExtras {
   maxRssBytes?: number;
 }
 
-export interface RunChildMainDeps {
+export interface RunChildMainPorts {
   /** Loads the modules a run loads. The default imports the run path's entry module, whose static graph is that set. */
   loadRunPath?: () => Promise<unknown>;
   clock?: () => number;
@@ -52,7 +52,7 @@ function readPlanSnapshot(path: string): { tasks: number } | { error: string } {
 }
 
 /** Runs the verb; resolves to the process exit code. NEVER rejects: every failure is written to the status first. */
-export async function runChildMain(argv: readonly string[], deps: RunChildMainDeps = {}): Promise<number> {
+export async function runChildMain(argv: readonly string[], deps: RunChildMainPorts = {}): Promise<number> {
   const stderr = deps.stderr ?? ((text: string) => void process.stderr.write(text));
   const dir = argValue(argv, "--run-dir");
   if (dir === undefined) {

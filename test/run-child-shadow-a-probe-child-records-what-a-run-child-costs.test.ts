@@ -16,8 +16,8 @@ import type { EngineChildLaunch } from "../src/lib/child-entry-argv.js";
 import { readPeakSamples, resetLearnedEstimateCacheForTests, type TreePeakSampler } from "../src/lib/host-memory-learning.js";
 import { DEFAULT_ESTIMATE_MIB, WORKER_CLASSES } from "../src/lib/host-memory-ledger.js";
 import {
-  RUN_CHILD_ENTRY, createAdmittedPlanSlot, planSha, prunePlanSnapshots, pruneProbeRunDirs, startRunChildProbe, writePlanSnapshot,
-  type RunChildProbeInput, type RunChildProbeSeams,
+  RUN_CHILD_ENTRY, createAdmittedPlanSlot, planSha, tapPlanSnapshot, prunePlanSnapshots, pruneProbeRunDirs, startRunChildProbe, writePlanSnapshot,
+  type RunChildProbeInput, type RunChildProbePorts,
 } from "../src/lib/run-child.js";
 import {
   RUN_CHILD_SCHEMA, readStatus, runDir, writeSpec, writeStatus, type RunChildSpec, type RunChildStatus,
@@ -47,8 +47,8 @@ interface Fixture {
   root: string;
   state: string;
   engine: string;
-  ledger: NonNullable<RunChildProbeSeams["ledger"]>;
-  store: NonNullable<RunChildProbeSeams["store"]>;
+  ledger: NonNullable<RunChildProbePorts["ledger"]>;
+  store: NonNullable<RunChildProbePorts["store"]>;
 }
 
 /** A state root holding one engine tree record at HASH. `real` cuts a tree that can run the entry: a COPY of src/ (a bundle's
@@ -87,6 +87,7 @@ function bundledFixture(): Promise<Fixture> {
 }
 
 const TASKS = [{ id: "W1-T1" }, { id: "W1-T2" }, { id: "W1-T3" }];
+type AdmittedPlanLike = { plan: { tasks: readonly unknown[] } };
 type Row = { step: string } & Record<string, unknown>;
 
 function inputFor(fx: Fixture, rows: Row[], overrides: Partial<RunChildProbeInput> = {}): RunChildProbeInput {
@@ -98,12 +99,12 @@ function inputFor(fx: Fixture, rows: Row[], overrides: Partial<RunChildProbeInpu
   };
 }
 
-const seamsFor = (fx: Fixture, overrides: RunChildProbeSeams = {}): RunChildProbeSeams => ({
+const seamsFor = (fx: Fixture, overrides: RunChildProbePorts = {}): RunChildProbePorts => ({
   readMode: () => "shadow", mainSha: async () => SHA, ledger: fx.ledger, store: fx.store, ...overrides,
 });
 
 /** A launch that runs `script` under plain node in place of the real entry. */
-const scriptLaunch = (script: string, fx: Fixture): NonNullable<RunChildProbeSeams["launch"]> =>
+const scriptLaunch = (script: string, fx: Fixture): NonNullable<RunChildProbePorts["launch"]> =>
   (_engine, args): EngineChildLaunch => ({ argv: ["-e", script, "--", ...args], kind: "tsx", reason: "test-script", cwd: fx.root, engineRoot: fx.engine });
 
 const only = (rows: Row[], step: string): Row => {
@@ -147,7 +148,7 @@ test("W1-T9082: a shadow probe writes its status and its shadow row", { timeout:
 
 test("W1-T9082: a failing probe never touches the in-process run", async () => {
   const fx = fixture("failing", false);
-  const failures: Array<[string, RunChildProbeSeams]> = [
+  const failures: Array<[string, RunChildProbePorts]> = [
     ["a child that exits without a status", seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch("console.error('boom'); process.exit(3)", fx) })],
     ["a spawn that throws", seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch("", fx), spawn: () => { throw new Error("no fork for you"); } })],
     ["a child that fails the contract", seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch(`
@@ -304,6 +305,20 @@ test("W1-T9082: a probe that hangs is killed and a spawn error is ledgered", asy
   const unobserved: TreePeakSampler = { track: () => {}, finish: () => undefined, sampleNow: () => {}, size: () => 0 };
   await startRunChildProbe(inputFor(fx, rows), seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch("process.exit(0)", fx), sampler: unobserved }));
   assert.equal(only(rows, "run_child.shadow").tree_peak_bytes, null);
+});
+
+test("W1-T9082: the plan tap hands the probe the plan and leaves the run its own result and failure", async () => {
+  const slot = createAdmittedPlanSlot();
+  const plan = { plan: { tasks: TASKS } };
+  const tapped = tapPlanSnapshot(slot, (options: { allowStale?: boolean }) => (options.allowStale ? Promise.resolve(plan) : plan));
+  assert.equal(tapped({}), plan, "the run gets the very object its sync returned");
+  assert.equal(await slot.promise, plan, "and the probe gets the same plan");
+  const second = createAdmittedPlanSlot();
+  const failing = tapPlanSnapshot(second, (): AdmittedPlanLike => { throw new Error("fetch failed"); });
+  assert.throws(() => failing({}), /fetch failed/, "a sync failure still reaches the run");
+  const rejecting = createAdmittedPlanSlot();
+  await assert.rejects(tapPlanSnapshot(rejecting, () => Promise.reject(new Error("later failure")))({}), /later failure/);
+  assert.equal(await rejecting.promise, undefined, "a rejected sync leaves the probe with no plan, not a rejection");
 });
 
 test("W1-T9082: the probe class is reserved like the others", () => {
