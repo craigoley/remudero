@@ -7,6 +7,12 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
+// @ts-expect-error — the trusted security metadata adapter is plain ESM.
+import {
+  publishSecurityMergeDecision,
+  readSecurityMergeDecision,
+  readSecurityMergeDecisionSync,
+} from "../src/lib/code-scanning-merge-adapter.mjs";
 import {
   buildSweepEffects, classifyMergeRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
 } from "./helpers/sweep-test.js";
@@ -286,4 +292,38 @@ test("W1-T8620: classifyMergeRefusal names the transient and cancelled shapes", 
   // Absent is not passed: a gated check missing from the rollup leaves a failed gate a real red.
   assert.equal(classifyMergeRefusal(GATE_REFUSAL, GATE_OLDER_THAN_INPUTS.slice(0, 2), REQUIRED).kind, "real-red");
   assert.equal(classifyMergeRefusal(GATE_REFUSAL, GATE_OLDER_THAN_INPUTS, []).kind, "other");
+});
+
+test("W1-T11524: the existing merge-sweep suite exercises async exact-head security reads and publication", async () => {
+  const target = { owner: "craigoley", repo: "remudero", prNumber: 8620, expectedHead: HEAD };
+  const live = {
+    state: "open", head: { sha: HEAD },
+    base: { sha: BASE, ref: "main", repo: { full_name: "craigoley/remudero" } },
+    changed_files: 1,
+  };
+  const readSync = (path: string) => {
+    if (path.includes("/files?")) return [{ filename: "src/example.ts" }];
+    if (path.includes("/check-runs?")) return { total_count: 1, check_runs: [CLEAN_CODEQL] };
+    return live;
+  };
+  assert.equal(readSecurityMergeDecisionSync(target, readSync).decision.state, "safe");
+  const reads: string[] = [];
+  const read = async (path: string) => {
+    reads.push(path);
+    return readSync(path);
+  };
+  const observed = await readSecurityMergeDecision(target, read);
+  assert.equal(observed.decision.state, "safe");
+
+  const statuses: Array<Record<string, unknown>> = [];
+  const published = await publishSecurityMergeDecision(
+    target,
+    { read, status: async (status: Record<string, unknown>) => { statuses.push(status); } },
+    "https://github.com/craigoley/remudero/actions/runs/1",
+  );
+  assert.equal(published.published, true);
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0].sha, HEAD);
+  assert.equal(statuses[0].state, "success");
+  assert.ok(reads.filter((path) => path.endsWith("/pulls/8620")).length >= 4);
 });
