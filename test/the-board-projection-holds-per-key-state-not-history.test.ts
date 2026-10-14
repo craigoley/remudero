@@ -20,6 +20,7 @@ import {
 } from "../src/lib/board-projection.js";
 import type { Clock } from "../src/lib/clock.js";
 import type { FeedbackEntry } from "../src/lib/feedback.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "../src/lib/ledger-carry.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import { createNowView, type NowViewContext, type NowViewData, type NowViewOptions } from "../src/lib/now-view.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -414,6 +415,35 @@ test("W1-T9436: a re-derived task reads its rows from the store, never from the 
   const canon = (m: Map<string, unknown>) => Object.fromEntries([...m].map(([id, p]) => [id, canonicalProjection(p as never)]).sort());
   assert.deepEqual(canon(fromStore), canonicalProjections(reference), "the store-read derive equals the every-row one");
   assert.equal(fromStore.get("W1-T6")?.independentFailureBlocked, true, "control: W1-T6 is blocked by the row naming it only in `task`");
+});
+
+test("W1-T9436: the store index reads plan-only filing urls and reviewed heads", (t) => {
+  const rows: Row[] = [
+    { step: "pr.opened", plan_only: true, pr_url: url(11) },
+    { step: "pr.opened", plan_only: true, pr_url: 12 },
+    { step: "review.posted", plan_only: true, pr_url: url(13), head_sha: "h13a" },
+    { step: "review.posted", plan_only: true, pr_url: url(13), head_sha: "h13b" },
+    { step: "review.posted", plan_only: true, pr_url: url(13), head_sha: "h13a" },
+    { step: PLAN_ONLY_REVIEW_MARKER_STEP, plan_only: true, pr_url: url(14), head_sha: "h14" },
+    { step: "review.posted", plan_only: true, pr_url: url(15), head_sha: 15 },
+    { step: "review.posted", plan_only: true, head_sha: "missing-url" },
+    { step: "pr.opened", pr_url: url(16) },
+    { step: "review.posted", pr_url: url(16), head_sha: "ordinary-review" },
+  ].map((row, n) => ({ ts: at(NOW0 - 1_000 + n), ...row }));
+  const w = world(t, rows);
+  const board = w.board();
+  drain(board);
+  const index = board.index(board.rows());
+  w.append([{ ts: at(NOW0), step: "pr.opened", plan_only: true, pr_url: url(17) }]);
+  assert.deepEqual(index.planOnlyFilingPrUrls, new Set([url(11)]));
+  assert.deepEqual(index.planOnlyReviewedHeads, new Map([
+    [url(13), new Set(["h13a", "h13b"])],
+    [url(14), new Set(["h14"])],
+  ]));
+  drain(board);
+  const updated = board.index(board.rows());
+  assert.deepEqual(updated.planOnlyReviewedHeads, index.planOnlyReviewedHeads);
+  assert.deepEqual(updated.planOnlyFilingPrUrls, new Set([url(11), url(17)]));
 });
 
 test("W1-T9436: the projector keeps a task alias table, backfilled once from fact bodies", (t) => {
