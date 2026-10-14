@@ -7,6 +7,8 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
+import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
+import { createAgentView, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
 import {
   createNavBadgeReadModelView,
   createNavBadgeSourcePublisher,
@@ -190,6 +192,29 @@ test("the read-model nav badge equals the phase 0 computation over the same inpu
   const sources = bodies.get("")!.body.sources.map((source) => source.name);
   assert.deepEqual(sources, ["analytics:core", "analytics:console", "ledger:core", "ledger:console", "inbox-classification"]);
 });
+
+test("complete generated records and badge share the persisted per-instance fold across refresh and restart", async (t) => {
+  const f = await fixture(t);
+  writeFileSync(readModelSwitchesPath(f.stateDir), JSON.stringify({ views: { agent: "shadow", "nav-badge": "shadow" } }));
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  const instances = [{ name: "core", ledgerDir: f.stateDir, repo: CORE_REPO }, { name: "console", ledgerDir: f.consoleDir, repo: CONSOLE_REPO }];
+  const entries = new Map<string, ReadModelBodyEntry>();
+  const ticker = createReadModelTicker({ stateDir: f.stateDir, instances, views: [createAgentView({ instances, ledgerSource }), createNavBadgeReadModelView(ledgerSource)], clock: CLOCK, holder: "complete-record-test", post: (msg) => { if (msg.type === "body") entries.set(readModelKey(msg.entry), msg.entry); } });
+  ticker.tick();
+  for (const [instance, repo] of [["core", CORE_REPO], ["console", CONSOLE_REPO]]) assert.equal(ticker.acceptSnapshot({ instance, ok: true, asOf: busySnapshot().asOf!, bodies: analyticsSourceBodies(busySnapshot(), repo) }), true);
+  ticker.tick();
+  const body = (): AgentProposalsBody => (entries.get("agent:" + agentViewKey("core", "proposals"))!.body.data as AgentViewData).body as AgentProposalsBody;
+  assert.equal(body().coverage?.complete, 1);
+  assert.deepEqual(body().proposals?.map((p) => p.proposalId), (entries.get("nav-badge:")!.body.data as NavBadgeData).agent.proposalIds);
+  const first = body();
+  ticker.tick();
+  assert.deepEqual(body(), first, "unchanged committed source and fold keep observation identity");
+  ticker.release();
+  const restarted = createReadModelWorker({ stateDir: f.stateDir, instances });
+  assert.deepEqual((restarted.body("agent", agentViewKey("core", "proposals"))!.body.data as AgentViewData).body, first);
+});
+
+function readModelKey(entry: ReadModelBodyEntry): string { return `${entry.view}:${entry.key}`; }
 
 test("with its DB on the scratch disk the read-model nav badge still reads the sources serve published to the state disk", async (t) => {
   const f = await fixture(t);

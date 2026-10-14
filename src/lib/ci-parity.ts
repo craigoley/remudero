@@ -2837,6 +2837,23 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "composition, which the entry above records as a decision a build pass must not make unilaterally. If an operator " +
       "judges (a) satisfied, this row becomes an ADMITTED entry with `script: \"census:env-var-registry\"` and that measured ms.",
   ),
+  // W1-T7853: both rows are here because `censusPopulationDrift` refuses an undisclosed census-shaped file. One
+  // refusal row each, no behaviour.
+  refusedForPredicate(
+    "test/ci-filed-fold-debt-reaches-the-daemon.test.ts",
+    "a",
+    "W1-T7853's own suite. Its `git ls-files --others` is the ci.yml collect step's body, which it executes inside " +
+      "throwaway fixture repositories, and its readdirSync lists those fixtures' plan/feedback and a runner temp dir. " +
+      "It walks no tracked src/, test/ or scripts/ population and asserts no per-file property; the `src/` strings are " +
+      "its own import paths.",
+  ),
+  refusedForPredicate(
+    "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts",
+    "a",
+    "W1-T5522's light-gates fixture. The `ls-files` the recognizer sees is the pinned argv of the fold-debt collect " +
+      "step (W1-T7853), which it runs against stub tools in a temp dir; it walks no tracked population and asserts no " +
+      "per-file property. The `src/` strings are its own import paths.",
+  ),
 ];
 
 export const RULE_SUITE_NAME_RE = /(?:census|ratchet|baseline)/i;
@@ -3592,6 +3609,29 @@ function fastGateScriptNames(repoRoot: string, packageJsonText?: string): Set<st
   return new Set(Object.keys(pkg.scripts ?? {}));
 }
 
+/** The `package.json` "name" of the repository {@link FAST_GATE_STEPS} describes. */
+export const HARNESS_PACKAGE_NAME = "remudero";
+
+/** The repo-relative runner file each `runner:` step executes. */
+const FAST_GATE_RUNNER_FILES: Readonly<Record<NonNullable<FastGateStep["runner"]>, string>> = {
+  "rule-checks": "scripts/list-rule-suites.mjs",
+  "census-precheck": "scripts/census-precheck.mjs",
+};
+
+/**
+ * W1-T8920 — is `repoRoot` a repository OTHER than the harness's own? The marker is the
+ * `package.json` "name": a string that is not {@link HARNESS_PACKAGE_NAME}, in a tree that also lacks
+ * `scripts/list-rule-suites.mjs`. A nameless package is treated as the harness (the
+ * step table's strict reading, unchanged), so only a repo that positively names itself something
+ * else gets the consumer treatment.
+ */
+function isConsumerRepo(repoRoot: string, packageJsonText?: string): boolean {
+  // Unparseable text never reaches here: {@link fastGateScriptNames} has already thrown on it.
+  const { name } = JSON.parse(packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8")) as { name?: unknown };
+  if (typeof name !== "string" || name === HARNESS_PACKAGE_NAME) return false;
+  return !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES["rule-checks"]));
+}
+
 export interface PreflightFastDeps {
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
@@ -3663,6 +3703,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
+  const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
   const timedCensus = (script: string) => {
     const startedAt = now();
     const result = withoutNodeTestContext(() =>
@@ -3678,6 +3720,12 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
     runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
+      }
+      if (consumer && runner !== undefined && !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES[runner]))) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${FAST_GATE_RUNNER_FILES[runner]}" is core's runner and this repo does not hold it` };
+      }
+      if (consumer && runner === undefined && !scriptNames.has(script)) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${script}" is core's step and this repo does not define it` };
       }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() =>

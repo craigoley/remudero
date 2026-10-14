@@ -1,0 +1,19 @@
+id: fb-1791916418972-479f00
+ts: 2026-10-13T18:33:38.972Z
+raw: |
+  Operator ruling 2026-10-13: "Treat test helpers as concerns." PR #11434 implements this consistently for reviewer and task linter: one test/setup or test/helpers implementation plus its suites is one concern; separate helpers/modules and suite-only changes keep counting separately. Its coverage-shard (8/8), job 115437294211, fails a legacy assertion at test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts:50 expecting "block" for helper-plus-suite when sourcePath is undefined or plan/tasks.yaml. The isolated three-test suite at head 788a7634f6c7 gives # tests 3 / # fail 1 (actual undefined, expected block); main 3eb5e1a4c6c9 gives # tests 3 / # fail 0. Align this existing-path test with the explicit new helper contract while retaining discriminating controls for two helpers, two implementation modules, unrelated suite-only concerns, and shard-slug precedence. Preserve the operator's contract; do not restore the old classification solely to clear CI. Azure ledger on this exact head already queues fleet fix round 1, waiting for host capacity. Ground triage against #11434 and its existing repair; do not file duplicate implementation work or hand-push over the fleet lane. Receipts: handoff-2026-10-13/next-steps-execution/concern-contract-788a7634f6c79fd33ef5d63709136f2d83afef13.tap and helper-coverage-8.log.
+
+  Merged fix receipt: PR #11434 merged on 2026-10-13 at 19:01:58 UTC.
+  Squash commit: ec74050ee6f24c13f7176c8f760cea174c768e4d.
+  The fleet repaired the legacy fixture on published head c0aaa404afe9169d5315ffd7f475cd23d436d2e6 by using two suite files for the independent-concerns control. It preserved the operator's helper classification. Hosted checks and review passed. The helper, legacy-fixture and launcher suites also passed together on the serving Linux checkout 92012bc7aa66048f6596bee5d70260988f478f01: 13 tests and zero failures.
+
+  Automatic triage should ground this diagnostic against the merged fix and use its existing already-decided path. The original pending repair above is historical evidence. The separate lifecycle-owner question remains in fb-1791908207465-93d619.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

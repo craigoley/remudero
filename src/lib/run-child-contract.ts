@@ -56,10 +56,6 @@ const TERMINAL_STATES: ReadonlySet<RunChildState> = new Set<RunChildState>(["don
 
 export type RunChildEntryKind = "bundle" | "tsx";
 
-/** The restart-boundary phase names in use today (`noteRestartPhase` in src/run-task.ts). The field is a string so
- *  a newer minor may name more; a reader treats an unfamiliar name as opaque. */
-export const RUN_CHILD_PHASES = ["recon", "implementing", "checkpointed"] as const;
-
 /** A child's identity: pid AND its kernel start time AND the container generation. `startTicks` is the
  *  host-memory ledger's `proc:<field 22 of /proc/<pid>/stat>` rendering, compared by equality only. */
 export interface RunChildIdentity {

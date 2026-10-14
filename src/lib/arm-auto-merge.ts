@@ -24,6 +24,7 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock, type Clock } from "./clock.js";
+import { securityMergeHead, securityMergeHeadAsync } from "./security-merge-admission.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -50,7 +51,7 @@ import {
   recordClosingReferenceToLedger,
   type ClosingReferenceGuardResult,
 } from "./closing-reference-guard.js";
-import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghExecFile, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, contributorAdmissionSteps, readAdmissionRest, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type AdmissionTarget, type AdmissionAction, type AdmissionRecord } from "./contributor-admission.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -403,8 +404,9 @@ function* headShaSteps(prUrl: string, fetch: RestReader): Steps<string> {
 /** W1-T1255: the argv for GitHub's own MERGE endpoint — the REST/core-budget twin of
  *  `gh pr merge --squash`, which is GraphQL. See run-task.ts's own `ghUpdateBranchArgv`, whose
  *  shape this copies deliberately: same `gh api --method PUT` mechanism, different endpoint. */
-export function ghMergePrArgv(owner: string, repo: string, prNumber: number): string[] {
-  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash"];
+export function ghMergePrArgv(owner: string, repo: string, prNumber: number, expectedHead?: string): string[] {
+  return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/merge`, "-f", "merge_method=squash",
+    ...(expectedHead ? ["-f", `sha=${expectedHead}`] : [])];
 }
 
 /** W1-T1255: resolve the three REST path components out of a PR URL, or `undefined` when the URL
@@ -420,13 +422,17 @@ export function mergeTargetFromPrUrl(prUrl: string): { owner: string; repo: stri
  *  shifts, and so the argv and the refusal are unit-testable without a live pull request. */
 export function mergeDirectViaRest(
   prUrl: string,
-  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe" }) => unknown = execFileSync,
+  exec: (file: string, args: string[], opts: { encoding: "utf8"; stdio: "pipe"; timeout?: number; maxBuffer?: number; killSignal?: NodeJS.Signals }) => unknown = ghExecFile,
+  securityRead?: (path: string) => unknown,
+  expectedHead?: string,
 ): void {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
+  const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", ["api", path],
+    { encoding: "utf8", stdio: "pipe", timeout: 15_000, maxBuffer: 2 << 20, killSignal: "SIGKILL" })))), expectedHead);
+  exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
 }
 
 const execFilePromise = promisify(execFile);
@@ -435,12 +441,15 @@ const execFilePromise = promisify(execFile);
 export async function mergeDirectViaRestAsync(
   prUrl: string,
   exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = execFilePromise,
+  securityRead?: (path: string) => Promise<unknown>,
+  expectedHead?: string,
 ): Promise<void> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8" });
+  const head = await securityMergeHeadAsync(prUrl, securityRead, expectedHead);
+  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" });
 }
 
 /**
@@ -599,6 +608,9 @@ export function realArmDeps(
   // One existing synchronous CLI transport port; daemon actions replace these methods with
   // awaited ports in realArmDepsAsync, including contributor admission.
   const runGh = ghExec;
+  // The synchronous CLI owns this existing bounded transport; do not introduce an
+  // independent sync default reader. Every daemon merge effector below uses the async port.
+  const readSecurity = (path: string): unknown => JSON.parse(runGh(["api", path], { encoding: "utf8", stdio: "pipe" }));
   return {
     contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
       (path) => readAdmissionRest(path, runGh))),
@@ -615,7 +627,8 @@ export function realArmDeps(
     },
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      runGh(["pr", "merge", prUrl, "--auto", "--squash"], {
+      const head = securityMergeHead(prUrl, readSecurity);
+      runGh(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])], {
         encoding: "utf8",
         stdio: "pipe",
       });
@@ -652,7 +665,8 @@ export function realArmDeps(
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      runGh(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
+      const head = securityMergeHead(prUrl, readSecurity);
+      runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
     closingReferences: (prUrl) => runStepsSync(closingReferenceGuardSteps(prUrl, ghJson, (args) => {
@@ -693,7 +707,8 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     sleep: async (ms) => { if (ms > 0) await delay(ms); },
     armAuto: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      await ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash"]);
+      const head = await securityMergeHeadAsync(prUrl);
+      await ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]);
     },
     mergeDirect: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
@@ -707,7 +722,8 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     readPlanMergeSafety: (prUrl) => runStepsAsync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync)),
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
-      await ghTextAsync(["pr", "merge", prUrl]);
+      const head = await securityMergeHeadAsync(prUrl);
+      await ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]);
     },
   };
 }
@@ -1502,6 +1518,54 @@ function* mergeDirectAfterPreflightSteps(
   }
 }
 
+/** W1-T9212 — the row a re-evaluated held plan PR writes: trigger, wait since the hold, arm outcome. */
+export const PLAN_PR_REEVALUATED_STEP = "sweep.plan_pr_reevaluated";
+
+/** W1-T9212 — what let a held plan PR be re-evaluated: its checks turned green, or GitHub settled `unknown`. */
+export type PlanPrReevaluationTrigger = "checks-green" | "mergeability-settled";
+
+export interface HeldPlanPr {
+  /** The FIRST `automerge.plan_pr_held` at this head: the wait is measured from here. */
+  heldAtMs: number;
+  trigger: PlanPrReevaluationTrigger;
+}
+
+/**
+ * W1-T9212 — IS THIS PLAN PR HELD AT ITS CURRENT HEAD, AND ON WHAT? PURE over ledger rows.
+ *
+ * A hold on `mergeable_state` `blocked` was a hold on required checks (a caller that now observes them
+ * green re-evaluates: `checks-green`); a hold on `unknown` was a hold on GitHub's computation
+ * (`mergeability-settled`). A conflicting or unreadable hold is neither, so it is not a held plan PR
+ * here. Rows naming another head are ignored; a row naming none (a sweep-lane row) is accepted.
+ */
+export function heldPlanPrFromLedger(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  pr: { prNumber: number; prUrl: string; headSha: string },
+): HeldPlanPr | undefined {
+  let heldAtMs: number | undefined;
+  let latestAt = -Infinity;
+  let latest: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.step !== "automerge.plan_pr_held" || typeof row.ts !== "string") continue;
+    if (row.pr_url !== pr.prUrl && row.pr_number !== pr.prNumber) continue;
+    const head = row.head_sha ?? row.prior_head_sha;
+    if (typeof head === "string" && head !== pr.headSha) continue;
+    const at = Date.parse(row.ts);
+    if (!Number.isFinite(at)) continue;
+    heldAtMs = heldAtMs === undefined ? at : Math.min(heldAtMs, at);
+    if (at >= latestAt) {
+      latestAt = at;
+      latest = row;
+    }
+  }
+  if (heldAtMs === undefined || latest === undefined) return undefined;
+  if (latest.remedy === "mergeability-unknown" || latest.mergeable_state === "unknown") {
+    return { heldAtMs, trigger: "mergeability-settled" };
+  }
+  if (latest.mergeable_state === "blocked") return { heldAtMs, trigger: "checks-green" };
+  return undefined;
+}
+
 /** BACKSTOP: re-read only while GitHub has not computed plan-PR mergeability. */
 export const PLAN_PR_UNKNOWN_MAX_REREADS = 3;
 
@@ -2040,6 +2104,9 @@ export function decideArmReprobeFromFacts(
  */
 
 export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "retryable" | "unknown" {
+  // Fresh CodeQL completion/API recovery on the SAME head must be reconsidered. This
+  // grants only a later gated observation, never direct merge or quota fallback.
+  if (/^security merge (?:unknown|blocked):/.test(stderrText)) return "retryable";
   if (/clean status/i.test(stderrText)) return "direct-merge";
   if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
     stderrText,

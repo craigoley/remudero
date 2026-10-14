@@ -66,6 +66,9 @@ import {
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
   laneDeliveryFailure,
+  type PriorityBackfillEstimates,
+  type PriorityDeferral,
+  type PriorityReservationRelease,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -220,9 +223,13 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 /** BACKSTOP: no-history fallback (W1-T5761); measured run lengths govern later phases (W1-T7697). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
-/** Pair starts and verdicts by run id; missing, torn or non-positive measurements contribute nothing. */
-export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: number; samples: number } {
-  const starts = new Map<string, number>();
+/** One measured run: its task (when the start row names one) and its length. */
+export interface MeasuredRun { taskId?: string; ms: number }
+
+/** Pair starts and verdicts by run id; missing, torn or non-positive measurements contribute nothing. Each
+ *  measured run is also appended to `runs` when given, so a caller can read per-task lengths (W1-T8514). */
+export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredRun[]): { totalMs: number; samples: number } {
+  const starts = new Map<string, { at: number; taskId?: string }>();
   let totalMs = 0;
   let samples = 0;
   for (const raw of rawLines) {
@@ -231,13 +238,14 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
     if (!row || typeof row.run_id !== "string" || typeof row.ts !== "string") continue;
     const at = Date.parse(row.ts);
     if (!Number.isFinite(at)) continue;
-    if (row.step === "run.start") starts.set(row.run_id, at);
+    if (row.step === "run.start") starts.set(row.run_id, { at, taskId: typeof row.task_id === "string" ? row.task_id : undefined });
     if (row.step !== "verdict") continue;
     const start = starts.get(row.run_id);
     starts.delete(row.run_id);
-    if (start === undefined || at <= start) continue;
-    totalMs += at - start;
+    if (start === undefined || at <= start.at) continue;
+    totalMs += at - start.at;
     samples++;
+    runs?.push({ ...(start.taskId !== undefined ? { taskId: start.taskId } : {}), ms: at - start.at });
   }
   return { totalMs, samples };
 }
@@ -3434,10 +3442,27 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const measuredRuns: MeasuredRun[] = [];
+  const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
+  // W1-T8514: the measured run lengths behind a priority reservation's backfill release. The lane clock is the
+  // current dispatch phase's, bound once that phase exists; before it, no task is in flight.
+  let laneElapsedMs: (taskId: string) => number | undefined = () => undefined;
+  const priorityBackfill: PriorityBackfillEstimates = {
+    runLengthsMs: (taskId) => measuredRuns.filter((r) => r.taskId === taskId).map((r) => r.ms),
+    fleetRunLengthsMs: () => measuredRuns.map((r) => r.ms),
+    elapsedMs: (taskId) => laneElapsedMs(taskId),
+  };
+  const logPriorityDeferral = (d: PriorityDeferral): void => {
+    log("dispatch.deferred_for_priority", { task: d.task.id, priority: d.task.priority ?? null, waiting_task: d.waiting.id,
+      waiting_priority: d.waiting.priority ?? null, holders: d.holders, paths: d.paths,
+      expected_duration_ms: d.expectedDurationMs ?? null, expected_start_ms: d.expectedStartMs ?? null });
+  };
+  const logPriorityRelease = (r: PriorityReservationRelease): void => {
+    log("dispatch.priority_reservation_released", { task: r.task.id, waiting_task: r.waiting.id, reason: r.reason });
+  };
   // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
-  const runLengths = dispatchRunHistory(bootLedgerLines);
   let restartHistoryLines: readonly string[] = bootLedgerLines;
   try { restartHistoryLines = deps.readRestartHistory?.() ?? bootLedgerLines; }
   catch (error) {
@@ -3574,7 +3599,12 @@ export async function runDaemon(
     }
     flushIdleLaneWindow(report);
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
-    report("daemon.summary", { ...s });
+    // W1-T9321 design 4: a process that opened its boot gate and exited without one gated cadence run is the
+    // 2026-10-13 outage's shape; the exit row names it, so a repeat is one grep away. Only a boot that gated something.
+    report("daemon.summary", { ...s, ...(bootGateHolds ? {
+      gated_cadence_runs: gatedCadenceRuns,
+      gate_opened_without_cadence: bootGateOpenedAtMs !== undefined && gatedCadenceRuns === 0,
+    } : {}) });
     if (reporting.faults.length) {
       s.reportingFaults = reporting.faults.map(({ phase, reason }) => ({ phase, detail: reportingFaultDetail(reason) }));
       // A hard operator STOP must stay a clean stop, not invite a supervisor restart.
@@ -3605,9 +3635,27 @@ export async function runDaemon(
   // gated, and dispatch waits on nothing. The deferral rows are written once, on the first gated tick.
   let bootGateOpenedAtMs: number | undefined = bootGateHolds ? undefined : bootGateStartedAtMs;
   let bootCadencesDeferred = false;
+  // W1-T9225 — TICK 1 STARTS THE BOOT REVIEW PASS AND NEVER AWAITS IT. Dispatch reads nothing that pass produces
+  // (its effects are statuses, arms and ledger rows), and its review workers and tick 1's lanes share the existing
+  // worker budget and memory admission, as on every later tick. Only the gated cadences wait for it: they run once the
+  // gate is open AND this pass has settled, so W1-T5720's order (reviews before the cadences) still holds.
+  let bootReviewStarted = false;
+  let bootReviewInFlight = false;
+  // W1-T9321 — THE GATE OPENING STARTS THE CADENCES. W1-T9072 left them, and the W1-T7690 due timer that drives them,
+  // to the first iteration top after the gate opens; tick 1 waits for its lanes, and from 2026-10-13T14:24Z every core
+  // process was replaced before tick 2 came, so none ran. The timer now starts the moment the gate is open AND the boot
+  // review pass has settled, whichever is last. Assigned once the timer exists; until then the iteration top starts it.
+  let releaseGatedCadences = (): void => {};
+  const gatedCadencesReleased = (): boolean => bootGateTrigger !== undefined && !bootReviewInFlight;
+  // How many gated cadence runs this process started, for the exit row (W1-T9321 design 4).
+  let gatedCadenceRuns = 0;
   const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
-  const deferBootCadence = (cadence: string): void =>
-    log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
+  type BootWait = "first_full_pass" | "boot_review_pass";
+  const bootWaitReason = (waitsFor: readonly BootWait[]): string =>
+    waitsFor.length > 1 ? "first full pass and boot review pass have not settled"
+      : waitsFor[0] === "boot_review_pass" ? "boot review pass has not settled" : "first full pass has not settled";
+  const deferBootCadence = (cadence: string, waitsFor: readonly BootWait[] = ["first_full_pass"]): void =>
+    log("daemon.boot_gate.deferred", { cadence, reason: bootWaitReason(waitsFor), waits_for: waitsFor, bound_ms: bootGateBoundMs });
   const gardens = [
     ...(deps.knowledgeGardener ? [startGarden(knowledgeGardenSpec({ ...deps.knowledgeGardener, prState: undefined }), deps.knowledgeGardener, pollIntervalMs)] : []),
     ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
@@ -3631,6 +3679,7 @@ export async function runDaemon(
       pass_in_flight: sweepLiveness.inFlight,
     });
     gardens.push(...deferredGardens.map((start) => start(pollIntervalMs)));
+    releaseGatedCadences();
   };
   // Unref'd: while the gate is closed the first pass's own bound timer keeps the process alive.
   const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
@@ -4159,8 +4208,9 @@ export async function runDaemon(
     }
   };
   /** One rung's single-flight slot. `begin` is the outer cycle's claim; `start` is the timer's. */
-  const rungFlight = <R>(steps: () => RungSteps<R>, idle: R) => {
+  const rungFlight = <R>(rungSteps: () => RungSteps<R>, idle: R) => {
     let current: Promise<R> | undefined;
+    const steps = (): RungSteps<R> => (gatedCadenceRuns++, rungSteps());
     return {
       steps,
       joined: (): Promise<R> | undefined => current,
@@ -4513,12 +4563,257 @@ export async function runDaemon(
     }
     return false;
   }, false);
+  /** W1-T9321 — a tick-top cadence's single-flight slot, and the run a gated tick OWES it. A tick that skips the
+   *  cadence behind the boot gate records the debt (with the arguments that tick would have passed); the due timer,
+   *  which starts once the gate is open and the boot review has settled, pays it once beside the still-running tick.
+   *  Any run, from either path, settles the debt, so a cadence still runs at most once per tick, as at an iteration
+   *  top: the debt exists only because a boot's tick 1 can outlive its process, and tick 2 then never comes. */
+  const cadenceFlight = <A extends unknown[], R>(body: (...args: A) => Promise<R>) => {
+    let current: Promise<R> | undefined;
+    let debt: A | undefined;
+    return {
+      owe: (...args: A): void => { debt = args; },
+      owed: (): A | undefined => debt,
+      run: (...args: A): Promise<R> => {
+        if (current) return current;
+        debt = undefined;
+        gatedCadenceRuns++;
+        const run = body(...args);
+        current = run;
+        const clear = (): void => { if (current === run) current = undefined; };
+        run.then(clear, clear);
+        return run;
+      },
+    };
+  };
+  const tickSweepsWired = deps.sweepOrphans !== undefined || deps.sweepFeedbackLanding !== undefined || deps.checkGithubPosture !== undefined;
+  const tickSweeps = cadenceFlight(async (): Promise<void> => {
+    // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
+    // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
+    if (deps.sweepOrphans) {
+      try {
+        const report = await deps.sweepOrphans();
+        log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
+      } catch (e) {
+        log("daemon.orphan_sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // Feedback-landing sweep, on the same once-per-iteration cadence; boot already runs it once. This is
+    // the per-poll half, so an entry captured or failed to land BETWEEN polls is still found within one
+    // cycle. Best-effort (W1-T530 part ii).
+    if (deps.sweepFeedbackLanding) {
+      try {
+        const result = await deps.sweepFeedbackLanding();
+        log("daemon.feedback_landing_sweep", {
+          landed: result.landed,
+          pushed: result.pushed ?? false,
+          file_count: result.files.length,
+        });
+      } catch (e) {
+        log("daemon.feedback_landing_sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // GitHub-side posture drift check, on the same once-per-iteration cadence. The hook throttles the actual read to
+    // at most once a day, so most ticks cost nothing. A non-empty return is LEDGERED — never gated, never a continue,
+    // never consulted by any governor — so a posture finding can never halt a dispatch or fail a check (W1-T1040).
+    if (deps.checkGithubPosture) {
+      try {
+        const findings = await deps.checkGithubPosture();
+        for (const finding of findings) {
+          log("github_posture.finding", { capability: finding.capability, kind: finding.kind, cost: finding.cost });
+        }
+      } catch (e) {
+        log("github_posture.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+  });
+  /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
+  const retroCadence = cadenceFlight(async (): Promise<boolean> => {
+    if (ledgerCompactionDecision?.overBound) {
+      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
+    } else {
+      let decision: RetroTriggerDecision | undefined;
+      try {
+        decision = await deps.checkRetroTrigger!();
+      } catch (e) {
+        log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      // W1-T2981 — the REFUSAL is decided BEFORE `retro_triggered` is written, so that row keeps
+      // naming an actual fire. With the retro detached the loop keeps ticking while it runs, and the
+      // trigger legitimately still reads `fire` on the next tick because the marker has not advanced
+      // yet; logging first turned ONE retro into two `retro_triggered` rows and would have made every
+      // later count of "how often did the retro fire" wrong by the number of ticks it spanned.
+      if (decision === undefined || decision.fire === false) {
+        activeRetroCrossingKey = undefined;
+      } else if (decision.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
+        log("daemon.retro_trigger.already_detached", { reason: decision.reason });
+      } else if (decision?.fire) {
+        const hold = holdWorkerAdmission("retro");
+        if (hold) {
+          log("daemon.retro_trigger.held", { reason: hold.reason });
+          return true;
+        }
+        const crossingKey = retroTriggerCrossingKey(decision);
+        if (activeRetroCrossingKey === crossingKey) {
+          log("daemon.retro_trigger.crossing_already_fired", { reason: decision.reason });
+        } else {
+          activeRetroCrossingKey = crossingKey;
+          log("retro_triggered", {
+            reason: decision.reason,
+            merges_since_marker: decision.mergesSinceMarker,
+            // Infinity (the marker-absent case) is not JSON-representable — name it
+            // explicitly rather than let JSON.stringify silently collapse it to null.
+            days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
+          });
+          if (deps.runRetroTrigger) {
+            // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
+            // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
+            // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the
+            // light sweep kept reviewing and merging — every liveness signal green, nothing built. With
+            // the marker 3.7 days / 446 merges behind and RETRO_MAX_RUNS_PER_PASS at 40, ~11 such ticks.
+            // A retro gates nothing: it SPENDS (hence its place below headroom) but no rung downstream
+            // reads its result. It goes on the registry the sweep's fix dispatches use, which
+            // `stopForFreshness` already drains, so a restart still lets a running retro finish.
+            // NO `sweepLightDuringRetro` HERE, deliberately: it starts a second "retro" ticker while the
+            // tick proceeds into dispatch, which starts its own — the overlap the clock handoff prevents.
+            {
+              detachSweepAction(
+                sweepLightDuringRetro(
+                  deps,
+                  pollIntervalMs,
+                  log,
+                  () => deps.runRetroTrigger!(decision),
+                  diskHeadroomLatch,
+                  sweepRetrigger,
+                ).catch((e) => {
+                  log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
+                }),
+                { actionKind: "retro", taskId: "DAEMON" },
+              );
+              log("daemon.retro_trigger.detached", { reason: decision.reason });
+            }
+          }
+        }
+      }
+    }
+    return false;
+  });
+  /** Resolves true when a fleet-control hold says the tick must not go on (the old `continue`). */
+  const autoTriageCadence = cadenceFlight(async (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }): Promise<boolean> => {
+    let decision: AutoTriageDecision | undefined;
+    try {
+      decision = await deps.checkAutoTriage!(signals);
+    } catch (e) {
+      log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
+    }
+    if (decision?.fire) {
+      // In-flight guard: the same shape as the task lane's pair above, keyed on feedback id. The decision
+      // only knows the entry's own status and cannot see an already-open PR carrying this id's provenance,
+      // so that read happens here, right before the fire it would otherwise duplicate (W1-T300).
+      // #10265: that read is a once-per-boot snapshot, blind to a triage PR opened since; this boot's `pr.opened` row is not.
+      const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
+        triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
+      let inFlight = openPrNumber !== undefined;
+      let inFlightReason = "an open triage PR already carries this feedback id's provenance";
+      if (inFlight && openPrNumber !== undefined) {
+        // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
+        // stands the guard down rather than parking the entry forever on yesterday's snapshot (W1-T177).
+        const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
+        // #10265: a MERGED triage already moved the entry on main; this checkout is just behind.
+        const mainStatus = liveState === "MERGED" ? deps.readFeedbackStatusOnMain?.(decision.feedbackId) : undefined;
+        if (mainStatus !== undefined && mainStatus !== "new") {
+          inFlightReason = `its triage PR merged and origin/main holds the entry at status: ${mainStatus} — this checkout is behind`;
+        } else if (liveState !== undefined && liveState !== "OPEN") {
+          inFlight = false;
+          log("auto_triage.stood_down", {
+            feedback: decision.feedbackId,
+            pr_number: openPrNumber,
+            state: liveState,
+            reason: "cached in-flight read was stale",
+          });
+        }
+      }
+      if (inFlight) {
+        // A ledgered refusal naming the id and the open PR number: a silent skip here is indistinguishable
+        // from the starvation this rung is about.
+        log("auto_triage.skipped_inflight", {
+          feedback: decision.feedbackId,
+          pr_number: openPrNumber,
+          reason: inFlightReason,
+        });
+      } else {
+        const hold = holdWorkerAdmission("auto-triage");
+        if (hold) {
+          log("auto_triage.held", { feedback: decision.feedbackId, reason: hold.reason });
+          return true;
+        }
+        if (deps.runAutoTriage) {
+          const fired = decision;
+          // W1-T2986 — DETACHED, exactly as W1-T2981 detached the retro beside it. This rung sits
+          // between the dispatch-set computation and the idle branch and used to `await` an
+          // unbounded run wrapped in a light-sweep ticker, so a fired triage held the whole tick
+          // and dispatch was never reached — the shape that took the fleet down for two days, with
+          // the ticker keeping every liveness signal green throughout. MEASURED across the ledger
+          // union: 185 `auto_triage.fired` against 1241 `auto_triage.skipped`, so roughly one tick
+          // in eight would have stalled on it once the retro stopped doing so first.
+          //
+          // Triage gates nothing: it spends, which is why it stays below the headroom rung, but no
+          // rung downstream reads its result. It goes on the same registry the sweep's fix
+          // dispatches and the retro use, which `stopForFreshness` drains, so a restart still lets
+          // a running triage finish. A second concurrent triage is refused and the refusal named.
+          if (detachedActionInFlight("auto-triage")) {
+            log("auto_triage.already_detached", { feedback: fired.feedbackId, reason: fired.reason });
+          } else {
+            log("auto_triage.fired", { feedback: fired.feedbackId, reason: fired.reason });
+            detachSweepAction(
+              sweepLightDuringRetro(
+                deps,
+                pollIntervalMs,
+                log,
+                () => deps.runAutoTriage!(fired.feedbackId),
+                diskHeadroomLatch,
+                sweepRetrigger,
+              ).catch((e) => {
+                log("auto_triage.run_failed", {
+                  feedback: fired.feedbackId,
+                  error: String((e as Error)?.message ?? e),
+                });
+              }),
+              { actionKind: "auto-triage", taskId: "DAEMON" },
+            );
+            log("auto_triage.detached", { feedback: fired.feedbackId });
+          }
+        } else {
+          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
+        }
+      }
+    } else if (decision) {
+      log("auto_triage.skipped", { reason: decision.reason });
+    }
+    return false;
+  });
   // Timer starts spending rungs only after this cycle passes headroom, cost, and WIP governors.
   let spendGatesOpen = false;
+  /** W1-T9321: the debts a gated tick left. The sweeps read nothing the rungs decide; the retro and auto-triage spend,
+   *  so they wait for the spend gates, and the retro follows this firing's read-only rungs, whose compaction decision
+   *  carries the ledger-pressure deferral it honours. */
+  const payOwedCadences = (readOnly: Promise<unknown>): Promise<unknown>[] => {
+    const paid: Promise<unknown>[] = [];
+    if (tickSweeps.owed()) paid.push(tickSweeps.run());
+    if (spendGatesOpen && retroCadence.owed()) {
+      paid.push(readOnly.then(() => (spendGatesOpen && retroCadence.owed() ? retroCadence.run() : undefined)));
+    }
+    const triageDebt = autoTriageCadence.owed();
+    if (spendGatesOpen && triageDebt) paid.push(autoTriageCadence.run(...triageDebt));
+    return paid;
+  };
   const dueRungsTick = (): void => {
     if (dueRungsStopped) return;
     const looks: Promise<unknown>[] = [readOnlyRungs.start()];
     if (spendGatesOpen) looks.push(intakeRungs.start(), wipeTestRung.start());
+    looks.push(...payOwedCadences(looks[0]!));
     void Promise.all(looks).catch((e) => {
       log("daemon.due_rungs.failed", { error: String((e as Error)?.message ?? e) });
     });
@@ -4528,6 +4823,7 @@ export async function runDaemon(
     dueRungsTimer = setInterval(dueRungsTick, Math.max(1, pollIntervalMs));
     dueRungsTimer.unref();
   };
+  releaseGatedCadences = (): void => { if (gatedCadencesReleased()) startDueRungsTimer(); };
 
   const tickMemory = { sampled: false };
   for (;;) {
@@ -4757,14 +5053,21 @@ export async function runDaemon(
     }
 
     // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
-    // Start, don't await: a slow review must not serialize the background full sweep behind it.
-    const bootReviewPass = bootGateTrigger === undefined && !bootCadencesDeferred ? (async () => {
-      try {
-        await deps.sweepLight?.({ reviewOnly: true });
-      } catch (e) {
-        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
-      }
-    })() : undefined;
+    // Start, don't await: a slow review must not serialize the background full sweep, or dispatch, behind it.
+    if (bootGateTrigger === undefined && !bootReviewStarted) {
+      bootReviewStarted = true;
+      bootReviewInFlight = true;
+      void (async () => {
+        try {
+          await deps.sweepLight?.({ reviewOnly: true });
+        } catch (e) {
+          log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+        } finally {
+          bootReviewInFlight = false;
+          releaseGatedCadences();
+        }
+      })();
+    }
 
     // The level-triggered PR-pipeline reconciler, once per iteration: re-derive every open PR's disposition
     // and take its gated action, alongside dispatch rather than instead of it (W1-T77, ratifies P22).
@@ -4923,56 +5226,25 @@ export async function runDaemon(
     // W1-T9072: while the gate is closed this tick skips the gated cadences and goes on to dispatch. They run at
     // the first iteration top after it opens, so never beside a lane this tick starts. The deferral rows hold
     // cadences, not lanes, so they leave this tick's idle-slot cause as it was.
-    if (bootGateTrigger === undefined && !bootCadencesDeferred) {
-      await bootReviewPass;
+    // W1-T9225: the boot review pass holds them the same way, skipped and never awaited, and the rows written on the
+    // first held tick name which of the two waits each cadence is held for.
+    const bootWaitsFor: BootWait[] = [
+      ...(bootGateTrigger === undefined ? ["first_full_pass" as const] : []),
+      ...(bootReviewInFlight ? ["boot_review_pass" as const] : []),
+    ];
+    if (bootWaitsFor.length > 0 && !bootCadencesDeferred) {
       bootCadencesDeferred = true;
       const [idleCause, idleHold] = [idleLaneTickCause, idleLaneTickHold];
-      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
+      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence, bootWaitsFor);
       [idleLaneTickCause, idleLaneTickHold] = [idleCause, idleHold];
     }
-    const cadencesThisTick = bootGateTrigger !== undefined;
+    const cadencesThisTick = bootWaitsFor.length === 0;
     if (cadencesThisTick) startDueRungsTimer();
     const cadencesStartedAtMs = daemonClock.now();
-    // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
-    // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
-    if (cadencesThisTick && deps.sweepOrphans) {
-      try {
-        const report = await deps.sweepOrphans();
-        log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
-      } catch (e) {
-        log("daemon.orphan_sweep.failed", { error: String((e as Error)?.message ?? e) });
-      }
-    }
-
-    // Feedback-landing sweep, on the same once-per-iteration cadence; boot already runs it once. This is
-    // the per-poll half, so an entry captured or failed to land BETWEEN polls is still found within one
-    // cycle. Best-effort (W1-T530 part ii).
-    if (cadencesThisTick && deps.sweepFeedbackLanding) {
-      try {
-        const result = await deps.sweepFeedbackLanding();
-        log("daemon.feedback_landing_sweep", {
-          landed: result.landed,
-          pushed: result.pushed ?? false,
-          file_count: result.files.length,
-        });
-      } catch (e) {
-        log("daemon.feedback_landing_sweep.failed", { error: String((e as Error)?.message ?? e) });
-      }
-    }
-
-    // GitHub-side posture drift check, on the same once-per-iteration cadence. The hook throttles the actual read to
-    // at most once a day, so most ticks cost nothing. A non-empty return is LEDGERED — never gated, never a continue,
-    // never consulted by any governor — so a posture finding can never halt a dispatch or fail a check (W1-T1040).
-    if (cadencesThisTick && deps.checkGithubPosture) {
-      try {
-        const findings = await deps.checkGithubPosture();
-        for (const finding of findings) {
-          log("github_posture.finding", { capability: finding.capability, kind: finding.kind, cost: finding.cost });
-        }
-      } catch (e) {
-        log("github_posture.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-    }
+    // W1-T9321: the three per-iteration sweeps (orphan, feedback landing, GitHub posture) share one slot,
+    // `tickSweeps`; a tick that skips them behind the boot gate owes them to the due timer.
+    if (cadencesThisTick) await tickSweeps.run();
+    else if (tickSweepsWired) tickSweeps.owe();
 
     if (cadencesThisTick) {
       const running = readOnlyRungs.joined();
@@ -5246,73 +5518,10 @@ export async function runDaemon(
     // the same class of spend headroom exists to gate — and before the dispatch pick. There is deliberately
     // no wait-and-continue: the gates above exist to REFUSE a dispatch, but the retro gates nothing and
     // only delayed reaching dispatch by a full poll interval (W1-T2265). Forensics: docs/forensics/daemon.md.
-    if (cadencesThisTick && deps.checkRetroTrigger && ledgerCompactionDecision?.overBound) {
-      log("daemon.retro_trigger.deferred_ledger_pressure", { reason: ledgerCompactionDecision.reason });
-    } else if (cadencesThisTick && deps.checkRetroTrigger) {
-      let decision: RetroTriggerDecision | undefined;
-      try {
-        decision = await deps.checkRetroTrigger();
-      } catch (e) {
-        log("daemon.retro_trigger.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      // W1-T2981 — the REFUSAL is decided BEFORE `retro_triggered` is written, so that row keeps
-      // naming an actual fire. With the retro detached the loop keeps ticking while it runs, and the
-      // trigger legitimately still reads `fire` on the next tick because the marker has not advanced
-      // yet; logging first turned ONE retro into two `retro_triggered` rows and would have made every
-      // later count of "how often did the retro fire" wrong by the number of ticks it spanned.
-      if (decision === undefined || decision.fire === false) {
-        activeRetroCrossingKey = undefined;
-      } else if (decision.fire && deps.runRetroTrigger && detachedActionInFlight("retro")) {
-        log("daemon.retro_trigger.already_detached", { reason: decision.reason });
-      } else if (decision?.fire) {
-        const hold = holdWorkerAdmission("retro");
-        if (hold) {
-          log("daemon.retro_trigger.held", { reason: hold.reason });
-          continue;
-        }
-        const crossingKey = retroTriggerCrossingKey(decision);
-        if (activeRetroCrossingKey === crossingKey) {
-          log("daemon.retro_trigger.crossing_already_fired", { reason: decision.reason });
-        } else {
-          activeRetroCrossingKey = crossingKey;
-          log("retro_triggered", {
-            reason: decision.reason,
-            merges_since_marker: decision.mergesSinceMarker,
-            // Infinity (the marker-absent case) is not JSON-representable — name it
-            // explicitly rather than let JSON.stringify silently collapse it to null.
-            days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
-          });
-          if (deps.runRetroTrigger) {
-            // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
-            // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
-            // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the
-            // light sweep kept reviewing and merging — every liveness signal green, nothing built. With
-            // the marker 3.7 days / 446 merges behind and RETRO_MAX_RUNS_PER_PASS at 40, ~11 such ticks.
-            // A retro gates nothing: it SPENDS (hence its place below headroom) but no rung downstream
-            // reads its result. It goes on the registry the sweep's fix dispatches use, which
-            // `stopForFreshness` already drains, so a restart still lets a running retro finish.
-            // NO `sweepLightDuringRetro` HERE, deliberately: it starts a second "retro" ticker while the
-            // tick proceeds into dispatch, which starts its own — the overlap the clock handoff prevents.
-            {
-              detachSweepAction(
-                sweepLightDuringRetro(
-                  deps,
-                  pollIntervalMs,
-                  log,
-                  () => deps.runRetroTrigger!(decision),
-                  diskHeadroomLatch,
-                  sweepRetrigger,
-                ).catch((e) => {
-                  log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
-                }),
-                { actionKind: "retro", taskId: "DAEMON" },
-              );
-              log("daemon.retro_trigger.detached", { reason: decision.reason });
-            }
-          }
-        }
-      }
-    }
+    // W1-T9321: one slot, `retroCadence`, so the due timer can pay a gated tick's owed run; a hold still ends the tick.
+    if (cadencesThisTick && deps.checkRetroTrigger) {
+      if (await retroCadence.run()) continue;
+    } else if (deps.checkRetroTrigger) retroCadence.owe();
 
     let wipeTestHeld = false;
     if (cadencesThisTick) {
@@ -5413,6 +5622,9 @@ export async function runDaemon(
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
       const dispatchOpts: NextRunnableOpts = {
+      priorityBackfill,
+      onDeferredForPriority: logPriorityDeferral,
+      onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
@@ -5565,102 +5777,11 @@ export async function runDaemon(
     // to collide, so the rung that CREATES work could only fire when work already existed. Measured on a
     // starved daemon: about 87 feedback entries unread, thirteen hours. The accepted cost is a skipped row
     // per held tick, each naming which bound held. Forensics: docs/forensics/daemon.md.
+    // W1-T9321: one slot, `autoTriageCadence`; a gated tick owes it this tick's census for the due timer to pay.
+    const autoTriageSignals = { deferralPending: deferredPairings > 0, dispatchCount: dispatchSet.length, laneBudget };
     if (cadencesThisTick && deps.checkAutoTriage) {
-      let decision: AutoTriageDecision | undefined;
-      try {
-        decision = await deps.checkAutoTriage({
-            deferralPending: deferredPairings > 0,
-            dispatchCount: dispatchSet.length,
-            laneBudget,
-          });
-      } catch (e) {
-        log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
-      }
-      if (decision?.fire) {
-        // In-flight guard: the same shape as the task lane's pair above, keyed on feedback id. The decision
-        // only knows the entry's own status and cannot see an already-open PR carrying this id's provenance,
-        // so that read happens here, right before the fire it would otherwise duplicate (W1-T300).
-        // #10265: that read is a once-per-boot snapshot, blind to a triage PR opened since; this boot's `pr.opened` row is not.
-        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId) ??
-          triagePrOpenedInLedger(deps.readLedgerLines?.(), decision.feedbackId);
-        let inFlight = openPrNumber !== undefined;
-        let inFlightReason = "an open triage PR already carries this feedback id's provenance";
-        if (inFlight && openPrNumber !== undefined) {
-          // The confirming-read discipline, applied verbatim: a cached open can be stale, so a fresh read
-          // stands the guard down rather than parking the entry forever on yesterday's snapshot (W1-T177).
-          const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
-          // #10265: a MERGED triage already moved the entry on main; this checkout is just behind.
-          const mainStatus = liveState === "MERGED" ? deps.readFeedbackStatusOnMain?.(decision.feedbackId) : undefined;
-          if (mainStatus !== undefined && mainStatus !== "new") {
-            inFlightReason = `its triage PR merged and origin/main holds the entry at status: ${mainStatus} — this checkout is behind`;
-          } else if (liveState !== undefined && liveState !== "OPEN") {
-            inFlight = false;
-            log("auto_triage.stood_down", {
-              feedback: decision.feedbackId,
-              pr_number: openPrNumber,
-              state: liveState,
-              reason: "cached in-flight read was stale",
-            });
-          }
-        }
-        if (inFlight) {
-          // A ledgered refusal naming the id and the open PR number: a silent skip here is indistinguishable
-          // from the starvation this rung is about.
-          log("auto_triage.skipped_inflight", {
-            feedback: decision.feedbackId,
-            pr_number: openPrNumber,
-            reason: inFlightReason,
-          });
-        } else {
-          const hold = holdWorkerAdmission("auto-triage");
-          if (hold) {
-            log("auto_triage.held", { feedback: decision.feedbackId, reason: hold.reason });
-            continue;
-          }
-          if (deps.runAutoTriage) {
-            const fired = decision;
-            // W1-T2986 — DETACHED, exactly as W1-T2981 detached the retro beside it. This rung sits
-            // between the dispatch-set computation and the idle branch and used to `await` an
-            // unbounded run wrapped in a light-sweep ticker, so a fired triage held the whole tick
-            // and dispatch was never reached — the shape that took the fleet down for two days, with
-            // the ticker keeping every liveness signal green throughout. MEASURED across the ledger
-            // union: 185 `auto_triage.fired` against 1241 `auto_triage.skipped`, so roughly one tick
-            // in eight would have stalled on it once the retro stopped doing so first.
-            //
-            // Triage gates nothing: it spends, which is why it stays below the headroom rung, but no
-            // rung downstream reads its result. It goes on the same registry the sweep's fix
-            // dispatches and the retro use, which `stopForFreshness` drains, so a restart still lets
-            // a running triage finish. A second concurrent triage is refused and the refusal named.
-            if (detachedActionInFlight("auto-triage")) {
-              log("auto_triage.already_detached", { feedback: fired.feedbackId, reason: fired.reason });
-            } else {
-              log("auto_triage.fired", { feedback: fired.feedbackId, reason: fired.reason });
-              detachSweepAction(
-                sweepLightDuringRetro(
-                  deps,
-                  pollIntervalMs,
-                  log,
-                  () => deps.runAutoTriage!(fired.feedbackId),
-                  diskHeadroomLatch,
-                  sweepRetrigger,
-                ).catch((e) => {
-                  log("auto_triage.run_failed", {
-                    feedback: fired.feedbackId,
-                    error: String((e as Error)?.message ?? e),
-                  });
-                }),
-                { actionKind: "auto-triage", taskId: "DAEMON" },
-              );
-              log("auto_triage.detached", { feedback: fired.feedbackId });
-            }
-          } else {
-            log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
-          }
-        }
-      } else if (decision) {
-        log("auto_triage.skipped", { reason: decision.reason });
-      }
-    }
+      if (await autoTriageCadence.run(autoTriageSignals)) continue;
+    } else if (deps.checkAutoTriage) autoTriageCadence.owe(autoTriageSignals);
 
     if (dispatchSet.length === 0) {
       noteBootFirstDispatch({ heldReason: "nothing_runnable" });
@@ -5967,6 +6088,10 @@ export async function runDaemon(
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map<string, number>();
+    laneElapsedMs = (taskId) => {
+      const startedAt = laneStartedAtMs.get(taskId);
+      return startedAt === undefined ? undefined : Math.max(0, daemonClock.now() - startedAt);
+    };
     const restartHoldouts = new Set<string>();
     const holdoutDeadlines = new Map<string, number>();
     const yieldAsked = new Set<string>();
@@ -6059,6 +6184,7 @@ export async function runDaemon(
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
         let next: Task | undefined;
+        const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
           const budget = laneDispatchBudget({
@@ -6073,6 +6199,7 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
@@ -6098,7 +6225,9 @@ export async function runDaemon(
             log("dispatch.lane_refill_held", {
               lane,
               finished_task: finished.id,
-              reason: reason ?? "no disjoint runnable task within the lane budget",
+              reason: reason ?? (refillDeferrals.length > 0
+                ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
+                : "no disjoint runnable task within the lane budget"),
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
               ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
             });
@@ -6315,7 +6444,7 @@ export async function runDaemon(
         return inFlightFreshness;
       } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
-        if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
+        if (length > 0) { runLengths.totalMs += length; runLengths.samples++; measuredRuns.push({ taskId: id, ms: length }); }
         return outcome;
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);

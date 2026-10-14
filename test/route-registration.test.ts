@@ -15,6 +15,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { buildInstanceProposalRoutes } from "../src/lib/instance-inbox-proposal.js";
 
 // ── recon-ER: the console has TWO ways to declare a route and only ONE that mounts it. A
 // builder can be aggregated into a `build*Routes` plural, or imported and called individually
@@ -101,6 +102,8 @@ function planOf(): Plan {
 function depsFor(root: string): ServeDeps {
   const ledgerPath = ledgerPathFor(root);
   const planPath = writePlan(root);
+  const registryPath = join(root, "daemon-instances.yaml");
+  writeFileSync(registryPath, "instances:\n  site:\n    repo: remudero-site\n    github_repo: craigoley/remudero-site\n");
   return {
     board: { plan: planOf(), ledgerPath, github: fakeGitHub() },
     panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: fakeGitHub(), ratify: fakeRatifyGateway() },
@@ -110,6 +113,7 @@ function depsFor(root: string): ServeDeps {
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
     pollMs: 50,
+    instances: { registryPath, stateBase: join(root, "instances") },
     log: () => {},
   };
 }
@@ -133,7 +137,9 @@ async function withListening<T>(server: ReturnType<typeof buildServeServer>, fn:
 test("every console route declared in src/lib is mounted on the real server", skipInMutationSandbox(), async () => {
   const root = tmpRoot();
   const deps = depsFor(root);
-  const declared = declaredConsoleRoutes();
+  const sourceRoutes = new Set(buildInstanceProposalRoutes({ stateDir: join(root, "state"), ledgerPath: deps.ledgerPath }).map(r => `${r.method} ${r.path}`));
+  const declared = declaredConsoleRoutes().map(route => route.where.startsWith("src/lib/instance-inbox-proposal.ts:") && sourceRoutes.has(`${route.method} ${route.path}`)
+    ? { ...route, path: `/v1/i/site${route.path.slice("/v1".length)}` } : route);
 
   // The declared set must be non-trivial, or the assertion below passes vacuously on an empty
   // list — the failure mode that would make this whole suite theatre.

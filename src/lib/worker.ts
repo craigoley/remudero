@@ -1,4 +1,5 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { unavailableWorkerInitSummary, workerInitSummaryFromMessage, type WorkerInitSummary } from "./worker-init-summary.js";
@@ -130,6 +131,8 @@ import {
   type WorkerKeychainSummary,
 } from "./worker-home.js";
 import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { currentRunChildReservationId, liveRunChildCount } from "./run-child-reservation.js";
+import type { RunChildProbe } from "./run-child-contract.js";
 import { feedbackLineagePayload, feedbackLineageSnapshot } from "./contributor-admission.js";
 import { envelope as feedbackLineageEnvelope } from "./untrusted-envelope.js";
 import { openLearnedReservation, type LearnedReservation, type LearnedReservationOptions } from "./host-memory-learning.js";
@@ -2073,9 +2076,9 @@ function annotateClaudeCapacity(
 
 let activeWorkerSpawns = 0;
 
-/** Current whole-process worker occupancy. Builds and reviews share this one counter. */
-export function activeWorkerCount(): number {
-  return activeWorkerSpawns;
+/** In-process worker occupancy plus live run children. Builds and reviews share this count. */
+export function activeWorkerCount(stateRoot?: string, probe?: RunChildProbe): number {
+  return activeWorkerSpawns + liveRunChildCount(stateRoot, probe);
 }
 
 /** What a claim records in the host memory ledger (W1-T7093). Bookkeeping only: nothing reads it to admit work. */
@@ -2139,12 +2142,12 @@ export async function withWorkerOccupancy<T>(
   reservation: WorkerOccupancyReservation = {},
 ): Promise<T> {
   const release = claimWorkerOccupancy();
-  const memory = openOccupancyReservation(reservation);
+  const memory = currentRunChildReservationId() ? undefined : openOccupancyReservation(reservation);
   try {
     return await operation();
   } finally {
     release();
-    memory.releaseOccupancy();
+    memory?.releaseOccupancy();
   }
 }
 
@@ -2328,16 +2331,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
-  const admission = await awaitMemoryAdmission({
+  const childReservationId = currentRunChildReservationId();
+  const admission = childReservationId ? undefined : await awaitMemoryAdmission({
     workerClass: workerClassOf(args),
     root: () => (args.config ?? loadConfig()).root,
     ...(args.runId ? { runId: args.runId } : {}),
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
   const releaseWorkerOccupancy = claimWorkerOccupancy();
-  const memoryReservation = ("reservation" in admission ? admission.reservation : undefined) ??
-    openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
-  const boundContainment = reservationBoundContainment(args.containment, memoryReservation);
+  const memoryReservation = childReservationId ? undefined :
+    (admission && "reservation" in admission ? admission.reservation : undefined) ??
+      openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+  const boundContainment = memoryReservation ? reservationBoundContainment(args.containment, memoryReservation) : args.containment ?? {};
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
@@ -2351,7 +2356,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
-  recordShadowMemoryVerdict({
+  if (memoryReservation) recordShadowMemoryVerdict({
     runId: args.runId,
     taskId: args.taskId,
     workerClass: workerClassOf(args),
@@ -3266,7 +3271,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   }
   } finally {
     releaseWorkerOccupancy();
-    memoryReservation.releaseOccupancy();
+    memoryReservation?.releaseOccupancy();
   }
 }
 
@@ -3283,7 +3288,7 @@ export interface UsageProbeSession {
  * SpawnWorkerArgs.queryFn}. */
 export type UsageProbeQueryFn = (params: {
   prompt: AsyncIterable<never>;
-  options: Pick<Options, "env" | "settingSources">;
+  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable">;
 }) => UsageProbeSession;
 
 /** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to
@@ -3352,13 +3357,26 @@ export function openUsageProbeSession(
     refresh?: UsageCredentialRefreshWait;
     /** W1-T6252: told when this probe provisioned or healed the shared credential store; run-task.ts ledgers it. */
     onCredentialSeed?: (event: ClaudeCredentialSeedEvent) => void;
+    /** The same toolchain-resolution seam as {@link SpawnWorkerArgs.claudeExecutable}: omitted means the shared per-process
+     * `claudeExecutableCache` and live fs/PATH/subprocess (W1-T9362). */
+    claudeExecutable?: SpawnWorkerArgs["claudeExecutable"];
   } = {},
 ): UsageProbeSession {
   // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test runner. An injected
   // `runQuery` creates no connection and is not what this stops.
   if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
   const q = runQuery ?? ((p: Parameters<UsageProbeQueryFn>[0]) => query(p as never) as unknown as UsageProbeSession);
-  const options: Pick<Options, "env" | "settingSources"> = { settingSources: [] };
+  const options: Parameters<UsageProbeQueryFn>[0]["options"] = { settingSources: [] };
+  // Hand the SDK the binary spawnWorker already resolved once per process. Unset, the SDK's query() picks its own binary and,
+  // on Linux, runs a synchronous, uncached process.report.getReport() to choose musl or glibc on EVERY probe — 56 s of self
+  // time in the 2026-10-14 loop-stall profile. A resolution failure is never a new failure: the probe opens as before and the
+  // SDK resolves its own binary (W1-T9362).
+  try {
+    options.pathToClaudeCodeExecutable =
+      resolveClaudeExecutable(context.claudeExecutable?.cache ?? claudeExecutableCache, context.claudeExecutable?.deps);
+  } catch {
+    // Deliberately empty: absent option = today's behaviour; spawnWorker owns refusing a blocked toolchain.
+  }
   // Linux workers consume the narrowed credential grant; capacity must observe that same store.
   // Darwin continues to use its existing keychain rather than selecting a different config store.
   if ((context.platform ?? process.platform) !== "darwin") {
@@ -7140,12 +7158,14 @@ export function ghPrMergeSquash(prUrl: string, closingReferences: (prUrl: string
     );
   }
   assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl}`);
+  const runGh = ghExec;
+  const securityHead = securityMergeHead(prUrl, path => JSON.parse(runGh(["api", path], { encoding: "utf8" })));
   // TRAP: NO `--delete-branch`. `gh pr merge --help` documents it as deleting the LOCAL branch too, which needs a resolvable
   // current branch — and a caller running from the daemon's deliberately detached checkout has none, so the call failed "not
   // on any branch" even when the merge landed. The repository carries `delete_branch_on_merge: true`, so the head branch is
   // still deleted, server-side (W1-T1050).
   // Source-text compatibility for W1-T129's pre-existing proof: execFileSync("gh", ["pr", "merge", prUrl, "--squash"])
-  return ghExec(["pr", "merge", prUrl, "--squash"], {
+  return runGh(["pr", "merge", prUrl, "--squash", ...(securityHead ? ["--match-head-commit", securityHead] : [])], {
     encoding: "utf8",
   });
 }

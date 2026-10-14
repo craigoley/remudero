@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T7093, W1-T7094, W1-T7095, W1-T8472, W1-T9070]
   files: [src/lib/run-child-reservation.ts, src/lib/host-memory-ledger.ts, src/lib/host-memory-learning.ts, src/lib/worker.ts, test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

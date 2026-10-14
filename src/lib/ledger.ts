@@ -573,6 +573,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
+  // W1-T8264: sre-lane.ts routeOperatorInterventions dedupes a hand action by this row; rotated away, the same
+  // intervention reads as new and is routed to the SRE lane a second time.
+  "operator.intervention",
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
   // second fix lane may claim a PR already under repair, so it is decision-relevant by the same
   // test that derives this set from its consumers -- not a log line nobody reads.
@@ -676,6 +679,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
+  "main.rule_checks.observed", // W1-T7848: mainLatestRunFromLedger folds it into main's reading; lost, an inherited rule red reads green.
+  "sweep.fold_debt_pull.ingested", // W1-T7853: foldDebtRunIdsFromLedger dedups on it; lost, CI fold debt is pulled and landed again.
+  "sweep.fold_debt_pull.dropped", // W1-T7853: the same dedup for a run whose PR closed unmerged or merged at a later head.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
   "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
   "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
@@ -688,6 +694,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
   // rotating it away loses the only evidence the judge acted.
   "escalation.judged",
+  // W1-T8868. READER: the stale re-judge pass skips an issue state already settled here
+  // (`escalation.rejudged`), and `escalation.auto_resolve_attempted` is the only record that a
+  // reversible triage action ran before its issue was opened — the audit row an undo starts from.
+  "escalation.rejudged",
+  "escalation.auto_resolve_attempted",
   // W1-T3212: `ruling.judged` is the ONLY record of what the ruling judge decided and why, on
   // both arms. Nothing else writes it, and no measurement yet establishes that this judge
   // calibrates well — reading the first weeks of these rows is what will settle that, so a

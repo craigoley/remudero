@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit"
   plan_refs: [W1-T4435, W1-T7421]
   files: [src/run-task.ts, src/lib/ci-friction-gardener.ts, test/a-ci-friction-filing-carries-the-rounds-it-was-priced-on.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

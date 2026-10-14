@@ -1,0 +1,74 @@
+- id: W1-T9277
+  title: "A GREP PROOF QUOTED WITH A TRAILING COMMA IS A WRAPPED PATTERN — `grep: \"<pattern>\", in <path>` runs as argv `\"<pattern>\",` and reads 0, but wrappedGrepPattern only sees a pattern that ENDS with its quote, so acceptance-author-gate, the deterministic body repair and check-acceptance all pass it; the 10-12 main repair #11096 and #11430 both failed review on it"
+  repo: remudero
+  depends_on: [W1-T9237]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # one concern: one shape predicate the required acceptance-author-gate reads; src/lib/review.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11430's body proof `grep: \"kind: guard  # ...\", in plan/tasks.d/W1-T9225-...yaml` failed review; the 10-12 main repair #11096 used the same form"
+  plan_refs: [W1-T9237, W1-T5544, W1-T2544, W1-T1060]
+  files:
+    - src/lib/review.ts
+    - test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts
+  status: queued
+  priority: 2  # two hand PRs failed review on it in two days, and every author-time check said OK
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 on origin/main fe381f93b:
+      - In-process: `parseWhitelistedProof('grep: "kind: guard", in plan/x.yaml').args` is
+        `["-arn","--","\"kind: guard\",","plan/x.yaml"]`: the quotes and the comma are part of the pattern.
+        `wrappedGrepPattern` returns undefined for it, while it returns `{ delimiter: '"', bare: "kind: guard" }` for
+        `grep: "kind: guard" in plan/x.yaml`.
+      - `./bin/rmd check-proof 'grep: "kind: guard", in package.json'` prints argv
+        `grep -arn -- "kind: guard", package.json`, hits 0, verdict fail.
+      - `./bin/rmd check-acceptance <body file>` on a body whose one proof is `grep: "kind: guard", in package.json`
+        prints "OK — the parser resolves exactly what was written, and every proof is non-empty" and exits 0.
+    WHY, READ on origin/main (symbols, not lines), src/lib/review.ts `wrappedGrepPattern`: it takes the pattern from
+    `^\s*grep:\s*(.+?)\s+in\s+\S+\s*$` and reports a wrap only when that pattern both starts AND ends with one of
+    backtick, double or single quote. A quoted pattern followed by a comma ends with `,`, so it is never a wrap.
+    Every consumer inherits the miss: scripts/acceptance-author-gate.mjs `authorTimeProofShapeRefusal` (the
+    "wraps its grep pattern ... use: grep: <bare> in <path>" refusal), the advisory note in `acceptanceAuthorTimeCheck`,
+    `wrappedGrepBodyRepair` (W1-T5544, the deterministic body cure) and the diff-anchor candidate skip in src/run-task.ts.
+    The form comes from prose habit (a quoted phrase, then a comma, then "in"): the 10-12 main-repair body (#11096)
+    and #11430 both used it, and both failed review with the pattern read literally.
+    DEPENDS ON W1-T9237 (filed 2026-10-13, queued): that task makes `rmd check-acceptance` run the gate's own
+    `authorTimeProofShapeRefusal` on a local body. This task widens the one predicate that refusal reads, so
+    check-acceptance names this form through W1-T9237's path, not through a second copy of the rule.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 349 readable open origin heads for "trailing comma"
+    (main 0, no head more) and `wrappedGrepPattern` (main 1: W1-T5544, the repair that consumes it; no head more).
+    Control: the same sweep finds `^- id: W1-T9237$` on main and finds a head-only shard on
+    plan/W1-T3455-log-proven-ratchet-admission.
+  design: |
+    1. ONE PREDICATE. `wrappedGrepPattern` also reports a wrap when the pattern is a quoted span (backtick, double or
+       single quote, the same three delimiters and the same "no delimiter inside" rule) followed only by a comma and
+       optional whitespace. `bare` is the text inside the quotes, without the comma, so the gate's message reads
+       `use: grep: <bare> in <path>`. The returned shape gains nothing a caller must handle; an optional
+       `trailing: ","` field is allowed if a message wants to name it.
+    2. EVERY CONSUMER INHERITS IT: the gate's proof-shape refusal, the advisory note in `acceptanceAuthorTimeCheck`,
+       and `wrappedGrepBodyRepair`, whose existing rewrite (`(.+?)(\s+in\s+\S+\s*)$` → bare) already drops the comma
+       with the pattern. No consumer gets its own comma rule.
+    3. NO WIDER NET. A bare pattern ending in a comma (`grep: foo, in p`), a pattern with a quote inside it
+       (`grep: a "b", c in p`) and a quoted pattern followed by other text are not wraps, as today.
+    Tests go in test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts: the predicate over the
+    three delimiters and the near misses, `evaluateGate` refusing a body that carries the form with the bare form in
+    its message, `wrappedGrepBodyRepair` producing the bare proof, and `checkAcceptanceCommand` on a local body file
+    exiting non-zero with the bare form named (W1-T9237's path).
+  acceptance:
+    - claim: "a grep proof whose quoted pattern is followed by a comma is reported as wrapped, with the bare pattern"
+      proof: 'grep: test("W1-T9277: a quoted grep pattern with a trailing comma is a wrapped pattern" in test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts'
+    - claim: "acceptance-author-gate refuses that form and the deterministic body repair rewrites it to the bare form"
+      proof: 'grep: test("W1-T9277: the gate refuses the trailing-comma form and the body repair unwraps it" in test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts'
+    - claim: "rmd check-acceptance names the trailing-comma form on a local body and shows the bare form"
+      proof: 'grep: test("W1-T9277: check-acceptance names the trailing-comma form before the PR opens" in test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts'
+    - claim: "a bare pattern ending in a comma and a pattern with an inner quote are not wraps"
+      proof: 'grep: test("W1-T9277: a bare comma or an inner quote is not a wrap" in test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-quoted-grep-pattern-with-a-trailing-comma-is-a-wrapped-pattern.test.ts"
+  falsifier: |
+    Restore the ends-with-the-delimiter check: the trailing-comma form returns undefined, the gate passes the body and
+    check-acceptance exits 0, so the first three tests fail. Report a wrap whenever the pattern merely STARTS with a
+    quote: `grep: a "b", c in p` is unaffected, but `grep: "a" b, in p` is reported and the fourth test fails. Drop
+    the inner-quote rule: `grep: "a "b"", in p`-style spans are reported and the fourth test fails.

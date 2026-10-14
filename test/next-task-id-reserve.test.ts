@@ -3,7 +3,8 @@
  *
  * EVERY ARM IS DRIVEN THROUGH AN INJECTED RESERVER, NEVER A REAL REMOTE, and every refusal arm has
  * a paired positive control. That split is why this does not block `diff-coverage`: a refusal
- * reachable only through a real `git push` is a line no test can cover.
+ * reachable only through a real `git push` is a line no test can cover. The one exception is
+ * W1-T8915's test, which drives the DEFAULT reserver over a disposable local bare origin.
  *
  * `openPrTexts: NO_OPEN_PRS` (W1-T2324): every `--reserve` call below now ALSO injects a
  * reachable, empty open-PR read. Before W1-T2324, `--reserve` reserved regardless of the mint's
@@ -22,6 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -35,7 +37,7 @@ import {
   validateReserveArgs,
 } from "../src/run-task.js";
 import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 const mintRepo = gitRepo({ kind: "reserve-mint-plan" });
 mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
@@ -270,4 +272,69 @@ test("W1-T1055: a signalled git push is a FAILURE, never a silent success", () =
   const seen: string[][] = [];
   gitRunAdapter((a) => { seen.push(a); return { status: 0 }; })(["push", "origin", "x:y"]);
   assert.deepEqual(seen, [["push", "origin", "x:y"]]);
+});
+
+// ── W1-T8915: the DEFAULT reserver, through the CLI, against a real disposable origin ──────────
+
+test("W1-T8915: reservation CLI never reports held after local anchor failure", async () => {
+  const origin = gitRepo({ bare: true, kind: "w8915-cli-origin" });
+  const work = gitRepo({ cloneFrom: origin.dir, kind: "w8915-cli-work" });
+  const identity: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+    GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+  };
+  // A REAL local failure: no git identity anywhere, so the anchor's `commit-tree` exits 128.
+  const noIdentity: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "user.useConfigOnly",
+    GIT_CONFIG_VALUE_0: "true",
+  };
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) delete noIdentity[k];
+  const realGit = (env: NodeJS.ProcessEnv) => {
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      const r = spawnSync("git", args, { cwd: work.dir, encoding: "utf8", env });
+      return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    };
+    return { run, calls };
+  };
+  const reserve = async (runGit: (args: string[]) => { status: number | null; stdout: string; stderr: string }) => {
+    const cap = capture();
+    let code: number;
+    try {
+      // No `reserver`: the command builds its own DEFAULT git-backed reserver over `runGit`.
+      code = await nextTaskIdCommand(["--reserve", "--branch", "run-W1-T8915-cli"], {}, {
+        runGit, holderOf: () => "unknown", openPrTexts: NO_OPEN_PRS, policyCurrency: () => ({ status: "current" }),
+      });
+    } finally {
+      cap.restore();
+    }
+    return { code, out: cap.out.join("\n"), err: cap.err.join("\n") };
+  };
+
+  const failing = realGit(noIdentity);
+  const refused = await reserve(failing.run);
+  assert.equal(refused.code, 2, "a local anchor failure is a refusal, exit 2");
+  assert.equal(refused.out.includes("RESERVED "), false, "nothing may claim to be held");
+  assert.match(refused.err, /REFUSED/);
+  assert.match(refused.err, /cannot create a reservation anchor locally/);
+  assert.match(refused.err, /git commit-tree exited 128: no git identity is configured/, "the real local cause is named");
+  assert.doesNotMatch(refused.err, /unreachable/i, "never a misleading network diagnosis");
+  assert.ok(failing.calls.some((c) => c[0] === "commit-tree"), "the default reserver really ran commit-tree");
+  assert.deepEqual(failing.calls.filter((c) => c[0] === "push"), [], "and no push followed it");
+  assert.equal(origin.git("for-each-ref", "refs/rmd-id/"), "", "origin holds no reservation");
+
+  // POSITIVE CONTROL: the same clone and command, with an identity, really reserves on origin.
+  const healthy = realGit(identity);
+  const held = await reserve(healthy.run);
+  const id = /^RESERVED (W1-T\d+) on origin/m.exec(held.out)?.[1];
+  assert.ok(id, `the healthy run reports a held id:\n${held.out}\n${held.err}`);
+  assert.match(origin.git("rev-parse", `refs/rmd-id/${id}`), /^[0-9a-f]{40}$/, "and origin really holds it");
 });

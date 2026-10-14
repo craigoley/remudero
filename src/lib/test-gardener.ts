@@ -8,6 +8,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, runGardenAsync, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { FLAKE_INCIDENT_POLICY, flakeIncidentOriginFile } from "./flake-incident-gardener.js";
 
 /**
  * lib/test-gardener.ts (W1-T4112) — the test suite tends itself.
@@ -118,6 +119,9 @@ export const DURATION_WINDOW_RUNS = 7;
  *  rewriting about 2,100 rows of run-to-run noise on a known conflict hotspot. */
 export const DURATION_ADOPTION_CADENCE_MS = 24 * 3_600_000;
 
+/** PRIMARY CONTROL — an urgent manifest PR must save at least one minute of fast-lane wall time. */
+export const MIN_URGENT_DURATION_SAVING_MS = 60_000;
+
 export type SettledRowKind = "first" | "tier" | "drift";
 export interface SettledRow { file: string; from: number | undefined; to: number; kind: SettledRowKind }
 
@@ -143,13 +147,14 @@ export function roundDurationMs(ms: number): number {
  *     value (its own envelope) and the median sits outside the band — hysteresis, so a row adopted
  *     at its median stays put until the evidence moves as a whole;
  *   - a TIER move additionally needs the whole envelope past the slow threshold, so a file near
- *     the boundary never flips back and forth. A row pinned at exactly the threshold is
- *     retier-flaker's lever and is left alone.
+ *     the boundary never flips back and forth. A row pinned at the threshold is held
+ *     until a quiet flake window makes it eligible for measurement again.
  */
 export function settleDurationRows(
   committed: TestManifest,
   observations: Array<Record<string, number>>,
   knownFiles: ReadonlySet<string>,
+  quietPinnedFiles: ReadonlySet<string> = new Set(),
 ): { rows: SettledRow[]; bandLog: number; full: boolean } {
   const full = observations.length >= DURATION_WINDOW_RUNS;
   const byFile = new Map<string, number[]>();
@@ -176,7 +181,7 @@ export function settleDurationRows(
       rows.push({ file, from, to, kind: "first" });
       continue;
     }
-    if (!full || from === threshold) continue;
+    if (!full || (from === threshold && !quietPinnedFiles.has(file))) continue;
     const lo = Math.min(...obs);
     const hi = Math.max(...obs);
     if (from >= lo && from <= hi) continue;
@@ -212,14 +217,19 @@ export function durationCandidates(
   testFiles: string[],
   shardCount: number,
   recent: boolean,
+  quietPinnedFiles: ReadonlySet<string> = new Set(),
 ): TestGardenAction[] {
-  const { rows, bandLog, full } = settleDurationRows(committed, observations, new Set(testFiles));
+  const settledRows = settleDurationRows(committed, observations, new Set(testFiles), quietPinnedFiles);
+  const { bandLog, full } = settledRows;
+  const rows = recent ? settledRows.rows.filter(row => row.kind !== "drift") : settledRows.rows;
   if (rows.length === 0) return [];
   const settled: TestManifest = { thresholdMs: committed.thresholdMs, files: { ...committed.files } };
   for (const r of rows) settled.files[r.file] = r.to;
   if (recent) {
-    const saved = Math.log(fastLaneSlowestMs(probe, committed, settled, testFiles) / fastLaneSlowestMs(probe, settled, settled, testFiles));
-    if (!(full && saved > bandLog)) return [];
+    const before = fastLaneSlowestMs(probe, committed, settled, testFiles);
+    const after = fastLaneSlowestMs(probe, settled, settled, testFiles);
+    const noiseMs = before * (1 - Math.exp(-bandLog));
+    if (!(full && before - after >= Math.max(MIN_URGENT_DURATION_SAVING_MS, noiseMs))) return [];
   }
   const runs = `the median of ${observations.length} CI run(s)`;
   if (probe.proposalIsMaterial(committed, settled, shardCount)) {
@@ -245,31 +255,48 @@ export function durationCandidates(
     }));
 }
 
-/** RETIER-FLAKER: a file the ledger shows retried at least {@link RETIER_THRESHOLD} times and not
- *  already in the slow tier, forced there by recording its duration at the manifest's own
- *  threshold — the one lever `tierForDuration` already reads, so no second "force slow" field is
- *  needed anywhere else in this repo. Read through `readLedgerUnionRecordsSync` (the resolver), so
- *  a rotated or gzipped ledger file is counted exactly like the live one, never a glob over one
- *  rotation form. */
-export function retierFlakerCandidates(stateDir: string, probe: TestManifestProbe, committed: TestManifest, testFiles: string[]): TestGardenAction[] {
-  const known = new Set(testFiles);
-  const { rows } = readLedgerUnionRecordsSync(stateDir, { step: "test.flake_retry" });
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    const file = row.file;
-    if (typeof file === "string" && known.has(file)) counts.set(file, (counts.get(file) ?? 0) + 1);
+interface FlakeEvidence {
+  runs: Map<string, Set<number>>;
+  lastRetry: Map<string, number>;
+  incidents: Map<string, string>;
+  complete: boolean;
+}
+
+function flakeEvidence(stateDir: string, now: number): FlakeEvidence {
+  const read = readLedgerUnionRecordsSync(stateDir, { step: ["test.flake_retry", "flake_incident.filed"], refuseIncomplete: true });
+  const runs = new Map<string, Set<number>>(), lastRetry = new Map<string, number>(), incidents = new Map<string, string>();
+  for (const row of read.rows) {
+    const file = typeof row.file === "string" ? row.file : typeof row.origin === "string" ? flakeIncidentOriginFile(row.origin) : undefined;
+    if (file === undefined) continue;
+    if (row.step === "flake_incident.filed") {
+      if (typeof row.task_id === "string") incidents.set(file, row.task_id);
+      continue;
+    }
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isFinite(at) || at > now) continue;
+    lastRetry.set(file, Math.max(lastRetry.get(file) ?? -Infinity, at));
+    if (row.retry_outcome !== "recovered" || at < now - FLAKE_INCIDENT_POLICY.windowMs ||
+        typeof row.ci_run_id !== "number" || !Number.isSafeInteger(row.ci_run_id) || row.ci_run_id < 0) continue;
+    const ids = runs.get(file) ?? new Set<number>();
+    ids.add(row.ci_run_id); runs.set(file, ids);
   }
-  const out: TestGardenAction[] = [];
-  for (const [file, count] of counts) {
-    if (count < RETIER_THRESHOLD) continue;
-    const currentMs = committed.files[file] ?? 0;
-    if (currentMs >= committed.thresholdMs) continue;
+  return { runs, lastRetry, incidents, complete: read.ok && read.torn === 0 };
+}
+
+/** A daily retier counts distinct recovered CI runs in the flake-incident window; the threshold is its existing lever. */
+export function retierFlakerCandidates(stateDir: string, probe: TestManifestProbe, committed: TestManifest, testFiles: string[],
+  recent = false, now = systemClock.now(), evidence = flakeEvidence(stateDir, now)): TestGardenAction[] {
+  if (recent) return [];
+  const known = new Set(testFiles), out: TestGardenAction[] = [];
+  for (const [file, runs] of evidence.runs) {
+    if (!known.has(file) || runs.size < RETIER_THRESHOLD || (committed.files[file] ?? 0) >= committed.thresholdMs) continue;
+    const incident = evidence.incidents.get(file);
     out.push({
       class: "retier-flaker",
       target: rowTarget(probe, file),
       file: probe.DEFAULT_MANIFEST_RELATIVE_PATH,
       edit: { kind: "row", key: file, to: committed.thresholdMs },
-      reason: `Retried ${count} time(s) so far — moving it to the slow tier so its flakes stop skewing the fast lane's shards.`,
+      reason: `Recovered on ${runs.size} distinct CI run(s) in the flake window — moving it to the slow tier; ${incident ? `flake-incident receipt ${incident}` : "eligible for flake-incident filing"}.`,
     });
   }
   return out.sort((a, b) => a.target.localeCompare(b.target));
@@ -316,10 +343,9 @@ export function rawObservationWindow(runs: TestProposalHistory["runs"]): Array<R
   return window;
 }
 
-/** When the manifest last changed on the checkout's own history — an adoption, a retier or a
- *  person's edit alike, so the conflict hotspot gets a quiet day whoever moved it. */
-export function manifestLastCommitMs(repoRoot: string, relPath: string): number | undefined {
-  const out = execFileSync("git", ["-C", repoRoot, "log", "-1", "--format=%ct", "--", relPath], { encoding: "utf8" }).trim();
+/** A manifest's latest commit at the selected ref; the gardener selects main, while existing callers may select HEAD. */
+export function manifestLastCommitMs(repoRoot: string, relPath: string, ref: "HEAD" | "origin/main" = "HEAD"): number | undefined {
+  const out = execFileSync("git", ["-C", repoRoot, "log", "-1", "--format=%ct", ...(ref === "origin/main" ? ["--glob=refs/remotes/origin/mai[n]"] : []), "--", relPath], { encoding: "utf8" }).trim();
   return out === "" ? undefined : Number(out) * 1000;
 }
 
@@ -336,19 +362,20 @@ export function testGardenInventory(
   // are files to fill them, which those two functions do not clamp for themselves.
   const shardCount = Math.max(1, Math.min(probe.DEFAULT_CI_SHARD_COUNT, testFiles.length || 1));
   const candidates: TestGardenAction[] = [];
+  const now = (opts.clock ?? systemClock).now(), evidence = flakeEvidence(stateDir, now);
+  const quietPinnedFiles = new Set([...evidence.lastRetry].filter(([, at]) =>
+    evidence.complete && at < now - FLAKE_INCIDENT_POLICY.windowMs).map(([file]) => file));
   for (const ledger of durationLedgers(probe.DEFAULT_MANIFEST_RELATIVE_PATH)) {
     const committed = probe.loadManifest(join(repoRoot, ledger.manifestPath));
     const proposalPath = testManifestProposalPath(stateDir, ledger.statePrefix);
     const history = rawObservationWindow(readTestProposalHistory(stateDir, ledger.statePrefix).runs);
     const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
-    const changedAt = observations.length > 0
-      ? opts.manifestChangedAtMs ? opts.manifestChangedAtMs(ledger.manifestPath) : manifestLastCommitMs(repoRoot, ledger.manifestPath)
-      : undefined;
-    const recent = changedAt !== undefined && (opts.clock ?? systemClock).now() - changedAt < DURATION_ADOPTION_CADENCE_MS;
+    const changedAt = opts.manifestChangedAtMs ? opts.manifestChangedAtMs(ledger.manifestPath) : manifestLastCommitMs(repoRoot, ledger.manifestPath, "origin/main");
+    const recent = changedAt !== undefined && now - changedAt < DURATION_ADOPTION_CADENCE_MS;
     const ledgerProbe = { ...probe, DEFAULT_MANIFEST_RELATIVE_PATH: ledger.manifestPath };
-    candidates.push(...durationCandidates(ledgerProbe, committed, observations, testFiles, shardCount, recent));
+    candidates.push(...durationCandidates(ledgerProbe, committed, observations, testFiles, shardCount, recent, quietPinnedFiles));
     if (ledger.artifact === TEST_MANIFEST_PROPOSAL_ARTIFACT) {
-      candidates.push(...retierFlakerCandidates(stateDir, probe, committed, testFiles));
+      candidates.push(...retierFlakerCandidates(stateDir, probe, committed, testFiles, recent, now, evidence));
     }
   }
   return { candidates };

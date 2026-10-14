@@ -18,7 +18,7 @@
     - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
     # W1-T8235 charges an idle slot to `boot_gate` from `daemon.boot_gate.deferred`; may need its fixture moved
     - test/an-idle-lane-slot-names-the-hold-that-emptied-it.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

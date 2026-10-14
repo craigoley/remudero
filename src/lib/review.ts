@@ -21,7 +21,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
@@ -4875,7 +4875,9 @@ export async function observePromisedFollowUps(args: {
     if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
     const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
     const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
-    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!).map(promise => ({ ...promise, taskId: args.task.id }));
+    const atBase = new Set(present.length ? (await runGit(["ls-tree", "--name-only", baseSha!, "--", ...present])).trim().split("\n").filter(Boolean) : []);
+    const baseBlobs = new Map<string, string>(); for (const path of present) if (atBase.has(path)) baseBlobs.set(path, await runGit(["show", `${baseSha}:${path}`]));
+    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!, path => baseBlobs.get(path) ?? "").map(promise => ({ ...promise, taskId: args.task.id }));
     if (taskPath !== undefined) {
       const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
       promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
@@ -4897,8 +4899,10 @@ export async function observePromisedFollowUps(args: {
     for (const path of filingPaths) planRecords.push(...followUpPlanRecords(await runGit(["show", `${baseSha}:${path}`])));
     if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
     const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
+    // The PR's own record counts beside records that list it in plan_refs (W1-T9283); it is kept last so filings come first.
+    const kept = planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && (task.id === promise.taskId || task.plan_refs?.includes(promise.taskId))));
     return { state: "complete", headSha, baseSha, promised: unique,
-      planRecords: planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && task.plan_refs?.includes(promise.taskId))) };
+      planRecords: [...kept.filter(task => task.id !== args.task.id), ...kept.filter(task => task.id === args.task.id)] };
   } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
 }
 
@@ -4915,15 +4919,17 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
       unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
   const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
-  let incomplete = false;
-  let firstRun: string | undefined, afterRotation: string | undefined;
+  let incomplete = false, liveNotObserved = true;
+  const gaps = { unreadArchives: 0, malformedRows: 0, liveTornTails: 0, unreadLive: 0, invalidValues: 0 };
+  const gapReason = () => `unread archives: ${gaps.unreadArchives}; could-belong malformed rows: ${gaps.malformedRows}; live torn tails: ${gaps.liveTornTails}; unread live: ${gaps.unreadLive}; live not observed: ${liveNotObserved}; invalid follow-up values: ${gaps.invalidValues}`;
+  let firstRun: string | undefined, afterRotation: string | undefined, windowStart = args.prCreatedAt;
   try {
     const stateDir = dirname(args.ledgerPath);
     if (resolve(args.ledgerPath) !== resolve(ledgerLivePath(stateDir))) throw new Error("promise harvest path is not the union's live ledger");
     // The shared union deliberately tolerates absent state/live files. That is not
     // evidence of an empty harvest; prove the directory exists before inferring absence.
     const names = readdirSync(stateDir);
-    if (!names.includes(LEDGER_FILENAME)) incomplete = true;
+    if (!names.includes(LEDGER_FILENAME)) { incomplete = true; liveNotObserved = true; }
     else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
     for (const liveOnly of [true, false]) {
       let liveRead = false;
@@ -4948,14 +4954,22 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         }
         // The earliest live start may be a retry whose original start has already rotated away.
         const bound = firstRun !== undefined && Date.parse(firstRun) < Date.parse(prCreatedAt) ? firstRun : prCreatedAt;
+        windowStart = bound;
         afterRotation = rotationBeforeTime(names, bound);
       }
       for await (const row of openLedgerUnion(stateDir, {
         step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
         ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
-        onLiveRead: () => { liveRead = true; },
+        onLiveRead: () => { liveRead = true; liveNotObserved = false; },
         onUnreadDirectory: (_path, error) => { throw error; },
-        onUnreadArchive: () => { incomplete = true; }, onUnreadLive: () => { incomplete = true; }, onMalformedRow: () => { incomplete = true; },
+        onUnreadArchive: () => { incomplete = true; gaps.unreadArchives++; },
+        onUnreadLive: () => { incomplete = true; gaps.unreadLive++; },
+        onMalformedRow: finding => {
+          if (!malformedRowCouldBelong(finding, args.taskId, windowStart ?? finding.timestamp ?? "")) return;
+          incomplete = true;
+          if (finding.kind === "live-torn-tail") gaps.liveTornTails++;
+          else gaps.malformedRows++;
+        },
       }, args.io)) {
         if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
             typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts))) {
@@ -4963,10 +4977,10 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
         }
         if (row.step !== "report.followups") continue;
         if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
-        if (!Array.isArray(row.entries)) { incomplete = true; continue; }
+        if (!Array.isArray(row.entries)) { incomplete = true; gaps.invalidValues++; continue; }
         for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
           if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
-            incomplete = true; continue;
+            incomplete = true; gaps.invalidValues++; continue;
           }
           const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
           entries.set(JSON.stringify(entry), entry);
@@ -4979,7 +4993,7 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
           }
         }
       }
-      if (liveOnly && !liveRead) incomplete = true;
+      if (liveOnly && !liveRead) { incomplete = true; liveNotObserved = true; }
       const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
       if (unreportedFollowUps(observation.promised,
         followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
@@ -4989,10 +5003,10 @@ export async function recoverPromisedFollowUpReports(observation: PromisedFollow
     const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
     if (incomplete && unreportedFollowUps(observation.promised, report, observation.planRecords).length > 0) {
-      return { state: "unknown", cause: "promise-harvest-incomplete", reason: "promise harvest corpus is unreadable or malformed; absence is unproved" };
+      return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest corpus is unreadable or malformed; ${gapReason()}; absence is unproved` };
     }
     return { ...observation, harvested, harvestCorpusComplete: !incomplete };
-  } catch (error) { return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest unavailable: ${String(error)}` }; }
+  } catch (error) { return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest unavailable: ${String(error)}; ${gapReason()}` }; }
   finally { clearTimeout(timer); }
 }
 
@@ -5314,7 +5328,7 @@ export function judgeReview(
     const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
     const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
     if (missing.length > 0) verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
-      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
+      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry; rewording or deleting the promise text does not satisfy it): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
       proof_exec: "not_executable" });
   }
   const testTheater = detectTestTheater(evidence.diff);
@@ -8373,6 +8387,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
+  "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
@@ -8396,6 +8411,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
+  "^scripts/security-merge-producer\\.mjs$",
+  "^src/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
   "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.

@@ -40,7 +40,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   buildCommitTrailerIndex: 1,
   buildProofAmendmentWritePorts: 2,
   buildRegisteredGarden: 3,
-  buildSweepEffects: 6,
+  buildSweepEffects: 5, // Armed-idle direct merge now awaits its transport and security observation.
   buildWipeTestCadenceDaemonHooks: 1,
   changeView: 1,
   changedShardProofs: 2,

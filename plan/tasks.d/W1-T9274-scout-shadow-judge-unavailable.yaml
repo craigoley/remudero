@@ -1,0 +1,32 @@
+- id: W1-T9274
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — shadow_judge.unavailable landed 2 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 3.86
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:shadow_judge.unavailable"
+  files:
+    - test/scout-shadow-judge-unavailable.test.ts
+  acceptance:
+    - claim: "shadow_judge.unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9274: shadow_judge.unavailable no longer recurs\" in test/scout-shadow-judge-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step shadow_judge.unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared file is a single new test file (test/scout-shadow-judge-unavailable.test.ts). The description and files list show no secrets, auth, deletion, or merge, deploy or review-policy changes."
+      - "The acceptance criterion is a grep-verifiable test name, so the result can be checked from what is shown. The filing says the cause is fixed rather than hidden, and the PR still goes through CI and review."
+      - "The family has no track record (0 merged, 0 declined). The filing also says the rows name no file, so the fix location is unknown. Those are reasons for care, but the escalation rule's HIGH criteria are not met."
+    judged_at: "2026-10-13T19:08:48.130Z"
+    pin: "3c63f6c405fc1d7770f4ab32ef1b8724211e72cd07cf220af9261444abac3f10"

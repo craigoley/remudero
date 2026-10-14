@@ -13,7 +13,7 @@
   files:
     - src/lib/dispatch-value.ts
     - test/the-validity-share-reads-more-than-one-run.test.ts
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

@@ -4,7 +4,7 @@
  * WHY. OBSERVED 2026-10-10 in the core daemon container: a worker's `node --test <many files>` at Node's default
  * concurrency (cores − 1) held 7–8 file children at 300–570 MB RSS each, 2.8 GB for one process tree, with no slot and
  * no admission. Node refuses `--test-concurrency` in NODE_OPTIONS, so no environment can size a run: the entrypoint
- * has to pass the flag. This one takes a slot sized at {@link TEST_FILE_PEAK_BYTES} per file, so its concurrency is the
+ * has to pass the flag. This one takes a slot sized by learned file peaks, so its concurrency is the
  * smaller of the CPU-derived count and what the memory headroom holds (at least one, no fixed cap), and runs niced.
  * A hand-run `node --test` that bypasses this entrypoint is admitted file by file instead (test-file-admission.ts).
  *
@@ -12,11 +12,14 @@
  * are node's. An explicit lower `--test-concurrency` is kept.
  */
 import { spawn as spawnChild } from "node:child_process";
+import { globSync, statSync } from "node:fs";
+import { parseArgs } from "node:util";
+
+import { testFileEstimates, type PeakStoreOptions } from "./host-memory-learning.js";
 
 import {
   acquireTestSlotAsync,
   lowPriorityCommand,
-  TEST_FILE_PEAK_BYTES,
   TEST_SLOT_LEASE_MS,
   testRunArgv,
   type BinaryProbe,
@@ -50,8 +53,9 @@ export type BoundedTestSpawn = (file: string, args: readonly string[], env: Node
 
 export interface BoundedTestRunOptions {
   acquireSlot?: (label: string) => Promise<TestSlotLease>;
-  /** Options for the default slot acquisition; it always names {@link TEST_FILE_PEAK_BYTES} per file. */
+  /** Options for the default slot acquisition, including an explicitly supplied sizing override. */
   testSlot?: Omit<TestSlotOptions, "sleep">;
+  peakStore?: PeakStoreOptions;
   spawn?: BoundedTestSpawn;
   spawnProcess?: typeof spawnChild;
   signalSource?: Pick<NodeJS.Process, "on" | "off">;
@@ -60,6 +64,28 @@ export interface BoundedTestRunOptions {
 }
 
 const SIGNAL_NUMBERS: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
+
+/** Expand Node's positional file selection for sizing only; the runner still receives its original argv. */
+export function selectedTestFiles(args: readonly string[]): string[] {
+  const valueFlags = ["import", "require", "loader", "experimental-loader", "test-concurrency", "test-name-pattern",
+    "test-skip-pattern", "test-reporter", "test-reporter-destination", "test-timeout", "test-shard", "test-isolation"];
+  const options = Object.fromEntries(valueFlags.map((flag) => [flag, { type: "string" as const,
+    ...(flag === "require" ? { short: "r" } : {}) }]));
+  const { positionals } = parseArgs({ args: [...args], options, strict: false, allowPositionals: true });
+  if (positionals.length === 0) {
+    return globSync("**/{test,test/**/*,test-*,*[._-]test}.{js,mjs,cjs,ts,mts,cts}", { exclude: ["**/node_modules/**"] });
+  }
+  const selected: string[] = [];
+  for (const path of positionals) {
+    if (/[*?\[{]/.test(path)) selected.push(...globSync(path, { exclude: ["**/node_modules/**"] }));
+    else {
+      let directory = false;
+      try { directory = statSync(path).isDirectory(); } catch (error) { void error; /* Node reports a missing file. */ }
+      selected.push(...(directory ? globSync(`${path}/**/*.test.{js,cjs,mjs,ts,cts,mts}`) : [path]));
+    }
+  }
+  return [...new Set(selected)];
+}
 
 const inheritSpawn = (
   spawn: typeof spawnChild = spawnChild,
@@ -86,7 +112,10 @@ export async function runBoundedTest(args: readonly string[], opts: BoundedTestR
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const slot = await (opts.acquireSlot
     ? opts.acquireSlot(NPM_TEST_SLOT_LABEL)
-    : acquireTestSlotAsync(NPM_TEST_SLOT_LABEL, { perFileBytes: TEST_FILE_PEAK_BYTES, ...opts.testSlot }));
+    : acquireTestSlotAsync(NPM_TEST_SLOT_LABEL, {
+      ...(opts.testSlot?.perFileBytes === undefined ? { filePeaks: testFileEstimates(selectedTestFiles(args), opts.peakStore) } : {}),
+      ...opts.testSlot,
+    }));
   // A foreign-container holder is aged by its heartbeat: refresh well inside the lease while the run is live.
   const heartbeat = setInterval(() => slot.refresh(), TEST_SLOT_LEASE_MS / 3);
   heartbeat.unref();

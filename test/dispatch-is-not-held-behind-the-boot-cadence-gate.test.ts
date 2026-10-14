@@ -12,7 +12,7 @@ import type { RunResult } from "../src/run-task.js";
 // W1-T9072 — DISPATCH IS NOT HELD BEHIND THE BOOT CADENCE GATE. W1-T5720's gate held tick 1's dispatch along
 // with its cadences, so every boot's lanes waited for the first full pass (59 boots: median 4.1 min, max 8.4).
 // Every input tick 1's selection reads is valid at boot without that pass, so dispatch runs on tick 1 while
-// the gated cadences still wait, and they still never run beside a lane: only at an iteration top.
+// the gated cadences still wait for the gate (W1-T9321: and run as soon as it opens, not at an iteration top).
 
 function fixturePlan(ids: readonly string[]): Plan {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}tick-one-dispatch-`));
@@ -108,11 +108,12 @@ test("W1-T9072: the gated cadences stay deferred and never run beside a tick-1 l
   assert.deepEqual(h.steps("daemon.boot_gate.deferred").map((l) => l.extra.cadence), ["gardens", "checkMeasurementCadence", "checkRetroTrigger"],
     "each deferral is still named, once");
   assert.ok(at("garden") > at("gate-opened"), `the deferred gardens start when the gate opens (${saw})`);
+  // W1-T9321: once the gate opens they no longer wait for an iteration top (tick 2 never came on the core daemon);
+  // test/gated-cadences-run-once-the-boot-gate-opens.test.ts holds the lane open and proves they run beside it.
   for (const cadence of ["measurement", "retro"]) {
-    assert.equal(h.events.filter((e) => e === cadence).length, 1, `${cadence} is deferred, not skipped (${saw})`);
+    assert.ok(at(cadence) >= 0, `${cadence} is deferred, not skipped (${saw})`);
     assert.ok(at(cadence) > at("gate-opened"), `${cadence} waits for the gate (${saw})`);
-    assert.ok(at(cadence) > at("lane-end:A"), `${cadence} never runs beside the tick-1 lane (${saw})`);
-    assert.ok(at(cadence) < at("lane-start:B"), `${cadence} runs at the next iteration top, ahead of that tick's dispatch (${saw})`);
+    assert.ok(at(cadence) < at("lane-start:B"), `${cadence} runs no later than the next tick's dispatch (${saw})`);
   }
 });
 
@@ -217,4 +218,133 @@ test("W1-T9072: a tick-1 idle slot is not charged to the boot gate once dispatch
   assert.ok(h.steps("daemon.boot_gate.deferred").length > 0, "fixture: the gate held cadences on tick 1");
   assert.ok(changed.some((l) => l.extra.idle_slots === 1), `fixture: tick 1 sampled its idle slot (saw ${JSON.stringify(changed)})`);
   assert.ok(!changed.some((l) => l.extra.cause === "boot_gate"), `no idle slot is charged to the gate (saw ${changed.map((l) => l.extra.cause).join(", ")})`);
+});
+
+// W1-T9225 — TICK-1 DISPATCH DOES NOT WAIT FOR THE BOOT REVIEW PASS EITHER. W1-T9072 removed `await bootGateOpened` but
+// kept `await bootReviewPass` ahead of dispatch, and its fixture's `sweepLight: async () => {}` settled at once, so it
+// cost nothing there. On the first boot on that code (2026-10-13 15:12Z) it cost 500 s: first selection behind 5
+// reviews. These fixtures hold the boot review pass open for the whole run.
+
+/** A boot review pass (`sweepLight` with `reviewOnly`) that settles only when the test says so. */
+function heldBootReview(events: string[]) {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  return {
+    sweepLight: async (scope?: { reviewOnly?: boolean }) => {
+      events.push(scope?.reviewOnly ? "light-pass:review-only" : "light-pass");
+      if (scope?.reviewOnly) await held;
+    },
+    release: () => (events.push("review-released"), release()),
+  };
+}
+
+/** A daemon held at tick 1 never returns. This bound only turns that hang into a red, then lets the run finish. */
+async function unlessHeldAtTickOne(running: Promise<daemon.DaemonSummary>, review: { release: () => void }, saw: () => string) {
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    running.then((summary) => ({ summary })),
+    new Promise<{ held: true }>((resolve) => (timer = setTimeout(() => resolve({ held: true }), 5_000))),
+  ]);
+  clearTimeout(timer);
+  if ("summary" in outcome) return outcome.summary;
+  review.release();
+  await running;
+  return assert.fail(`tick 1 never dispatched while the boot review pass was held (${saw()})`);
+}
+
+test("W1-T9225: a runnable task starts on tick 1 while the boot review pass has not settled", async () => {
+  // Both gate states: the first full pass never settles (the 15:12Z boot: gate_open_ms null), or settles at once.
+  for (const firstPass of ["never-settles", "settles-at-once"] as const) {
+    const h = gatedBoot();
+    const review = heldBootReview(h.events);
+    let atStart: { ticks: number; released: boolean } | undefined;
+    const running = daemon.runDaemon(fixturePlan(["A"]), {
+      ...h.deps,
+      ...(firstPass === "settles-at-once" ? { sweep: async () => { h.events.push("first-pass-settled"); } } : {}),
+      sweepLight: review.sweepLight,
+      runOne: async (id) => {
+        h.events.push("dispatch");
+        atStart ??= { ticks: h.steps("daemon.tick").length, released: h.events.includes("review-released") };
+        h.merged.add(id);
+        return okResult(id);
+      },
+    }, { max: 1, pollIntervalMs: 5, bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 1_500 });
+    const summary = await unlessHeldAtTickOne(running, review, () => `${firstPass}: saw ${h.events.join(", ")}`);
+    const saw = `${firstPass}: saw ${h.events.join(", ")}`;
+    assert.equal(summary.stopReason, "max_reached", saw);
+    assert.deepEqual(summary.merged, ["A"], `the task ran (${saw})`);
+    assert.equal(h.events[0], "light-pass:review-only", `the boot review pass still starts first (${saw})`);
+    assert.ok(h.events.indexOf("light-pass:review-only") < h.events.indexOf("dispatch"), `the review pass started before dispatch (${saw})`);
+    assert.equal(atStart?.ticks, 1, `the task started on tick 1 (${saw})`);
+    assert.equal(atStart?.released, false, `the task started while the boot review pass was still in flight (${saw})`);
+    const rows = h.steps("daemon.boot_first_dispatch");
+    assert.equal(rows.length, 1, `one boot-to-first-dispatch row (${saw})`);
+    assert.equal(rows[0]!.extra.admitted_count, 1);
+    assert.equal(typeof rows[0]!.extra.first_selection_ms, "number");
+    review.release();
+  }
+});
+
+test("W1-T9225: the gated cadences wait for the boot review pass as well as the gate", async () => {
+  const h = gatedBoot();
+  const review = heldBootReview(h.events);
+  let ticks = 0;
+  // A tick 1 held on the review pass never reaches tick 4; this bound releases it so the run reds instead of hanging.
+  const unhang = setTimeout(() => review.release(), 5_000);
+  const summary = await daemon.runDaemon(fixturePlan(["A"]), {
+    ...h.deps,
+    // The first full pass settles at once, so the gate opens on tick 1 and only the boot review pass holds.
+    sweep: async () => { h.events.push("full-pass-settled"); },
+    sweepLight: review.sweepLight,
+    runOne: async (id) => {
+      h.events.push(`lane-start:${id}`);
+      h.merged.add(id);
+      return okResult(id);
+    },
+    // Release the review pass a few iterations in, so ticks with the gate open and the review held are observed.
+    checkStop: () => (h.events.includes("measurement") || ticks > 40 ? "fixture stop" : undefined),
+    log: (step: string, extra: Record<string, unknown> = {}) => {
+      h.deps.log(step, extra);
+      if (step === "daemon.tick" && ++ticks === 4) (clearTimeout(unhang), review.release());
+    },
+  }, { pollIntervalMs: 5, bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 1_500 });
+  clearTimeout(unhang);
+  const at = (e: string): number => h.events.indexOf(e);
+  const saw = `saw ${h.events.join(", ")}`;
+  assert.equal(h.steps("daemon.boot_gate.opened")[0]?.extra.trigger, "first_pass", "positive control: the first full pass opened the gate");
+  assert.ok(at("gate-opened") >= 0 && at("gate-opened") < at("review-released"), `the gate opened while the review pass was held (${saw})`);
+  for (const cadence of ["measurement", "retro"]) {
+    assert.ok(at(cadence) >= 0, `${cadence} is deferred, not skipped (${saw})`);
+    assert.ok(at(cadence) > at("review-released"), `${cadence} waits for the boot review pass, not only the gate (${saw})`);
+  }
+  assert.equal(summary.stopReason, "stopped");
+  assert.deepEqual(summary.merged, ["A"], saw);
+  assert.ok(at("lane-start:A") >= 0 && at("lane-start:A") < at("review-released"), `dispatch did not wait for the review pass (${saw})`);
+  const deferred = h.steps("daemon.boot_gate.deferred");
+  assert.deepEqual(deferred.map((l) => l.extra.cadence), ["checkMeasurementCadence", "checkRetroTrigger"], "each deferral is named, once");
+  for (const l of deferred) {
+    assert.deepEqual(l.extra.waits_for, ["boot_review_pass"], "the row names what the cadence waits for");
+    assert.equal(l.extra.reason, "boot review pass has not settled");
+  }
+});
+
+test("W1-T9225: a deferral row names both waits while the gate and the boot review pass are pending", async () => {
+  const h = gatedBoot();
+  const review = heldBootReview(h.events);
+  const summary = await unlessHeldAtTickOne(daemon.runDaemon(fixturePlan(["A"]), {
+    ...h.deps,
+    gardens: [() => (h.events.push("garden"), { stop: () => {} })],
+    sweepLight: review.sweepLight,
+    runOne: async (id) => (h.merged.add(id), okResult(id)),
+  }, { max: 1, pollIntervalMs: 5, bootCadenceGateBoundMs: 60_000, sweepWallClockBoundMs: 1_500 }), review, () => h.events.join(", "));
+  review.release();
+  assert.equal(summary.stopReason, "max_reached");
+  const deferred = h.steps("daemon.boot_gate.deferred");
+  assert.deepEqual(deferred.map((l) => [l.extra.cadence, l.extra.waits_for]), [
+    ["gardens", ["first_full_pass"]],
+    ["checkMeasurementCadence", ["first_full_pass", "boot_review_pass"]],
+    ["checkRetroTrigger", ["first_full_pass", "boot_review_pass"]],
+  ], "the gardens wait only for the gate; the cadences name both waits");
+  assert.equal(deferred[1]!.extra.reason, "first full pass and boot review pass have not settled");
+  assert.ok(!h.events.includes("measurement") && !h.events.includes("garden"), "nothing gated ran");
 });

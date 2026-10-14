@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (\"good with your recommendation\"): the priority-reservation question W1-T8502's rationale left open"
   plan_refs: [W1-T8502, W1-T476, W1-T4416, W1-T4064, W1-T171, W1-T2286, W1-T5805]
   files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-lower-priority-task-does-not-take-a-file-a-waiting-higher-priority-task-needs.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

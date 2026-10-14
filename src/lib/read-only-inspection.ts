@@ -9,9 +9,6 @@ import { buildSkillEffectivenessReport, renderSkillEffectivenessReport } from ".
 export const READ_ONLY_INSPECTION_USAGE =
   "usage: rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>";
 
-/** A closed list, not a generic dispatch escape that could admit a future write verb. */
-export const READ_ONLY_INSPECTION_VERBS = ["ledger-grep", "skill effectiveness"] as const;
-
 export function readOnlyInspectionCommand(rest: string[],
   readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
 ): number {

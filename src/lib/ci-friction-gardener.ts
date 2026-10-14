@@ -6,6 +6,7 @@ import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
+import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
@@ -20,7 +21,6 @@ import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
-  ciFrictionEvidence,
   ciFrictionRemedyRationale,
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
@@ -240,6 +240,10 @@ export interface CiFrictionRound {
    *  named, the files a main merge brought in. The evidence a drafted remedy carries. */
   detail?: string;
   pricing?: "median-proxy";
+  /** W1-T9057: what the round's failing checks named — titles, an excerpt, the tail's source. */
+  evidence?: CiFailureEvidence[];
+  /** W1-T9057: the pull request's URL, when the ledger recorded one. */
+  prUrl?: string;
 }
 
 /** A round this old counts half; one twice as old a quarter. A smooth fade, never a cutoff date,
@@ -337,6 +341,31 @@ export function runPrIndex(records: readonly LedgerRecord[]): Map<string, number
   return index;
 }
 
+/** W1-T9057: `run_id -> pull request URL`, from the same `pr.opened` rows {@link runPrIndex} reads. */
+export function runPrUrlIndex(records: readonly LedgerRecord[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const r of records) {
+    if (r.step !== "pr.opened" || typeof r.run_id !== "string" || typeof r.pr_url !== "string") continue;
+    if (prNumberFromUrl(r.pr_url) !== undefined && !index.has(r.run_id)) index.set(r.run_id, r.pr_url);
+  }
+  return index;
+}
+
+/** W1-T9057: the failing checks a `fix.dispatch` row's `ci_failures` named, with what each carried. */
+function failureEvidenceOf(row: LedgerRecord): CiFailureEvidence[] {
+  if (!Array.isArray(row.ci_failures)) return [];
+  const out: CiFailureEvidence[] = [];
+  for (const f of row.ci_failures as Array<Record<string, unknown>>) {
+    if (typeof f?.check !== "string") continue;
+    const tests = Array.isArray(f.tests) ? f.tests.filter((t): t is string => typeof t === "string").slice(0, CI_FAILURE_TESTS_CAP) : [];
+    const excerpt = typeof f.excerpt === "string" && f.excerpt !== "" ? f.excerpt.slice(0, CI_FAILURE_EXCERPT_CAP) : undefined;
+    const tailSource = typeof f.tail_source === "string" ? f.tail_source : undefined;
+    if (tests.length === 0 && excerpt === undefined) continue;
+    out.push({ check: f.check, tests, ...(excerpt !== undefined ? { excerpt } : {}), ...(tailSource !== undefined ? { tailSource } : {}) });
+  }
+  return out;
+}
+
 const minutesBetween = (fromIso: unknown, toIso: unknown): number | undefined => {
   if (typeof fromIso !== "string" || typeof toIso !== "string") return undefined;
   const ms = Date.parse(toIso) - Date.parse(fromIso);
@@ -416,12 +445,13 @@ export function poolOrTimeoutSignature(lines: readonly string[]): string | undef
 /** The signature of a red check whose log is a test runner's but names no failing test. */
 export const RED_WITH_NO_FAILING_TEST = "red with no failing test";
 
-/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
- *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
- *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
-export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
-  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
-  if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
+/** True when the (timestamp-stripped) lines are a test runner's log. */
+function isTestRunnerLog(bodies: readonly string[]): boolean {
+  return bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b));
+}
+
+/** W1-T9057: every failure a test runner's log NAMES, in log order, with where the first sits. */
+function namedRunnerFailures(bodies: readonly string[]): { named: string[]; firstNamedAt: number } {
   const named: string[] = [];
   let firstNamedAt = -1;
   for (const [i, b] of bodies.entries()) {
@@ -434,6 +464,61 @@ export function testRunnerFailureSignature(lines: readonly string[]): string | u
       named.push(name.trim());
     }
   }
+  return { named, firstNamedAt };
+}
+
+/** BACKSTOP (W1-T9057): bounds the failing titles a `fix.dispatch` row keeps per failing check. */
+export const CI_FAILURE_TESTS_CAP = 5;
+/** BACKSTOP (W1-T9057): bounds the log characters a `fix.dispatch` row keeps per failing check. */
+export const CI_FAILURE_EXCERPT_CAP = 600;
+
+const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
+
+/** The distinct failing test titles a runner's log names (at most `cap`); `[]` for any other log. */
+export function testRunnerFailures(logTail: string, cap = CI_FAILURE_TESTS_CAP): string[] {
+  const bodies = logTail.split("\n").map(stripLogTimestamp);
+  if (!isTestRunnerLog(bodies)) return [];
+  return [...new Set(namedRunnerFailures(bodies).named)].slice(0, cap);
+}
+
+/** At most {@link CI_FAILURE_EXCERPT_CAP} characters of the log around its first failure line (the
+ *  tail's end when none is marked), timestamps removed. `undefined` for an empty tail. */
+export function ciFailureExcerpt(logTail: string, cap = CI_FAILURE_EXCERPT_CAP): string | undefined {
+  const lines = logTail.split("\n").map((l) => stripLogTimestamp(l).trimEnd());
+  if (lines.every((l) => l.trim() === "")) return undefined;
+  const at = lines.findIndex((l) => /^\s*not ok \d+ - |✖|\bFAIL\b|\bError\b|refused|BLOCKED/.test(l));
+  const from = at < 0 ? Math.max(0, lines.length - 12) : Math.max(0, at - 1);
+  return lines.slice(from, from + 14).join("\n").trim().slice(0, cap);
+}
+
+/** What one failing check of a `fix.dispatch` row carries beyond its signature (W1-T9057). */
+export interface CiFailureEvidence {
+  check: string;
+  tests: string[];
+  excerpt?: string;
+  tailSource?: string;
+}
+
+/** The `ci_failures` entry a `fix.dispatch` row ledgers for one failing check. */
+export function ciFailureLedgerEntry(f: { name: string; logTail: string; tailSource?: string }): {
+  check: string; signature: string | null; tests: string[]; excerpt: string | null; tail_source: string | null;
+} {
+  return {
+    check: f.name,
+    signature: ciFailureSignature(f.logTail) ?? null,
+    tests: testRunnerFailures(f.logTail),
+    excerpt: ciFailureExcerpt(f.logTail) ?? null,
+    tail_source: f.tailSource ?? null,
+  };
+}
+
+/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
+ *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
+ *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
+  if (!isTestRunnerLog(bodies)) return undefined;
+  const { named, firstNamedAt } = namedRunnerFailures(bodies);
   const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
   const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
   if (file !== undefined) return file;
@@ -505,6 +590,22 @@ function redChecksByHead(records: readonly LedgerRecord[]): Map<string, string[]
   return index;
 }
 
+/** W1-T9057: `pr -> titles` of the `test.flake_retry` rows whose retry ALSO failed. */
+function alsoFailedTitlesByPr(records: readonly LedgerRecord[]): Map<number, string[]> {
+  const index = new Map<number, string[]>();
+  for (const r of records) {
+    if (r.step !== "test.flake_retry" || r.retry_outcome !== "also_failed" || !Array.isArray(r.titles) || !Array.isArray(r.pr_numbers)) continue;
+    const titles = (r.titles as unknown[]).filter((t): t is string => typeof t === "string" && t !== "");
+    for (const pr of r.pr_numbers as unknown[]) {
+      if (typeof pr !== "number") continue;
+      const list = index.get(pr) ?? [];
+      for (const t of titles) if (!list.includes(t)) list.push(t);
+      index.set(pr, list);
+    }
+  }
+  return index;
+}
+
 interface RoundBoundary {
   ts: string;
   detail?: string;
@@ -516,6 +617,8 @@ interface RoundBoundary {
   elapsed?: number;
   /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
   pr?: number;
+  prUrl?: string;
+  evidence?: CiFailureEvidence[];
 }
 
 /** `head_sha -> pull request`, from any row naming both (the sweep's `sweep.disposed`). The daemon
@@ -542,6 +645,10 @@ export function headPrIndex(records: readonly LedgerRecord[]): Map<string, numbe
 export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): CiFrictionRound[] {
   const prByRun = runPrIndex(records);
   const prByHead = headPrIndex(records);
+  const urlByRun = runPrUrlIndex(records);
+  const urlByHead = new Map<string, string>();
+  for (const r of records) if (typeof r.head_sha === "string" && typeof r.pr_url === "string" && !urlByHead.has(r.head_sha)) urlByHead.set(r.head_sha, r.pr_url);
+  const alsoFailedByPr = alsoFailedTitlesByPr(records);
   const redByHead = redChecksByHead(records);
   const flaky = new Set(records.filter((r) => r.step === "test.flake_retry" && typeof r.file === "string").map((r) => r.file as string));
   // A refusal belongs to the latest dispatch of the same run on the same round: a numbered round
@@ -567,7 +674,7 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
         : "";
       const conflicted = Array.isArray(r.conflicted_files) ? (r.conflicted_files as unknown[]).filter((f) => typeof f === "string").slice(0, 3).join(", ") : "";
       const detail = [`${String(r.mode)} round`, named, conflicted ? `conflicted: ${conflicted}` : ""].filter(Boolean).join(" — ");
-      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined };
+      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined, prUrl: typeof r.head_sha === "string" ? urlByHead.get(r.head_sha) : undefined, evidence: failureEvidenceOf(r) };
       list.push(boundary);
       byRun.set(r.run_id, list);
       const key = roundKey(r);
@@ -598,7 +705,18 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
       const minutes = boundary.elapsed ?? (runPr !== undefined ? minutesBetween(prevTs, boundary.ts) : undefined);
       if (pr !== undefined && minutes !== undefined) {
         const causes = boundary.split ?? [boundary.cause];
-        for (const cause of causes) rounds.push({ pr, cause, minutes: minutes / causes.length, at: boundary.ts, ...(boundary.detail ? { detail: boundary.detail } : {}) });
+        const prUrl = urlByRun.get(runId) ?? boundary.prUrl;
+        // A `test.flake_retry` row whose retry ALSO failed names the titles a round's own log may not have carried.
+        const titles = alsoFailedByPr.get(pr) ?? [];
+        const evidence = boundary.evidence !== undefined && boundary.evidence.length > 0
+          ? boundary.evidence
+          : titles.length > 0 && boundary.cause.kind === "check" ? [{ check: "test.flake_retry", tests: titles.slice(0, CI_FAILURE_TESTS_CAP) }] : [];
+        for (const cause of causes) {
+          rounds.push({ pr, cause, minutes: minutes / causes.length, at: boundary.ts, ...(boundary.detail ? { detail: boundary.detail } : {}),
+            ...(evidence.length > 0 ? { evidence } : {}),
+            // The link rides with the evidence it belongs to: a round that names nothing keeps the shape it always had.
+            ...(evidence.length > 0 && prUrl !== undefined ? { prUrl } : {}) });
+        }
       }
       prevTs = boundary.ts;
     }
@@ -876,6 +994,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
+    readSource: (file) => git(["show", `${pinned()}:${file}`]),
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -966,6 +1085,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
         if (!m) return [];
         const file = m[1]!;
+        if (/^src\/lib\/ci-friction-[^/]+\.ts$/.test(file)) return [];
         // A test file is evidence, never an owner — under a test/ directory or named *.test.*.
         if (/(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file)) return [];
         return [{ file, hits: Number(m[2]) }];
@@ -1012,8 +1132,63 @@ export interface CiFrictionDraft {
   price: CiFrictionCausePrice;
   rung: number;
   owner: CiFrictionOwner;
-  rounds: readonly RemedyRound[];
+  rounds: readonly GardenRemedyRound[];
   prior?: Extract<CiFrictionCauseState, { state: "draft" }>["prior"];
+}
+
+/** A {@link RemedyRound} that also carries what its failing checks named (W1-T9057). */
+export interface GardenRemedyRound extends RemedyRound {
+  evidence?: CiFailureEvidence[];
+  prUrl?: string;
+  pricing?: "median-proxy";
+}
+
+/** A round belongs to `key` when its own cause key is `key`, or `key` is a CHECK FAMILY (the gate-priced
+ *  `check:<family>`) and the round failed in that family: its failing check names it, or its ci-log cause key does. */
+export function ciFrictionRoundMatchesCause(round: GardenRemedyRound, key: string): boolean {
+  if (round.causeKey === key) return true;
+  if (!key.startsWith("check:") || key.startsWith("check:ci-log:")) return false;
+  const family = key.slice("check:".length);
+  return round.causeKey.startsWith(`check:ci-log:${kebabSlug(family, 40)}`)
+    || (round.evidence ?? []).some((e) => ciCheckFamily(e.check) === family);
+}
+
+const logLine = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").trimEnd();
+
+/** The RECENT ROUNDS block of a drafted rationale: newest first, one per pull request, each with its
+ *  PR link, failing test titles and a log excerpt where the `fix.dispatch` row carried them. */
+export function ciFrictionRoundLines(rounds: readonly GardenRemedyRound[], key: string, limit = 5): string[] {
+  const seen = new Set<number>();
+  const picked = rounds
+    .filter((r) => r.at !== undefined && ciFrictionRoundMatchesCause(r, key))
+    .sort((a, b) => b.at!.localeCompare(a.at!))
+    .filter((r) => (seen.has(r.pr) ? false : (seen.add(r.pr), true)))
+    .slice(0, limit);
+  if (picked.length === 0) return ["- (none recorded)"];
+  return picked.flatMap((r) => {
+    const link = r.prUrl !== undefined ? `PR #${r.pr} (${r.prUrl})` : `PR #${r.pr}`;
+    const tests = [...new Set((r.evidence ?? []).flatMap((e) => e.tests))].slice(0, CI_FAILURE_TESTS_CAP);
+    const excerpt = (r.evidence ?? []).find((e) => e.excerpt !== undefined)?.excerpt;
+    return [
+      `- ${link} at ${r.at}: ${logLine((r.detail ?? "").slice(0, 200)) || "(no detail recorded)"}`,
+      ...(tests.length > 0 ? [`    failing tests: ${tests.map(logLine).join("; ")}`] : []),
+      ...(excerpt !== undefined ? ["    log excerpt:", ...excerpt.split("\n").map((l) => `      | ${logLine(l)}`)] : []),
+    ];
+  });
+}
+
+/** The rationale a drafted remedy carries: {@link ciFrictionRemedyRationale}'s, with its RECENT ROUNDS block
+ *  rebuilt from the family-matched rounds, and a gate-priced cause described by what priced it. */
+export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): string[] {
+  const { price, owner } = draft;
+  const lines = ciFrictionRemedyRationale({ key, minutes: price.minutes, rounds: price.rounds, prs: price.prs, owner, evidence: [], prior: draft.prior });
+  const heading = lines.indexOf("RECENT ROUNDS (newest first):");
+  const end = lines.findIndex((l, i) => i > heading && l === "");
+  const gatePriced = !draft.rounds.some((r) => r.causeKey === key && r.pricing !== "median-proxy");
+  const head = gatePriced
+    ? [`MEASURED by the ci-friction gardener: ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} red run(s) within the measured window on ${price.prs} pull request(s).`, ...lines.slice(1, heading + 1)]
+    : lines.slice(0, heading + 1);
+  return [...head, ...ciFrictionRoundLines(draft.rounds, key), ...(end < 0 ? [] : lines.slice(end))];
 }
 
 /** The title a drafted remedy's regression test must carry — task-scoped, and never containing " in ",
@@ -1022,10 +1197,12 @@ export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
   return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
 }
 
-/** The slug a drafted shard's filename and its regression test share. Equal names are what make the
- *  test the shard's OWN falsifier to the sizing rule, so a remedy is one owner file plus its test. */
+/** Shard and regression share a slug; cause words must not classify that regression as a rule suite.
+ *  The full cause stays in origin and evidence, including when its filename needs a neutral hash. */
 export function ciFrictionShardStem(key: string): string {
-  return kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  const stem = kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  return RULE_SUITE_NAME_RE.test(stem)
+    ? `ci-friction-remedy-${createHash("sha256").update(key).digest("hex").slice(0, 16)}` : stem;
 }
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. It names the
@@ -1049,15 +1226,7 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
       { claim: `the harness no longer spends a fix round on ${key}`, proof: `grep: test("${ciFrictionRemedyTestTitle(taskId, key)}" in ${testPath}` },
     ],
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
-    rationale: ciFrictionRemedyRationale({
-      key,
-      minutes: price.minutes,
-      rounds: price.rounds,
-      prs: price.prs,
-      owner,
-      evidence: ciFrictionEvidence(draft.rounds, key),
-      prior: draft.prior,
-    }),
+    rationale: ciFrictionDraftRationale(draft, key),
   }).text;
 }
 
@@ -1161,8 +1330,9 @@ export interface CiFrictionGardenSources {
 const LADDER_DEPTH = 8;
 
 /** Rounds in the shape the remedy module reads. */
-export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): RemedyRound[] {
-  return rounds.map((r) => ({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.at ? { at: r.at } : {}), ...(r.detail ? { detail: r.detail } : {}) }));
+export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): GardenRemedyRound[] {
+  return rounds.map((r) => ({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.at ? { at: r.at } : {}), ...(r.detail ? { detail: r.detail } : {}),
+    ...(r.evidence ? { evidence: r.evidence } : {}), ...(r.prUrl ? { prUrl: r.prUrl } : {}), ...(r.pricing ? { pricing: r.pricing } : {}) }));
 }
 
 /**

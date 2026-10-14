@@ -840,6 +840,9 @@ export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline
 export const PRECHECK_ADDITIONAL_RUNS = [
   // W1-T7719: listRuleSuites includes this rostered proof, so pre-push asks it directly as well.
   { testFile: "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts", script: "test:fix-owner-recovery" },
+  // W1-T7853: the same for the two suites its disclosed census-shaped rows put in listRuleSuites.
+  { testFile: "test/ci-filed-fold-debt-reaches-the-daemon.test.ts", script: "test:fold-debt-pull" },
+  { testFile: "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts", script: "test:merge-queue-gates" },
 ];
 
 /** Every census suite this script asks before the push, and how: `modeled` names the check that asks its

@@ -89,6 +89,50 @@ const LIFTS = (_task: string, arm: string, trial: number): CorpusProofOutcome =>
 /** With-skill passes, without-skill fails. */
 const WITH_ONLY = (_task: string, arm: string): CorpusProofOutcome => (arm === "with-skill" ? "pass" : "fail");
 
+test("a malformed fixed eval control preserves the refusal reason and dispatches nothing", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), fleet = fakeFleet(LIFTS);
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 0 } });
+  assert.ok(run.state === "refused" && run.reason === "invalid-run-control" && run.dispatched === 0);
+  assert.ok(run.state === "refused" && run.detail.includes("invalid fixed eval deadline/shutdown reserve"));
+  assert.equal(fleet.built.length, 0);assert.equal(fleet.requests.length, 0);
+});
+
+test("a cancelled skill eval launches no further attempts and never certifies capacity release", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), source = new AbortController();
+  const fleet = fakeFleet(LIFTS, request => { assert.ok(request.signal);source.abort();return {}; });
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log,
+    control: { finishByMs: Date.now() + 10000, shutdownReserveMs: 100, signal: source.signal } });
+  assert.equal(run.state, "cancelled");if (run.state !== "cancelled") return;
+  assert.equal(fleet.requests.length, 1);assert.equal(fleet.graded.length, 0);assert.equal(fleet.cleaned.length, 1);
+  assert.equal(run.capacityReleaseAllowed, false);assert.equal(run.attempts[0]!.verdict, "unmeasurable");
+  assert.deepEqual(run.attempts[0]!.reasons, ["eval-cancelled"]);
+  assert.equal(fleet.rows.at(-1)!.row.termination, "unverified");
+});
+
+test("an expired skill eval control refuses new attempts while preserving the quiet and spend gates", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected(), fleet = fakeFleet(LIFTS);
+  const input = { selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 100 } };
+  assert.equal((await runSkillEval(input)).state, "cancelled");assert.equal(fleet.built.length, 0);
+  assert.equal((await runSkillEval({ ...input, argv: [] })).state, "refused");
+  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "up" }, headroom: HEADROOM } })).state, "refused");
+});
+
+test("skill eval cancellation during grading or failed cleanup is never an evaluated success", async () => {
+  const { runSkillEval } = await skillEval(), selection = await selected();
+  for (const phase of ["grading", "cleanup"] as const) {
+    const source = new AbortController(), fleet = fakeFleet(LIFTS, () => phase === "cleanup" ? { cleanup: () => { throw new Error("cleanup EIO"); } } : {});
+    const grade = (req: Parameters<typeof fleet.grade>[0]) => { if (phase === "grading") source.abort();return fleet.grade(req); };
+    const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+      grade, argv: CONFIRM, idle: IDLE, log: fleet.log,
+      control: { finishByMs: Date.now() + 10000, shutdownReserveMs: 100, signal: source.signal } });
+    assert.equal(run.state, "cancelled");assert.equal(fleet.requests.length, 1);
+    assert.ok(run.state === "cancelled" && run.capacityReleaseAllowed === false);
+  }
+});
+
 test("a skill eval passes a draft that lifts the with-skill pass rate, logs every attempt and the result, and cleans up every head", async () => {
   const { runSkillEval, SKILL_EVAL_STEPS } = await skillEval();
   const selection = await selected();
@@ -307,7 +351,19 @@ test("a skill eval stops dispatching once an overspent attempt leaves less than 
   assert.equal(run.verdict.totalCostUsd, 176);
 });
 
-test("a skill eval names each failed attempt reason and keeps a graded verdict when only its cleanup fails", async () => {
+test("skill eval uncertain cleanup stops the entire default-off run and cannot publish evaluated success", async () => {
+  const { runSkillEval, SKILL_EVAL_STEPS } = await skillEval(), selection = await selected();
+  const fleet = fakeFleet(LIFTS, () => ({ cleanup: () => { throw new Error("cleanup EIO"); } }));
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log });
+  assert.equal(run.state, "cancelled", "default-off is not permission to record uncertain cleanup as success");
+  assert.equal(fleet.requests.length, 1, "no later attempt may launch after unknown cleanup");
+  assert.ok(run.state === "cancelled" && run.capacityReleaseAllowed === false);
+  assert.equal(run.attempts[0]!.verdict, "unmeasurable");
+  assert.equal(fleet.rows.some(row => row.step === SKILL_EVAL_STEPS.result), false);
+});
+
+test("a skill eval names each failed attempt reason and stops on uncertain cleanup without a graded success", async () => {
   const { runSkillEval } = await skillEval();
   const selection = await selected();
   const fleet = fakeFleet((task, arm, _trial, n) => (n === 2 ? "throw" : n === 3 ? "unmeasurable" : WITH_ONLY(task, arm)), (_request, n) => {
@@ -315,8 +371,10 @@ test("a skill eval names each failed attempt reason and keeps a graded verdict w
     if (n === 1) return { headDir: null };
     return n === 4 ? { cleanup: () => { throw new Error("worktree remove failed"); } } : {};
   });
-  const run = evaluated(await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
-    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log }));
+  const run = await runSkillEval({ selection, draftMarkdown: DRAFT.markdown, dispatcherFor: fleet.dispatcherFor, stack: STACK,
+    grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log });
+  assert.equal(run.state, "cancelled");if (run.state !== "cancelled") return;
+  assert.equal(fleet.requests.length, 5);
   assert.deepEqual(run.attempts.slice(0, 4).map((a) => [a.verdict, a.reasons]), [
     ["unmeasurable", ["attempt-failed: the worker spawn died"]],
     ["unmeasurable", ["no-head"]],
@@ -325,9 +383,9 @@ test("a skill eval names each failed attempt reason and keeps a graded verdict w
   ], "each failure keeps its own message, so a paid attempt that died says why");
   assert.equal(run.attempts[0]!.costUsd, null, "a dispatch that died reports no cost");
   const cleanupFailed = run.attempts[4]!;
-  assert.notEqual(cleanupFailed.verdict, "unmeasurable", "a head graded before its cleanup failed keeps its grade");
+  assert.equal(cleanupFailed.verdict, "unmeasurable", "a grade cannot override uncertain cleanup");
   assert.deepEqual(cleanupFailed.reasons, ["cleanup-failed: worktree remove failed"]);
-  assert.equal(run.verdict.reason, "too-few-measurable-tasks");
+  assert.equal(run.capacityReleaseAllowed, false);
 });
 
 test("a skill eval refuses a draft that is not the one its held-out set was drawn for, or a set smaller than K", async () => {

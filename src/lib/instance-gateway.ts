@@ -32,11 +32,11 @@ import { parseInstanceRegistry, type RegistryInstance } from "./instance-registr
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { INSTANCE_INBOX_SOURCE_PATHS, mountInstanceInboxRoutes } from "./instance-inbox-contract.js";
+import { buildInstanceProposalRoutes } from "./instance-inbox-proposal.js";
 import {
   buildInboxThreadReadRoute,
   buildInboxThreadReplyRoute,
-  buildInboxThreadRoute,
-  buildInboxThreadsRoute,
+  buildPanelReadRoutes,
   inboxThreadStorePath,
   type PanelGraphDeps,
   type RatifyCliGateway,
@@ -176,13 +176,18 @@ export const NO_INSTANCE_RATIFY: RatifyCliGateway = {
   },
 };
 
-/** W1-T5339: the panel's four conversation routes over ONE instance's own plan, ledger, checkout and inbox root. */
+/** Selected panel reads and reversible writes over ONE instance's plan, ledger, checkout and inbox root. */
 export function defaultInstanceInboxSources(root: InstanceStateRoot, repository: string, github: GitHub): Route[] {
   const deps: PanelGraphDeps = {
     root: join(root.root, "repos", repository.split("/")[1] ?? repository), planPath: root.planPath, ledgerPath: root.ledgerPath,
-    inboxRoot: root.root, github: { prView: () => null }, statusGithub: github, ratify: NO_INSTANCE_RATIFY,
+    inboxRoot: root.root, github: { prView: () => null }, statusGithub: github, ratify: NO_INSTANCE_RATIFY, inboxFromSlowLane: true,
+    inboxSourceIdentity: { instance: root.instance, repository, root: join(root.root, "repos", repository.split("/")[1] ?? repository),
+      planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root },
+    inboxAuditScope: { instance: root.instance, repository },
   };
-  return [buildInboxThreadsRoute(deps), buildInboxThreadRoute(deps), buildInboxThreadReplyRoute(deps), buildInboxThreadReadRoute(deps)];
+  return [...buildPanelReadRoutes(deps).filter(r => INSTANCE_INBOX_SOURCE_PATHS.has(r.path)),
+    buildInboxThreadReplyRoute(deps), buildInboxThreadReadRoute(deps),
+    ...buildInstanceProposalRoutes({ stateDir: join(root.root, "state"), ledgerPath: root.ledgerPath })];
 }
 
 /** The route set one non-core instance answers, rooted entirely in its own state and plan. */
@@ -230,9 +235,10 @@ export function instanceRouteSet(
 function coreInstanceRoutes(coreRoutes: readonly Route[], core: string, repository: string, opts: InstanceGatewayOptions): Route[] {
   const isInbox = (route: Route) => INSTANCE_INBOX_SOURCE_PATHS.has(route.path);
   const inboxRoot = opts.coreInboxRoot ?? opts.assistantClaimRoot;
+  const sources = [...(inboxRoot === undefined ? [] : buildInstanceProposalRoutes({ stateDir: join(inboxRoot, "state"), ledgerPath: join(inboxRoot, "state", LEDGER_FILENAME) })), ...coreRoutes.filter(isInbox)];
   return [
     ...mountUnderInstance(coreRoutes.filter((route) => !isInbox(route)), core),
-    ...mountInstanceInboxRoutes({ instance: core, repository, stateDir: inboxRoot === undefined ? undefined : join(inboxRoot, "state"), routes: coreRoutes.filter(isInbox) }),
+    ...mountInstanceInboxRoutes({ instance: core, repository, stateDir: inboxRoot === undefined ? undefined : join(inboxRoot, "state"), routes: sources }),
   ];
 }
 

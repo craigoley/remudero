@@ -1,0 +1,27 @@
+- id: W1-T9396
+  title: Add cheap pre-push net-byte gate check workflow
+  repo: remudero
+  depends_on:
+    - W1-T9395
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=71681d9b23788aae
+  attempts: 0
+  files:
+    - .github/workflows/pre-push-net-byte-check.yml
+  acceptance:
+    - claim: pre-push hook aborts when net-byte budget would be exceeded
+      proof: "unit test: pre-push hook aborts on oversized budget"
+  origin: architect
+  rationale: >-
+    From the 2026-09-22 follow-up on https://github.com/craigoley/remudero/pull/6562, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: whether `scripts/claude-md-budget-ratchet.mjs`'s net-byte gate
+    should be exercised by a cheap pre-push check (it currently only surfaces inside the full
+    instrumented suite via `test/the-doctrine-cap-tracks-the-index.test.ts`), so a future
+    doctrine-adding PR fails fast locally instead of red on the expensive required check. — from
+    PR-6562 (run DAEMON-1790081891181, https://github.com/craigoley/remudero/pull/6562)
