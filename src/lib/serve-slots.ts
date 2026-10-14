@@ -21,6 +21,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { reclaimStaleGitLocks, type StaleLockReclaimOptions } from "./git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
@@ -112,14 +113,14 @@ export interface SlotChildEntries {
  * never serve's. Never throws: a tree without the script, or a failed build, leaves the workers on their .ts source, and the
  * build removes its manifest before it writes, so a failed build never leaves a stale bundle vouched for.
  */
-export async function buildSlotChildEntries(dir: string, run: RunCommand = runCommand, now: () => number = Date.now): Promise<SlotChildEntries> {
-  const started = now();
-  if (!existsSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT))) return { outcome: "absent", ms: now() - started };
+export async function buildSlotChildEntries(dir: string, run: RunCommand = runCommand, clock: Clock = systemClock): Promise<SlotChildEntries> {
+  const started = clock.now();
+  if (!existsSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT))) return { outcome: "absent", ms: clock.now() - started };
   try {
     await run(process.execPath, [CHILD_ENTRY_BUILD_SCRIPT], dir);
-    return { outcome: "built", ms: now() - started };
+    return { outcome: "built", ms: clock.now() - started };
   } catch (err) {
-    return { outcome: "failed", reason: (err instanceof Error ? err.message : String(err)).split("\n")[0]!.slice(0, 200), ms: now() - started };
+    return { outcome: "failed", reason: (err instanceof Error ? err.message : String(err)).split("\n")[0]!.slice(0, 200), ms: clock.now() - started };
   }
 }
 

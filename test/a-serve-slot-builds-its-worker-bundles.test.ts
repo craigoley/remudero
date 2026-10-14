@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 import { buildSlotChildEntries, CHILD_ENTRY_BUILD_SCRIPT, createSlotPreparer, runCommand, type RunCommand } from "../src/lib/serve-slots.js";
 import type { ServeSupervisor } from "../src/lib/serve-supervisor.js";
@@ -96,6 +97,6 @@ test("a build that throws a non-Error still reads failed, with its time", async 
   mkdirSync(join(dir, "scripts"));
   writeFileSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT), "\n");
   let at = 100;
-  const verdict = await buildSlotChildEntries(dir, async () => { at += 40; throw "killed\nby a signal"; }, () => at);
+  const verdict = await buildSlotChildEntries(dir, async () => { at += 40; throw "killed\nby a signal"; }, clockFromMillisFn(() => at));
   assert.deepEqual(verdict, { outcome: "failed", reason: "killed", ms: 40 });
 });
