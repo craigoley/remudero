@@ -15,7 +15,7 @@ import { NEEDS_HUMAN_LABEL, type Escalation, type IssueGateway, type OpenIssue }
 import type { TriageEvidence } from "../src/lib/escalation-triage.js";
 import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
 import { createEscalationTriageHistoryReader } from "../src/lib/sweep.js";
-import { buildEscalationTriageRuntime, sweepEscalationTriage } from "../src/run-task.js";
+import { buildEscalationTriageRuntime, refreshEscalationTriageEvidence, sweepEscalationTriage } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
@@ -170,4 +170,24 @@ test("W1-T9406: the history reader takes its step slice as a parameter", async (
   assert.deepEqual([...new Set(rung.rows.map((row) => row.step))], ["escalation.issue_opened"], "the rung's default slice is unchanged");
   const strikes = await createEscalationTriageHistoryReader({ slice: { holder: "test.w1-t9406-strikes", steps: ["fix.dispatch"] } })(fixture.dir);
   assert.deepEqual(strikes.rows.map((row) => row.run_id), ["FIX-1", "FIX-2", "FIX-3"]);
+});
+
+test("W1-T9406: the daemon tick's evidence refresh loads the slice, and a failed one is logged, not thrown", async (t) => {
+  const fixture = corpus();
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9406-root-"));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(fixture.dir, { recursive: true, force: true }); });
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>): void => void logged.push([step, extra]);
+  const runtime = runtimeFor(root);
+  await refreshEscalationTriageEvidence(runtime, fixture.path, log);
+  const spy = syncReadSpy();
+  try {
+    runtime({ issues: {} as never, ledgerPath: fixture.path, runId: "TICK-T9406" }).evidence!(BORN);
+  } finally {
+    spy.restore();
+  }
+  assert.deepEqual(spy.counts, { rotationReads: [], gunzips: 0 }, "the tick's refresh left nothing to read on the loop");
+  assert.deepEqual(logged, []);
+  await refreshEscalationTriageEvidence({ refresh: async () => { throw new Error("EIO: the state dir went away"); } }, fixture.path, log);
+  assert.deepEqual(logged, [["escalation_triage.evidence_refresh_failed", { error: "EIO: the state dir went away" }]]);
 });

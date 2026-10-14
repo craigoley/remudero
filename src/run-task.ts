@@ -3421,6 +3421,23 @@ export function buildEscalationTriageRuntime(
   }, { refresh });
 }
 
+/**
+ * W1-T9406: a pass driver's refresh of the triage evidence slice, loading its new rotations off the loop before the
+ * pass triages anything. A failed refresh is contained and logged: the evidence then reads what it lacks inline, as
+ * the union would, or refuses when the slice is unreadable.
+ */
+export async function refreshEscalationTriageEvidence(
+  runtime: Pick<ReturnType<typeof buildEscalationTriageRuntime>, "refresh">,
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  try {
+    await runtime.refresh(ledgerPath);
+  } catch (e) {
+    log("escalation_triage.evidence_refresh_failed", { error: String((e as Error)?.message ?? e) });
+  }
+}
+
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
 // anchored to the `commandSpec`/`COMMANDS` registry it reads. Re-exported below for
 // test/run-task.test.ts's existing import. `flagValue` (W1-T2888) joined it for the identical
@@ -47965,16 +47982,9 @@ export function buildSweepHook(
     const tickRead = await tickReadFor?.();
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
-    if (!github) {
-      configureEscalationTriage(triageRuntime);
-      // W1-T9406: before this tick triages anything, load the evidence slice's new rotations off the loop. A failed
-      // refresh is contained: the evidence then reads what it lacks inline, as the union would, or refuses.
-      try {
-        await triageRuntime.refresh(ledgerPath);
-      } catch (e) {
-        log("escalation_triage.evidence_refresh_failed", { error: String((e as Error)?.message ?? e) });
-      }
-    }
+    if (!github) configureEscalationTriage(triageRuntime);
+    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
     try {
       await mainHealthRung?.();
     } catch (e) {
