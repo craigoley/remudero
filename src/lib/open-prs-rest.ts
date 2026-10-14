@@ -1257,9 +1257,7 @@ function concludedRunJobsAsRead(
   return undefined;
 }
 
-/** W1-T2947: one job of the jobs response, keeping the `name` and `id` the single-job requeue targets.
- *  Each is carried only when GitHub supplied a usable one; the keys are otherwise ABSENT, so a missing
- *  identity reads as "cannot target this job" and never as an empty-string name or a zero id. */
+/** W1-T2947: keeps the job `name`/`id` the requeue targets; an unusable one is ABSENT, never "" or 0. */
 function restJobObservation(x: { status?: string | null; name?: string | null; id?: number | null }): WorkflowRunJobObservation {
   return {
     status: typeof x.status === "string" ? x.status : undefined,

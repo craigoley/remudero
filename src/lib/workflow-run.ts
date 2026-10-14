@@ -14,13 +14,10 @@
  * produces it. This is that shape, one field over.
  */
 
-/** One job of a workflow run. `name` and `id` (W1-T2947) are present only when GitHub's payload carried
- *  them as a non-empty string / a number; they are the identity the single-job requeue needs, and an
- *  absent one means the job cannot be targeted — never a guess. */
+/** One job of a run; `name`/`id` (W1-T2947) are the single-job requeue's target, absent when unusable. */
 export interface WorkflowRunJobObservation {
   status?: string;
   name?: string;
-  /** GitHub's job id, as the decimal string `actions/jobs/{job_id}/rerun` takes. */
   id?: string;
 }
 
