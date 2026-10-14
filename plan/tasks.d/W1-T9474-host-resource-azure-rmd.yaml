@@ -1,0 +1,19 @@
+- id: W1-T9474
+  title: "HOST azure: rmd keeps growing (+256 MB/h, 170% of the state fall) across 117 janitor passes and no janitor rule reaps it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "host-resource:azure:rmd"
+  files:
+    - deploy/rmd-host-cleanup.sh
+  acceptance:
+    - claim: "the janitor reaps rmd on azure with a rule that cites its origin host-resource:azure:rmd, so its growth rate stops being positive"
+      proof: "grep: host-resource:azure:rmd in deploy/rmd-host-cleanup.sh"
+  note: "Filed by the host-resource gardener (W1-T4804). BEFORE: rmd grew 256 MB/h over 33.1 h (5 samples) while the janitor ran 117 times. The gardener measures this consumer's growth rate again a week after filing and credits or debits the remedy by whether it stopped growing. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."

@@ -382,6 +382,7 @@ export interface RemoteRefReserver {
    * double may omit it entirely, exactly like {@link reservedFloor}.
    */
   recordFilingBranch?(taskId: string, branch: string): boolean;
+  wonAnchor?(taskId: string): string | undefined;
 }
 
 /** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
@@ -818,6 +819,9 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     takeoverOf(taskId) {
       return takeovers.get(taskId);
     },
+    wonAnchor(taskId) {
+      return wonAnchors.get(taskId);
+    },
     recordFilingBranch(taskId, branch) {
       if (!branch || branch === "unknown") return false;
       const previousAnchor = wonAnchors.get(taskId);
@@ -916,9 +920,9 @@ export function withIdReservationLogging<T>(
  * Reserve the first id at or above `startId` no other writer holds ON THE REMOTE. Same policy as
  * {@link reserveTaskIdFrom}: contention advances rather than refusing. An unreachable remote
  * refuses to mint rather than reconciling optimistically later, which is what took `origin/main`
- * down twice before this existed. Nothing ever releases a reservation, either: a hole in the
- * sequence is cheap and normal here, cheaper than the distributed-state problem release-on-merge
- * would trade it for. A hole is not a defect; a collision is.
+ * down twice before this existed. Only a filer refused before any push releases its OWN claim,
+ * leased on its sha (task-id-release.ts); nothing releases on merge or another writer's claim.
+ * A hole is not a defect; a collision is.
  * Why: docs/forensics/task-id-reservation.md#reservetaskidremote.
  */
 export function reserveTaskIdRemote(
@@ -1010,8 +1014,8 @@ export function reserveTaskIdRemote(
 }
 
 /** A block of ids reserved on the remote, one ref each — the remote twin of
- *  {@link TaskIdReservationBlock}, with no `releaseAll`: nothing releases a remote reservation,
- *  deliberately (see {@link reserveTaskIdRemote}'s own doc). */
+ *  {@link TaskIdReservationBlock}, with no `releaseAll`: only task-id-release.ts gives back a
+ *  refused filer's own claim (see {@link reserveTaskIdRemote}'s own doc). */
 export interface RemoteReservationBlock {
   /** The reserved ids, ascending — mirrors {@link TaskIdReservationBlock.ids}. */
   readonly ids: number[];

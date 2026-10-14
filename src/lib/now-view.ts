@@ -1145,6 +1145,11 @@ export function createNowView(opts: NowViewOptions): {
     gateway?: ReturnType<typeof snapshotGithub>;
     h?: Held;
     rows?: ReadonlyArray<Row>;
+    /**
+     * W1-T9458: the projector's newest row when the board stage caught up. `state` is the live slot state, which
+     * moves on while later stages run, so the body's ledger source is stamped with this: what its board read.
+     */
+    boardNewestTs?: string | null;
     snapshot?: BoardSnapshot;
     decisions?: NowDecisionsData;
     body?: { key: string; data: NowViewData; sources: ViewSource[] };
@@ -1198,6 +1203,7 @@ export function createNowView(opts: NowViewOptions): {
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
       if (!h.board.update({ force: true }).caughtUp) return false;
+      b.boardNewestTs = b.state.newestTs;
       b.h = h;
       b.rows = h.board.rows();
     }],
@@ -1225,7 +1231,9 @@ export function createNowView(opts: NowViewOptions): {
       shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])), credit: h.board.creditRead() });
       const sources: ViewSource[] = [
-        ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
+        // A row the projector ingested after the board stage is not in this body: its asOf must not claim it, or the
+        // shadow's gap window (view asOf, legacy asOf] misses that row and calls the lag real (W1-T9458).
+        ...(opts.ledgerSource ? [opts.ledgerSource({ ...state, newestTs: b.boardNewestTs !== undefined ? b.boardNewestTs : state.newestTs }, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
         planSource(`plan:${instance.name}`, planBehind(instance), now),
         judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe!.sampledAt, state: "fresh" }, now),
