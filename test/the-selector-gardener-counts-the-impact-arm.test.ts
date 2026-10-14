@@ -119,6 +119,29 @@ describe("test/the-selector-gardener-counts-the-impact-arm.test.ts", () => {
     assert.deepEqual(fallbackWithNarrowMiss.misses.map((m) => m.selection), ["narrow"]);
   });
 
+  test("the impact map's distance survives parsing, shards, storage and each impact miss", async (t) => {
+    const missed = { ...record([{ ...hit(), impact: "missed" }]), impactDistance: 240 };
+    assert.deepEqual(gardener.parseSelectorShadowLines(line(missed)), [missed]);
+    const produced = shadowRecord({ fullRun: false, suites: ["test/hit.test.ts"], narrow: ["test/hit.test.ts"],
+      impact: ["test/hit.test.ts"], impactDistance: 240, reasons: [],
+      recentOnly: { floor: [], narrow: [], impact: [] } }, ["test/hit.test.ts"]);
+    assert.deepEqual(gardener.parseSelectorShadowLines(line(produced)), [produced], "the producer's own record");
+    for (const bad of [{ ...record(), impactDistance: -1 }, { ...record(), impactDistance: 1.5 },
+      { fullRun: false, floorSize: 80, failures: [], impactDistance: 3 }]) {
+      assert.throws(() => gardener.parseSelectorShadowLines(line(bad)), /invalid record sizes/, JSON.stringify(bad));
+    }
+    const split = run(7, missed);
+    split.log = split.log.split("\n").map((l, i) => i === 1 ? l.replace('"impactDistance":240', '"impactDistance":241') : l).join("\n");
+    assert.throws(() => gardener.selectorShadowReport([split], 100), /inconsistent impact evidence/);
+    assert.deepEqual(gardener.selectorShadowReport([run(1, missed)], 100).misses.map((m) => [m.selection, m.impactDistance]),
+      [["impact", 240]], "an impact miss names how far its map was behind");
+    const h = harness(t);
+    const stored = await h.pass([run(1, missed)], async () => ["test/hit.test.ts"]);
+    assert.deepEqual(stored.unattributed.misses.map((m) => [m.selection, m.impactDistance]), [["impact", 240]]);
+    assert.deepEqual(h.rows(gardener.SELECTOR_SHADOW_OBSERVATION_STEP).map((r) => r.impact_distance), [240]);
+    assert.equal(gardener.readSelectorShadowObservations(h.stateDir).observations[0]!.impactDistance, 240);
+  });
+
   test("live impact attribution and fallback reasons survive storage and source reports", async (t) => {
     const h = harness(t);
     const first = await h.pass([

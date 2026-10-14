@@ -22,6 +22,7 @@ import {
   buildImpactMap,
   decodeMappings,
   IMPACT_MAP_FORMAT,
+  IMPACT_MAP_STALENESS_BOUND,
   impactArmSelection,
   impactDrift,
   impactTouches,
@@ -175,10 +176,11 @@ test("W1-T6083: an edit to an exported module-scope binding selects every suite 
 
 test("W1-T6083: an impact map older than its staleness bound falls back to the narrow selection and names the fallback", () => {
   const diffText = diffOf("src/m.ts", ["@@ -11 +11 @@", "-a", "+b"]);
-  const stale = armFor(fixture.map, diffText, { drift: { distance: 151, changedSinceMap: [] } });
+  const bound = IMPACT_MAP_STALENESS_BOUND;
+  const stale = armFor(fixture.map, diffText, { drift: { distance: bound + 1, changedSinceMap: [] } });
   assert.deepEqual(stale.suites, ["test/narrow.test.ts"]);
-  assert.match(stale.fallback!, /stale: 151 commits behind the base, past its bound of 150/);
-  assert.equal(armFor(fixture.map, diffText, { drift: { distance: 150, changedSinceMap: [] } }).fallback, undefined, "at the bound it still speaks");
+  assert.match(stale.fallback!, new RegExp(`stale: ${bound + 1} commits behind the base, past its bound of ${bound}$`));
+  assert.equal(armFor(fixture.map, diffText, { drift: { distance: bound, changedSinceMap: [] } }).fallback, undefined, "at the bound it still speaks");
   // Through the selector: on a fallback the arm IS the narrow selection, and the shadow record says why.
   const input: AffectedSuitesInput = {
     files: FIXTURE_FILES, pathReaders: [], symbolSuites: [B],
@@ -190,6 +192,28 @@ test("W1-T6083: an impact map older than its staleness bound falls back to the n
   const record = shadowRecord(sel, [A]);
   assert.equal(record.impactSize, sel.narrow!.length);
   assert.match(record.impactFallback!, /stale/);
+});
+
+test("the staleness bound covers two days of main, and the shadow record carries the impact map's distance", () => {
+  // MEASURED 2026-09-30..10-13: main lands 149–272 first-parent commits a day, so a bound of 150
+  // silenced the arm for the last hours of 11 of 13 days and for any day after a missed nightly.
+  assert.ok(IMPACT_MAP_STALENESS_BOUND >= 2 * 244, `two days at the busiest measured rate (244/day): ${IMPACT_MAP_STALENESS_BOUND}`);
+  const diffText = diffOf("src/m.ts", ["@@ -11 +11 @@", "-a", "+b"]);
+  const run = (drift: { distance?: number; changedSinceMap: string[]; problem?: string }, withMap = true) => {
+    const sel = selectAffectedSuites(["src/m.ts"], {
+      files: FIXTURE_FILES, pathReaders: [], symbolSuites: [B],
+      impact: withMap ? { map: fixture.map, diffText, drift } : { mapProblem: "none", diffText, drift },
+    });
+    return { sel, record: shadowRecord(sel, [A]) };
+  };
+  const speaking = run({ distance: 240, changedSinceMap: [] });
+  assert.equal(speaking.sel.impactFallback, undefined, "a day's drift no longer silences the arm");
+  assert.equal(speaking.record.impactDistance, 240, "a speaking arm records its map's distance");
+  const stale = run({ distance: IMPACT_MAP_STALENESS_BOUND + 1, changedSinceMap: [] });
+  assert.match(stale.record.impactFallback!, /stale/);
+  assert.equal(stale.record.impactDistance, IMPACT_MAP_STALENESS_BOUND + 1, "a stale fallback records its distance too");
+  assert.equal(run({ changedSinceMap: [], problem: "no ancestry" }).record.impactDistance, undefined, "no distance is invented");
+  assert.equal(run({ changedSinceMap: [] }, false).record.impactDistance, undefined, "no map, no distance");
 });
 
 test("W1-T6083: the other fallbacks — no map, a base not descended from it, a non-code input, a drifted file, no diff — each name themselves", () => {

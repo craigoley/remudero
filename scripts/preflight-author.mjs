@@ -14,11 +14,20 @@ import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
+import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
 /** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
 export const AUTHOR_MAX_WORKERS = 4;
+/** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
+export const AUTHOR_DOCS_PRECHECK_MAX_MS = 30_000;
+/** Only docs-index inputs and its executable contract; deletion/rename sides remain in the diff. */
+export function authorDocsIndexInputs(changedFiles) {
+  return changedFiles.filter(path => (path.startsWith('docs/') && (path.endsWith('.md') || path === 'docs/docs-index.json')) ||
+    path.startsWith('scripts/generate-docs-index') || path === '.github/workflows/docs-index-check.yml' || path === 'package.json');
+}
 /** The share of the author step runtime one affected-test run may spend: the wall time an author waits. */
 export const AUTHOR_WALL_SHARE = 1 / 16;
 /** A suite is never priced below this, so an unmeasured file in an empty manifest is not free. */
@@ -198,9 +207,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}) => {
-    const runtimeLimitMs = deadline === undefined ? AUTHOR_STEP_RUNTIME_MS :
-      Math.min(AUTHOR_STEP_RUNTIME_MS, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS) => {
+    const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
+      Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
@@ -228,6 +237,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
     }
     receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
+      durationMs: result.durationMs ?? null, startedAt: result.startedAt ?? null, finishedAt: result.finishedAt ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name.startsWith('affected-tests') ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
@@ -317,6 +327,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (receipt.suites.length === 0 && receipt.selection !== 'plan-only') throw new Error('no verified test files in the checkout');
     console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
+      const dependencyBefore=authorDependencyProvenance(root);
+      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusOk = census.status === 0 && !census.signal && !census.error;
       report('census-precheck', census, censusOk);
@@ -324,6 +337,21 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
+        const docsInputs = authorDocsIndexInputs(receipt.changedFiles);
+        receipt.docsIndexPrecheck = { required: docsInputs.length > 0, inputs: docsInputs };
+        if (docsInputs.length > 0) {
+          // Execute the SAME governed package commands as hosted docs-index-check,
+          // before claiming a heavyweight slot. Never fix generated output inside a gate.
+          for (const script of ['docs-index:check', 'docs-index:check-paths']) {
+            const name = `docs-index-precheck:${script}`, result = runStep(name, ['run', '--silent', script], 'npm', {}, AUTHOR_DOCS_PRECHECK_MAX_MS);
+            const ok = result.status === 0 && !result.signal && !result.error && result.outputComplete !== false;
+            report(name, result, ok, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
+            if (!ok) {
+              receipt.affectedTestsNotRunReason = `${name} did not succeed; no heavy slot/static/test phase was started`;
+              throw new Error(`changed docs inputs failed ${script}; regenerate/repair the index on a separate committed tree`);
+            }
+          }
+        }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
         const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });
@@ -361,6 +389,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             report('lint-plan-fast', lint, lintOk);
           }
           if (staticOk && lintOk) {
+            const dependencyAfterStatic=authorDependencyProvenance(root);
+            receipt.dependencyProvenance.afterStatic=dependencyAfterStatic;
+            if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfterStatic))throw new Error('installed dependency donor changed during static validation; tests not started');
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
@@ -441,6 +472,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
         throw new Error('the author tree changed during verification; receipt refused');
       }
+      const dependencyAfter=authorDependencyProvenance(root);
+      receipt.dependencyProvenance.after=dependencyAfter;
+      if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfter))throw new Error('installed dependency donor changed during author validation; receipt refused');
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
@@ -451,6 +485,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     console.error(`author preflight REFUSED: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
+  receipt.phaseAccounting = accountAuthorPhases(receipt);
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
     if (diagnosticsRoot) {

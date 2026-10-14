@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.12
   status: queued
@@ -82,3 +82,15 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/config.ts and a new test file, test/check-ci-log-coverage-shard.test.ts. Neither is a secrets, auth, deploy, merge-policy or deletion surface."
+      - "The description is a CI-friction remedy. It states no deletion, no irreversible action, and no operator-only decision on budget or policy."
+      - "The change's PR still passes CI and review. The filing is machine-authored, and the gates state records only that the machine-filing judge releases it or escalates it."
+      - "The family track record is mixed, with 24 merged and 40 declined (Beta mean 0.60). That calls for some caution but is not a danger signal in itself."
+      - "The acceptance is a grep for a test name in a file that does not yet exist. The rationale shows the failing tests are varied and the cause is vague, so the fix may be ineffective. That is an effectiveness concern, not a risk-class one."
+    judged_at: "2026-10-14T08:52:32.102Z"
+    pin: "cd5d59ac94fe451494811c60815dcd2d117e8b435770cc17f03d73298e78e064"
