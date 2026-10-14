@@ -2229,7 +2229,7 @@ export function ensureDeps(
     // outlive its timeout and hold the reviewer the way a wedged proof did.
     const root = configuredDependencySeedRoot();
     if (root && !existsSync(nodeModules)) materializeDependencySeed(cwd, { root, proof: true, env: proofInstallEnv(),
-      runInstall: (stage, args) => { exec("npm", args, { cwd: stage, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" }); } });
+      runInstall: (stage, args, env) => { exec("npm", args, { cwd: stage, env, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" }); } });
     else exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */

@@ -13,6 +13,11 @@ links read-only external packages with private root caches and checkout-local wo
 `--proof` disables lifecycle scripts and gives Linux proofs independent copies.
 Darwin and Linux, toolchain versions, workspace manifests, project npm options, and proof/development
 policy never share a generation. Inputs are required; unreadable or escaping inputs fail closed.
+Seed installs default their npm cache to `.npm-cache` inside the seed root, so
+Azure's root disk and a broken account cache symlink cannot receive the downloads.
+An explicit npm cache environment override is preserved. An empty
+`RMD_DEPENDENCY_SEED_ROOT` disables account preferences; test setup uses this
+unless a fixture supplies its own root, avoiding writes to the operator store.
 
 Enabled worker, hand-worktree and proof paths use the provisioner. Existing checkouts are retained.
 The asynchronous reviewer invokes the standalone tool in a bounded child process.

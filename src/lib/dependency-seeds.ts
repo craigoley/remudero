@@ -21,7 +21,7 @@ export interface DependencySeedOptions {
   npmVersion?: string;
   env?: NodeJS.ProcessEnv;
   now?: number;
-  runInstall?: (stage: string, args: string[]) => void;
+  runInstall?: (stage: string, args: string[], env: NodeJS.ProcessEnv) => void;
   lockWaitMs?: number;
 }
 export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean };
@@ -33,6 +33,7 @@ export function dependencySeedConfigPath(home = homedir()): string {
 /** Configuration is opt-in, so rollout never rewires an existing service or checkout. */
 export function configuredDependencySeedRoot(home = homedir(), env = process.env): string | undefined {
   const override = env.RMD_DEPENDENCY_SEED_ROOT;
+  if (override === "") return undefined; // Explicitly disable account preferences for isolated test fixtures.
   if (override) {
     if (!isAbsolute(override)) throw new Error("RMD_DEPENDENCY_SEED_ROOT must be absolute");
     return override;
@@ -221,7 +222,9 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
       }
       else {
         const args = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
-        (opts.runInstall ?? ((cwd, argv) => execFileSync("npm", argv, { cwd, env: opts.env ?? process.env, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" })))(stage, args);
+        const parentEnv = opts.env ?? process.env;
+        const env = { ...parentEnv, npm_config_cache: parentEnv.npm_config_cache ?? parentEnv.NPM_CONFIG_CACHE ?? join(root, ".npm-cache") };
+        (opts.runInstall ?? ((cwd, argv, env) => execFileSync("npm", argv, { cwd, env, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" })))(stage, args, env);
         mkdirSync(join(stage, "node_modules"), { recursive: true });
         installed = true;
       }

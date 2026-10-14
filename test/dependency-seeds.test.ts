@@ -150,9 +150,10 @@ test("dependency seed fails closed on mismatched or incomplete donors and instal
 
 test("dependency seed npm installs disable lifecycle scripts and publish only a verified generation", () => fixture((root, donor, checkout) => {
   let installs = 0;
-  const result = materializeDependencySeed(checkout, { ...identityOptions, root: join(root, "seeds"), proof: true, runInstall: (stage, args) => {
+  const result = materializeDependencySeed(checkout, { ...identityOptions, root: join(root, "seeds"), proof: true, runInstall: (stage, args, env) => {
     installs++;
     assert.deepEqual(args, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    assert.equal(env.npm_config_cache, join(root, "seeds", ".npm-cache"));
     mkdirSync(join(stage, "node_modules", "dep"), { recursive: true });
     writeFileSync(join(stage, "node_modules", "dep", "package.json"), '{"name":"dep","version":"1.0.0"}');
   } });
@@ -214,6 +215,7 @@ test("dependency seed account configuration is optional and invalid configuratio
   const file = dependencySeedConfigPath(root); mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, '{"enabled":false}'); assert.equal(configuredDependencySeedRoot(root, {}), undefined);
   writeFileSync(file, '{"enabled":true,"root":"/durable/seeds"}'); assert.equal(configuredDependencySeedRoot(root, {}), "/durable/seeds");
+  assert.equal(configuredDependencySeedRoot(root, { RMD_DEPENDENCY_SEED_ROOT: "" }), undefined);
   writeFileSync(file, '{"enabled":true,"root":"relative"}'); assert.throws(() => configuredDependencySeedRoot(root, {}), /absolute/);
   writeFileSync(file, 'broken json'); assert.throws(() => configuredDependencySeedRoot(root, {}), /JSON/);
 }));
