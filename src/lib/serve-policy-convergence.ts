@@ -187,7 +187,7 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
  * (the deploy cycle's own `imagePublished`); before that it waits for the build, which is never drift.
  * An unreadable build sha leaves today's daemon comparison deciding.
  */
-function readServeImage(deps: ServeImageDeps): ServeImageDrift | undefined {
+function readServeImage(deps: Parameters<typeof runServePolicyCycle>[0]): ServeImageDrift | undefined {
   const inputs = deps.serveImageInputs?.();
   if (inputs === undefined) return deps.serveImageDrift?.();
   if (inputs.behind === 0) return undefined;
@@ -199,11 +199,6 @@ function readServeImage(deps: ServeImageDeps): ServeImageDrift | undefined {
     : `an image containing ${newest.slice(0, 9)} is ${published === false ? "not published yet" : "of unknown publication"}`;
   return { kind: "unknown", reason: `serve is ${inputs.behind} image-input commit(s) behind origin/main, but ${image} — waiting for the build` };
 }
-
-type ServeImageDeps = Pick<DeployDeps, "newestBakedSha" | "imagePublished"> & {
-  serveImageDrift?: () => ServeImageDrift | undefined;
-  serveImageInputs?: () => ServeImageInputs | undefined;
-};
 
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
@@ -294,6 +289,7 @@ export function realServePolicyDeps(
   if (isPrimaryDeployment(registryText, o.stateRoot) !== true) return {};
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
+  const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
   return {
     servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
@@ -318,7 +314,6 @@ export function realServePolicyDeps(
         return undefined; // serve down or no docker — the daemon comparison decides, as before
       }
       if (!/^[0-9a-f]{40}$/i.test(buildSha)) return undefined; // built without RMD_BUILD_SHA reads "unknown"
-      const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
       // serve executes every baked input, and the deploy cycle's lockfile image inputs too
       const baked = bakedPathCommitsBehind(buildSha, git, "serve");
       if (baked === undefined) return undefined;
@@ -379,7 +374,7 @@ export function realServePolicyDeps(
     escalate: (e) => {
       const slug = (() => {
         try {
-          return githubSlugOf(exec("git", ["-C", o.installPath, "remote", "get-url", "origin"]).trim());
+          return githubSlugOf(git(["remote", "get-url", "origin"]).trim());
         } catch {
           return undefined; // no origin — the failure row and back-off file still record it
         }
