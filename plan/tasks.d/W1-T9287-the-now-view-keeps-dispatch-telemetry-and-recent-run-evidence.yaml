@@ -1,0 +1,27 @@
+- id: W1-T9287
+  title: "Preserve dispatch worker identity on Now and per-event telemetry on recent activity"
+  repo: remudero
+  depends_on: []
+  priority: 1.75
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-13 operator-approved follow-up; issue #9587"
+  plan_refs: ["W1-T5025"]
+  files: ["src/lib/now-view.ts","src/lib/board.ts","src/lib/recent-projection.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/the-now-view-keeps-dispatch-telemetry-and-recent-run-evidence.test.ts"]
+  status: queued
+  attempts: 0
+  rationale: |
+    Issue #9587 records the producer/consumer projection gap: Now keeps requested/served model but drops worker and recent correlation metadata. The operator approved splitting fields by update frequency rather than causing per-event Now ETag churn.
+  design: |
+    Add runId only when the producer proves the current dispatch identity, plus role and provider on NowTask.worker. Preserve requested versus explicitly served identity and honest unknowns. Keep currentTool, lastEventAt and lastTool off that worker projection; carry them with run/provider/model/event metadata through bounded recent/task activity. Do not correlate previous attempts by task id alone or substitute another instance. Preserve measured zeros, missing/stale/malformed distinctions, heartbeat filtering, redaction, off-loop materialization and payload bounds. Prove unchanged dispatch identity does not change the worker projection when only event telemetry moves. Regenerate the producer schema. After this producer merges, coordinate a console schema pin and actual adapter regression in the console repo before closing the end-to-end issue.
+  acceptance:
+    - claim: "per-event activity cannot churn the dispatch worker projection"
+      proof: "grep: test(\"the now worker projection changes only with proven dispatch identity\" in test/the-now-view-keeps-dispatch-telemetry-and-recent-run-evidence.test.ts"
+    - claim: "recent activity retains bounded fields without inferring current-run or served identity"
+      proof: "grep: test(\"recent telemetry keeps explicit run evidence and rejects foreign attempts\" in test/the-now-view-keeps-dispatch-telemetry-and-recent-run-evidence.test.ts"
+  falsifier: |
+    Remove either worker mapping or recent serialization, infer served identity from assignment, or join a foreign/previous run by task id. The corresponding fixtures fail; heartbeat and measured-zero controls remain.

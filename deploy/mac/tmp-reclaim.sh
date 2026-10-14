@@ -13,37 +13,35 @@
 # mixed-owner paths, Git checkouts/worktrees, scheduled log/lock files, or paths with process/CWD/open
 # use or an incomplete safety scan. Those paths are recorded for review instead of silently skipped.
 #
-# THE AGE WINDOW FOLLOWS DISK PRESSURE IN TIERS (retention_window): 48 h with 30% or more of the
-# disk free, 24 h at 20-29%, 12 h at 15-19%, and 6 h below 15% or when free space cannot be read.
-# Six hours is the floor, never a target: session scratch reaped mid-session was a real failure, so
-# no tier and no override goes under it. Each pass re-reads free space, so the window widens again
-# on its own once the disk recovers. Age alone is not enough: ownership, process/CWD/open-file,
-# symlink, and Git checks below fail closed.
+# The age window is always six hours, regardless of free space. Each account runs its own hourly
+# sweep; ownership, process/CWD/open-file, symlink, and Git checks below still fail closed. Old
+# regular log files are eligible too, except when the current crontab schedules that path or any
+# safety check is uncertain.
 set -u
 shopt -s nullglob
 
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
 ROOT="${RMD_RECLAIM_ROOT:-/private/tmp}"
+SESSION_ROOT="${RMD_RECLAIM_SESSION_ROOT:-$HOME/Remudero/.session-scratch}"
 REPORT="${RMD_RECLAIM_REPORT:-$HOME/Library/Logs/remudero/tmp-reclaim-kept.txt}"
 ME=$(id -un)
 if [ "$(uname)" = Darwin ]; then owner() { stat -f %Su "$1"; }; else owner() { stat -c %U "$1"; }; fi
-# The disk counts as full at MARK_PCT used; the tier is chosen by how far below that mark it sits.
-MARK_PCT=90
+AGE_MIN=360
 
-# retention_window <points below the mark> — the age window in minutes. Tiered, never under six
-# hours. Twin of retention_window in deploy/rmd-host-cleanup.sh: change the two together.
-retention_window() {
-  local headroom="$1"
-  if [ "$headroom" -ge 20 ]; then echo 2880
-  elif [ "$headroom" -ge 10 ]; then echo 1440
-  elif [ "$headroom" -ge 5 ]; then echo 720
-  else echo 360
+# Preserve log paths used by recurring jobs. If the crontab cannot be read, fail closed for logs.
+CRON_READ_OK=0
+CRON_TEXT=""
+if command -v crontab >/dev/null 2>&1; then
+  CRON_OUTPUT=$(crontab -l 2>&1); CRON_STATUS=$?
+  if [ "$CRON_STATUS" -eq 0 ]; then
+    CRON_TEXT="$CRON_OUTPUT"; CRON_READ_OK=1
+  elif printf '%s\n' "$CRON_OUTPUT" | grep -F 'no crontab for' >/dev/null 2>&1; then
+    CRON_READ_OK=1
   fi
-}
+fi
 
-# Free space as a whole percentage of the volume holding ROOT (overridable for tests). An unreadable
-# df is not "plenty of room": it takes the six-hour floor tier.
+# Free space is reported for context only; it never changes the fixed six-hour age window.
 if [ -n "${RMD_RECLAIM_FREE_PCT:-}" ]; then
   FREE_PCT=$RMD_RECLAIM_FREE_PCT
 else
@@ -54,11 +52,11 @@ else
   esac
 fi
 case "$FREE_PCT" in
-  ""|*[!0-9]*) FREE_PCT=unknown; AGE_MIN=$(retention_window 0) ;;
-  *) AGE_MIN=$(retention_window $(( MARK_PCT - (100 - FREE_PCT) ))) ;;
+  ""|*[!0-9]*) FREE_PCT=unknown ;;
+  *) : ;;
 esac
 BEFORE_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
-# tsx's transpile cache is regenerable, so it follows the same window.
+# tsx's transpile cache is regenerable, so it follows the same fixed six-hour window.
 TSX_AGE_MIN=$AGE_MIN
 LSOF_CMD="${RMD_RECLAIM_LSOF:-$(command -v lsof 2>/dev/null || printf '/usr/sbin/lsof')}"
 if [ -n "${TMPDIR:-}" ]; then
@@ -69,12 +67,31 @@ else
   TSX_TMP_ROOT="/tmp"
 fi
 TSX_PRUNED_N=0; TSX_SKIPPED=0
-del_k=0; del_n=0; risky=()
+del_k=0; del_n=0; risky=(); risky_n=0
+session_del_k=0; session_del_n=0
 
 report_risk() {
   local reason="$1" path="$2"
   risky+=("$reason | $path")
+  risky_n=$((risky_n + 1))
   printf 'KEEP RISKY (%s): %s\n' "$reason" "$path"
+}
+
+# Return a reason when the path is scheduled output or scheduling status is uncertain.
+scheduled_log_risk() {
+  local path="$1" alias
+  case "$path" in /*) ;; *) path="$ROOT_REAL/${path#./}" ;; esac
+  [ "$CRON_READ_OK" = 1 ] || { echo 'crontab unavailable; scheduled-log status unknown'; return 0; }
+  case "$CRON_TEXT" in
+    *"$path"*) echo 'scheduled log path referenced by crontab'; return 0 ;;
+  esac
+  if [ "$ROOT_REAL" = /private/tmp ]; then
+    alias="/tmp/${path##*/}"
+    case "$CRON_TEXT" in
+      *"$alias"*) echo 'scheduled /tmp log path referenced by crontab'; return 0 ;;
+    esac
+  fi
+  return 1
 }
 
 # Return success when activity is found or cannot be ruled out. Process args
@@ -145,7 +162,11 @@ artifact_risk() {
   case "${path##*/}" in
     claude-*|com.apple.*|launchd*|powerlog|.X*|.font-unix|.ICE-unix) echo 'protected Claude/macOS temp name'; return 0 ;;
     .env|.env.*|*password*|*secret*|*token*|*credential*|*keychain*|*.pem|*.p12|*.pfx|*.keytab|id_rsa*|id_ed25519*) echo 'credential-like filename'; return 0 ;;
-    *.log|*.lock|*.pid|*.sock) echo 'log or coordination file may be scheduled/reused'; return 0 ;;
+    *.log)
+      [ -f "$path" ] || { echo 'log-like path is not a regular file'; return 0; }
+      if found=$(scheduled_log_risk "$path"); then echo "$found"; return 0; fi
+      ;;
+    *.lock|*.pid|*.sock) echo 'coordination file may be reused'; return 0 ;;
   esac
   [ "$structure_only" = 1 ] && return 1
   path_is_live_or_unknown "$path" && return 0
@@ -175,7 +196,9 @@ prune_old_tree_files() {
     esac
     if why=$(path_is_live_or_unknown "$abs"); then report_risk "$why" "$abs"; continue; fi
     case "${file##*/}" in
-      *.log) report_risk 'historical log retained for diagnostics' "$abs"; continue ;;
+      *.log)
+        if why=$(scheduled_log_risk "$abs"); then report_risk "$why" "$abs"; continue; fi
+        ;;
       *.lock|*.pid|*.sock) report_risk 'nested coordination file may be in use' "$abs"; continue ;;
     esac
     k=$(du -xsk "$abs" 2>/dev/null | cut -f1)
@@ -228,39 +251,103 @@ prune_tsx_cache() {
   fi
 }
 
+process_tmp_entry() {
+  local path="$1" old_check old_status why k
+  [ -e "$path" ] || return 0
+  # TSX is a regenerable per-file cache, handled separately; never remove its root.
+  case "${path##*/}" in tsx-*) prune_tsx_cache "$path"; return 0;; esac
+  old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
+  if [ "$old_status" -ne 0 ]; then report_risk 'age scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
+  if [ -n "$old_check" ]; then
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      prune_old_tree_files "$path"
+    fi
+    return 0
+  fi
+  why=$(artifact_risk "$path")
+  if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
+  # Recheck age and every risk gate immediately before deletion.
+  if [ "$APPLY" = 1 ]; then
+    old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
+    if [ "$old_status" -ne 0 ]; then report_risk 'age recheck unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
+    [ -z "$old_check" ] || return 0
+    why=$(artifact_risk "$path")
+    if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
+  fi
+  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
+  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
+  del_k=$(( del_k + ${k:-0} )); del_n=$(( del_n + 1 ))
+  if [ "$APPLY" = 1 ]; then
+    if ! rm -rf "$path"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/${path#./}"; fi
+  else
+    printf 'WOULD DELETE %s (%s KiB)\n' "$ROOT_REAL/${path#./}" "$k"
+  fi
+}
+
+# Session scratch is a separate, narrower policy: remove only complete direct-child directories
+# whose every item is older than six hours. Loose files are deliberately left alone. The same
+# ownership, symlink, Git, credential, scheduled-log, process/CWD/open-file checks still apply.
+session_scratch_risk() {
+  local path="$1" found status log_file why
+  why=$(artifact_risk "$path")
+  [ -z "$why" ] || { echo "$why"; return 0; }
+  found=$(find "$path" -xdev ! -type d ! -type f -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'session scratch file-type scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "special file: $found"; return 0; }
+  found=$(find "$path" -xdev -type f \( -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' -o -iname '*credential*' -o -iname '*keychain*' -o -iname '*.pem' -o -iname '*.p12' -o -iname '*.pfx' -o -iname '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'session scratch sensitive-name scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "credential-like filename: $found"; return 0; }
+  while IFS= read -r -d '' log_file; do
+    if why=$(scheduled_log_risk "$log_file"); then echo "$why"; return 0; fi
+  done < <(find "$path" -xdev -type f -name '*.log' -print0 2>/dev/null)
+  return 1
+}
+
+process_session_scratch_dir() {
+  local path="$1" recent status why k resolved
+  [ -d "$path" ] || return 0
+  if [ -L "$path" ]; then report_risk 'session scratch directory is a symlink' "$path"; return 0; fi
+  resolved=$(cd "$path" 2>/dev/null && pwd -P)
+  if [ -z "$resolved" ] || [ "$resolved" != "$path" ]; then
+    report_risk 'session scratch path changed or could not be resolved' "$path"; return 0
+  fi
+  recent=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+  if [ "$status" -ne 0 ]; then report_risk 'session scratch age scan unavailable' "$path"; return 0; fi
+  if [ -n "$recent" ]; then report_risk 'recent content inside session scratch directory' "$path"; return 0; fi
+  why=$(session_scratch_risk "$path")
+  if [ -n "$why" ]; then report_risk "$why" "$path"; return 0; fi
+  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
+  if [ -z "$k" ]; then report_risk 'session scratch size scan unavailable' "$path"; return 0; fi
+  if [ "$APPLY" = 1 ]; then
+    recent=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); status=$?
+    if [ "$status" -ne 0 ]; then report_risk 'session scratch age recheck unavailable' "$path"; return 0; fi
+    [ -z "$recent" ] || { report_risk 'recent content appeared before session scratch deletion' "$path"; return 0; }
+    why=$(session_scratch_risk "$path")
+    if [ -n "$why" ]; then report_risk "$why" "$path"; return 0; fi
+    if ! rm -rf -- "$path"; then report_risk 'session scratch delete failed/incomplete' "$path"; return 0; fi
+    printf 'deleted old session scratch directory (%s KiB): %s\n' "$k" "$path"
+  else
+    printf 'WOULD DELETE old session scratch directory %s (%s KiB)\n' "$path" "$k"
+  fi
+  session_del_k=$((session_del_k + k)); session_del_n=$((session_del_n + 1))
+}
+
 cd "$ROOT" || exit 1
 ROOT_REAL=$(pwd -P)
 for p in ./* ./.[!.]*; do
   e=${p#./}
   [ -e "./$e" ] || continue
-  # TSX is a regenerable per-file cache, handled separately; never remove its root.
-  case "$e" in tsx-*) prune_tsx_cache "./$e"; continue;; esac
-  old_check=$(find "./$e" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
-  if [ "$old_status" -ne 0 ]; then report_risk 'age scan unavailable' "$ROOT_REAL/$e"; continue; fi
-  if [ -n "$old_check" ]; then
-    if [ -d "./$e" ] && [ ! -L "./$e" ]; then
-      prune_old_tree_files "./$e"
-    fi
+  # Node tests often put many disposable trees and a large TSX cache under /private/tmp/rt.
+  # Handle its immediate children independently so the TSX batch guard runs once per cache,
+  # rather than recursively treating every generated file as a separate live-path query.
+  if [ "$e" = rt ] && [ -d "$p" ] && [ ! -L "$p" ]; then
+    for child in "$p"/* "$p"/.[!.]*; do
+      [ -e "$child" ] || continue
+      process_tmp_entry "$child"
+    done
     continue
   fi
-  why=$(artifact_risk "./$e")
-  if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/$e"; continue; fi
-  # Recheck age and every risk gate immediately before deletion.
-  if [ "$APPLY" = 1 ]; then
-    old_check=$(find "./$e" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
-    if [ "$old_status" -ne 0 ]; then report_risk 'age recheck unavailable' "$ROOT_REAL/$e"; continue; fi
-    [ -z "$old_check" ] || continue
-    why=$(artifact_risk "./$e")
-    if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/$e"; continue; fi
-  fi
-  k=$(du -xsk "./$e" 2>/dev/null | cut -f1)
-  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/$e"; continue; fi
-  del_k=$(( del_k + ${k:-0} )); del_n=$(( del_n + 1 ))
-  if [ "$APPLY" = 1 ]; then
-    if ! rm -rf "./$e"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/$e"; fi
-  else
-    printf 'WOULD DELETE %s (%s KiB)\n' "$ROOT_REAL/$e" "$k"
-  fi
+  process_tmp_entry "./$e"
 done
 TMP_REAL=$(cd "$TSX_TMP_ROOT" 2>/dev/null && pwd -P)
 if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
@@ -268,6 +355,41 @@ if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
     [ -d "$p" ] && [ ! -L "$p" ] && prune_tsx_cache "$p"
   done
 fi
+
+# The account-local Remudero session scratch root is opt-in by existence, never created here.
+# Without a test override, insist on the canonical ~/Remudero/.session-scratch location and reject
+# symlinked roots/parents so a path swap cannot redirect cleanup elsewhere.
+if [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; then
+  session_root_ok=1
+  if [ -L "$SESSION_ROOT" ] || [ ! -d "$SESSION_ROOT" ]; then
+    report_risk 'session scratch root is not a real directory' "$SESSION_ROOT"; session_root_ok=0
+  fi
+  if [ "$session_root_ok" = 1 ] && [ -z "${RMD_RECLAIM_SESSION_ROOT+x}" ]; then
+    home_real=$(cd "$HOME" 2>/dev/null && pwd -P)
+    parent_real=$(cd "$HOME/Remudero" 2>/dev/null && pwd -P)
+    parent_owner=$(owner "$parent_real" 2>/dev/null)
+    if [ -L "$HOME/Remudero" ] || [ -z "$home_real" ] || [ "$parent_real" != "$home_real/Remudero" ] || [ "$parent_owner" != "$ME" ]; then
+      report_risk 'Remudero session scratch parent is symlinked or unverified' "$SESSION_ROOT"; session_root_ok=0
+    fi
+  fi
+  if [ "$session_root_ok" = 1 ]; then
+    SESSION_ROOT_REAL=$(cd "$SESSION_ROOT" 2>/dev/null && pwd -P)
+    if [ -z "$SESSION_ROOT_REAL" ] || [ "$(owner "$SESSION_ROOT_REAL" 2>/dev/null)" != "$ME" ] || { [ -z "${RMD_RECLAIM_SESSION_ROOT+x}" ] && [ "$SESSION_ROOT_REAL" != "$parent_real/.session-scratch" ]; }; then
+      report_risk 'session scratch root owner/path unverified' "$SESSION_ROOT"; session_root_ok=0
+    fi
+  fi
+  if [ "$session_root_ok" = 1 ] && { [ ! -r "$SESSION_ROOT_REAL" ] || [ ! -x "$SESSION_ROOT_REAL" ]; }; then
+    report_risk 'session scratch root cannot be fully scanned' "$SESSION_ROOT"; session_root_ok=0
+  fi
+  if [ "$session_root_ok" = 1 ]; then
+    ROOT_REAL="$SESSION_ROOT_REAL"
+    while IFS= read -r -d '' p; do
+      process_session_scratch_dir "$p"
+    done < <(find "$SESSION_ROOT_REAL" -mindepth 1 -maxdepth 1 -type d -mmin "+$AGE_MIN" -print0 2>/dev/null)
+  fi
+fi
+ROOT_REAL=$(cd "$ROOT" 2>/dev/null && pwd -P)
+del_n=$((del_n + session_del_n)); del_k=$((del_k + session_del_k))
 AFTER_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 case "$BEFORE_AVAIL_KB:$AFTER_AVAIL_KB" in
   *[!0-9:]*|:*|*:) actual_delta="unknown" ;;
@@ -276,14 +398,16 @@ esac
 
 [ $APPLY = 1 ] && verb="Deleted" || verb="Would delete"
 printf '%s %s: %d entries, %d MB (free %s%%, age window %d min); risky retained=%d\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$verb" "$del_n" $(( del_k / 1024 )) "$FREE_PCT" "$AGE_MIN" "${#risky[@]}"
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$verb" "$del_n" $(( del_k / 1024 )) "$FREE_PCT" "$AGE_MIN" "$risky_n"
 printf 'tsx files %s: %d, skipped caches=%d; df avail %s -> %s KiB (delta %s KiB)\n' \
   "$([ "$APPLY" = 1 ] && printf 'pruned' || printf 'would-prune')" "$TSX_PRUNED_N" "$TSX_SKIPPED" "${BEFORE_AVAIL_KB:-unknown}" "${AFTER_AVAIL_KB:-unknown}" "$actual_delta"
+printf 'session scratch dirs %s: %d, %d MB (root %s; age window %d min)\n' \
+  "$([ "$APPLY" = 1 ] && printf 'deleted' || printf 'would-delete')" "$session_del_n" "$((session_del_k / 1024))" "$SESSION_ROOT" "$AGE_MIN"
 
 if [ $APPLY = 1 ]; then
   mkdir -p "$(dirname "$REPORT")"
   {
-    echo "# $(date -u +%Y-%m-%dT%H:%M:%SZ) — $ROOT retained risky paths (age may be unknown; otherwise older than the $AGE_MIN min window)"
-    printf '%s\n' "${risky[@]}"
+    echo "# $(date -u +%Y-%m-%dT%H:%M:%SZ) — retained risky paths under $ROOT and $SESSION_ROOT (age may be unknown; otherwise older than the $AGE_MIN min window)"
+    if [ "$risky_n" -gt 0 ]; then printf '%s\n' "${risky[@]}"; fi
   } > "$REPORT"
 fi

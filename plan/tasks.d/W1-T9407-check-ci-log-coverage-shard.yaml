@@ -1,0 +1,96 @@
+- id: W1-T9407
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard cost 54.8 PR minute(s) across 36 round(s) on 32 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.12
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard"
+  files:
+    - src/lib/config.ts
+    - test/check-ci-log-coverage-shard.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard"
+      proof: "grep: test(\"W1-T9407: check:ci-log:coverage-shard is prevented, not retried\" in test/check-ci-log-coverage-shard.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard cost 54.8 PR minute(s) (seven-day half-life) across 36 fix round(s) on 32 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/config.ts: test/worker-home-wiring.test.ts imports it
+    - test/worker-home-wiring.test.ts: named by the failing check
+    - the rounds name a failing test: test/worker-home-wiring.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #11595 (https://github.com/craigoley/remudero/pull/11595) at 2026-10-14T08:18:37.291Z: ci-log round — rule-checks: test/deps-interface-census.test.ts; coverage-shard (4/8)
+        failing tests: inline and aliased seams are counted and identical member-sets are reported without refusing
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/deps-interface-census.test.ts:1:4235
+          | ✖ inline and aliased seams are counted and identical member-sets are reported without refusing (88.210559ms)
+          |   AssertionError [ERR_ASSERTION]: inline seams grew from 112 to 113
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/deps-interface-census.test.ts:141:10)
+          |       at Test.runInAsyncScope (node:async_hooks:227:14)
+          |       at Test.run (node:internal/test_runner/test:1402:25)
+          |       at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+          |       at Test.postRun (node:internal/test_runner/t
+    - PR #11524 (https://github.com/craigoley/remudero/pull/11524) at 2026-10-14T01:42:35.541Z: ci-log round — docs-index-check; coverage-shard (1/8); coverage-shard (3/8): test/run-task.test.ts; coverage-shard (6/8): test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts
+        failing tests: realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh — every dep body runs, none is guessed; every dep body runs, none is guessed"]; W1-T5284: arming auto merge lets a timer fire while gh is in flight, W1-T5284: the async arm's real transport carries each gh write and the cached merge-queue read; W1-T5284: arming auto merge lets a timer fire while gh is in flight; W1-T5284: the async arm's real transport carries each gh write and the cached merge-queue read
+        log excerpt:
+          | --- generator remedy line(s) retained from earlier in this job (W1-T2733) ---
+          | Run 'npm run docs-index' and commit the result.
+          | 
+          | generate-docs-index: docs/docs-index.json is STALE -- it does not match a fresh regeneration from docs/**/*.md.
+          | Run 'npm run docs-index' and commit the result.
+          | ##[error]Process completed with exit code 1.
+    - PR #11504 (https://github.com/craigoley/remudero/pull/11504) at 2026-10-13T23:25:29.543Z: ci-log round — coverage-shard (8/8): test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts; coverage-shard (6/8): test/inbox-registry-atomic.test.ts; coverage-shard (5/8): test/a-
+        failing tests: W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site; W1-T985: the approve lane prints the overlap advisory for its filed shard, W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site; W1-T240 claim 3: approveCommand's remove-on-ratify write (`rmd approve`) reaches updateProposalRegistry, never a bare writeFileSync(registryPath; each adds through the lock-first helper","W1-T240 claim 3: approveCommand's remove-on-ratify write (`rmd approve`) reaches updateProposalRegistry, never a bare writeFileSync(registryPath"]; test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+        log excerpt:
+          | ...
+          | not ok 12 - W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site
+          |   ---
+          |   duration_ms: 1207.906839
+          |   type: 'suite'
+          |   location: '/home/runner/work/remudero/remudero/test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts:156:1'
+          |   failureType: 'subtestsFailed'
+          |   error: '1 subtest failed'
+          |   code: 'ERR_TEST_FAILURE'
+          |   ...
+          | # todo 0
+          | # duration_ms 9180.967157
+          | test-judge: NODE --TEST RUN FAILED (status 1): # fail 2. 2/2 file(s) reported, # tests 23, # fail 2. Last test started: test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts > W1-
+    - PR #11487 (https://github.com/craigoley/remudero/pull/11487) at 2026-10-13T21:53:27.782Z: ci-log round — coverage-shard (3/8); coverage-shard (1/8): test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+        failing tests: unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower; unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a sync primitive handed over as a seam default counts; a sync primitive handed over as a seam default counts
+        log excerpt:
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED names check(s) outside REQUIRED: not-a-required-check
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is EMPTY, which would gate on nothing
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not a JSON array of strings
+          | ci-gate-from-contract: refusing the merge_group gate: MERGE_GROUP_REQUIRED is not valid JSON
+          | ci-gate-from-contract: refusing the merge_group gate:
+    - PR #11452 (https://github.com/craigoley/remudero/pull/11452) at 2026-10-13T19:34:29.432Z: ci-log round — coverage-shard (4/8); coverage-shard (8/8): test/a-busy-primary-reaches-its-image-recycle.test.ts
+        failing tests: the baked supervisor catalogs cover its actual runtime import closure; W1-T6282: a daemon tree behind on deploy logic still defers, naming the paths
+
+    WHAT THE LAST RUNG TRIED: W1-T5268 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:coverage-shard in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/config.ts and a new test file, test/check-ci-log-coverage-shard.test.ts. Neither is a secrets, auth, deploy, merge-policy or deletion surface."
+      - "The description is a CI-friction remedy. It states no deletion, no irreversible action, and no operator-only decision on budget or policy."
+      - "The change's PR still passes CI and review. The filing is machine-authored, and the gates state records only that the machine-filing judge releases it or escalates it."
+      - "The family track record is mixed, with 24 merged and 40 declined (Beta mean 0.60). That calls for some caution but is not a danger signal in itself."
+      - "The acceptance is a grep for a test name in a file that does not yet exist. The rationale shows the failing tests are varied and the cause is vague, so the fix may be ineffective. That is an effectiveness concern, not a risk-class one."
+    judged_at: "2026-10-14T08:52:32.102Z"
+    pin: "cd5d59ac94fe451494811c60815dcd2d117e8b435770cc17f03d73298e78e064"

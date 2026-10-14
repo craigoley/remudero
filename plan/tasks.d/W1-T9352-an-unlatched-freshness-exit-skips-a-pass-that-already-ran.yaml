@@ -1,0 +1,86 @@
+- id: W1-T9352
+  title: "AN UNLATCHED FRESHNESS EXIT SKIPS A FULL PASS THAT ALREADY RAN SINCE MAIN ADVANCED — W1-T8170 skips the pre-exit pass only for a latched dispatch-phase exit, so on 2026-10-14 the tick-top exit started a fresh full pass at 00:31:48 with all 3 lanes empty, ran it to its bound (abandoned 00:41:31, no sweep.pass row) and only then drained: 29 lane-min"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the unlatched stale exits do not repeat a full pass that completed after main advanced
+  band_meaning: span
+  origin: "fleet-stall diagnosis 2026-10-14 for the operator session (core lanes empty 00:13:50-00:52:08Z); standing direction: fix at the root, no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T8170, W1-T1272, W1-T4998, W1-T5720, W1-T2965, W1-T8172, W1-T9114, W1-T7746]
+  files: [src/lib/daemon.ts, test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts]
+  status: queued
+  priority: 2.5  # measured 29 lane-min in one exit; 4 of 31 exits 2026-10-12..14 took this arm
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger union on the Azure host, read-only; daemon pid 1710758, boot head 08cbabc50).
+      - The last build lane settled at 00:13:50 (`lane.idle_changed` idle_slots 3/3). The WIP governor then held
+        refills host-short (`dispatch_deferred_wip` measured_bound 0 at 00:19:14, 00:23:20, 00:28:11), so no lane ran.
+      - The tick that began at 00:30:35 read stale at its top: `daemon.freshness_decision` action restart, reason
+        upper_age, 00:31:48 (cyclesEntered > 0, so the W1-T2965 first-cycle guard did not apply).
+      - `stopForFreshness` found no background pass (the 00:12:44 pass had settled; `sweep.skipped_concurrent`
+        "a previous sweep pass is still executing" at 00:22:09 and 00:28:02 shows it running past 00:28) and no
+        latch, so it started a fresh `runGatedSweep` at 00:31:48. The pass wrote board fetch rows to 00:32:30, then the
+        loop blocked (`daemon.loop_lag` 458,845 ms at 00:40:27, phase sweep) and the pass was abandoned at its bound
+        at 00:41:31 (`daemon.sweep.abandoned` elapsed 582,927, bound 559,000). It wrote no `sweep.pass` row.
+      - Only then did the drain start (00:41:31 to 00:49:58). `daemon_selfrestart_for_freshness` at 00:49:58 reads
+        `pre_exit_pass: "ran"`. The next boot (00:50:34) ran its own first pass and dispatched 3 lanes at 00:51:58.
+      - Full passes had already completed after main advanced: the advance was first held at 23:47:52
+        (`daemon.freshness_coalesced` held_ms 2,635,820 at 00:31:48), and `daemon.tick_phases` at 00:18:55 consumed a
+        completed pass of 461,551 ms. The fresh pass repeated work, and the next boot repeated it again.
+      - Cost: 9.7 min with all 3 lanes idle, 29 lane-min, in this one exit. Across 2026-10-12 to 10-14, 4 of 31
+        freshness exits took the `ran` arm (10-13 03:16Z, 04:44Z, 15:11Z, 10-14 00:49Z; decision to drain start 0.3,
+        1.5, 18.8 and 9.7 min). Whether the 15:11Z exit was latched was not separated.
+    READ on origin/main 442d86c49 (src/lib/daemon.ts, symbols):
+      - `stopForFreshness(freshness, dispatchLatchAtMs?)` skips the pass (`skipped_ran_since_latch`) only when
+        `dispatchLatchAtMs` is given and `sweepLiveness.lastCompletedAtMs` is later. Only the latched dispatch-phase
+        exit passes it (`stopForFreshness(inFlightFreshness, restartWait.decidedAtMs)`).
+      - Three exits pass no anchor: the tick-top exit (`decideFreshness(freshness) === "restart"`), the stale-reviewer
+        idle exit (`requestStaleReviewerRestart`), and the pre-admission exit with an empty dispatch set
+        (`refetchedFreshness`).
+      - The daemon already tracks when it first saw the advance it restarts for (`staleSinceMs`, set by
+        `observeFreshnessAdvance`), and `sweepLiveness.lastCompletedAtMs` counts a pass that settled after its bound.
+      - W1-T8170 design 4 kept these exits' pass because "they have no lane wait that already ran one". Since
+        W1-T4998 a full pass runs in the background every tick, so an unlatched exit after the first cycle has had
+        the same passes a latched one has.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 6 open PR heads for pre_exit_pass, "pre-exit",
+    "stale exit", "freshness exit", "tick-top exit", staleSinceMs and stopForFreshness. Control: pre_exit_pass reads
+    1 shard (W1-T8170) on main and on every head. W1-T8172 starts the drain at a latch and W1-T9114 moves reviews and
+    detached actions to children; neither changes which pre-exit pass an unlatched exit runs.
+    SEPARATE: the 8-minute loop block inside that pass is not this task. Its `daemon.loop_stall_profile` row
+    (W1-T7746) names readFileUtf8, getReport, stat and readdir but leaves 497,652 ms unattributed, while the host
+    held 4.3 GB of swap.
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait, age or count below), lean into automation.
+    1. ANCHOR THE UNLATCHED EXITS ON THE ADVANCE. The tick-top exit and the pre-admission exit with an empty dispatch
+       set pass the daemon's `staleSinceMs` (the first observation of the advance this restart is for) to
+       `stopForFreshness`. The existing check then skips the fresh `runGatedSweep` when a full pass completed after
+       that moment. `pre_exit_pass` gains a fourth value, `"skipped_ran_since_stale"`, so a latch skip and an advance
+       skip can be told apart.
+    2. W1-T1272'S GUARANTEE HOLDS. A background pass still running at exit is awaited, as today. With no full pass
+       completed since the advance, or with `staleSinceMs` unset, the bounded pass runs, as today.
+    3. The stale-reviewer idle exit keeps today's pass. Its staleness is the reviewer's code, not an observed advance
+       of main, so it has no anchor here. The latched exit is unchanged.
+    4. `daemon_selfrestart_for_freshness` also carries `stale_since_ms` and `last_pass_completed_ms` (null when no
+       pass completed), so the arm that ran can be checked against its evidence.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive runDaemon with an injected sweep,
+    checkFreshness and a fake clock, as test/a-latched-restart-exits-when-its-last-lane-settles.test.ts does.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts"
+    - claim: "a tick-top exit after a full pass completed since the advance starts no new full pass"
+      proof: 'grep: test("W1-T9352: a tick-top exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
+    - claim: "an empty-dispatch pre-admission exit after such a pass starts no new full pass"
+      proof: 'grep: test("W1-T9352: an empty-dispatch exit does not repeat a pass since the advance" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
+    - claim: "with no full pass completed since the advance, the unlatched exit still runs the bounded pass"
+      proof: 'grep: test("W1-T9352: an exit with no pass since the advance still runs one" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
+    - claim: "the restart row names the advance skip and its evidence"
+      proof: 'grep: test("W1-T9352: the restart row names the advance skip and its evidence" in test/an-unlatched-freshness-exit-skips-a-pass-that-already-ran.test.ts'
+    - claim: "the advance skip is a named pre-exit arm"
+      proof: 'grep: skipped_ran_since_stale in src/lib/daemon.ts'
+  falsifier: |
+    Keep the callers as on main: in the first test the injected sweep is called once more at the tick-top exit
+    although a pass completed after the advance, and the row reads "ran". Skip the pass unconditionally: the third
+    test sees a stale exit with no full pass since the advance and no sweep call.

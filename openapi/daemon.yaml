@@ -505,6 +505,8 @@ components:
             state:
               type: string
               enum: [running, stalled, unreadable]
+        fleetRuntimeHealth:
+          $ref: "#/components/schemas/FleetRuntimeHealth"
         needsYou:
           description: >
             W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's
@@ -513,6 +515,54 @@ components:
           $ref: "#/components/schemas/HumanGateCountSummary"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    FleetRuntimeHealth:
+      type: object
+      description: >
+        W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from
+        shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`)
+        is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading.
+        Carries destinations and reason codes only: no host paths, credential or config contents.
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [healthy, drift, unknown]
+        reason:
+          type: string
+        observedAt:
+          type: string
+        ageMs:
+          type: number
+        container:
+          type: string
+        checked:
+          type: integer
+        drift:
+          type: array
+          items:
+            type: object
+            required: [destination, reason]
+            properties:
+              destination:
+                type: string
+              reason:
+                type: string
+                enum: [missing, wrong_source, read_only, read_write]
+        alert:
+          type: object
+          description: Present only on `drift`. `remedy` is a NAME for the operator; no action is attached.
+          required: [severity, title, detail, remedy]
+          properties:
+            severity:
+              type: string
+              enum: [critical]
+            title:
+              type: string
+            detail:
+              type: string
+            remedy:
+              type: string
 
     StatusCounts:
       type: object
@@ -1668,6 +1718,8 @@ components:
         notReady: {type: integer}
         declined: {type: integer}
         fleet: {type: integer}
+        archived: {type: integer, description: "W1-T8831 -- items the operator archived; counted here and in no other lane."}
+        snoozed: {type: integer, description: "W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane."}
         needsYou:
           type: object
           required: [ready, drafting, notReady, declined]
@@ -1707,6 +1759,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        archived:
+          type: array
+          description: W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        snoozed:
+          type: array
+          description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         needsYou:
           $ref: "#/components/schemas/InboxNeedsYou"
         counts:
@@ -7417,6 +7479,194 @@ components:
         value: {type: [number, "null"]}
         notCollectedReason: {type: string}
 
+    GardenerSpend:
+      type: object
+      description: >
+        Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation.
+        Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct
+        from a complete total; absent correlation, prices or retained-corpus coverage stay unknown.
+        Host and fleet gardeners contribute no repository cost.
+      required: [version, state, reason, observedAt, materializedAt, totalUsd, pricedSubtotalUsd, counts, window, coverage, gardens]
+      properties:
+        version: {type: string, enum: [gardener-spend-v1]}
+        state: {type: string, enum: [not_collected, partial, complete]}
+        reason:
+          type: string
+          enum: [missing_registry, invalid_registry, over_budget, missing_materialization, scope_mismatch, correlation_not_available, ledger_unavailable, incomplete_evidence, priced_receipts]
+        observedAt: {type: [string, "null"], format: date-time}
+        materializedAt: {type: [string, "null"], format: date-time}
+        totalUsd: {type: [number, "null"], minimum: 0}
+        pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+        counts:
+          type: object
+          required: [priced, unpriced, unlinked]
+          properties:
+            priced: {type: [integer, "null"], minimum: 0}
+            unpriced: {type: [integer, "null"], minimum: 0}
+            unlinked: {type: [integer, "null"], minimum: 0}
+        window:
+          type: [object, "null"]
+          required: [from, through]
+          properties:
+            from: {type: string, format: date-time}
+            through: {type: string, format: date-time}
+        coverage:
+          type: object
+          required: [retainedCorpus, truncated]
+          properties:
+            retainedCorpus: {type: string, enum: [not_collected, partial, complete]}
+            truncated: {type: [boolean, "null"]}
+        gardens:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            required: [name, enabled, scope, totalUsd, pricedSubtotalUsd]
+            properties:
+              name: {type: string, maxLength: 64}
+              enabled: {type: boolean}
+              scope: {type: string, enum: [repository, host, fleet]}
+              totalUsd: {type: [number, "null"], minimum: 0}
+              pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+    RepositoryFlowBucket:
+      type: object
+      additionalProperties: false
+      required: [date, opened, merged, deliveredTasks, repairedPrs, repairRounds]
+      properties:
+        date: {type: string, pattern: '^\d{4}-\d\d-\d\d$'}
+        opened: {type: [integer, "null"], minimum: 0}
+        merged: {type: [integer, "null"], minimum: 0}
+        deliveredTasks: {type: [integer, "null"], minimum: 0}
+        repairedPrs: {type: [integer, "null"], minimum: 0}
+        repairRounds: {type: [integer, "null"], minimum: 0}
+
+    RepositoryFlow:
+      description: >
+        Optional cached repository-flow-v1. PR events use GitHub clocks and native structured
+        delivery credit, never worker verdicts. Repair counts are observed retained receipts,
+        not verified historical absence or proof of recovery. Null is unknown, not zero.
+        Source observation clocks are independent of materialization; absent on older producers.
+      type: object
+      additionalProperties: false
+      required: [version, scope, repository, state, reason, materializedAt, sources, limits, gaps, notCollected, windows]
+      properties:
+        version: {type: string, enum: [repository-flow-v1]}
+        scope: {type: string, enum: [repository]}
+        repository: {type: string, maxLength: 240}
+        state: {type: string, enum: [reported, partial, not_collected]}
+        reason: {type: [string, "null"], enum: [missing_source, invalid_source, over_budget, null]}
+        materializedAt: {type: string, format: date-time}
+        sources:
+          type: object
+          additionalProperties: false
+          required: [openObservedAt, closedObservedAt, prCorpus, prFreshness, ledgerObservedAt, ledgerCorpus, earliestLedgerAt, latestLedgerAt, observedPrs, observedRepairIdentities]
+          properties:
+            openObservedAt: {type: [string, "null"], format: date-time}
+            closedObservedAt: {type: [string, "null"], format: date-time}
+            prCorpus: {type: string, enum: [complete, partial, unavailable]}
+            prFreshness: {type: string, enum: [fresh, stale, unknown]}
+            ledgerObservedAt: {type: [string, "null"], format: date-time}
+            ledgerCorpus: {type: string, enum: [observed, partial, unavailable]}
+            earliestLedgerAt: {type: [string, "null"], format: date-time}
+            latestLedgerAt: {type: [string, "null"], format: date-time}
+            observedPrs: {type: [integer, "null"], minimum: 0}
+            observedRepairIdentities: {type: [integer, "null"], minimum: 0}
+        limits:
+          type: object
+          additionalProperties: false
+          required: [prRows, repairIdentities, publicBytes, evidencePerWindow]
+          properties:
+            prRows: {type: integer, enum: [100000]}
+            repairIdentities: {type: integer, enum: [65536]}
+            publicBytes: {type: integer, enum: [65536]}
+            evidencePerWindow: {type: integer, enum: [64]}
+        gaps: {type: array, maxItems: 16, items: {type: string, maxLength: 160}}
+        notCollected:
+          type: object
+          additionalProperties: false
+          required: [firstPass, repairLatency, backlog, efficiency]
+          properties:
+            firstPass: {type: string, enum: [initial-head and required-check policy evidence not collected]}
+            repairLatency: {type: string, enum: [required-current-head recovery evidence not collected]}
+            backlog: {type: string, enum: [historical daily backlog observations not collected]}
+            efficiency: {type: string, enum: [delivered-work price and token attribution evidence not collected]}
+        windows:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [days, from, through, coverage, buckets, summary, evidence, evidenceTruncated]
+            properties:
+              days: {type: integer, enum: [7, 30]}
+              from: {type: string, format: date-time}
+              through: {type: string, format: date-time}
+              coverage:
+                type: object
+                additionalProperties: false
+                required: [opened, merged, repairs, partialCounts]
+                properties:
+                  opened: {type: string, enum: [complete, observed, unknown]}
+                  merged: {type: string, enum: [complete, observed, unknown]}
+                  repairs: {type: string, enum: [observed, unknown]}
+                  partialCounts: {type: string, enum: ["observed lower bounds; not complete historical totals"]}
+              buckets: {type: array, maxItems: 30, items: {$ref: "#/components/schemas/RepositoryFlowBucket"}}
+              summary:
+                type: object
+                additionalProperties: false
+                required: [opened, merged, deliveredTasks, repairedPrs, repairRounds, repairReasons, mergeLatency, openAge]
+                properties:
+                  opened: {type: [integer, "null"], minimum: 0}
+                  merged: {type: [integer, "null"], minimum: 0}
+                  deliveredTasks: {type: [integer, "null"], minimum: 0}
+                  repairedPrs: {type: [integer, "null"], minimum: 0}
+                  repairRounds: {type: [integer, "null"], minimum: 0}
+                  repairReasons:
+                    type: object
+                    additionalProperties: false
+                    required: [code, flake, infrastructure, conflict, unknown]
+                    properties:
+                      code: {type: [integer, "null"], minimum: 0}
+                      flake: {type: [integer, "null"], minimum: 0}
+                      infrastructure: {type: [integer, "null"], minimum: 0}
+                      conflict: {type: [integer, "null"], minimum: 0}
+                      unknown: {type: [integer, "null"], minimum: 0}
+                  mergeLatency:
+                    type: object
+                    additionalProperties: false
+                    required: [unit, samples, p50Ms, p90Ms, missingCreatedAt]
+                    properties:
+                      unit: {type: string, enum: [ms]}
+                      samples: {type: integer, minimum: 0}
+                      p50Ms: {type: [number, "null"], minimum: 0}
+                      p90Ms: {type: [number, "null"], minimum: 0}
+                      missingCreatedAt: {type: integer, minimum: 0}
+                  openAge:
+                    type: object
+                    additionalProperties: false
+                    required: [unit, censored, asOf, samples, oldestMs, missingCreatedAt]
+                    properties:
+                      unit: {type: string, enum: [ms]}
+                      censored: {type: boolean, enum: [true]}
+                      asOf: {type: [string, "null"], format: date-time}
+                      samples: {type: integer, minimum: 0}
+                      oldestMs: {type: [number, "null"], minimum: 0}
+                      missingCreatedAt: {type: integer, minimum: 0}
+              evidence:
+                type: array
+                maxItems: 64
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [prNumber, url, kind, at]
+                  properties:
+                    prNumber: {type: integer, minimum: 1}
+                    url: {type: string, maxLength: 320}
+                    kind: {type: string, enum: [opened, merged, repair]}
+                    at: {type: string, format: date-time}
+              evidenceTruncated: {type: boolean}
+
     AnalyticsView:
       type: object
       description: >
@@ -7491,6 +7741,10 @@ components:
                     type: array
                     items:
                       $ref: "#/components/schemas/AnalyticsViewMetric"
+                  gardenerSpend:
+                    $ref: "#/components/schemas/GardenerSpend"
+                  repositoryFlow:
+                    $ref: "#/components/schemas/RepositoryFlow"
                   reason: {type: string}
                   details:
                     $ref: "#/components/schemas/AnalyticsStoredDetails"
@@ -7909,6 +8163,13 @@ components:
       required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, keys, requestsPerDay, requiredSamples, ready, reason]
       properties:
         view: {type: string}
+        qualificationGeneration:
+          type: string
+          maxLength: 160
+          description: "The current producer contract these counters qualify; older generations remain archived, not counted."
+        skipped: {type: integer, minimum: 0, description: "Samples refused because either matched producer or source was not ready."}
+        lastSkippedMs: {type: integer, minimum: 0}
+        lastSkipReason: {type: string}
         requests: {type: integer}
         firstRequestMs: {type: [integer, "null"]}
         samples: {type: integer}
@@ -8134,6 +8395,16 @@ components:
               type: string
               description: The repo registry's refusal code; GET /v1/registry answers 503 with it.
 
+    InboxSender:
+      type: object
+      description: >
+        W1-T8825: who sent an inbox item - the producer id (a machine-judge item's filer family, else the
+        proposal id's kind) and its fixed display name (src/lib/inbox-owner.ts). Never a proposal id.
+      required: [kind, name]
+      properties:
+        kind: {type: string}
+        name: {type: string}
+
     InboxViewItem:
       type: object
       description: >
@@ -8141,6 +8412,17 @@ components:
         unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
       required: [proposalId]
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         proposalId: {type: string}
         summary: {type: string}
         plain:
@@ -8185,6 +8467,14 @@ components:
               required: [proposalId]
               properties:
                 proposalId: {type: string}
+        archivedAt:
+          type: string
+          format: date-time
+          description: W1-T8831 -- when the operator archived this item (RFC 3339 UTC); present while archived, in the `archived` section only.
+        snoozedUntil:
+          type: string
+          format: date-time
+          description: W1-T8831 -- when this item's snooze ends (RFC 3339 UTC); present while snoozed, in the `snoozed` section only.
         classification:
           type: string
           description: A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340).
@@ -8231,7 +8521,7 @@ components:
           properties:
             section:
               type: string
-              enum: [needsYou, ready, drafting, notReady, declined, fleet]
+              enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
             items:
               type: array
               items:
@@ -8555,17 +8845,108 @@ components:
       properties:
         proposals:
           type: array
+          maxItems: 100
           items:
             type: object
             required: [proposalId, category, signal, confidence]
             properties:
-              proposalId: {type: string}
+              proposalId: {type: string, maxLength: 512}
               category: {type: string}
-              signal: {type: string}
+              signal: {type: string, maxLength: 160}
               confidence: {type: number}
+        recordVersion:
+          type: string
+          enum: [operator-agent-records-v1]
+        records:
+          type: array
+          maxItems: 100
+          description: >
+            W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are
+            observations from the sole native ranking evaluation, never registered ledger history. Interpret
+            detail freshness together with the envelope sources and stale flag. Unknown details stay explicit.
+          items:
+            type: object
+            required: [proposalId, detail, durable]
+            properties:
+              proposalId: {type: string, maxLength: 512}
+              detail:
+                oneOf:
+                  - $ref: "#/components/schemas/AgentGeneratedRecommendation"
+                  - type: object
+                    required: [state, reason]
+                    properties:
+                      state: {type: string, enum: [unavailable]}
+                      reason: {type: string}
+              durable:
+                oneOf:
+                  - type: object
+                    required: [state]
+                    properties:
+                      state: {type: string, enum: [unregistered]}
+                  - type: object
+                    required: [state, source, createdAt, status]
+                    properties:
+                      state: {type: string, enum: [registered]}
+                      source: {type: string, enum: [ledger]}
+                      createdAt: {type: string, format: date-time}
+                      status: {type: string, enum: [pending, accepted, rejected, expired]}
+        coverage:
+          type: object
+          required: [ranked, published, complete, unavailable, capped]
+          description: >
+            Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail
+            remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0.
+            Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine.
+          properties:
+            ranked: {type: integer, minimum: 0}
+            published: {type: integer, minimum: 0}
+            complete: {type: integer, minimum: 0}
+            unavailable: {type: integer, minimum: 0}
+            capped: {type: integer, minimum: 0}
         reason:
           type: string
-          description: Why no proposal is generated (no repository, or no committed analytics snapshot yet).
+          description: Why generation or publication was refused, including missing, malformed or over-budget sources.
+
+    AgentGeneratedRecommendation:
+      type: object
+      required: [state, kind, observationId, repository, instanceId, proposalText, reasoning, observedAt, scoreKind, evidence, unavailable]
+      properties:
+        state: {type: string, enum: [reported]}
+        kind: {type: string, enum: [generated-recommendation]}
+        observationId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        repository: {type: string, maxLength: 160}
+        instanceId: {type: string, maxLength: 160}
+        proposalText: {type: string, maxLength: 600}
+        reasoning: {type: string, maxLength: 1400}
+        observedAt: {type: string, format: date-time}
+        scoreKind:
+          type: string
+          enum: [native-heuristic]
+          description: The rank confidence is the existing heuristic, not a calibrated probability or an approval grant.
+        evidence:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [key, value, unit, source, observedAt, freshness, window]
+            properties:
+              key: {type: string}
+              value: {type: number, minimum: 0}
+              unit: {type: string, enum: [count, tokens, tokens/run, ms, ratio]}
+              source: {type: string}
+              observedAt: {type: string, format: date-time}
+              freshness: {type: string, enum: [fresh]}
+              window:
+                type: [object, "null"]
+                required: [start, end]
+                properties:
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+        unavailable:
+          type: array
+          maxItems: 6
+          items: {type: string}
+          description: Named unknowns, including source window, independent samples, causation, cost, savings and consent.
 
     NeedsYouView:
       type: object
@@ -9664,17 +10045,47 @@ components:
     # subset has no oneOf/allOf, so a TypeScript union or `extends` is flattened into one object
     # and the flattening is named in that schema's description.
 
+    PlainOptionAction:
+      type: object
+      description: An existing inbox write route, attached at serve time when valid for the item's lane.
+      required:
+        - method
+        - path
+        - fields
+      properties:
+        method:
+          type: string
+          enum: [POST]
+        path:
+          type: string
+        fields:
+          type: object
+          description: Fixed string fields to include in the request body.
+          additionalProperties:
+            type: string
+        input:
+          type: string
+          description: The free-text field the console must collect before posting.
+          enum: [reason, feedback, text]
+
     PlainOption:
       type: object
-      description: One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`).
+      description: One served inbox choice (src/lib/inbox-plain.ts's `ServedPlainOption`).
       required:
         - label
         - consequence
+        - intent
       properties:
         label:
           type: string
         consequence:
           type: string
+        intent:
+          type: string
+          description: Untagged stored options are served as reply suggestions without an action.
+          enum: [approve, decline, reframe, reply, keep]
+        action:
+          $ref: "#/components/schemas/PlainOptionAction"
 
     PlainInboxMessage:
       type: object
@@ -9712,6 +10123,9 @@ components:
           enum:
             - writer
             - template
+        sourceFingerprint:
+          type: string
+          description: Optional cache provenance, not verification of the writer's factual claims.
 
     InboxDraftedTask:
       type: object
@@ -9757,6 +10171,17 @@ components:
         - plain
         - draftedTasks
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9787,6 +10212,17 @@ components:
         - plain
         - spawnedAt
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9812,6 +10248,17 @@ components:
         - plain
         - reasons
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9860,6 +10307,17 @@ components:
         - plain
         - reason
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         classification:
           type: string
           enum: [ASK, RECORD]
@@ -9913,6 +10371,17 @@ components:
         - plain
         - lane
       properties:
+        from:
+          $ref: "#/components/schemas/InboxSender"
+        receivedAt:
+          type: [string, "null"]
+          description: When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists.
+        lastActivityAt:
+          type: [string, "null"]
+          description: The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt).
+        groupKey:
+          type: string
+          description: The key a console groups a sender's items into one thread by (equal to from.kind).
         proposalId:
           type: string
         summary:
@@ -9974,6 +10443,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxFleetItem"
+        archived:
+          type: array
+          description: W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
+        snoozed:
+          type: array
+          description: W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`.
+          items:
+            $ref: "#/components/schemas/InboxViewItem"
         counts:
           $ref: "#/components/schemas/InboxCounts"
         staleness:
@@ -10202,6 +10681,255 @@ components:
         retiredReason:
           type: string
 
+        judgment:
+          $ref: "#/components/schemas/InboxAttentionJudgment"
+
+    InboxAttentionJudgment:
+      type: object
+      required: [state, reason]
+      description: Current task-verification evidence; unclassified is never an operator ruling.
+      properties:
+        state:
+          type: string
+          enum: [judged, unclassified]
+        reason:
+          type: string
+        decision:
+          type: string
+          enum: [needs_operator, automate, backlog]
+        at:
+          type: [string, "null"]
+
+    InboxDismissalAudit:
+      type: object
+      description: Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed.
+      required:
+        - contract
+        - state
+        - scope
+        - window
+        - coverage
+        - controls
+        - denominator
+        - observed
+        - measurement
+        - items
+        - truncated
+      properties:
+        contract:
+          type: string
+          enum:
+            - inbox-dismissal-audit-v1
+        state:
+          type: string
+          enum:
+            - measured
+            - unmeasurable
+        scope:
+          type: object
+          required:
+            - instance
+            - repository
+          properties:
+            instance:
+              type:
+                - string
+                - "null"
+            repository:
+              type:
+                - string
+                - "null"
+        window:
+          type: object
+          required:
+            - from
+            - to
+          properties:
+            from:
+              type: string
+              format: date-time
+            to:
+              type: string
+              format: date-time
+        coverage:
+          type: object
+          required:
+            - receipts
+            - outcomes
+            - plan
+            - registry
+          properties:
+            receipts:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            outcomes:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            plan:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+            registry:
+              type: string
+              enum:
+                - observed
+                - partial
+                - unavailable
+        controls:
+          type: object
+          required:
+            - heldSecurity
+            - terminalMechanical
+          properties:
+            heldSecurity:
+              type: object
+              required:
+                - taskId
+                - observed
+                - passed
+              properties:
+                observed:
+                  type: boolean
+                passed:
+                  type: boolean
+                taskId:
+                  type: string
+                  enum:
+                    - W1-T216
+            terminalMechanical:
+              type: object
+              required:
+                - observed
+                - passed
+              properties:
+                observed:
+                  type: boolean
+                passed:
+                  type: boolean
+        denominator:
+          type: object
+          description: Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped.
+          required:
+            - eligible
+            - sampled
+            - returned
+            - unqualified
+            - foreign
+            - duplicates
+            - conflicting
+          properties:
+            eligible:
+              type: integer
+              minimum: 0
+            sampled:
+              type: integer
+              minimum: 0
+            returned:
+              type: integer
+              minimum: 0
+            unqualified:
+              type: integer
+              minimum: 0
+            foreign:
+              type: integer
+              minimum: 0
+            duplicates:
+              type: integer
+              minimum: 0
+            conflicting:
+              type: integer
+              minimum: 0
+        observed:
+          type: object
+          description: Observed lower bounds, never a certified zero without coverage.
+          required:
+            - falseDismissals
+            - terminalConfirmed
+            - restored
+            - unresolved
+          properties:
+            falseDismissals:
+              type: integer
+              minimum: 0
+            terminalConfirmed:
+              type: integer
+              minimum: 0
+            restored:
+              type: integer
+              minimum: 0
+            unresolved:
+              type: integer
+              minimum: 0
+        measurement:
+          type: object
+          required:
+            - falseDismissals
+            - falseDismissalRate
+          properties:
+            falseDismissals:
+              type:
+                - integer
+                - "null"
+              minimum: 0
+            falseDismissalRate:
+              type:
+                - number
+                - "null"
+              minimum: 0
+              maximum: 1
+        items:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required:
+              - receiptId
+              - proposalId
+              - taskId
+              - snapshotKey
+              - retiredAt
+              - outcome
+              - restored
+              - evidence
+            properties:
+              receiptId:
+                type: string
+              proposalId:
+                type: string
+              taskId:
+                type:
+                  - string
+                  - "null"
+              snapshotKey:
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              retiredAt:
+                type: string
+                format: date-time
+              outcome:
+                type: string
+                enum:
+                  - false_dismissal
+                  - terminal_confirmed
+                  - unresolved
+              restored:
+                type: boolean
+              evidence:
+                type: array
+                maxItems: 3
+                items:
+                  type: string
+        truncated:
+          type: boolean
+
     InboxAttentionCensusResult:
       type: object
       description: >
@@ -10209,6 +10937,8 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        dismissalAudit:
+          $ref: "#/components/schemas/InboxDismissalAudit"
         planSource:
           $ref: "#/components/schemas/PlanSource"
         scope:
@@ -10261,7 +10991,7 @@ components:
             Classification of observed decision-labelled items. These categories sum to counts.decision;
             ready does not imply that operator judgment is required, and needsPreparation is not a
             dismissal instruction. All values are observational under partial source coverage.
-          required: [ready, needsPreparation, unknown]
+          required: [ready, needsPreparation, needsTriage, unknown]
           properties:
             ready:
               type: integer
@@ -10269,6 +10999,10 @@ components:
             needsPreparation:
               type: integer
               minimum: 0
+            needsTriage:
+              type: integer
+              minimum: 0
+              description: Human-verification asks with unclassified judgement evidence.
             unknown:
               type: integer
               minimum: 0
@@ -10478,6 +11212,63 @@ components:
           type: string
           description: A proposal id from the active registry; must be non-blank.
 
+    InstanceInboxProposal:
+      type: object
+      required: [repository, instance, proposalId, summary, snapshotKey, actions]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        proposalId: {type: string}
+        summary: {type: string, maxLength: 4000}
+        snapshotKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Identity of this active proposal. Reframe must echo it; a changed proposal is refused.
+        actions:
+          type: array
+          items:
+            type: object
+            required: [action, tier, path]
+            properties:
+              action: {type: string, enum: [reframe]}
+              tier: {type: string, enum: [low]}
+              path: {type: string}
+
+    InstanceInboxReframeRequest:
+      allOf:
+        - $ref: '#/components/schemas/InboxReframeRequest'
+        - type: object
+          required: [repository, instance, threadId, intentId, snapshotKey]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+            threadId:
+              type: string
+              description: Must identify the same proposal as proposalId.
+            intentId: {type: string, minLength: 8, maxLength: 128}
+            snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+
+    InstanceInboxReframeResult:
+      type: object
+      required: [repository, instance, proposalId, ok, delivery, draftInvalidated, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        proposalId: {type: string}
+        ok: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        draftInvalidated: {type: boolean, enum: [true]}
+        replayed: {type: boolean}
+        receipt:
+          type: object
+          required: [intentId, key, status, action, threadId]
+          properties:
+            intentId: {type: string}
+            key: {type: string}
+            status: {type: string, enum: [settled, unknown]}
+            action: {type: string, enum: [reframe]}
+            threadId: {type: string}
+
     InboxReframeRequest:
       type: object
       description: POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`).
@@ -10490,6 +11281,44 @@ components:
         feedback:
           type: string
           description: The operator's feedback, captured verbatim; must be non-blank.
+
+    InboxArchiveRequest:
+      type: object
+      description: POST /v1/inbox/archive's body (src/lib/panel-graph.ts's `validateArchiveProposal`).
+      required: [proposalId, archived]
+      properties:
+        proposalId: {type: string}
+        archived: {type: boolean, description: "true sets the item aside; false brings it back."}
+
+    InboxArchiveResult:
+      type: object
+      description: POST /v1/inbox/archive's 200 body.
+      required: [ok, proposalId, archived]
+      properties:
+        ok: {type: boolean}
+        proposalId: {type: string}
+        archived: {type: boolean}
+        archivedAt: {type: string, format: date-time, description: Present while archived; the first archive's instant, kept by a repeat.}
+
+    InboxSnoozeRequest:
+      type: object
+      description: POST /v1/inbox/snooze's body (src/lib/panel-graph.ts's `validateSnoozeProposal`).
+      required: [proposalId, until]
+      properties:
+        proposalId: {type: string}
+        until:
+          type: [string, "null"]
+          format: date-time
+          description: RFC 3339 UTC time in the future when the item returns; null wakes it now.
+
+    InboxSnoozeResult:
+      type: object
+      description: POST /v1/inbox/snooze's 200 body.
+      required: [ok, proposalId, snoozedUntil]
+      properties:
+        ok: {type: boolean}
+        proposalId: {type: string}
+        snoozedUntil: {type: [string, "null"], format: date-time}
 
     InboxVerdictRequest:
       type: object
@@ -15208,7 +16037,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
         - name: cursor
           in: query
           required: false
@@ -16306,10 +17135,11 @@ paths:
           required: false
           description: >
             `needsYou` (the operator's four lanes, not paged), or one list lane: `ready`,
-            `drafting`, `notReady`, `declined`, `fleet`.
+            `drafting`, `notReady`, `declined`, `fleet`, `archived`, `snoozed` (W1-T8831: items the
+            operator set aside, listed here and in no other lane or count).
           schema:
             type: string
-            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
         - name: limit
           in: query
           required: false
@@ -16632,6 +17462,87 @@ paths:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
 
+  /v1/i/{instance}/inbox:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the selected instance's maintained Inbox.
+      description: Uses only that instance's plan, registry, ledger and classification. Missing or stale sources remain qualified; no core fallback.
+      security: [{bearerRead: []}]
+      responses:
+        '200':
+          description: Instance-qualified Inbox, with the ordinary Inbox section and pagination query contract.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InboxResult'
+                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+        '503': {description: Instance or maintained classification unavailable.}
+
+  /v1/i/{instance}/inbox/attention-census:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read only the selected instance's attention evidence.
+      security: [{bearerRead: []}]
+      responses:
+        '200':
+          description: Source-qualified attention evidence from this instance.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/InboxAttentionCensusResult'
+                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+        '503': {description: Instance or maintained classification unavailable.}
+
+  /v1/i/{instance}/inbox/proposal:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read an active proposal and its reversible action contract.
+      security: [{bearerRead: []}]
+      parameters:
+        - {name: id, in: query, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Identity-checked proposal snapshot with only mounted, usable actions.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxProposal'}
+        '404': {description: Proposal absent from this instance's active registry.}
+        '409': {description: Requested repository or instance does not match the route.}
+        '503': {description: Instance proposal source unavailable.}
+
+  /v1/i/{instance}/inbox/reframe:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Record reversible feedback in the selected instance's own source.
+      description: >
+        Requires exact instance/repository identity, matching thread/proposal identity, the current
+        proposal snapshot and a durable intent. Revalidates under the registry lock. Invalidates
+        only that proposal's cached draft and preserves its history and security holds. Exact replay
+        returns its receipt; changed replay, stale proposals and old read-only daemons refuse.
+        An unknown delivery is never automatically retried. Approval and retirement are not offered.
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InstanceInboxReframeRequest'}
+      responses:
+        '200':
+          description: Feedback recorded and draft invalidated, or an exact receipt replay.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxReframeResult'}
+        '400': {description: Invalid feedback or mismatched thread/proposal identity.}
+        '404': {description: Proposal no longer active.}
+        '409': {description: Scope, snapshot or intent conflict; or instance read-only.}
+        '503': {description: Source or receipt store unavailable. Delivery may remain unknown.}
+
   /v1/inbox/reframe:
     post:
       summary: Send feedback on a proposal -- hands off to a detached `rmd reframe`.
@@ -16655,6 +17566,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxProposalStartedResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/archive:
+    post:
+      summary: Archive an inbox item, or bring it back.
+      description: >
+        W1-T8831 (src/lib/panel-graph.ts's `buildArchiveProposalRoute`). Write tier: LOW -- it
+        decides nothing and changes no proposal state: approve, decline and restore still work on an
+        archived item, and acting on one un-archives it. Idempotent; ledgers `inbox.archived`. The mark
+        is kept in `state/inbox-triage.json` (ledger compaction cannot shed it), and the item moves to
+        the `archived` section, out of every other lane and count, on the slow lane's next pass. A
+        proposal that leaves the registry drops its mark.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxArchiveRequest"
+      responses:
+        "200":
+          description: The mark is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxArchiveResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`not_found` -- no active proposal with this id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+
+  /v1/inbox/snooze:
+    post:
+      summary: Snooze an inbox item until a time, or wake it now.
+      description: >
+        W1-T8831 (src/lib/panel-graph.ts's `buildSnoozeProposalRoute`). Write tier: LOW. `until` is an
+        RFC 3339 UTC time in the future (400 otherwise); null wakes the item now. Idempotent; ledgers
+        `inbox.snoozed`. The item sits in the `snoozed` section, out of every other lane and count,
+        until the slow lane's first pass at or after `until` re-emits the pages. The view holds no clock.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboxSnoozeRequest"
+      responses:
+        "200":
+          description: The snooze is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSnoozeResult"
         "400":
           $ref: "#/components/responses/InvalidRequest"
         "401":

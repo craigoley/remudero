@@ -104,6 +104,36 @@ test("an old remedy is judged on its most recent fortnight, not its whole histor
   assert.equal(effect.verdict, "unmeasurable", "rounds older than the capped window are not the before side");
 });
 
+test("an aged remedy reopens when its recent window regresses despite a successful first fortnight", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 20);
+  const recent = rounds(MERGE + 46 * DAY, MERGE + 60 * DAY, 200, 4);
+  const effect = ciFrictionRemedyEffect([...before, ...initial, ...recent], KEY, MERGE, MERGE + 60 * DAY);
+  assert.deepEqual(effect.before, { k: 50, n: 200 });
+  assert.deepEqual(effect.after, { k: 50, n: 200 });
+  assert.equal(effect.verdict, "debit");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [...before, ...initial, ...recent], MERGE + 60 * DAY).state, "draft");
+});
+
+test("an aged remedy credits a recent improvement instead of debiting its unsuccessful first fortnight", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 4);
+  const recent = rounds(MERGE + 46 * DAY, MERGE + 60 * DAY, 200, 20);
+  const effect = ciFrictionRemedyEffect([...before, ...initial, ...recent], KEY, MERGE, MERGE + 60 * DAY);
+  assert.equal(effect.verdict, "credit");
+  assert.deepEqual(effect.after, { k: 10, n: 200 });
+});
+
+test("an aged remedy cannot retain credit without a current post-merge observation", () => {
+  const before = rounds(MERGE - 14 * DAY, MERGE, 200, 4);
+  const initial = rounds(MERGE, MERGE + 14 * DAY, 200, 20);
+  const effect = ciFrictionRemedyEffect([...before, ...initial,
+    { pr: 9000, causeKey: KEY, at: new Date(MERGE + 61 * DAY).toISOString() }], KEY, MERGE, MERGE + 60 * DAY);
+  assert.equal(effect.after.n, 0);
+  assert.equal(effect.verdict, "pending");
+  assert.equal(ciFrictionCauseState(KEY, [remedy()], [...before, ...initial], MERGE + 60 * DAY).state, "measuring");
+});
+
 test("a cause with no task is drafted at rung 1, and a landed filing receipt holds it", () => {
   assert.deepEqual(ciFrictionCauseState(KEY, [], [], MERGE), { state: "draft", key: KEY, rung: 1 });
   const held = ciFrictionCauseState(KEY, [], [], MERGE, new Set([`ci-friction:${KEY}`]));

@@ -11,7 +11,7 @@
   origin: "operator-approved memory qualification 2026-10-11; no production enforcement activation"
   plan_refs: [W1-T7093, W1-T7094, W1-T7095, W1-T4632]
   files: [src/lib/host-memory-admission.ts, src/lib/host-memory-ledger.ts, src/lib/host-memory-learning.ts, src/lib/worker.ts, src/lib/garden-registry.ts, test/an-enforced-memory-budget-waits-in-priority-order.test.ts, test/a-memory-reservation-is-released-only-when-its-whole-tree-is-gone.test.ts, test/a-missing-memory-ledger-never-reads-as-empty.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

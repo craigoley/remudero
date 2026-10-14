@@ -52,7 +52,9 @@ export interface GardenState<C extends string> {
   lastCheap?: string;
   /** The one class whose PR is awaiting its outcome. While it waits, no new PR is opened.
    *  `mergeSeenAt` is when a pass first saw the merge, so a frozen metric is released ({@link GARDEN_PENDING_RELEASE_MS}). */
-  pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome; mergeSeenAt?: string };
+  pending?: { prUrl: string; actionClass: C; baseline: Outcome; atMerge?: Outcome; mergeSeenAt?: string; targets?: GardenTarget<C>[] };
+  /** Targets of garden PRs closed unmerged (newest last), never proposed again by a spec that reads them. */
+  declinedTargets?: DeclinedGardenTarget<C>[];
   /** The decision pending's recording time; legacy records start when next observed open. */
   pendingRecordedAt?: string;
   /** The current streak of passes whose filing threw, which defers the next attempt ({@link gardenFilingRetryAt}). */
@@ -79,6 +81,30 @@ export interface GardenEffect {
 }
 
 const GARDEN_FOLDED_EFFECTS_KEPT = 200;
+
+/** One entry a garden PR acts on; `into` is a merge's survivor. */
+export interface GardenTarget<C extends string> {
+  class: C;
+  target: string;
+  into?: string;
+}
+
+/** A target whose PR an operator closed unmerged; `prNumber` is null only for a url naming no number. */
+export interface DeclinedGardenTarget<C extends string> extends GardenTarget<C> {
+  prNumber: number | null;
+  declinedAt: string;
+}
+
+// Every pass rewrites the state file, so the list is bounded; 200 outlasts ~67 capped PRs' declines.
+const GARDEN_DECLINED_TARGETS_KEPT = 200;
+
+/** A closed PR's pending targets appended to the declined list; a pending without targets adds nothing. */
+function rememberDeclined<C extends string>(state: GardenState<C>, closed: NonNullable<GardenState<C>["pending"]>, at: string): GardenState<C> {
+  if (closed.targets === undefined || closed.targets.length === 0) return state;
+  const n = /\/pull\/(\d+)/.exec(closed.prUrl)?.[1];
+  const added = closed.targets.map((t) => ({ ...t, prNumber: n === undefined ? null : Number(n), declinedAt: at }));
+  return { ...state, declinedTargets: [...(state.declinedTargets ?? []), ...added].slice(-GARDEN_DECLINED_TARGETS_KEPT) };
+}
 
 class GardenEffectProtocolError extends RmdError {
   constructor(detail: string) {
@@ -556,7 +582,9 @@ export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W ex
   /** The evidence a class without `review` is judged on, read from the current inventory. */
   metric?: (inventory: I, actionClass: C) => Outcome;
   /** Every action any class could take now. Called after the class draws, with the same rng. */
-  candidates: (inventory: I, rng: () => number) => A[];
+  candidates: (inventory: I, rng: () => number, declined?: readonly DeclinedGardenTarget<string>[]) => A[];
+  /** The targets a landed PR records on its pending, which its close declines; absent, a close remembers none. */
+  pendingTargets?(plan: GardenPlan<C, A>): GardenTarget<C>[];
   scorecard: (inventory: I, plan: GardenPlan<C, A>) => Record<string, unknown>;
   /** Reserve the plan's IDs before apply; actions that file nothing reserve nothing. */
   prepare?(workspace: W, plan: GardenPlan<C, A>, async: boolean): readonly string[] | Promise<readonly string[]>;
@@ -596,6 +624,8 @@ export class GardenStateUnreadableError extends RmdError {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const isOutcome = (v: unknown): boolean => isRecord(v) && isCount(v.trials) && isCount(v.successes);
+const isTarget = (v: unknown): v is Record<string, unknown> => isRecord(v) && typeof v.class === "string" && typeof v.target === "string" && (v.into === undefined || typeof v.into === "string");
+const isDeclined = (v: unknown): boolean => isTarget(v) && typeof v.declinedAt === "string" && (v.prNumber === null || Number.isSafeInteger(v.prNumber));
 
 /** The first structural fault in a parsed state, or `undefined`. Optional fields may be absent (an older
  *  record), a class the spec has added since may be absent (it is initialized), but nothing present may
@@ -606,13 +636,15 @@ function gardenStateFault(parsed: unknown): string | undefined {
   for (const [name, c] of Object.entries(parsed.classes)) {
     if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
   }
-  const { pending, lastPass, lastCheap, filingFailures, refusedLanding, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
+  const { pending, lastPass, lastCheap, filingFailures, refusedLanding, foldedEffects, foldedLegacyEffects, foldedEffectThrough, declinedTargets } = parsed;
   if (pending !== undefined) {
     if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
     if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
     if (!isOutcome(pending.baseline) || (pending.atMerge !== undefined && !isOutcome(pending.atMerge))) return "`pending` has a malformed baseline";
     if (pending.mergeSeenAt !== undefined && typeof pending.mergeSeenAt !== "string") return "`pending.mergeSeenAt` is not a timestamp";
+    if (pending.targets !== undefined && (!Array.isArray(pending.targets) || !pending.targets.every(isTarget))) return "`pending.targets` is not a list of targets";
   }
+  if (declinedTargets !== undefined && (!Array.isArray(declinedTargets) || !declinedTargets.every(isDeclined))) return "`declinedTargets` is not a list of declined targets";
   if (parsed.pendingRecordedAt !== undefined && (typeof parsed.pendingRecordedAt !== "string" || !Number.isFinite(Date.parse(parsed.pendingRecordedAt)))) return "`pendingRecordedAt` is not a timestamp";
   if (lastPass !== undefined && (!isRecord(lastPass) || typeof lastPass.fingerprint !== "string" || (lastPass.landed !== undefined && typeof lastPass.landed !== "string"))) return "`lastPass` is not a fingerprint";
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
@@ -1057,10 +1089,10 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     state = { ...state, pendingRecordedAt: clock.iso() };
     writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
   }
-  // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
+  // Closing any PR is a debit and declines its targets; a reviewed class credits its merge; neither reads the corpus.
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
-    state = heldPassForgotten(judged.state);
+    state = heldPassForgotten(prState === "closed" ? rememberDeclined(judged.state, pendingBefore, clock.iso()) : judged.state);
     deps.log(`${spec.name}.gardener_judged`, { verdict: judged.verdict, classes: state.classes });
     if (state.lastCheap === cheap) {
       writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
@@ -1126,7 +1158,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         classes: spec.classes,
         state,
         rng,
-        candidates: () => spec.candidates(inventory, rng),
+        candidates: () => spec.candidates(inventory, rng, state.declinedTargets ?? []),
         switchedOff: (c) => existsSync(join(deps.stateDir, `${spec.name.toUpperCase()}_OFF-${c}`)),
       });
   const scorecard = spec.scorecard(inventory, plan);
@@ -1193,7 +1225,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null });
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (judgedByDecision(spec, c) ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
-  const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting) } : state.pending;
+  const targets = prUrl ? spec.pendingTargets?.(plan) ?? [] : [];
+  const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}) } : state.pending;
   const pendingRecordedAt = prUrl && acting !== undefined ? (judgedByDecision(spec, acting) ? clock.iso() : undefined) : state.pendingRecordedAt;
   const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
   writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");

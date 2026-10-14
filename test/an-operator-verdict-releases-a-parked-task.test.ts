@@ -296,7 +296,7 @@ test("W1-T3216: `rmd approve <task-id>` reaches the release path and writes the 
     );
     const config = { root: tmp } as never;
 
-    const code = await approveCommand(["W1-T1041"], { config });
+    const code = await approveCommand(["W1-T1041"], { config, planPath: join(tmp, "plan", "tasks.yaml") });
     assert.equal(code, 0, "the branch is REACHED and succeeds — not a usage error from the proposal path");
 
     const ledger = readFileSync(ledgerPathFor({ root: tmp } as never), "utf8").split("\n").filter(Boolean);
@@ -306,7 +306,7 @@ test("W1-T3216: `rmd approve <task-id>` reaches the release path and writes the 
     assert.equal(release[0]!.run_id, "APPROVE-W1-T1041");
 
     // Idempotent through the REAL command too, not only through the pure function.
-    const again = await approveCommand(["W1-T1041"], { config });
+    const again = await approveCommand(["W1-T1041"], { config, planPath: join(tmp, "plan", "tasks.yaml") });
     assert.equal(again, 0);
     const after = readFileSync(ledgerPathFor({ root: tmp } as never), "utf8").split("\n").filter(Boolean)
       .map((l) => JSON.parse(l) as Record<string, unknown>)
@@ -323,7 +323,7 @@ test("W1-T3216: an unknown but well-formed task id is refused AS A TASK, not as 
     mkdirSync(join(tmp, "plan"), { recursive: true });
     mkdirSync(join(tmp, "state"), { recursive: true });
     writeFileSync(join(tmp, "plan", "tasks.yaml"), "- id: W1-T1041\n  title: x\n  repo: remudero\n  type: implement\n  verify: human\n  status: queued\n  depends_on: []\n");
-    const code = await approveCommand(["W1-T9999"], { config: { root: tmp } as never });
+    const code = await approveCommand(["W1-T9999"], { config: { root: tmp } as never, planPath: join(tmp, "plan", "tasks.yaml") });
     assert.equal(code, 2, "refused — and by the TASK path, which is what the shape test buys");
     assert.equal(existsSync(ledgerPathFor({ root: tmp } as never)), false, "a refusal writes nothing at all, not even an empty ledger");
   } finally {

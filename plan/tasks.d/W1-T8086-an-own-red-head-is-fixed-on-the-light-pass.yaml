@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11 (\"go with all your recommendations\"): flow re-measure 02:00-14:09Z names own-red fix latency as the next bottleneck"
   plan_refs: [W1-T1211, W1-T2430, W1-T5922, W1-T7243, W1-T2379, W1-T2726, W1-T7955, W1-T100]
   files: [src/run-task.ts, src/lib/sweep.ts, test/an-own-red-head-is-fixed-on-the-light-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

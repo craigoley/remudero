@@ -90,3 +90,22 @@ test("W1-T4837: ledger steps map to their cause and unrelated steps to none", ()
   assert.equal(idleLaneCauseForStep("daemon.cost_governor"), "capacity_headroom");
   assert.equal(idleLaneCauseForStep("daemon.tick"), undefined);
 });
+
+test("a heavy NEW-build reservation names capacity only when its reader confirmed the hold", () => {
+  const held = idleLaneCauseForStep("dispatch.new_build_held", { state: "held" });
+  const unavailable = idleLaneCauseForStep("dispatch.new_build_held", { state: "unavailable" });
+  assert.equal(held, "capacity_headroom");
+  assert.equal(unavailable, "unknown");
+  assert.equal(idleLaneCauseForStep("dispatch.new_build_held"), "unknown");
+  assert.equal(idleLaneCauseForStep("dispatch.new_build_held", { state: "unrecognized" }), "unknown");
+  const account = fold([
+    { atMs: 0, busyLanes: 0, dispatchable: 2, cause: held, selectionRan: true },
+    { atMs: 4 * MIN, busyLanes: 0, dispatchable: 2, cause: unavailable, selectionRan: true },
+    { atMs: 11 * MIN, busyLanes: 1, dispatchable: 2 },
+  ]);
+  const row = summarizeIdleLaneAccount(account, 11 * MIN);
+  assert.equal(row.minutes_by_cause.capacity_headroom, 4);
+  assert.equal(row.minutes_by_cause.unknown, 7);
+  assert.equal(row.minutes_by_cause.selection_empty, 0, "a reservation refusal is not an empty selection");
+  assert.equal(row.idle_minutes, 11);
+});

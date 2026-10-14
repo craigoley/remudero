@@ -1,0 +1,21 @@
+id: host-io-03635d355699a974
+ts: 2026-10-12T23:42:12.586Z
+raw: >-
+  host-io:azure:nvme0n1
+
+
+  Host azure, disk nvme0n1 (backs state, daemon): busy 54% (median of 30 beats
+  across the last 3 h), await 63 ms, 303 tps.
+
+  Top readers: remudero-daemon 3.6 MB/s (106 r/s); remudero-console-daemon 1.7
+  MB/s (40 r/s); remudero-site-daemon 624 KB/s (12 r/s); cron.service 413 KB/s
+  (56 r/s); remudero-serve 79 KB/s (1 r/s).
+attachments: []
+origin: incident#03635d355699a974babcdf4034d60717f047dba9239c87e25d4b0f8d024e4a89
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

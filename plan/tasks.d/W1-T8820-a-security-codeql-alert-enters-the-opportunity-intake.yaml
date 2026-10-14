@@ -1,0 +1,45 @@
+- id: W1-T8820
+  title: "A SECURITY CODEQL ALERT ENTERS THE OPPORTUNITY INTAKE — the CodeQL intake admits only alerts tagged quality AND maintainability, so the ~18 open security-tagged warnings on main (js/http-to-file-access, js/file-access-to-http, js/insecure-temporary-file, js/indirect-command-line-injection, js/file-system-race) reach no work package at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # two concerns (Rule 19): a new opportunity source beside an existing one; the quality partition is untouched
+  band_meaning: span
+  origin: "operator session 2026-10-12: CodeQL warning backlog (operator approved, \"go with 1-4\")"
+  plan_refs: [W1-T4070, W1-T4273, W1-T4274, W1-T4333, W1-T8819]
+  files: [src/lib/codeql-quality-intake.ts, src/lib/opportunity-intake.ts, test/a-security-codeql-alert-enters-the-opportunity-intake.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12: main held 35 warning-level CodeQL alerts. `isCodeqlQualityAlert`
+    (src/lib/codeql-quality-intake.ts) admits an alert only when it carries BOTH GitHub rule tags `quality` and
+    `maintainability`; `opportunity-intake.ts` turns each unassigned quality rule into one `codeql-quality:<rule>`
+    opportunity. A security-tagged rule matches neither tag, so js/http-to-file-access (7), js/file-access-to-http
+    (5), js/insecure-temporary-file (2), js/indirect-command-line-injection (2) and js/file-system-race (2) are
+    scanned and silently excluded: no opportunity, no proposal, no task. The quality rules already flow (W1-T4274,
+    W1-T4333 came from that intake).
+    Filed instead of a new gardener lane: the opportunity intake already ranks, de-duplicates and retires CodeQL
+    rule packages; a second lane would duplicate it.
+  design: |
+    1. A sibling predicate admits an open CodeQL alert tagged `security` whose level is warning or above (rule
+       severity warning/error, or security severity medium/high/critical). Notes stay out.
+    2. Each unassigned security rule becomes one `codeql-security:<rule>` opportunity beside the quality ones, with
+       the same anchor, counts and "verify all N alert(s) without dismissing them" wording, and the same
+       rejected-feedback and already-covered exclusions.
+    3. The quality partition is byte-identical: `isCodeqlQualityAlert`, `partitionCodeqlQualityAlerts` and their
+       counts do not change, so the existing intake suite keeps passing unchanged.
+  acceptance:
+    - claim: "an open security-tagged warning CodeQL alert becomes a codeql-security opportunity for its rule"
+      proof: 'grep: test("W1-T8820: a security-tagged warning alert becomes one codeql-security opportunity" in test/a-security-codeql-alert-enters-the-opportunity-intake.test.ts'
+    - claim: "a security-tagged note does not enter the intake"
+      proof: 'grep: test("W1-T8820: a security-tagged note stays out of the intake" in test/a-security-codeql-alert-enters-the-opportunity-intake.test.ts'
+    - claim: "the quality partition is unchanged by a security alert in the same scan"
+      proof: 'grep: test("W1-T8820: the quality partition is unchanged by a security alert" in test/a-security-codeql-alert-enters-the-opportunity-intake.test.ts'
+  falsifier: |
+    Give the intake one open CodeQL js/http-to-file-access alert tagged security at rule severity warning. At
+    origin/main no opportunity names it; with the change exactly one `codeql-security:js/http-to-file-access`
+    opportunity does. Drop the sibling predicate and the first test reds.

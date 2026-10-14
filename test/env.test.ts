@@ -218,3 +218,20 @@ test("an explicit DISABLE_AUTOUPDATER in extra overrides the default (test/overr
   const child = buildWorkerEnv({ DISABLE_AUTOUPDATER: "0" }, { PATH: "/usr/bin", HOME: "/home/x" });
   assert.equal(child.DISABLE_AUTOUPDATER, "0");
 });
+
+// ── CLAUDE_CODE_DISABLE_AUTO_MEMORY grant (auto memory ignores settingSources) ──
+
+test("grants CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 to every worker child, so no worker loads the repo's shared auto memory", () => {
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "settingSources: [] alone leaves auto memory on");
+});
+
+test("NEVER copies the operator's CLAUDE_CODE_DISABLE_AUTO_MEMORY from the parent — only the granted value", () => {
+  const child = buildWorkerEnv({}, { PATH: "/usr/bin", HOME: "/home/x", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "0" });
+  assert.equal(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "an operator value must not leak in — the grant always wins");
+});
+
+test("an explicit CLAUDE_CODE_DISABLE_AUTO_MEMORY in extra overrides the default (test/override escape hatch)", () => {
+  const child = buildWorkerEnv({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: "0" }, { PATH: "/usr/bin", HOME: "/home/x" });
+  assert.equal(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "0");
+});

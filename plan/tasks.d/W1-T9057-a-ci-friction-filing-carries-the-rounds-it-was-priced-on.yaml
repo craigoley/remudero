@@ -1,0 +1,44 @@
+- id: W1-T9057
+  title: "A CI-FRICTION FILING CARRIES THE ROUNDS IT WAS PRICED ON — the failing test titles, the PR links and a log excerpt are dropped at fix.dispatch, so the rationale's RECENT ROUNDS reads '(none recorded)' and the judge escalates for missing evidence"
+  repo: remudero
+  depends_on: [W1-T9056]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the evidence a ci-friction filing carries; spans the dispatch ledger row and the drafter
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T4435, W1-T7421]
+  files: [src/run-task.ts, src/lib/ci-friction-gardener.ts, test/a-ci-friction-filing-carries-the-rounds-it-was-priced-on.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main:
+    - `fix.dispatch` (src/run-task.ts) ledgers `ci_failures[{check, signature}]` only. `CiFailure.logTail` is in memory at
+      dispatch and then dropped: no failing test titles, no error excerpt, no PR link.
+    - `ciFrictionEvidence` keeps only rounds whose `causeKey` equals the cause key exactly, so a family key collects
+      nothing. W1-T7358's rationale reads "RECENT ROUNDS (newest first): - (none recorded)" beside "40 fix round(s) on
+      241 pull request(s)". W1-T9002, W1-T9003 and W1-T9023, the first family-keyed filings after #11228, read the same.
+    - fix-lane's `failuresOf` reads `ci_failures[].logTail`, which the writer never stores, so every fix-lane pass falls
+      back to API log reads.
+    - The judge never saw the rationale anyway (W1-T9042, the judge-evidence task), so both halves are needed.
+  design: |
+    1. At the `fix.dispatch` log, each `ci_failures` entry adds `tests` (up to 5 failing titles, from a factored-out
+       `testRunnerFailures`), `excerpt` (at most 600 chars around the first failure) and `tail_source`.
+    2. `RoundBoundary`, `CiFrictionRound` and `RemedyRound` carry an optional `evidence`, and `runPrIndex` keeps `pr_url`.
+    3. `ciFrictionEvidence` takes a matcher so a family key collects its member rounds, and joins `also_failed` rows from
+       `test.flake_retry`.
+    4. `ciFrictionRemedyRationale` renders each recent round's PR link, failing titles and excerpt.
+    5. The rationale no longer claims "fix round(s)" or "seven-day half-life" for gate-priced causes; it names red runs
+       within the window.
+  acceptance:
+    - claim: "a drafted rationale carries each round's PR link, failing test titles and a log excerpt"
+      proof: "grep: test(\"W1-T9057: a drafted rationale carries each round's PR link, failing test titles and a log excerpt\" in test/a-ci-friction-filing-carries-the-rounds-it-was-priced-on.test.ts"
+    - claim: "fix.dispatch ledgers each failure's titles and a bounded excerpt"
+      proof: "grep: test(\"W1-T9057: fix\\.dispatch ledgers each failure's titles and a bounded excerpt\" in test/a-ci-friction-filing-carries-the-rounds-it-was-priced-on.test.ts"
+  falsifier: |
+    Dispatch a fix round on a CI failure whose log names two failing tests, then draft its cause. At origin/main the row
+    carries only check and signature and the rationale says "(none recorded)"; with the change both titles, the PR link
+    and an excerpt appear in the rationale.

@@ -1,0 +1,161 @@
+
+- id: W1-T9069
+  title: "A LATCHED RESTART REFILLS A FREED LANE WITH WORK THAT ENDS BEFORE IT — W1-T8927's holdout closes refill as \"stale code\" for the whole latch and logs `daemon.restart_holdout` on every 5-s watchdog poll, so on 2026-10-13 two freed lanes idled 45 lane-min behind one 35-min holdout and the latch wrote 281 rows; over 72 h, 68 freed lanes idled 647 lane-min while a sibling still ran"
+  repo: remudero
+  depends_on: [W1-T8514, W1-T9072]  # same-file serialization only: P1 W1-T8514 (src/lib/drain.ts, src/lib/daemon.ts) is in flight (run-W1-T8514-* branches, not merged); queued P2.5 W1-T8172 (daemon.ts) changes the drain AFTER the last lane settles and does not wait on this
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what a freed lane does, and when the restart fires, while a restart is latched behind a holdout
+  band_meaning: span
+  origin: "operator approval 2026-10-13 (\"Agree with all of this … keep automated flow\"): layer 1 of the restart-churn fix; layer 2 (build runs outlive the daemon) follows as an ADR"
+  plan_refs: [W1-T8927, W1-T7806, W1-T6274, W1-T8139, W1-T8198, W1-T8170, W1-T8172, W1-T8235, W1-T8238, W1-T4709, W1-T8514]
+  files:
+    - src/lib/daemon.ts
+    - test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts
+    # existing latch tests that may encode "a holdout closes refill" or one holdout row per poll; each red without the change
+    - test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts
+    - test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts
+    - test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 90778c755 (src/ unchanged since 0384f1a08), against the core ledger union on host remudero
+    (~/rmd-state2/state, read 2026-10-13 ~11:45Z, niced). Symbols, not lines.
+    WHAT THE CODE DOES. In runDaemon's dispatch phase, `latchRestart` makes every in-flight lane a member of
+    `restartHoldouts` (W1-T7806), and while that set is non-empty `decideRefill`, `conclude` (in `chooseRefill`) and
+    `admitAtStart` keep refill open. W1-T8927 (#11281) added the cost trade inside runOne's `restartAtWorkerBoundary`
+    closure: reason `finish_is_cheaper` keeps a run as a holdout with a deadline of now + its phase's median
+    remaining time (`restartWorkHistory`). That hold branch ALSO runs `refillClosed ??= "stale code"`, so the first
+    holdout closes refill for every lane for the rest of the latch, the opposite of W1-T7806. The same closure
+    writes `daemon.restart_holdout` or `daemon.restart_yield_asked` on EVERY call, and the quiet-worker watchdog
+    calls it on every poll (`runQuietWorkerWatchdog`, `QUIET_WATCHDOG_POLL_MS` = 5 s, through `restartLatchDetail`
+    to `restartPending`). The restart fires where the dispatch phase returns `stopForFreshness(inFlightFreshness,
+    restartWait.decidedAtMs)`. No row records what a latch cost in lane time.
+    MEASURED over the union, 2026-10-10T11:45Z to 2026-10-13T11:43:44Z: 79 .gz rotations plus the live file
+    opened (0 plain rotations exist); 2,404 matching rows, 2,003 after removing duplicate lines that rotations repeat.
+    Positive controls: 436 run.start rows in the window; newest extracted row 11:43:44Z against a live tail of
+    11:45:29Z; a direct grep of the live file counts 281 `daemon.restart_holdout` rows, the same as the extract;
+    both known refusals of 2026-10-13 (11:03:32Z, 11:19:45Z) are present.
+      - 68 daemon.boot rows. 32 latches wrote `daemon.freshness_restart_waiting` (latch time = ts - waited_ms),
+        924 latched minutes in total.
+      - 68 freed lanes held by `dispatch.lane_refill_held` with reason "stale code" (including "stale code
+        (decided while the refill read was in flight)"); none repeats a (lane, latch). They sat idle 647.2 lane-min
+        while a sibling still ran (refusal to `dispatch.settled_set`), then 412.2 lane-min from settle to the next
+        boot. The second part is the drain and boot: W1-T8172 and layer 2, not this task.
+      - Holdouts: `daemon.restart_holdout` exists only on 2026-10-13. W1-T8927's code is first visible at 09:29:13Z
+        (three `daemon.restart_yield_asked`, reason self_scoped_change). Since then ONE latch waited on a holdout.
+      - 2026-10-13 03:06-10:37Z: 9 boots and 15 stale-code refusals (13 plain, 2 "decided while the refill read was in
+        flight"). The brief said 12; 15 is the deduped count.
+    THE EPISODE, 2026-10-13 (corrects the brief: W1-T8863 did not end at 10:52Z; it started 10:37:22Z as the third
+    lane and ran until 11:03:30Z). Latch at 10:58:05Z (old 8eda6febf, new e7975fca6). Holdouts: W1-T9001
+    (implementing, remaining 698,187 ms over 305 samples, deadline 11:09:44Z) and W1-T7957 (first held in
+    checkpointed, remaining 2,086,886 ms over 39 samples, deadline 11:32:58Z); W1-T8863 held at 11:00:44Z (pushing,
+    94 s) and asked at 11:03:30Z (estimate_elapsed, phase ci). Its lane was held "stale code" at 11:03:32Z. W1-T9001
+    was asked at 11:09:56Z, settled 11:19:43Z, and its lane was held at 11:19:45Z. W1-T7957 was asked at 11:33:03Z
+    (estimate_elapsed), settled 11:34:14Z; `dispatch.settled_set` 11:34:15Z; boot 11:43:44Z. Yield cost was
+    2,863,030 ms (47.7 min) over 185 samples. Idle while the holdout ran: 30.7 + 14.5 = 45.2 lane-min. The last
+    `run.start` before the boot was 10:37:22Z. 281 holdout rows in 34.7 min (W1-T7957 206, W1-T9001 74, W1-T8863 1).
+    WHAT THE RULES BELOW WOULD HAVE DONE (illustrative arithmetic from the rows above, not a replay of the daemon):
+    at 11:03:32Z the restart's expected time is W1-T7957's deadline, 11:32:58Z, 29.4 min away. The src class's
+    median settled span over the same window is 12.8 min (381 runs; `settledSpansByClass`, W1-T4709), so design (a)
+    admits a src task to the freed lane. Had nothing fit, the lane idles 29.4 min, W1-T9001's lane idles from its
+    11:09:44Z deadline for 23.2 min, and holding costs 52.6 lane-min against a 47.7-min yield: design (b) asks
+    W1-T7957 to yield at 11:03:32Z instead of 11:33:03Z.
+    SPAM AND RETENTION. `MAX_RETAINED_LINES_PER_STEP` (src/lib/ledger.ts) is 200, and the cap is per step. One
+    episode's 281 rows already exceed `daemon.restart_holdout`'s own cap, so rotation archives the earlier episodes'
+    holdout rows, and every 5-s row grows the live file, which rotates other steps' rows to archive sooner. CENSUS
+    CHECK: on main, `daemon.restart_holdout` and `daemon.restart_yield_asked` are written only in src/lib/daemon.ts
+    and read only by test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts through
+    find/some/findLast. No census, gardener or console reader counts the rows, so writing them per state change
+    breaks no rate-dependent reader.
+    COVERAGE SWEEP (origin/main and all 341 remote heads, plan/ only; each head's count compared with main, and
+    main's own count as the positive control: restart_holdout 1, restart_yield_asked 1, idle lane-min 11,
+    lane_refill_held 15, restart latch 20): no head adds a shard over main. W1-T7806 (merged) made refill open while
+    holdouts remain. W1-T8927 (merged #11281; shard status lags) added the cost holdout that now closes it.
+    W1-T8170 (merged) and W1-T8172 (queued) are about the drain after the last lane settles. W1-T8235 (merged)
+    names the hold that emptied an idle slot. W1-T8238 (merged #11299) raises idle capacity behind a hold as an
+    incident and would read this task's cost row. W1-T8139 and W1-T8198 (merged) are about how a run yields. None
+    admits work that fits before the restart or moves the restart earlier on cost.
+  design: |
+    Operator rulings: no hard threshold or cap (every bound below is a measured estimate), keep automated flow.
+    All of it lives inside runDaemon's dispatch phase in src/lib/daemon.ts. The decision itself is one exported
+    pure function, `decideLatchedRestart`, that the tests drive directly.
+    1. LATCH STATE. Keep one state for the latch: each holdout's expected finish (its W1-T8927 deadline, which a
+       later phase still cannot extend), each idle lane's idle-since, the refills admitted under the latch, and
+       the restart's EXPECTED TIME R, the latest expected finish among the remaining holdouts. With no holdout left,
+       R is now. `decideLatchedRestart(state, estimates, nowMs)` returns R, the holdouts to ask to yield, and the
+       hold and yield costs it compared.
+    2. (a) A FREED LANE TAKES WORK THAT ENDS BEFORE R. The hold branch in `restartAtWorkerBoundary` no longer sets
+       `refillClosed` to "stale code". While a holdout remains, `decideRefill`/`chooseRefill` take the first
+       candidate from the same gates and pool as today (`runnableCandidates`, `partitionByFileOverlap`) whose
+       expected span ends at or before R. The expected span is the median settled span of its class:
+       `settledSpansByClass` (src/lib/cost-anomaly.ts) over the restart-history lines the daemon already reads at
+       boot, keyed by `deriveTaskClass` (src/lib/task-class.ts), the class `run.start` writes. When nothing fits,
+       because no class estimate exists, nothing ends before R, R is now, or the latch is a self-scoped change, the
+       lane PARKS (the `parkedLanes` path) with one `dispatch.lane_parked` row naming the reason, R, and the nearest
+       candidate and its span. It writes another row only when that state changes, and every re-decision below
+       wakes it. A refill admitted under the latch is never a holdout and never moves R later (W1-T7806 "cannot
+       renew"). It is asked to yield at its first boundary once R passes or no holdout remains. W1-T6274 holds:
+       with no holdout, R is now and no new run starts.
+    3. (b) THE RESTART MOVES EARLIER WHEN HOLDING COSTS MORE. On each state change, and never on a timer, the latch
+       re-decides. State changes are: a latch, a lane freeing, a lane parking or refilling, a holdout reporting a
+       new phase (its estimate moves), a holdout settling, and a poll that finds a deadline passed. Take the holdout
+       h whose expected finish sets R. Holding cost is the lane time that would sit idle until R: each idle lane
+       from now, and each other lane from its own expected finish. Yield cost is the measured
+       `restartWorkHistory` yield cost. When holding costs at least the yield, h is asked to yield at its next
+       boundary (a new reason, e.g. `idle_lanes_cost_more`), R is recomputed over the remaining holdouts, and the
+       test repeats. No history keeps today's behaviour: every run yields (W1-T8927).
+    4. (c) ROWS PER STATE CHANGE, NOT PER POLL. `restartAtWorkerBoundary` returns the latch's current answer for a
+       run on every call. It writes `daemon.restart_holdout` or `daemon.restart_yield_asked` only when that run's
+       answer, reason, phase or deadline changed. The row carries the reason, the in-flight set with each run's
+       remaining estimate, and R. A watchdog poll with an unchanged answer writes nothing.
+    5. (d) ONE COST ROW PER LATCH. Right before the dispatch phase returns `stopForFreshness` for a latched restart,
+       write `daemon.restart_latch_cost` once, with: latched_at, fired_at, waited_ms, idle_lane_ms (the sum over
+       lanes of time with no run under the latch), refills_under_latch, the holdouts with each one's outcome
+       (finished, yielded on cost, yielded on estimate_elapsed), yields_asked, R as first decided against the
+       actual fire time, and old_sha/new_sha.
+    6. LAYER 2 COMPATIBILITY. Nothing is persisted and no file format or run contract changes. If build runs later
+       outlive the daemon (the coming ADR), the holdouts empty, R becomes the drain's own time, and (a) and (d) keep
+       working unchanged.
+    UNCHANGED: `restartWorkHistory` and its estimates, the self-scoped rule, W1-T8927's deadline-never-extends rule,
+    W1-T8198's single restart predicate, W1-T8170/W1-T8172's drain, and every gate a refill already passes.
+    Tests go in the new file test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts, with
+    `test(` titles exactly as in the proofs below. Drive runDaemon with an injected runOne, checkFreshness and a fake
+    clock, as test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts and
+    test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts do, plus direct calls to `decideLatchedRestart`.
+    Use no live ledger, wall clock or network.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts"
+    - claim: "a lane freed under a latched restart admits a task whose class median span ends before the restart's expected time"
+      proof: 'grep: test("W1-T9069: a freed lane admits a task whose class span ends before the latched restart" in test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts'
+    - claim: "with no task that ends before the restart, the lane parks with one named row per state, and a refill admitted under the latch never moves the restart later"
+      proof: 'grep: test("W1-T9069: a freed lane with nothing that fits parks once and a latch refill never delays the restart" in test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts'
+    - claim: "a holdout is asked to yield as soon as the idle lane time until the restart costs at least its measured yield cost"
+      proof: 'grep: test("W1-T9069: the restart moves earlier when idle lanes cost more than a holdout yield" in test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts'
+    - claim: "a watchdog poll whose answer has not changed writes no holdout row"
+      proof: 'grep: test("W1-T9069: a holdout poll with an unchanged answer writes no ledger row" in test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts'
+    - claim: "the restart writes one latch-cost row carrying its idle lane time"
+      proof: 'grep: test("W1-T9069: a fired restart writes one latch-cost row with its idle lane time" in test/a-latched-restart-refills-a-lane-with-work-that-ends-before-it.test.ts'
+    - claim: "daemon.ts writes the latch-cost row"
+      proof: 'grep: daemon\.restart_latch_cost in src/lib/daemon.ts'
+    - claim: "daemon.ts exports the latch decision"
+      proof: 'grep: decideLatchedRestart in src/lib/daemon.ts'
+  falsifier: |
+    Replay 2026-10-13 10:58-11:34Z on a fake clock: three lanes; history giving implementing 698,187 ms, checkpointed
+    2,086,886 ms, a yield cost of 2,863,030 ms and a src class median span of 12.8 min. The restart latches with
+    W1-T9001 (implementing) and W1-T7957 (checkpointed) held, and the third lane frees 5.5 min later. At origin/main
+    that lane is held "stale code" and no run.start follows until the restart; with the change a src task starts on
+    it. Give that task no class history instead: the lane parks with one row, W1-T7957 is asked to yield at once,
+    and the restart fires before W1-T7957's deadline. Keep `refillClosed ??= "stale code"` in the hold branch and
+    the first test reds. Drop the cost comparison and the third test reds. Log on every call and the fourth test
+    counts one row per poll.
+  note: |
+    EFFECT, measured after merge from the core ledger union with no numeric pass mark. Per latch,
+    `daemon.restart_latch_cost.idle_lane_ms` replaces the hand count above, whose baseline is 647.2 lane-min over 68
+    refusals in 72 h, plus 45.2 lane-min in the single holdout latch. Count run.start rows that fall between a latch
+    and its boot (0 on 2026-10-13 10:58-11:43Z). `daemon.restart_holdout` rows per latch should track the number of
+    state changes, not latch minutes divided by 5 s.

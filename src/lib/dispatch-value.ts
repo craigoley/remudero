@@ -19,6 +19,8 @@ export interface DispatchValueTask {
   id: string;
   depends_on: readonly string[];
   files?: string[];
+  /** W1-T9323: dispatch priority (smaller outranks); absent ranks lowest. It weights the cost-of-delay urgency ({@link dispatchUrgency}). */
+  priority?: number;
 }
 
 /** Precomputed evidence consumed by the otherwise-pure dispatch comparator. */
@@ -30,6 +32,8 @@ export interface DispatchValueContext {
   readonly costOfDelayFallback?: boolean;
   /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
   readonly costOfDelayUnscored?: readonly string[];
+  /** W1-T9323: open tasks the filing history cannot date — scored at age 0, never left unscored. */
+  readonly costOfDelayImputed?: readonly string[];
 }
 
 export interface CostOfDelaySnapshot {
@@ -101,11 +105,15 @@ export function filingDatesFromPlanHistory(history: string): Map<string, number>
 /** W1-T7534: the `dispatch.cost_of_delay.ready` row. Its dedup key is per plan tree while any open task is
  * unscored, so the undatable ids are ledgered once per tree without disabling the ordering. */
 export function costOfDelayReadyRow(
-  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored">,
-): { key: string; plan_tree_sha: string; unscored?: readonly string[] } {
+  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored" | "costOfDelayImputed">,
+): { key: string; plan_tree_sha: string; unscored?: readonly string[]; imputed?: readonly string[] } {
   const unscored = context.costOfDelayUnscored ?? [];
-  if (unscored.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
-  return { key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha, unscored };
+  const imputed = context.costOfDelayImputed ?? [];
+  if (unscored.length === 0 && imputed.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
+  return {
+    key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha,
+    ...(unscored.length === 0 ? {} : { unscored }), ...(imputed.length === 0 ? {} : { imputed }),
+  };
 }
 
 /** A plan task's id (`W1-T123`, `CONSOLE-T7`); synthetic lane runs (RETRO, TRIAGE-…) are not build attempts. */
@@ -326,11 +334,69 @@ export function buildDispatchValueContext(
   };
 }
 
+/**
+ * A task's urgency: `2^-tierGap * (1 + log2(1 + waits))`, `waits` being its age in measured median waits and
+ * `tierGap` how far its priority sits below the queue head. Each tier halves the weight and each doubling of the
+ * wait adds one unit, so against a fresh task a 1-tier gap closes after 1 median wait, 2 tiers after 7, 3 after
+ * 127: intent holds, and any finite gap still closes. MEASURED 2026-10-14 (median wait 9.5 h): the additive
+ * `1 + waits + headStart` scored 36-day-old priority-4 W1-T3083 at 14.7x day-old priority-0.92 W1-T8950.
+ */
+export function dispatchUrgency(tierGap: number, waits: number): number {
+  return 2 ** -Math.max(0, tierGap) * (1 + Math.log2(1 + Math.max(0, waits)));
+}
+
+/** Each open task's tier gap below the queue head (the smallest declared priority). An absent priority sits one
+ * tier below the lowest declared one, so it orders after every task that carries a priority, as `compareDispatch`
+ * and docs/forensics/plan.md#taskpriority have always said. A queue with no declared priority has no gap. */
+export function priorityTiers(open: readonly Pick<DispatchValueTask, "priority">[]): (task: Pick<DispatchValueTask, "priority">) => number {
+  const declared = open.map(task => task.priority).filter((p): p is number => typeof p === "number" && Number.isFinite(p));
+  if (declared.length === 0) return () => 0;
+  const head = declared.reduce((lo, p) => Math.min(lo, p), Number.POSITIVE_INFINITY);
+  const lowest = declared.reduce((hi, p) => Math.max(hi, p), Number.NEGATIVE_INFINITY);
+  return task => (typeof task.priority === "number" && Number.isFinite(task.priority) ? task.priority : lowest + 1) - head;
+}
+
+/** Pool ceil(sqrt(dated runs)) nearest runs, including every equal-distance group.
+ * Grouped evidence retains its whole tally; no input order or fixed age bucket decides a tie. */
+export function validityShareNearAge(
+  samples: ReadonlyArray<readonly [number, { readonly valid: number; readonly total: number }]>, age: number,
+): { valid: number; total: number } {
+  if (!Number.isFinite(age) || samples.some(([at, tally]) => !Number.isFinite(at) ||
+    !Number.isSafeInteger(tally.total) || tally.total <= 0 || !Number.isSafeInteger(tally.valid) ||
+    tally.valid < 0 || tally.valid > tally.total)) throw new RangeError("Invalid age-validity evidence");
+  const datedRuns = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
+  if (!Number.isSafeInteger(datedRuns)) throw new RangeError("Invalid dated-run count");
+  if (datedRuns === 0) return { valid: 0, total: 0 };
+  const ordered = samples.every(([at], i) => i === 0 || samples[i - 1][0] <= at)
+    ? samples : [...samples].sort(([a], [b]) => a - b);
+  let lo = 0, hi = ordered.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (ordered[mid][0] < age) lo = mid + 1;
+    else hi = mid;
+  }
+  const wanted = Math.ceil(Math.sqrt(datedRuns));
+  let left = lo - 1, right = lo, valid = 0, total = 0;
+  while (total < wanted && (left >= 0 || right < ordered.length)) {
+    const distance = Math.min(left >= 0 ? Math.abs(ordered[left][0] - age) : Infinity,
+      right < ordered.length ? Math.abs(ordered[right][0] - age) : Infinity);
+    while (left >= 0 && Math.abs(ordered[left][0] - age) === distance) {
+      valid += ordered[left][1].valid;
+      total += ordered[left--][1].total;
+    }
+    while (right < ordered.length && Math.abs(ordered[right][0] - age) === distance) {
+      valid += ordered[right][1].valid;
+      total += ordered[right++][1].total;
+    }
+  }
+  return { valid, total };
+}
+
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -370,34 +436,50 @@ function costOfDelayContext(
     if (!outcome.stale) tally.valid++;
     ages.set(age, tally);
   }
+  // W1-T9323: the measured median wait — each task's first start minus its filing time — is the unit that
+  // turns a task's age into urgency. Nothing is fixed: with no wait sample the schedule is refused.
+  const firstStartByTask = new Map<string, number>();
+  for (const start of starts.values()) {
+    const previous = firstStartByTask.get(start.id);
+    if (previous === undefined || start.at < previous) firstStartByTask.set(start.id, start.at);
+  }
+  const waits: number[] = [];
+  for (const [id, at] of firstStartByTask) {
+    const filedAt = snapshot.filedAtByTaskId.get(id);
+    if (filedAt !== undefined && Number.isFinite(filedAt) && filedAt <= at) waits.push(at - filedAt);
+  }
+  waits.sort((a, b) => a - b);
+  const medianWaitMs = waits.length === 0 ? 0
+    : waits.length % 2 === 1 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2;
+  if (!(medianWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
+  // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
+  const tierOf = priorityTiers(tasks.filter(task => openIds.has(task.id)));
   const samples = [...ages].sort(([a], [b]) => a - b);
   const valid = samples.reduce((sum, [, tally]) => sum + tally.valid, 0);
   const total = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
   const prior = (valid + 1) / (total + 2);
   const costOfDelayByTaskId = new Map<string, number>();
   const stridePassByTaskId = new Map<string, number>();
-  const costOfDelayUnscored: string[] = [];
+  const costOfDelayImputed: string[] = [];
   for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     if (!openIds.has(task.id)) continue;
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
-    // W1-T7534: one undatable task (an id the filing scan cannot read, a future date) is left unscored;
-    // compareDispatch orders it after the scored population, and every other task keeps its stride.
-    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > nowMs) {
-      costOfDelayUnscored.push(task.id);
-      continue;
-    }
+    // W1-T9323: an undatable task (an id the filing scan cannot read, a snapshot one selection behind, a
+    // future date) is scored at age 0 and named as imputed, so it joins the stride order instead of trailing it.
+    const dated = filedAt !== undefined && Number.isFinite(filedAt) && filedAt <= nowMs;
+    if (!dated) costOfDelayImputed.push(task.id);
     const estimate = estimates.get(deriveTaskClass(task));
     if (!estimate || estimate.costPerAttempt <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-cost`] };
-    const age = nowMs - filedAt;
-    const nearest = samples.reduce<typeof samples[number] | undefined>((best, sample) =>
-      best === undefined || Math.abs(sample[0] - age) < Math.abs(best[0] - age) ? sample : best, undefined);
-    const probability = nearest === undefined ? prior
-      : (nearest[1].valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (nearest[1].total + DISPATCH_VALUE_PRIOR_WEIGHT);
+    const age = dated ? nowMs - (filedAt as number) : 0;
+    const share = validityShareNearAge(samples, age);
+    const probability = share.total === 0 ? prior
+      : (share.valid + DISPATCH_VALUE_PRIOR_WEIGHT * prior) / (share.total + DISPATCH_VALUE_PRIOR_WEIGHT);
     const classScore = context.scoreByClass.get(deriveTaskClass(task));
     // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
     // gives every class a share even when its raw merge count is zero.
     const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
-    const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability;
+    const urgency = dispatchUrgency(tierOf(task), age / medianWaitMs);
+    const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability * urgency;
     // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
     // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
     const pass = (1 + (counts.get(task.id) ?? 0)) / score;
@@ -407,7 +489,7 @@ function costOfDelayContext(
   }
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, ...(costOfDelayUnscored.length === 0 ? {} : { costOfDelayUnscored }) },
+    context: { costOfDelayByTaskId, stridePassByTaskId, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };
 }
 

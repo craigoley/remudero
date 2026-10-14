@@ -28,6 +28,8 @@ import {
   DEFAULT_SHINGLE_K,
   type DuplicateCorpusEntry,
 } from "./knowledge-dedup.js";
+import { BRE_CONSTRUCT_AFTER_BACKSLASH, breMetacharsIn } from "./bre-metachars.js";
+export { breMetacharsIn };
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 
@@ -94,7 +96,8 @@ export type LintCheck =
   | "proof-unit-test-base-wrapper"
   | "proof-test-only-discrimination"
   | "new-shard-rule-suite"
-  | "shard-shape";
+  | "shard-shape"
+  | "unminted-task-id";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -799,25 +802,6 @@ export function proofResolvabilityViolations(
 // that still succeeds warns, so working proofs stand.
 // Why: docs/forensics/task-linter.md#proofgrepsafetyviolations (W1-T287, PR #1071, W1-T253).
 
-/** BRE metacharacters whose presence can make a pattern NEVER match its literal
- *  text — the silent-false-FAIL class. Blocking; measured retrofit 0. */
-const BRE_BLOCKING_METACHARS: ReadonlyArray<string> = ["[", "*", "^", "$"];
-
-/** BRE metacharacters that do NOT silently strand a proof under the executor's own matcher, so they
- *  warn rather than block — for opposite reasons. `.` only WIDENS a match, so the proof still finds
- *  its own text. `?` is LITERAL in a BRE and a QUANTIFIER in an ERE: the executor passes no `-E`, so
- *  a bare `?` works today but any ERE-defaulting grep reports a clean zero. See {@link
- *  SINGLE_LITERAL_CLASS_CHARS} for why the remedy is `[?]`. */
-const BRE_WARNING_METACHARS: ReadonlyArray<string> = [".", "?"];
-
-/** Characters for which `[X]` — a bracket holding exactly this one character — is the SANCTIONED
- *  literal escape, exempt from `[`'s blocking rule; without it the linter would forbid the only
- *  portable remedy for the fragility it warns about. `\X` IS NOT AN ALTERNATIVE, since `\?` is a
- *  quantifier in GNU BRE and a literal in an ERE. MEASURED under both `grep` and `grep -E`. `^` is
- *  DELIBERATELY EXCLUDED, since `[^]` opens a NEGATED class; a multi-character class stays
- *  blocked. Why: PR #1071. */
-const SINGLE_LITERAL_CLASS_CHARS: ReadonlyArray<string> = ["?", ".", "*", "+", "$", "(", ")", "{", "}", "|", "[", "]"];
-
 /** The remedy sentence for each warning-tier metacharacter — the character's OWN fix, never a
  *  generic one: `.` and `?` fail in opposite directions, so a shared sentence would help neither. */
 const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
@@ -825,45 +809,6 @@ const BRE_WARNING_REMEDY: Readonly<Record<string, string>> = {
   "?": "is LITERAL under the executor's own `grep -arn` (a BRE) but a QUANTIFIER under an ERE, so this pattern matches today and silently finds NOTHING under any grep that defaults to ERE — a clean zero, not an error. Write `[?]`, which is literal under both. Do NOT write `\\?`: that INVERTS the failure (a quantifier in GNU BRE, a literal in an ERE) and breaks the engine that works today.",
 };
 
-/** Characters that become a BRE construct when a backslash precedes them — grouping, intervals, and
- *  GNU's optional-quantifier; `\.`-style escapes are NOT here, being literals. THE TRAP `?` NAMES:
- *  the escape an author reaches for to make `?` literal is precisely the form that stops being
- *  literal, since `\?` is a quantifier in a GNU BRE. Blocking is still right, because `[?]` is
- *  literal under both engines, and retrofit measured ZERO affected proofs.
- *  Why: docs/forensics/task-linter.md#bre_construct_after_backslash. */
-const BRE_CONSTRUCT_AFTER_BACKSLASH: ReadonlyArray<string> = ["(", ")", "{", "}", "?"];
-
-/** The unescaped BRE metacharacters in `pattern`, split by severity. It walks the string rather
- *  than regex-matching it: the one thing that must be exactly right is which characters an escape
- *  consumes, and expressing that as a regex over a regex is how this class of bug is born. */
-export function breMetacharsIn(pattern: string): { blocking: string[]; warning: string[] } {
-  const blocking: string[] = [];
-  const warning: string[] = [];
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === "\\") {
-      const next = pattern[i + 1];
-      if (next === undefined) {
-        blocking.push("\\"); // a dangling escape is undefined behaviour across implementations
-        break;
-      }
-      if (BRE_CONSTRUCT_AFTER_BACKSLASH.includes(next)) blocking.push("\\" + next);
-      i++; // the escape consumes its next char — `\.` is a LITERAL dot, legitimate
-      continue;
-    }
-    // `[X]` — one metacharacter, immediately closed — is the sanctioned literal form. Consume all
-    // three characters so the bracket does not block AND the character inside is not separately
-    // scored: `[?]` must be silent, not a warning about the very `?` it escapes. Anything else
-    // starting with `[` falls through to the blocking arm.
-    if (ch === "[" && pattern[i + 2] === "]" && SINGLE_LITERAL_CLASS_CHARS.includes(pattern[i + 1] ?? "")) {
-      i += 2;
-      continue;
-    }
-    if (BRE_BLOCKING_METACHARS.includes(ch)) blocking.push(ch);
-    else if (BRE_WARNING_METACHARS.includes(ch)) warning.push(ch);
-  }
-  return { blocking: [...new Set(blocking)], warning: [...new Set(warning)] };
-}
 
 // ── GREP-TARGET EXTENSIONLESS-FILE (W1-T3653) ───────────────────────────────
 // {@link grepProofTargetNamesNoFile} (review.ts) approximates "is this path a file" with a pure
@@ -3519,6 +3464,38 @@ export function monolithFilingViolations(task: Task, opts: LintOpts = {}): LintV
   ];
 }
 
+/** W1-T9292 — THE SHAPE OF A MINTED TASK ID: a prefix, `-T`, digits and an optional single letter (W1-T12e and
+ *  W1-T1B are real). The same shape `HAND_WORKTREE_TASK_ID_RE` (hand-worktree.ts) names; `materializeDraftTaskIds`
+ *  (inbox.ts) refuses a fragment declaring anything else, and {@link unmintedTaskIdViolations} lints it. */
+export const MINTED_TASK_ID_RE = /^[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?$/;
+
+/**
+ * W1-T9292 — AN UNMINTED ID NEVER LANDS IN THE PLAN. `rmd approve` landed NEW-1A and NEW-1B (#11378) and NEW-1a and
+ * NEW-1b (#11402) on main, and no lint checked an id's shape: every reservation, ownership check and id-shaped reader
+ * skips such a task rather than reporting it. BLOCK when the diff adds the task ({@link LintOpts.addedTaskIds});
+ * WARN otherwise, so the shards already on main stay visible without reddening main or an unrelated PR.
+ * `lint-plan` without `--base` passes an empty set, so it WARNS for every unminted id.
+ */
+export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  // NO SET ⇒ NO OPINION: only `lint-plan` knows which ids a diff adds, and a fragment still being drafted carries
+  // NEW-<n> placeholders by design, so every other caller (dispatch, the draft relint, fixtures) stays silent.
+  if (!opts.addedTaskIds) return [];
+  const id = String(task.id);
+  if (MINTED_TASK_ID_RE.test(id)) return [];
+  const added = opts.addedTaskIds.has(id);
+  return [
+    {
+      check: "unminted-task-id",
+      severity: added ? "block" : "warn",
+      message:
+        `task id ${JSON.stringify(id)} is not a minted task id (expected ${MINTED_TASK_ID_RE.source}, e.g. W1-T123). ` +
+        (added
+          ? "This diff adds it: mint and reserve a real id (`rmd next-task-id`) and rename the shard and every depends_on reference to it."
+          : "No diff being linted adds it (it is on the base, or there is no base), so this only warns; renumbering or retiring it is its own change."),
+    },
+  ];
+}
+
 export interface LintOpts {
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
   mountMaxTurns?: number;
@@ -3553,6 +3530,10 @@ export interface LintOpts {
   /** Ids present in THIS branch's `plan/tasks.yaml` and absent from the base ref's monolith.
    *  Supplied only in `--base` mode; undefined ⇒ {@link monolithFilingViolations} is silent. */
   newMonolithIds?: ReadonlySet<string>;
+  /** W1-T9292 — ids this diff ADDS to the plan (absent at the base ref), for {@link unmintedTaskIdViolations}: an
+   *  unminted id in the set BLOCKS, any other unminted id WARNS. Supplied only by `lint-plan` (empty without a base);
+   *  absent ⇒ that check is silent. */
+  addedTaskIds?: ReadonlySet<string>;
   /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
   monolithFiling?: LintSeverity;
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
@@ -3775,6 +3756,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...advisoryRoutingViolations(task));
   violations.push(...deferredFollowUpViolations(task));
   violations.push(...shardShapeViolations(task, opts));
+  violations.push(...unmintedTaskIdViolations(task, opts));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

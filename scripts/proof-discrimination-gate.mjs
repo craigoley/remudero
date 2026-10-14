@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { CHECK_PROOF_EXIT, checkProofChildArgv } from "../src/lib/check-proof.ts";
 // A proof that passes before and after a PR does not establish the PR's claim.  This gate runs
 // the reviewer's own parser/executor at the PR head and its actual merge base before ci-gate can
 // report a green aggregate.  `rmd check-proof --base` owns the execution and its `executed_stale`
@@ -11,7 +12,6 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { bodyWithRecoveredIdentity, readEventPayload, resolveTaskIdentity } from "./acceptance-author-gate.mjs";
-import { CHECK_PROOF_EXIT } from "../src/run-task.ts";
 import { parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
 
 function defaultGit(args, root) {
@@ -41,7 +41,7 @@ export function criteriaForReview(body, headSha, { root = REPO_ROOT, resolveAtHe
 
 /** Run the public diagnostic command instead of duplicating any proof parsing or execution. */
 export function runCheckProof(proof, mergeBase, { root = REPO_ROOT, spawn = spawnSync } = {}) {
-  const result = spawn(process.execPath, ["--import", "tsx", "src/run-task.ts", "check-proof", proof, "--base", mergeBase], {
+  const result = spawn(process.execPath, checkProofChildArgv(proof, mergeBase), {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,

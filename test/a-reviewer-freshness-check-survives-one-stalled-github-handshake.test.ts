@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -7,7 +8,7 @@ import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/poll-interval.js";
 import type { AsyncGitRunner, GitRunner } from "../src/lib/git-fetch-retry.js";
 import * as selfSync from "../src/lib/self-sync.js";
 import { checkReviewerCodeFreshnessAsync, checkServiceFreshnessAsync, type ServiceFreshness } from "../src/lib/self-sync.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 const HEAD = "a".repeat(40);
 const MAIN = "b".repeat(40);
@@ -174,7 +175,12 @@ test("test/a-reviewer-freshness-check-survives-one-stalled-github-handshake.test
     const work = gitRepo({ kind: "stalled-handshake-work" });
     origin.git("fetch", "--quiet", work.dir, "main:main");
     work.addRemote("origin", origin.dir);
-    work.git("fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main");
+    // git stamps the reflog from ITS clock and the code ages it on THIS process's, which a clock-shift probe moves
+    // alone (scripts/clock-shift.mjs TRAP); stamp it from this clock, which is what git writes on the real one.
+    execFileSync("git", ["-C", work.dir, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], {
+      env: { ...process.env, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+        GIT_COMMITTER_DATE: `@${Math.floor(Date.now() / 1000)} +0000` },
+    });
     work.git("remote", "set-url", "origin", "ssh://rmd-fixture.invalid/never.git");
     work.git("config", "ssh.variant", "simple");
     work.git("config", "core.sshCommand", "exec 2>/dev/null; exec sleep 2;:");

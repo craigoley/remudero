@@ -1,0 +1,40 @@
+- id: W1-T9059
+  title: "A CI-FRICTION REMEDY IS OWNED BY THE CODE ITS FAILING TEST EXERCISES — a test-file signature never matches src, so the owner falls to .github/workflows/ci.yml and the deterministic backstop sends the remedy to a person, and infrastructure signatures self-match the gardener's own vocabulary"
+  repo: remudero
+  depends_on: [W1-T9057]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — who owns a ci-friction remedy; spans the owner search and the gardener that pins it
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T5380, W1-T6311]
+  files: [src/lib/ci-friction-remedy.ts, src/lib/ci-friction-gardener.ts, test/a-ci-friction-remedy-is-owned-by-the-code-its-failing-test-exercises.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main (src/lib/ci-friction-remedy.ts `locateCiFrictionOwner`):
+    - Signature terms go to `filesContaining`, which searches src/scripts and excludes tests. A test-file signature never
+      matches, so the owner becomes `workflowOwner(family)` = .github/workflows/ci.yml. `deterministicEscalation` then
+      sends every such remedy to a person (9 of the 27 parked filings on 2026-10-13 declared ci.yml).
+    - Infrastructure signatures ("timed out with no test result", "red with no failing test", "pool defect") are spelled
+      in the gardener's own code. They self-match src/lib/ci-friction-gardener.ts, which became W1-T5585's owner, and
+      unrelated hand fixes to the gardener were then priced against that shard.
+    `testSourcePaths` already maps a test to the source files it imports.
+  design: |
+    1. `OwnerSearch.readSource`, implemented in `gitCiFrictionOwnerSearch` with `git show <pinned>:<file>`.
+    2. For a test-file signature, the owner is the first existing src/scripts module from
+       `testSourcePaths(path, readSource(path))`, plus the test file itself. With no import resolving, the test file alone.
+    3. Timeout, pool, no-failing-test, COVERAGE-REPORT-FAILED and artifact signatures belong to the workflow
+       (`workflowOwner`): they are infrastructure.
+    4. `filesContaining` never returns src/lib/ci-friction-*.ts for a signature term.
+  acceptance:
+    - claim: "a shard failure naming a test file is owned by the source module that test imports, not ci.yml"
+      proof: "grep: test(\"W1-T9059: a shard failure naming a test file is owned by the source module that test imports\" in test/a-ci-friction-remedy-is-owned-by-the-code-its-failing-test-exercises.test.ts"
+    - claim: "a timeout signature is owned by the workflow, never by the gardener's own vocabulary"
+      proof: "grep: test(\"W1-T9059: a timeout signature is owned by the workflow, never by the gardener vocabulary\" in test/a-ci-friction-remedy-is-owned-by-the-code-its-failing-test-exercises.test.ts"
+  falsifier: |
+    Locate the owner of `check:test:test/memory-tracker.test.ts`, whose test imports src/lib/dispatch-governor.ts. At
+    origin/main the owner is .github/workflows/ci.yml; with the change it is src/lib/dispatch-governor.ts plus the test.

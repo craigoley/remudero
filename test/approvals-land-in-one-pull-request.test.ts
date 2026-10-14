@@ -270,6 +270,7 @@ async function driveRealGatewayApprove(opts: { headRead?: "fails"; armedOnHead?:
   // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
   mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
   writeFileSync(join(seed.dir, "src", "lib", ".gitkeep"), "");
+  writeFileSync(join(seed.dir, "src", "lib", "plan.ts"), ""); // W1-T9039: the module the drafts edit exists
   seed.git("add", "-A");
   seed.git("commit", "--quiet", "-m", "chore: seed plan");
   seed.addRemote("origin", origin.dir);
@@ -308,7 +309,7 @@ async function driveRealGatewayApprove(opts: { headRead?: "fails"; armedOnHead?:
       "P-JOIN": {
         proposalId: "P-JOIN",
         fragmentYaml:
-          "- id: NEW-1\n  title: second approval joins the open pass\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+          "- id: NEW-1\n  title: second approval joins the open pass\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
         stampLine: "- P-JOIN (plan) — RATIFIED -> NEW-1.",
         anchorFingerprint: "",
       },

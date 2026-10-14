@@ -191,7 +191,7 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
-    file: "src/run-task.ts",
+    file: "src/lib/check-proof.ts",
     site: "buildBaseProofDir",
     creates:
       "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side a `unit test:` " +

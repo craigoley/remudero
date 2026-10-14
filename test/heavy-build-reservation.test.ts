@@ -166,7 +166,8 @@ test("heavy READY v2 retries a throwing escalation sink with one stable event id
     assert.equal(existsSync(pathFor(handle, "-delivered")), false);
   }
   const closed = readFileSync(pathFor(handle, "-closed"));
-  const log = (step: string, fields: Record<string, unknown>) => { events.push({ step, fields }); };
+  const sink = requireHeavyAPI().heavyReadyEscalationSink(dir);
+  const log = (step: string, fields: Record<string, unknown>) => { events.push({ step, fields });return sink(step, fields); };
   assert.deepEqual(readHeavyNewBuildHold({ dir, now: now - 1, log }), { state: "clear", observed: 1, pendingEscalations: 0 });
   assert.equal(events.length, 3);
   for (const event of events) {
@@ -283,7 +284,7 @@ test("heavy READY v2 foreign closure nonces hashes and deadline timestamps canno
 
 test("heavy READY v2 foreign delivery acknowledgements never suppress pending escalation silently", t => {
   const dir = fixture(t), now = Date.now(), handle = reserveHeavyNewBuilds("bad-delivery", "gate", { dir, now });
-  readHeavyNewBuildHold({ dir, now: handle.request.expiresAtMs, log: () => {} });
+  readHeavyNewBuildHold({ dir, now: handle.request.expiresAtMs, log: requireHeavyAPI().heavyReadyEscalationSink(dir) });
   const original = readFileSync(pathFor(handle, "-delivered")), ack = JSON.parse(original.toString());
   for (const bad of [{ ...ack, version: 99 }, { ...ack, closureHash: "foreign" }, { ...ack, eventId: "foreign" }]) {
     put(pathFor(handle, "-delivered"), bad);unknown(dir, handle.request.expiresAtMs);
@@ -480,6 +481,7 @@ function killAtHeavyEnvelopeRename(handle: HeavyReservationHandle, suffix: "-clo
       assert.equal(step, 'heavy_ready.escalated');
       assert.equal(fields.event_id, handle.request.id + ':escalated');
       fs.writeFileSync(dir + '/fixture-sink-receipt.json', JSON.stringify(fields), {mode:0o600, flush:true});
+      return api.heavyReadyEscalationSink(dir)(step, fields);
     }});
     assert.fail('the exact destination rename boundary must be reached');
   `, JSON.stringify(handle), destination, suffix, phase], {
@@ -496,7 +498,7 @@ function recoverHeavyEscalationInFreshChild(handle: HeavyReservationHandle, logi
   nativeChild(handle.dir, `
     const original = JSON.parse(process.argv[2]), logicalId = process.argv[3], events = [];
     const reading = api.readHeavyNewBuildHold({dir, now:original.request.expiresAtMs + 1,
-      log:(step, fields) => events.push({step, fields})});
+      log:(step, fields) => {events.push({step, fields});return api.heavyReadyEscalationSink(dir)(step, fields);}});
     assert.deepEqual(reading, {state:'clear', observed:1, pendingEscalations:0});
     assert.equal(events.length, 1);
     assert.equal(events[0].step, 'heavy_ready.escalated');
@@ -581,7 +583,7 @@ test("heavy READY v2 asynchronous sinks never acknowledge delivery or leak an un
       }
       const events = [];
       assert.deepEqual(api.readHeavyNewBuildHold({dir, now:handle.request.readyAtMs - 1,
-        log:(step, fields)=>events.push({step, fields})}), {state:'clear', observed:1, pendingEscalations:0});
+        log:(step, fields)=>{events.push({step, fields});return api.heavyReadyEscalationSink(dir)(step, fields);}}), {state:'clear', observed:1, pendingEscalations:0});
       assert.equal(events.length, 1);assert.equal(events[0].fields.event_id, handle.request.id + ':escalated');
       assert.equal(fs.existsSync(ack + '/record.json'), true);
     } finally {process.removeListener('unhandledRejection', listener);}

@@ -1,0 +1,27 @@
+- id: W1-T9158
+  title: "Plan scaffolding: anchor placeholders for MASTER-PLAN §7/P25 follow-up tasks (align with plan/tasks.yaml index and REAL existing ids)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=05f90c9f07a4bac0
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - plan/notes/ratification-W1-T9158.md
+  acceptance:
+    - claim: "W1-T9158 creates a scaffold that references the current MASTER-PLAN index and can be mapped to a real W1-T id upon operator ratification"
+      proof: "grep: W1-T9158 in plan/tasks.yaml"
+  origin: "architect"
+
+  rationale: >-
+    From the 2026-09-27 follow-up on W1-T3116-1790492944985, ratified via rmd approve:
+  
+    follow-up harvest [research]: Read `src/lib/daemon.ts`'s existing cadence/scheduling
+    primitives (e.g. how other daemon-lifetime rungs like PR reconciliation are scheduled) before
+    designing the new controller's hook point, so it reuses the existing scheduler rather than
+    inventing a second one — needed to satisfy design (ii)/(v)'s "one scheduler" constraint. —
+    from W1-T3116 (run W1-T3116-1790492944985)

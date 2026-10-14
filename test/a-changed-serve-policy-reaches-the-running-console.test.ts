@@ -363,8 +363,8 @@ test("serve convergence cannot stop the console before pressure admission", () =
       const h = harness({ replaceServe: seams.replaceServe });
       return { out: runServePolicyCycle(h.deps, TICK), h };
     };
-    // The 22:57Z host: 4 146 167 808 B available, under a 2 GiB reserve + 7.5 GiB cold start - 5.5 GiB freed.
-    writeFileSync(join(f.proc, "meminfo"), "MemAvailable: 4049000 kB\n");
+    // Under the updated 2 GiB reserve + 6 GiB cold start - 5.5 GiB freed = 2.5 GiB need.
+    writeFileSync(join(f.proc, "meminfo"), "MemAvailable: 2400000 kB\n");
     const tight = cycle();
     assert.equal(tight.out.replaced, false);
     assert.equal(tight.h.rows.at(-1)!.data?.hold, "host_headroom", tight.out.reason);

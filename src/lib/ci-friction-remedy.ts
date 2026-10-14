@@ -24,6 +24,7 @@
  *    third failed rung goes to a person instead of a fourth task.
  */
 import { fixedClock } from "./clock.js";
+import { testSourcePaths } from "./flake-incident-gardener.js";
 
 /** The fields of one priced round this module reads. */
 export interface RemedyRound {
@@ -110,7 +111,7 @@ const share = (w: ShareWindow): number => (w.n > 0 ? w.k / w.n : 0);
 
 /**
  * Did the cause's share of fix rounds fall after the remedy merged? Windows are equal: `after` runs from
- * the merge to now, `before` spans the same length ending at the merge (each capped at
+ * the latest post-merge span ending now, `before` spans the same length ending at the merge (each capped at
  * {@link CI_FRICTION_EFFECT_MAX_WINDOW_MS}).
  */
 export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey: string, mergedAtMs: number, nowMs: number): RemedyEffect {
@@ -120,7 +121,7 @@ export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey:
   for (const r of rounds) {
     const t = r.at === undefined ? NaN : Date.parse(r.at);
     if (!Number.isFinite(t)) continue;
-    const side = t >= mergedAtMs && t <= mergedAtMs + span ? after : t < mergedAtMs && t >= mergedAtMs - span ? before : undefined;
+    const side = t >= nowMs - span && t <= nowMs ? after : t < mergedAtMs && t >= mergedAtMs - span ? before : undefined;
     if (!side) continue;
     side.n += 1;
     if (r.causeKey === causeKey) side.k += 1;
@@ -219,6 +220,7 @@ export interface OwnerSearch {
    *  with its hit count. */
   filesContaining: (term: string) => Array<{ file: string; hits: number }>;
   fileExists: (file: string) => boolean;
+  readSource?: (file: string) => string | undefined;
   pin?: () => OwnerSearch;
   workflowOwner?: (family: string) => CiFrictionOwner | undefined;
   /** The checks `workflowOwner` resolved to no owner because a workflow could not be read or told apart, and why. */
@@ -283,8 +285,8 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
       ? { files: [file], why: [`${file}: repaired by hand in multiple distinct merged PRs`] } : undefined;
   }
-  const testPath = key.startsWith("check:ci-log:")
-    ? details.map((d) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(d)?.[1]).find((p): p is string => p !== undefined)
+  const testPath = key.startsWith("check:")
+    ? [key, ...details].map((d) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(d)?.[1]).find((p): p is string => p !== undefined && !p.split("/").includes(".."))
     : undefined;
   if (key.startsWith("main_merge:")) {
     const file = key.slice("main_merge:".length);
@@ -293,6 +295,22 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
   const terms = ownerSearchTerms(key, details);
   const family = key.startsWith("check:") ? terms.at(-1) : undefined;
   const distinctive = family && key.startsWith("check:ci-log:") ? terms.slice(0, -1) : [];
+  const infrastructure = distinctive.some(term =>
+    !/^test\/[\w./-]+\.test\.[mc]?[jt]s$/.test(term) &&
+    /^(?:timed out\b|pool (?:defect|failure)\b|red with no failing test\b|COVERAGE-REPORT-FAILED\b)|\bartifacts?\b/i.test(term));
+  if (family && infrastructure) {
+    const workflow = search.workflowOwner?.(family);
+    return workflow ? { ...workflow, ...(testPath ? { failingTest: testPath } : {}) } : undefined;
+  }
+  if (testPath && search.fileExists(testPath)) {
+    const source = testSourcePaths(testPath, search.readSource?.(testPath))
+      .find(file => /^(src|scripts)\//.test(file) && !file.split("/").includes("..") && search.fileExists(file));
+    return {
+      files: source ? [source, testPath] : [testPath],
+      why: [...(source ? [`${source}: ${testPath} imports it`] : []), `${testPath}: named by the failing check`],
+      failingTest: testPath,
+    };
+  }
   const generic = (term: string) => /^(ci|test|tests|coverage|build|check|checks)$/i.test(term.replace(/\s*\(\d+\/\d+\)\s*$/, "").trim());
   const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
   const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;

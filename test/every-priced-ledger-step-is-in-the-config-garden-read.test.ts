@@ -64,6 +64,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.absent_repush": A_LANE_RUN_ID,
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.capped_host_gap_rereview": A_LANE_RUN_ID, // W1-T7837: a sweep-lane row; its run_id is the sweep pass
+  "sweep.review_host_gap_rereview": A_LANE_RUN_ID, // W1-T7850: a sweep-lane row; its run_id is the sweep pass
   "sweep.armed_body_guarded": A_LANE_RUN_ID, // a sweep-lane row: an armed PR's edited body re-guarded
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
@@ -132,6 +133,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "dep-review.migrate.incomplete": A_LANE_RUN_ID,
   "approve.join_body_refreshed": A_LANE_RUN_ID,
   "approve.join_body_stale": A_LANE_RUN_ID,
+  "approve.join_skipped": A_LANE_RUN_ID, // W1-T9161: names the PR it did not join, under the APPROVE- run id
   "ratify.approved": A_LANE_RUN_ID,
   "alert-fix.acceptance_check_error": A_LANE_RUN_ID,
   "alert-fix.acceptance_defect": A_LANE_RUN_ID,
@@ -205,7 +207,11 @@ export function stepsWrittenWithAPrice(sources: ReadonlyMap<string, string>): Ma
   const resolve = (literal: string | undefined, name: string | undefined): Iterable<string> =>
     literal !== undefined ? [literal] : (constants.get(name!) ?? []);
   for (const [file, text] of sources) {
-    const logCall = new RegExp(`\\blog\\w*\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
+    // These exact adapters forward to the same ledger sink. Do not treat arbitrary
+    // business/report methods elsewhere as ledger writes or drop their old exemptions.
+    const adapters = file === "src/lib/daemon.ts" ? "|(?<![\\w$.])(?:report|reporting\\.report)"
+      : file === "src/lib/drain.ts" ? "|(?<![\\w$.])settledLog" : "";
+    const logCall = new RegExp(`(?:\\blog\\w*${adapters})\\(\\s*(?:(["'])(${STEP_NAME})\\1|(${CONST_NAME}))\\s*,`, "g");
     for (const m of text.matchAll(logCall)) {
       if (PRICED.test(balanced(text, text.indexOf("(", m.index)))) add(resolve(m[2], m[3]), file);
     }
@@ -323,4 +329,14 @@ test("the census reads each write idiom and ignores an unpriced or total-only ro
   ]));
   assert.deepEqual([...found.keys()].sort(), ["a.appended", "a.literal_log", "b.constant_log", "b.constant_object"]);
   assert.deepEqual([...found.get("b.constant_object")!], ["b.ts"]);
+});
+
+test("the priced-step census sees owned settlement adapters but not unrelated reporters", () => {
+  const found = stepsWrittenWithAPrice(new Map([
+    ["src/lib/daemon.ts", `report("daemon.blocked", { pr_url: url }); reporting.report("daemon.block.parked", { pr_url: url }); other.report("business.not.ledger", { cost_usd: 1 }); other.reporting.report("nested.not.ledger", { pr_url: url });`],
+    ["src/lib/drain.ts", `settledLog("drain.continued", { pr_url: url }); settledLog("drain.blocked", { reason: "unpriced" });`],
+    ["src/lib/unrelated.ts", `report("not.a.ledger", { cost_usd: 1 }); reporting.report("also.not.a.ledger", { pr_url: url });`],
+  ]));
+  assert.deepEqual([...found.keys()].sort(), ["daemon.block.parked", "daemon.blocked", "drain.continued"]);
+  assert.deepEqual([...found.get("daemon.blocked")!], ["src/lib/daemon.ts"]);
 });

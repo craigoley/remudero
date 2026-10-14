@@ -105,6 +105,7 @@ import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./re
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
+import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
@@ -220,6 +221,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
@@ -447,6 +449,8 @@ export interface ServeDeps {
   /** W1-T3718: the repair ladder's fleet state, spliced into `/v1/status` and
    *  `/v1/daemon-health`. The real reader is rooted at `fleetControlRoot`; a test injects one. */
   repairLadder?: { read?: (root: string, nowMs: number) => RepairLadderState };
+  /** W1-T2858: the heartbeat's runtime-contract snapshot reader (shared state only); injectable for tests. */
+  fleetRuntimeHealth?: { read?: (root: string, nowMs: number) => FleetRuntimeHealth };
   /** Server-owned provider browser-auth profiles and session store. Credential homes remain on the
    * daemon; the browser receives only provider-auth-v1 projections. */
   providerAuth?: {
@@ -608,6 +612,8 @@ export interface ServeDeps {
     /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
     workers?: () => readonly TrackedWorker[];
   };
+  /** W1-T8711: the seams of serve's shared producer observation (host-serve-evidence.ts); absent, this host's real store. */
+  hostServeEvidence?: HostServePublishOptions;
 }
 
 /**
@@ -844,7 +850,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   const repairLadder = (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   switch (path) {
     case "/v1/status":
-      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder };
+      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder, fleetRuntimeHealth: runtimeHealthFor(deps, nowMs) };
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -878,6 +884,20 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
  */
 export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLadderState): Route {
   return spliceJsonField(route, "repairLadder", read);
+}
+
+/** W1-T2858: the production reader (one shared-state file read) unless a test injects one. */
+function runtimeHealthFor(deps: ServeDeps, nowMs: number): FleetRuntimeHealth {
+  const inject = deps.fleetRuntimeHealth?.read;
+  return inject ? inject(deps.fleetControlRoot, nowMs) : readFleetRuntimeHealth(deps.fleetControlRoot, nowMs);
+}
+
+/**
+ * W1-T2858: `GET /v1/status` gains `fleetRuntimeHealth`, the host heartbeat's runtime-contract verdict
+ * (`healthy` | `drift` | `unknown`) read from shared state. One local file read: no Docker socket, no GitHub.
+ */
+export function withFleetRuntimeHealth(route: Route, read: (nowMs: number) => FleetRuntimeHealth): Route {
+  return spliceJsonField(route, "fleetRuntimeHealth", read);
 }
 
 /**
@@ -2851,6 +2871,9 @@ function assembleServeRoutes(
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
+  const reportRuntimeHealth = fleetRuntimeHealthTelemetry();
+  const readRuntimeHealth = (nowMs: number): FleetRuntimeHealth =>
+    reportRuntimeHealth(runtimeHealthFor(deps, nowMs));
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
@@ -2867,7 +2890,7 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
-    withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),
+    withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
@@ -3363,12 +3386,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
     // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
     // listener stops both: the server already sits at its listener ceiling.
+    // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and
+    // once at close. It never throws and never waits on anything but one small atomic write.
+    const publishServe = (scenario: "serve-steady" | "serve-stopped"): void => {
+      publishHostServeEvidence({ scenario }, {
+        revision: consoleSha,
+        log: (event) => deps.log?.(HOST_SERVE_ERROR_STEP, event),
+        ...deps.hostServeEvidence,
+      });
+    };
+    publishServe("serve-steady");
     const stopMemory = startServeMemoryMonitor({
       ...deps.serveMemory,
       holders: memory.holders,
-      sample: async (holders) => sampleServeMemory(holders, {
-        usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
-      }),
+      sample: async (holders) => {
+        const sample = sampleServeMemory(holders, {
+          usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
+        });
+        publishServe("serve-steady");
+        return sample;
+      },
       modeOf: (view) => viewMode(readModel, view),
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),
@@ -3376,6 +3413,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     server.on("close", () => {
       stopInvariants();
       stopMemory();
+      // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
+      // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
+      if (!deps.generation) publishServe("serve-stopped");
     });
   };
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
@@ -3404,7 +3444,12 @@ export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questio
   const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
-  return [core, ...others.map((instance) => ({ name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo }))];
+  return [core, ...others.map((instance) => {
+    const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
+    return { name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo,
+      inbox: { instance: instance.name, repository: instance.repo, root: join(root.root, "repos", instance.repo.split("/")[1]),
+        planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root } };
+  })];
 }
 
 export function repositoriesSources(deps: ServeDeps): RepositoriesSources["instances"] {

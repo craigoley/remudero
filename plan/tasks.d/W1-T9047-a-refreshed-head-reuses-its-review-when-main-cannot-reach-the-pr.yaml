@@ -1,0 +1,56 @@
+- id: W1-T9047
+  title: "A FLEET REFRESH REUSES THE REVIEW WHEN MAIN'S CHANGE CANNOT REACH THE PR — the exact-input digest carries no base, yet three leaks send every refreshed head to a full LLM review: the pending-CI post-review row never consults reviewReuseVerdict, the own-diff digest reads a shared file's blob instead of the PR's hunks, and reuse facts stop at 25 PRs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — when a review on a refreshed head may be reused instead of re-run
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: gardener loop audit; operator ruling the same day (reuse unless main's change touches the PR's files or its proof tests' import closure)"
+  plan_refs: [W1-T3704, W1-T5713, W1-T7735, W1-T8088]
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, test/a-refreshed-head-reuses-its-review-when-main-cannot-reach-the-pr.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED: #10339 was reviewed 11 times and #10600 8 times (doctrine never-fan-out-update-branch). #10848 cycled for
+    hours on 2026-10-12 as main moved under it at about 190 merges a day.
+    VERIFIED on origin/main:
+    - `reviewInputDigest(headSha, body, engineRevision)` (src/lib/review.ts) carries no base, and branch protection is
+      non-strict. So a main move alone voids nothing; only a refresh that makes a new head does.
+    - W1-T3704/W1-T5713 built `reviewReuseVerdict` (sweep.ts), returning `review-reused` / `discriminate-only`. Three
+      leaks bypass it:
+      (1) Both reuse rows in `DISPOSITION_RULES` need `checksState === "green"`. After a refresh CI is pending, so the
+          "Start one exact-input review after CI has registered" row (#8189) fires first. `runSweep` then maps every
+          `post-review` to `{kind: "full-review"}`.
+      (2) `ownDiffDigestFromCompareFiles` (open-prs-rest.ts) hashes each file's blob sha at head. When main touched a file
+          the PR also touches (sweep.ts, run-task.ts), the digest changes although the PR's own hunks are identical.
+      (3) `hydrateReviewReuseFacts` stops at `MERGE_STATE_HYDRATION_CAP` = 25, and every PR past it falls back to a full
+          review.
+    W1-T7735 (queued) decides WHEN to refresh; it does not touch any of the three leaks.
+    OPERATOR RULING 2026-10-13: reuse the prior review when the PR's own hunks are unchanged and main's change since the
+    reviewed merge base touches neither the PR's files nor the import closure of its proof tests. CI and proof
+    discrimination still run on the new head.
+  design: |
+    1. A pending-CI `post-review` on a head whose only change since the reviewed head is a fleet base merge
+       (`reviewOrphanedByPush`) goes through `reviewReuseVerdict` before any full review is dispatched.
+    2. The own-diff digest is computed from patch hunks with line numbers stripped (patch-id-like, from `files[].patch`).
+       It falls back to the blob sha when GitHub truncates a patch, and says so.
+    3. `discriminate-only` upgrades to `reuse` when main's delta since the reviewed merge base touches none of: the PR's
+       files, its proof target paths, or the import closure of its proof tests (`readTestImportClosureImpl`). Any overlap
+       keeps the full review.
+    4. Reuse facts are hydrated for every open PR the pass considers, or the 25 cap is ordered so refreshed fleet PRs come
+       first. A PR still past the cap is ledgered as such, never silently fully reviewed.
+  acceptance:
+    - claim: "a base-merge head with pending CI and an unchanged own diff is reviewed by reuse, not a full review"
+      proof: "grep: test(\"W1-T9047: a base-merge head with pending CI is reviewed by reuse, not a full review\" in test/a-refreshed-head-reuses-its-review-when-main-cannot-reach-the-pr.test.ts"
+    - claim: "a main change inside the PR's files or its proof tests' import closure still forces a full review"
+      proof: "grep: test(\"W1-T9047: a main change inside the PR's proof import closure forces a full review\" in test/a-refreshed-head-reuses-its-review-when-main-cannot-reach-the-pr.test.ts"
+    - claim: "the own-diff digest ignores line shifts that main introduced around unchanged hunks"
+      proof: "grep: test(\"W1-T9047: the own-diff digest ignores line shifts from main\" in test/a-refreshed-head-reuses-its-review-when-main-cannot-reach-the-pr.test.ts"
+  falsifier: |
+    Refresh a green-reviewed PR that touches src/lib/sweep.ts by merging a main commit that edits a distant function in
+    the same file. At origin/main the sweep dispatches a full review; with the change it reuses the review once CI
+    registers. A second main commit that edits the PR's proof test's import does force a full review.

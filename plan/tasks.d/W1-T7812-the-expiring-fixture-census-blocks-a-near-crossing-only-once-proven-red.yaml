@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: #10719, the W1-T4064 cost-of-delay fixture rows; approved 2026-10-10"
   plan_refs: [W1-T3388, W1-T3655, W1-T3839, W1-T5826, W1-T6035, W1-T6036, W1-T4064, W1-T7808]
   files: [scripts/expiring-fixture-census.mjs, src/lib/gate-gardener.ts, test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts, "src/lib/ci-parity.ts"]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

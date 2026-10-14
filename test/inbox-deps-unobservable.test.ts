@@ -98,7 +98,7 @@ function fragmentDependingOn(taskId: string, depId: string): string {
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -119,7 +119,7 @@ const MIXED_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -302,7 +302,7 @@ const ACCESSOR_PLAN_YAML = `
   verify: auto
   risk: medium
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "does the thing"
       proof: "unit test: accessor fixture one"

@@ -1,0 +1,63 @@
+- id: W1-T8833
+  title: "A FIX ROUND'S PUSH LOST TO A BASE REFRESH IS RE-APPLIED, AND A PUSH THAT FAILED IS NEVER RECORDED AS SUCCESS — the sweep's fix rung pushes with the raw pushFixRound, so #10509's re-apply never runs there; on 2026-10-12 #11133's FIXED commit was discarded by a lease rejection and fix.done still said success"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # the sweep fix lane's push path and the progress judge's input; spans run-task, sweep and the judge
+  band_meaning: span
+  origin: "operator session 2026-10-12: forensics on W1-T8198's #11133 fix round (operator: go through all follow-ups)"
+  plan_refs: [W1-T4693, W1-T4797, W1-T5227, W1-T7096, W1-T8198]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/fix-progress-judge.ts, test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 on #11133 (W1-T8198's build), core ledger:
+      18:20:26Z sweep.base_fixed.refresh / branch.update_requested (outcome updated) merged main into the PR:
+                head dec02d183, parents d8ac26a2c + 53c38dbc8.
+      18:20:42Z fix.dispatch targeted the OLD head d8ac26a; the round committed its FIXED change 63540e37
+                (implement.harness_commit admitted the needed test file).
+      18:22:17Z fix.push_failed cause git-push-failed: --force-with-lease=…:d8ac26a rejected ("stale info"); the
+                FIXED commit was discarded.
+      18:22:17Z fix.done subtype "success", pushed_head_sha absent. Every fix.progress_judged row 18:39–19:20Z then
+                read round 1 as a FIXED round with a real diff; the same fix was redone and pushed at 19:20Z, an hour late.
+    No fix.round_reapplied / fix.round_reapply_refused row exists for that push, so the re-apply was never attempted.
+    ROOT CAUSE (verified on origin/main 51ae52d1b):
+    (1) #10509 (src/lib/fix-round-reapply.ts, merged 2026-10-09) re-applies a leased push the remote outran by
+        merging the moved tip once, but it lives in `pushFixRoundPrechecked` (src/run-task.ts ~18708). Only the
+        run-task fix rung uses that wrapper (src/run-task.ts ~21117). The SWEEP's fix rung, which repairs most PRs,
+        wires the raw `pushFixRound` (src/lib/sweep.ts ~4024, "push: pushFixRound"), so it also skips the
+        W1-T4797 coverage precheck and the W1-T5227 conflict-marker check. harnessCommitsFix is true on the host and
+        the sweep passes guardRoundHead: true, so priorHeadSha WAS available; only the wrapper was missing.
+    (2) `logFixDone(pushedHeadSha)` after `landRoundPush` (src/run-task.ts ~14030 and ~13971) passes no subtype when
+        the push stood down, and `logFixDoneRow` (~13794) then defaults `subtype` to the worker's own
+        `fixResult.subtype` ("success").
+    (3) fix-progress-judge.ts reads the round's `subtype` and `fix_outcome` from that row, so a push that never
+        landed is presented to the judge as a successful FIXED round.
+  design: |
+    1. src/lib/sweep.ts: the sweep's runFixRung deps.push goes through `pushFixRoundPrechecked` exactly as the
+       run-task rung does (src/run-task.ts ~21117), so the sweep lane gets the #10509 re-apply plus the coverage and
+       conflict-marker prechecks. Keep W1-T4693's contract: a refused or failed push still throws a named
+       FixRoundPushError.
+    2. src/run-task.ts: when `landRoundPush` stands down (returns a FixRungOutcome), `fix.done` records
+       subtype "push_failed" (worker_subtype keeps the worker's own value), never the worker's "success".
+    3. src/lib/fix-progress-judge.ts: a round whose fix.done subtype is "push_failed" is a round that DID NOT LAND:
+       it is not credited as clearing anything, and the judge's input names it as push_failed, not as a no-op or a fix.
+    NOT IN SCOPE: re-reading the PR head before dispatch. With the re-apply on the sweep path, a base refresh that
+    lands between dispatch and push is merged instead of lost; a refresh that rewrote history still stands down.
+  acceptance:
+    - claim: "the sweep's fix rung pushes through pushFixRoundPrechecked, so a base refresh landing between dispatch and push is merged and the round's change reaches the new head"
+      proof: 'grep: test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lands its change on the new head" in test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts'
+    - claim: "a fix round whose push stood down records fix.done subtype push_failed, keeping the worker's own subtype beside it"
+      proof: 'grep: test("W1-T8833: a stood-down push records subtype push_failed on its fix-done row" in test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts'
+    - claim: "the progress judge reads a push_failed round as not landed, never as a FIXED round that cleared its red"
+      proof: 'grep: test("W1-T8833: the progress judge reads a push_failed round as not landed" in test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts'
+  falsifier: |
+    Drive the sweep fix rung against a gitRepo() remote whose PR branch gains a merge from main after dispatch and
+    before the push. At origin/main the leased push is rejected, no fix.round_reapplied row is written, the change is
+    lost and fix.done says success. With the change the round's commit is merged onto the new tip and pushed once,
+    fix.round_reapplied is ledgered, and a forced push failure records subtype push_failed. Rewire the sweep back to
+    the raw pushFixRound and the first test reds; drop the subtype and the second and third red.

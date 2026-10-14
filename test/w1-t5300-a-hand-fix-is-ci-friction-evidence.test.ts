@@ -79,8 +79,8 @@ test("hand-fix collector runs the real git and gh defaults and persists the merg
 test("manual check evidence survives measured gate pricing and hand-fix filings have durable receipts", () => {
   const added = { ...rounds[1]!, pr: 9, minutes: 5, pricing: "median-proxy" as const };
   const priced = priceCiFrictionCauses([...rounds, added], { status: "measured", prsScanned: 3,
-    neverFired: [], alwaysFired: [], gates: [{ gate: "coverage-ratchet", prs: 2, runs: 3, redRuns: 2, refusals: 1, repaired: 1, overridden: 0, minutes: 12 }] });
-  assert.deepEqual(priced.find((p) => p.cause.kind === "check"), { cause: rounds[1]!.cause, minutes: 17, rounds: 3, prs: 3 });
+    neverFired: [], alwaysFired: [], gates: [{ gate: "coverage-ratchet", prs: 2, runs: 3, redRuns: 2, refusals: 1, repaired: 1, overridden: 0, minutes: 12, redMinutes: 8, redPrs: 2 }] });
+  assert.deepEqual(priced.find((p) => p.cause.kind === "check"), { cause: rounds[1]!.cause, minutes: 13, rounds: 3, prs: 3 });
   assert.deepEqual(landedCiFrictionOrigins([{ step: "ci-friction.scorecard", pr_url: "https://github.com/owner/repo/pull/10", untracked: "hand_fix:src/worker.ts" }]), ["ci-friction:hand_fix:src/worker.ts"]);
 });
 

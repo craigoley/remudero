@@ -1,0 +1,108 @@
+- id: W1-T9409
+  title: "A RECYCLE PAUSE WHOSE WRITER DIED BEFORE IT STOPPED THE CONTAINER IS RELEASED — on 2026-10-14 deploy/recycle-container.sh wrote state/PAUSE at 08:12:24Z as pid 405262, exited rc=2 one second later without stopping remudero-daemon, and its PAUSE halted all core dispatch with nothing set to clear it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — releasing a recycle's own PAUSE once its writer is provably gone
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: core PAUSE from pid 405262 at 08:12:24Z, writer gone by 08:30Z, daemon still the old container"
+  plan_refs: [W1-T4197, W1-T5281, W1-T5804, W1-T4429, W1-T6597, W1-T8245]
+  files: [deploy/release-orphan-recycle-pause.sh, deploy/recycle-container.sh, deploy/install-host-units.sh, test/a-recycle-pause-whose-writer-died-is-released.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on host remudero, read-only:
+      - state/PAUSE (~/rmd-state2/state/PAUSE, mtime 08:12:24.859Z) holds
+        {"reason":"container recycle (deploy/recycle-container.sh)","requestedAt":"2026-10-14T08:12:24.000Z","pid":405262,"host":"Remudero"}.
+      - At 08:30Z `ps -p 405262` was empty, no recycle-container process was running, and remudero-daemon was
+        still the old container (Up 3 hours). From 08:15Z the daemon logged `lane.idle_changed` with cause
+        recycle_drain and hold "fleet PAUSE hold", and dispatched nothing.
+      - The writer was not an ssh session. journalctl -u rmd-fleet-watchdog shows the host watchdog tick
+        (rmd-relaunch.sh pid 402976) running the recycle on a STALLED progress verdict. The output ends at
+        08:12:25Z just after "RECLAIMING .../inflight/W1-T7898.lock". The unit then finished normally. The
+        host revival log reads "2026-10-14T08:12:25Z watchdog-recycle result=refused rc=2 reason= }".
+      - So the script exited with status 2 in its wait phase, before `docker stop`. Its only EXIT trap
+        (`recycle_cleanup_tmp`) cleans temp files. W1-T5281's PAUSE removal runs on HUP/INT/TERM only, so an
+        error exit (here a `set -e` abort, filed separately) leaves the PAUSE, and so would SIGKILL from the OOM
+        killer on this thrashing host (load 39-56, 862 MB available at 08:07Z). No trap can handle SIGKILL.
+      - state/PAUSE.aborted-recycle-1001828 (2026-09-26) is an earlier PAUSE of the same kind, renamed aside
+        by hand.
+      - Every later tick logged `deploy.skip` "daemon running stale code". No actor checks whether a
+        recycle PAUSE's writer is still alive.
+    READ on origin/main 2f5051b02:
+      - deploy/recycle-container.sh `clear_own_pause` removes only the exact body this run wrote (W1-T4197).
+        `recycle_on_signal` covers signals only, and `RECYCLE_SIGNAL_PHASE` flips to stopped just before
+        `docker stop`.
+      - src/lib/fleet-control.ts `evaluatePauseTier` (W1-T4429) has an orphaned tier, but it reads
+        setterAlive "unknown" for a setter on another host. The daemon runs in the container's pid namespace,
+        so it cannot see a host pid. Also, `checkPauseHold` is declared in DaemonDeps but no production caller
+        supplies it, so that governor never runs outside tests.
+      - The host watchdog tick (deploy/install-host-units.sh, rmd-fleet-watchdog.service, every 5 min) runs in
+        the host pid namespace with docker access. It already runs deploy/memory-high-tuner.sh in the
+        container-running branch before `watchdog_unchanged_tick`'s early exit.
+  design: |
+    Operator rules: no fixed threshold and no timer. A PAUSE is released only on proof that its writer is gone,
+    and never when the hold belongs to an operator.
+    1. THE BODY MAKES THE CHECK EXACT. deploy/recycle-container.sh keeps `reason` exactly as it is (W1-T5127 and
+       W1-T5804 key on it) and adds these fields to the PAUSE it writes:
+         - `container`: the full docker Id of CONTAINER_NAME, read before the write;
+         - `containerName`;
+         - `writerStart`: the writer's own process start time, from a portable `ps -o lstart= -p $$`;
+         - `phase`: "waiting".
+       Just before `docker stop` (where RECYCLE_SIGNAL_PHASE flips), the script rewrites the body with
+       phase "stopping", only if the file still holds RECYCLE_PAUSE_BODY, and updates RECYCLE_PAUSE_BODY so
+       `clear_own_pause` still matches its own.
+    2. AN ERROR EXIT IN THE WAIT PHASE TAKES ITS PAUSE WITH IT. The EXIT trap calls `clear_own_pause` when the
+       exit status is non-zero and the phase is still waiting. This covers a `set -e` abort like 10-14's rc=2,
+       as W1-T5281 already does for signals. After the stop phase the PAUSE stays, as today.
+    3. THE HOST TICK RELEASES WHAT NO TRAP CAN. Add deploy/release-orphan-recycle-pause.sh
+       (--container NAME --state-dir DIR). The watchdog tick in deploy/install-host-units.sh calls it in the
+       container-running branch, before the unchanged-tick exit, as it calls memory-high-tuner.sh: bounded and
+       never fatal to the tick. It releases only when ALL of these hold:
+         (a) the PAUSE parses and its `reason` is exactly the recycle's. Anything else is an operator hold
+             (the W1-T4197 rule) and is kept without a ledger row;
+         (b) `phase` is "waiting". After "stopping", the replacement path owns the PAUSE;
+         (c) `host` equals this host's hostname. Another host's pid cannot be judged here;
+         (d) the writer is dead: no process has that pid, or the process that has it started at a time other
+             than `writerStart` (the pid was reused);
+         (e) docker reports the recorded `container` Id as the running container under `containerName`
+             (State.Running true, Id equal).
+       Any unreadable input (docker or ps failing, a field missing) means keep. Releasing re-reads the body
+       byte-for-byte and then moves it aside to state/PAUSE.orphaned-recycle-<pid>; it is never deleted. The
+       script appends a ledger row, step `recycle.orphan_pause_released`, lane deploy. The row names the
+       writer pid, host and writerStart, the container, requestedAt, and the evidence for (d) and (e).
+    4. AN OLD-SHAPE BODY IS NEVER RELEASED. A recycle PAUSE without `container`, `phase` or `writerStart`, like
+       the one on 2026-10-14, is kept. When its writer is dead on this host, the tick ledgers
+       `recycle.orphan_pause_unverifiable` once per body, naming the writer, for a human to act on.
+    5. No setsid change. W1-T5281 already tells ssh users to run the recycle detached. On 10-14 the writer was
+       a systemd oneshot, and (3) covers SIGKILL under either launcher.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive
+    deploy/release-orphan-recycle-pause.sh against a fixture state dir with a stub `docker` on PATH. A dead
+    writer is a child that was spawned and reaped. A live writer is a running child with its real start time.
+    Drive the EXIT-path test through the real recycle-container.sh, using the W1-T5281 test's stub technique.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-recycle-pause-whose-writer-died-is-released.test.ts"
+    - claim: "a dead writer's recycle PAUSE is released with a ledger row while its container still runs"
+      proof: 'grep: test("W1-T9409: a dead writer and a running old container release the recycle PAUSE" in test/a-recycle-pause-whose-writer-died-is-released.test.ts'
+    - claim: "a live writer's recycle PAUSE is kept"
+      proof: 'grep: test("W1-T9409: a live writer keeps the recycle PAUSE" in test/a-recycle-pause-whose-writer-died-is-released.test.ts'
+    - claim: "an operator PAUSE is kept"
+      proof: 'grep: test("W1-T9409: an operator PAUSE is kept" in test/a-recycle-pause-whose-writer-died-is-released.test.ts'
+    - claim: "a writer that died after docker stop leaves its PAUSE engaged"
+      proof: 'grep: test("W1-T9409: a writer dead after docker stop keeps the PAUSE" in test/a-recycle-pause-whose-writer-died-is-released.test.ts'
+    - claim: "a recycle that exits non-zero during its wait removes its own PAUSE"
+      proof: 'grep: test("W1-T9409: an error exit during the wait removes the recycle PAUSE" in test/a-recycle-pause-whose-writer-died-is-released.test.ts'
+    - claim: "the watchdog tick runs the release check"
+      proof: 'grep: release-orphan-recycle-pause\.sh in deploy/install-host-units.sh'
+  falsifier: |
+    Against main, write the 10-14 PAUSE with a reaped pid and a stub docker that reports the old container
+    running. Run the watchdog's checks. The PAUSE stays forever and no row is written, so the first test fails.
+    If the release script ignores `phase` or `reason`, the after-stop and operator tests fail. If it reads any
+    process at the pid as alive, add a case where the pid is reused with a different start time: the PAUSE is
+    wrongly kept. Exit the recycle with `exit 2` in its wait phase and the PAUSE stays, so the EXIT-path test
+    fails.

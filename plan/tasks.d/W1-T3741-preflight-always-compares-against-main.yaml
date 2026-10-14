@@ -52,22 +52,25 @@
     needs a network read on a path whose whole value is being offline.
   acceptance:
     - claim: "a base passed to preflight reaches the mirrored gates that accept one"
-      proof: "unit test: the base flag reaches a mirrored gate"
+      proof: 'grep: test("W1-T3741: the base flag reaches a mirrored gate" in test/preflight-always-compares-against-main.test.ts'
     - claim: "absent a base, every gate is invoked exactly as it is today"
-      proof: "unit test: no base leaves the invocation unchanged"
+      proof: 'grep: test("W1-T3741: no base leaves the invocation unchanged" in test/preflight-always-compares-against-main.test.ts'
     - claim: "the summary states which base the run was measured against, because a reader cannot infer it"
-      proof: "unit test: the summary names the base it used"
+      proof: 'grep: test("W1-T3741: the summary names the base it used" in test/preflight-always-compares-against-main.test.ts'
   falsifier: |
     Infer the base from the branch name and the third assertion still passes while the answer
     becomes unknowable — so the test asserts the FORWARDED value, not that some base was used.
     Forward it only to the gate that motivated this and the first goes red for the others. Default
     it to anything but origin/main and the second goes red, which is the compatibility this rests on.
-  risk: low
+  risk: high
   band_meaning: blast-radius
   origin: human
   plan_refs: [W1-T3737, W1-T3388]
-  files: [src/run-task.ts]
+  files: [src/run-task.ts, src/lib/ci-parity.ts, docs/cli-reference.md, test/preflight-always-compares-against-main.test.ts]
   status: queued
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3741-43-the-last-three
+    amended 2026-10-12 (operator-approved, escalation #9086): four dispatches 10-03/04 built the change but every push was refused because
+    the three proof tests were never committed; files: named only src/run-task.ts, so the test file (and the docs/cli-reference.md and
+    src/lib/ci-parity.ts edits the change needs) sat outside the declared surface. The three proofs live in the new test file named above; risk raised to high because the change spans four concerns (Rule 19).

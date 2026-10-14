@@ -10,6 +10,8 @@
  */
 import { existsSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { BoardSnapshotSource } from "./board.js";
+import { systemClock, type Clock } from "./clock.js";
 import type { GitHub } from "./status.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
@@ -27,6 +29,10 @@ export const GENERATION_MESSAGES = {
   shed: "rmd.shed",
   shed_done: "rmd.shed_done",
   restore: "rmd.restore",
+  shed_workers: "rmd.shed_workers",
+  shed_workers_done: "rmd.shed_workers_done",
+  restore_workers: "rmd.restore_workers",
+  restore_workers_done: "rmd.restore_workers_done",
 } as const;
 
 export interface GenerationMessage {
@@ -112,6 +118,48 @@ export function onRestoreRequest(channel: GenerationChannel, restore: (reason: s
   });
 }
 
+/** What a generation reports it dropped when it shed its worker threads. */
+export interface WorkerShedOutcome {
+  /** Rebuildable worker threads terminated. */
+  workers: number;
+  /** Their heaps as last read, when the generation could size them. */
+  heapBytes?: number;
+}
+
+/**
+ * Memory tier 2 (W1-T8873): tier 1 frees only the main heap, while the rebuildable worker threads (views, heavy
+ * views, plan reload, oracle, board, prewarm, repo-dashboard) hold most of the generation's resident bytes. A
+ * memory-deferred handoff asks the ACTIVE generation to terminate them. `shed` resolves once the threads have
+ * exited; the generation keeps answering from the bodies it already holds (the existing stale-while-revalidate
+ * degraded mode: each body carries its as-of). The reply carries resident bytes before and after so the supervisor
+ * can ledger what was freed. `restore` starts the threads again, and is idempotent.
+ */
+export function onShedWorkersRequest(
+  channel: GenerationChannel,
+  hooks: { shed: () => Promise<WorkerShedOutcome | void> | WorkerShedOutcome | void; restore: (reason: string) => Promise<void> | void },
+  rss: () => number = () => process.memoryUsage().rss,
+): void {
+  channel.onMessage((message) => {
+    if (message.type === GENERATION_MESSAGES.restore_workers) {
+      void Promise.resolve()
+        .then(() => hooks.restore(message.reason ?? "restore_workers"))
+        .then(
+          () => channel.send({ type: GENERATION_MESSAGES.restore_workers_done }),
+          (err: unknown) => channel.send({ type: GENERATION_MESSAGES.restore_workers_done, error: String((err as Error)?.message ?? err) }),
+        );
+      return;
+    }
+    if (message.type !== GENERATION_MESSAGES.shed_workers) return;
+    const beforeBytes = rss();
+    void Promise.resolve()
+      .then(() => hooks.shed())
+      .then(
+        (outcome) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: outcome?.workers ?? 0, heapBytes: outcome?.heapBytes }),
+        (err: unknown) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: 0, error: String((err as Error)?.message ?? err) }),
+      );
+  });
+}
+
 export function readinessReport(probes: readonly ReadinessProbe[], query: URLSearchParams = new URLSearchParams()): ReadinessReport {
   const criteria = probes.map((probe) => probe(query));
   return { ready: criteria.every((criterion) => criterion.ok), criteria };
@@ -143,8 +191,35 @@ export function gatewayPrimedProbe(github: Pick<GitHub, "factsAgeMs" | "factsSta
   };
 }
 
-export function boardComputedProbe(computed: () => boolean): ReadinessProbe {
-  return () => ({ name: "board_computed", ok: computed() });
+/** BACKSTOP: long enough for a stage and its error message; short enough for every readiness poll and ledger row. */
+export const BOARD_REASON_BOUND = 500;
+
+/**
+ * #8429: a cold standby sat at a bare `ok: false` here for its whole 330 s bound, and nobody could
+ * tell a first projection still running (`not_ready`) from one that failed, crashed or went stale.
+ * The verdict is still `isReady()`; the board's own state rides beside it, and a handoff that times
+ * out ledgers this whole report (`serve.handoff_aborted`). A source that cannot say (the injected
+ * precompute gate) is marked unmeasurable rather than given a made-up reason.
+ */
+export function boardComputedProbe(
+  board: { isReady(): boolean } & Partial<BoardSnapshotSource>,
+  clock: Pick<Clock, "now"> = systemClock,
+): ReadinessProbe {
+  return () => {
+    const ok = board.isReady();
+    const state = board.current?.();
+    if (!state) return { name: "board_computed", ok, detail: { measurable: false } };
+    if (state.state === "ready") {
+      const generatedAt = state.snapshot.generated_at;
+      return { name: "board_computed", ok, detail: { state: "ready", generatedAt, snapshotAgeMs: clock.now() - Date.parse(generatedAt) } };
+    }
+    const reason = state.reason.length > BOARD_REASON_BOUND ? `${state.reason.slice(0, BOARD_REASON_BOUND - 1)}…` : state.reason;
+    return {
+      name: "board_computed",
+      ok,
+      detail: { state: "unavailable", reason, buildStartedAt: state.buildStartedAt, msSinceBuildStarted: clock.now() - Date.parse(state.buildStartedAt) },
+    };
+  };
 }
 
 /**

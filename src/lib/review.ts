@@ -1,7 +1,10 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { ghExec, ghJson } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { createHash } from "node:crypto";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
+import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -18,7 +21,8 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -53,7 +57,7 @@ import { adjudicateReservationChain, parseReservationHolderLine, parseReservatio
 /** The commit-status context string the merge gate keys on. Never change casually. */
 export const REVIEW_CONTEXT = "remudero-review";
 
-/** A judged success/failure or a cannot-evaluate hold, posted as pending until the toolchain is repaired. */
+/** A judged success/failure or a load/harvest hold, posted as pending until review can complete. */
 export type ReviewState = "success" | "failure" | "pending";
 
 /** States the commit-status poster accepts. */
@@ -65,7 +69,7 @@ export type PostableReviewState = ReviewState;
  *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
-export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v2";
+export const REVIEW_ENGINE_REVISION = "promised-followups-snapshot-v3";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
 
@@ -87,6 +91,7 @@ export interface ReviewDecisionDigestInput {
   /** The full implement report is material only when supplied: preserving omission keeps legacy
    * digest identities stable, while a current worker refusal cannot replay a prior clean verdict. */
   implementationReport?: string;
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   body?: string;
   acceptance: readonly AcceptanceCriterion[];
   declaredFiles?: readonly string[];
@@ -112,6 +117,13 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     diff: input.diff,
     report: input.report,
     ...(input.implementationReport !== undefined ? { implementationReport: input.implementationReport } : {}),
+    ...(input.promisedFollowUpObservation !== undefined &&
+      !(input.promisedFollowUpObservation.state === "unknown" && input.promisedFollowUpObservation.cause === "promise-harvest-incomplete") &&
+      (input.promisedFollowUpObservation.state === "unknown" || input.promisedFollowUpObservation.promised.length > 0)
+      ? { promisedFollowUps: input.promisedFollowUpObservation.state === "unknown" ? { state: "unknown" }
+        : { state: "complete", promised: input.promisedFollowUpObservation.promised,
+          unfiled: unreportedFollowUps(input.promisedFollowUpObservation.promised, "", input.promisedFollowUpObservation.planRecords),
+          harvested: input.promisedFollowUpObservation.harvested ?? [] } } : {}),
     body: input.body ?? null,
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
@@ -405,6 +417,7 @@ export interface CriterionVerdict {
   proof_exec: ProofExecOutcome;
   /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
   loadError?: string;
+  cause?: "promise-harvest-incomplete";
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
   proofFailureOutput?: string;
@@ -433,6 +446,11 @@ export type ReportSubstituteCause =
   | { kind: "fetch-failed" };
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
+export type PromisedFollowUpObservation =
+  | { state: "complete"; headSha?: string; baseSha?: string; promised: PromisedFollowUp[]; planRecords: FollowUpPlanRecord[];
+      harvested?: HarvestableFollowUp[]; harvestCorpusComplete?: boolean }
+  | { state: "unknown"; reason: string; cause?: "promise-harvest-incomplete" };
+
 export interface ReviewEvidence {
   /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
    *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
@@ -454,6 +472,8 @@ export interface ReviewEvidence {
    * remains authoritative for prose/diff checks while this optional channel supplies only the
    * strict `REFUSED:` grammar. */
   implementationReport?: string;
+  /** One awaited, exact-head/base observation, also included in the review decision identity. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** True when `report` is NOT the PR body (W1-T1100): `runTaskBody` (run-task.js) substitutes the worker's own chat
    *  text after a failed body read, so an outage degrades to judging the narrative rather than stalling the review.
    *  TRAP: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
@@ -538,6 +558,8 @@ export interface UnwiredAdvisory {
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
 export interface ReviewVerdict {
   state: ReviewState;
+  /** Provenance of the structural promise check; absent on an unchanged no-promise review. */
+  promisedFollowUpObservation?: PromisedFollowUpObservation;
   /** A proof runner could not load files even after its bounded refresh and retry. */
   cannotEvaluate?: boolean;
   /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
@@ -4710,6 +4732,13 @@ export const SCOPE_EXEMPT_GENERATED_ARTIFACTS: ReadonlySet<string> = new Set([
   // the remedy for a breach it caused — see the doc above for why deferring this one to a
   // follow-up task is unsafe rather than merely inconvenient.
   "scripts/source-size-baseline.json",
+  // W1-T8834: kept equal to sweep's registry by the build-prompt admission suite, without a cycle to sweep.
+  "scripts/comment-load-baseline.json",
+  "docs/docs-index.json",
+  "learnings/index.json",
+  "docs/cli-reference.md",
+  "MASTER-PLAN.md",
+  "packages/api-client/src/schema.d.ts",
 ]);
 
 /** INVERSE-SCOPE (design (ii)(b), the #839 class): the mirror of {@link "../run-task.js".scopeGuardOutOfScopeFiles},
@@ -4722,15 +4751,79 @@ function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles:
   return declaredFiles.filter((f) => !touched.has(f));
 }
 
-/** SCOPE-VIOLATION (W1-T401): the same diff → declared comparison {@link
- * "../run-task.js".scopeGuardOutOfScopeFiles} makes, run at REVIEW TIME where every PR is seen rather than at the one
- * push site that guard sits behind. ADVISORY, not a refusal. DELIBERATELY DIFFERENT ON ONE POINT: that guard treats an
- * absent declared scope as "everything is out of scope" and this does not. W1-T2650: also subtracts {@link
- * SCOPE_EXEMPT_GENERATED_ARTIFACTS}. */
-function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
+/** W1-T8834: the same name-filtered proof class commitWorkerEdits admits; grep proofs grant no admission. */
+export function workerProofTitles(criteria: readonly AcceptanceCriterion[]): string[] {
+  return criteria.flatMap((criterion) => {
+    const proof = parseWhitelistedProof(criterion.proof);
+    return proof?.kind === "test" && proof.nameFiltered ? [proof.label] : [];
+  });
+}
+
+/** Match commitWorkerEdits's declaration scanner without importing the CLI into src/lib. */
+function declaresAdmittedProofTitle(content: string, titles: readonly string[]): boolean {
+  const scanner = createScanner(true, undefined, content);
+  const braceDepths: number[] = [];
+  let lastEnd = -1;
+  const scanNext = (): SyntaxKind => {
+    let next = scanner.scan();
+    if (next === SyntaxKind.TemplateHead) braceDepths.push(0);
+    else if (next === SyntaxKind.OpenBraceToken && braceDepths.length > 0) braceDepths[braceDepths.length - 1]++;
+    else if (next === SyntaxKind.CloseBraceToken && braceDepths.length > 0) {
+      if (braceDepths[braceDepths.length - 1] === 0) {
+        next = scanner.reScanTemplateToken(false);
+        if (next === SyntaxKind.TemplateTail) braceDepths.pop();
+      } else braceDepths[braceDepths.length - 1]--;
+    }
+    return next;
+  };
+  let token = scanNext();
+  while (token !== SyntaxKind.EndOfFile) {
+    const end = scanner.getTokenEnd();
+    if (end <= lastEnd) return false;
+    lastEnd = end;
+    if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
+    if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
+      token = scanNext();
+      while (token === SyntaxKind.DotToken) {
+        scanNext();
+        if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
+        token = scanNext();
+      }
+      if (token === SyntaxKind.OpenParenToken) {
+        token = scanNext();
+        if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
+            !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
+            scanNext() === SyntaxKind.CommaToken) return true;
+      }
+    }
+    token = scanNext();
+  }
+  return false;
+}
+
+function admittedProofTests(diff: string, criteria: readonly AcceptanceCriterion[]): Set<string> {
+  const titles = workerProofTitles(criteria);
+  const admitted = new Set<string>();
+  if (titles.length === 0) return admitted;
+  for (const block of diff.split(/^diff --git /m)) {
+    const path = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    if (!path || !/^--- \/dev\/null$/m.test(block) || !/^test\/.*\.[cm]?[jt]sx?$/.test(path) ||
+        path.split("/").includes("..") || /^new file mode 120000$/m.test(block)) continue;
+    const content = walkDiff(block).filter((line) => line.kind === "add").map((line) => line.text).join("\n");
+    if (declaresAdmittedProofTitle(content, titles)) admitted.add(path);
+  }
+  return admitted;
+}
+
+/** Scope widening is advisory; subtract the harness's registered artifacts and admitted new proof tests. */
+function scopeViolationFiles(
+  diffFiles: readonly string[], declaredFiles: readonly string[] | undefined,
+  admittedTests: ReadonlySet<string> = new Set(),
+): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   const declared = new Set(declaredFiles);
-  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f));
+  return diffFiles.filter((f) => !declared.has(f) && !SCOPE_EXEMPT_GENERATED_ARTIFACTS.has(f) &&
+    !admittedTests.has(f));
 }
 
 export interface ReviewScopeContext {
@@ -4751,6 +4844,193 @@ export function reviewScopeContext(
     declaredFiles: [...(declaredFiles ?? [])],
     changedFiles: diffFiles,
     widenedFiles: scopeViolationFiles(diffFiles, declaredFiles),
+  };
+}
+
+/** Observe promises before decision claiming. Git reads are awaited, bounded and pinned to two immutable objects. */
+export async function observePromisedFollowUps(args: {
+  diff: string; headSha: string; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string };
+  runGit?: (args: string[], stdin?: string) => Promise<string>;
+}): Promise<PromisedFollowUpObservation> {
+  const empty: PromisedFollowUpObservation = { state: "complete", promised: [], planRecords: [] };
+  const paths = changedFiles(walkDiff(args.diff)).filter(path => /^docs\/adr\/[^/]+\.md$/.test(path));
+  const taskPath = args.task.sourcePath?.match(/(?:^|[:/])(plan\/tasks(?:\.yaml|\.d\/[^/]+\.ya?ml))$/)?.[1];
+  if (paths.length === 0 && args.task.sourcePath === undefined) return empty;
+  if (!args.headCheckoutDir) return { state: "unknown", reason: "promise source requires the exact PR-head checkout" };
+  const deadline = performance.now() + 45_000;
+  const runGit = async (argv: string[]): Promise<string> => {
+    if (performance.now() >= deadline) throw new Error("promise source read deadline expired");
+    if (args.runGit) return await args.runGit(argv);
+    return await hostWorktreeGitAsync(args.headCheckoutDir!, argv, {
+      maxBuffer: 16 << 20, timeout: Math.max(1, Math.min(15_000, Math.floor(deadline - performance.now()))),
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
+  };
+  try {
+    if (args.task.sourcePath !== undefined && taskPath === undefined) throw new Error("promise task source path is unavailable");
+    const [headSha, baseSha] = (await runGit(["rev-parse", "HEAD", "origin/main"])).trim().split("\n");
+    if (headSha !== args.headSha || !/^[a-f0-9]{40}$/.test(baseSha ?? "")) throw new Error("promise source is not the exact head/pinned origin/main");
+    const present = paths.length ? (await runGit(["ls-tree", "--name-only", headSha, "--", ...paths])).trim().split("\n").filter(Boolean) : [];
+    if (present.length > 256) throw new Error("promise ADR corpus exceeds its bounded read limit");
+    const blobs: string[] = []; for (const path of present) blobs.push(await runGit(["show", `${headSha}:${path}`]));
+    const contents = new Map(present.map((path, index) => [path, blobs[index]!]));
+    const atBase = new Set(present.length ? (await runGit(["ls-tree", "--name-only", baseSha!, "--", ...present])).trim().split("\n").filter(Boolean) : []);
+    const baseBlobs = new Map<string, string>(); for (const path of present) if (atBase.has(path)) baseBlobs.set(path, await runGit(["show", `${baseSha}:${path}`]));
+    const promised: PromisedFollowUp[] = promisedFollowUps(present, path => contents.get(path)!, path => baseBlobs.get(path) ?? "").map(promise => ({ ...promise, taskId: args.task.id }));
+    if (taskPath !== undefined) {
+      const blob = await runGit(["show", `${baseSha}:${taskPath}`]);
+      promised.push(...promisedFollowUps([taskPath], () => blob).filter(promise => promise.taskId === args.task.id));
+    }
+    if (promised.length === 0) return empty;
+    const corpus = (await runGit(["ls-tree", "-r", "--name-only", baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"])).trim().split("\n").filter(Boolean);
+    let matching = "";
+    if (corpus.length) {
+      try { matching = await runGit(["grep", "-l", "-F", "-e", args.task.id, baseSha!, "--", "plan/tasks.yaml", "plan/tasks.d/"]); }
+      catch (error) { if ((error as { code?: unknown }).code !== 1) throw error; }
+    }
+    const filingPaths = matching.trim().split("\n").filter(Boolean).map(line => {
+      const prefix = `${baseSha}:`;
+      if (!line.startsWith(prefix) || !corpus.includes(line.slice(prefix.length))) throw new Error("promise filing query escaped its pinned corpus");
+      return line.slice(prefix.length);
+    });
+    if (filingPaths.length > 256) throw new Error("promise filing corpus exceeds its bounded read limit");
+    const planRecords: FollowUpPlanRecord[] = [];
+    for (const path of filingPaths) planRecords.push(...followUpPlanRecords(await runGit(["show", `${baseSha}:${path}`])));
+    if ((await runGit(["rev-parse", "HEAD"])).trim() !== headSha) throw new Error("promise source head changed during observation");
+    const unique = promised.filter((promise, index) => promised.findIndex(p => p.path === promise.path && p.text === promise.text && p.taskId === promise.taskId) === index);
+    // The PR's own record counts beside records that list it in plan_refs (W1-T9283); it is kept last so filings come first.
+    const kept = planRecords.filter(task => unique.some(promise => promise.taskId !== undefined && (task.id === promise.taskId || task.plan_refs?.includes(promise.taskId))));
+    return { state: "complete", headSha, baseSha, promised: unique,
+      planRecords: [...kept.filter(task => task.id !== args.task.id), ...kept.filter(task => task.id === args.task.id)] };
+  } catch (error) { return { state: "unknown", reason: `promise source unavailable: ${String(error)}` }; }
+}
+
+const followUpReport = (entries: readonly HarvestableFollowUp[]): string =>
+  `## Follow-ups\n${entries.map(entry => `${entry.type}: ${entry.text}`).join("\n")}\n`;
+
+/** Recover a cold review's missing transcript from exact task/PR history. An available current report is authoritative. */
+export async function recoverPromisedFollowUpReports(observation: PromisedFollowUpObservation, args: {
+  ledgerPath: string; taskId: string; prUrl: string; implementationReport?: string;
+  prCreatedAt?: string; fetchPrCreatedAt?: (prUrl: string) => Promise<string>;
+  io?: LedgerUnionStreamIO; signal?: AbortSignal;
+}): Promise<PromisedFollowUpObservation> {
+  if (observation.state === "unknown" || args.implementationReport !== undefined || observation.promised.length === 0 ||
+      unreportedFollowUps(observation.promised, args.implementationReport ?? "", observation.planRecords).length === 0) return observation;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000), entries = new Map<string, HarvestableFollowUp>();
+  const signal = args.signal ? AbortSignal.any([args.signal, controller.signal]) : controller.signal;
+  let incomplete = false, liveNotObserved = true;
+  const gaps = { unreadArchives: 0, malformedRows: 0, liveTornTails: 0, unreadLive: 0, invalidValues: 0 };
+  const gapReason = () => `unread archives: ${gaps.unreadArchives}; could-belong malformed rows: ${gaps.malformedRows}; live torn tails: ${gaps.liveTornTails}; unread live: ${gaps.unreadLive}; live not observed: ${liveNotObserved}; invalid follow-up values: ${gaps.invalidValues}`;
+  let firstRun: string | undefined, afterRotation: string | undefined, windowStart = args.prCreatedAt;
+  try {
+    const stateDir = dirname(args.ledgerPath);
+    if (resolve(args.ledgerPath) !== resolve(ledgerLivePath(stateDir))) throw new Error("promise harvest path is not the union's live ledger");
+    // The shared union deliberately tolerates absent state/live files. That is not
+    // evidence of an empty harvest; prove the directory exists before inferring absence.
+    const names = readdirSync(stateDir);
+    if (!names.includes(LEDGER_FILENAME)) { incomplete = true; liveNotObserved = true; }
+    else if (!lstatSync(args.ledgerPath).isFile()) throw new Error("promise harvest live ledger is not a regular file");
+    for (const liveOnly of [true, false]) {
+      let liveRead = false;
+      if (!liveOnly) {
+        const fetchPrCreatedAt = args.fetchPrCreatedAt ?? (async (prUrl: string) => {
+          const target = prLifecycleUrlTarget(prUrl);
+          if (!target) throw new Error("promise harvest PR identity is unavailable");
+          const row = await ghJsonAsync(singlePrRestArgs(target.owner, target.repo, target.number)) as { created_at?: string };
+          if (!row.created_at) throw new Error("promise harvest PR creation time is unavailable");
+          return row.created_at;
+        });
+        let prCreatedAt = args.prCreatedAt;
+        if (prCreatedAt === undefined) {
+          signal.throwIfAborted();
+          let abortLookup!: () => void;
+          const aborted = new Promise<never>((_resolve, reject) => {
+            abortLookup = () => reject(signal.reason);
+            signal.addEventListener("abort", abortLookup, { once: true });
+          });
+          try { prCreatedAt = await Promise.race([fetchPrCreatedAt(args.prUrl), aborted]); }
+          finally { signal.removeEventListener("abort", abortLookup); }
+        }
+        // The earliest live start may be a retry whose original start has already rotated away.
+        const bound = firstRun !== undefined && Date.parse(firstRun) < Date.parse(prCreatedAt) ? firstRun : prCreatedAt;
+        windowStart = bound;
+        afterRotation = rotationBeforeTime(names, bound);
+      }
+      for await (const row of openLedgerUnion(stateDir, {
+        step: liveOnly ? ["run.start", "dispatch.claim", "report.followups"] : "report.followups", dedupe: false, signal,
+        ...(liveOnly ? { throughRotation: "" } : { afterRotation, includeLive: false }),
+        onLiveRead: () => { liveRead = true; liveNotObserved = false; },
+        onUnreadDirectory: (_path, error) => { throw error; },
+        onUnreadArchive: () => { incomplete = true; gaps.unreadArchives++; },
+        onUnreadLive: () => { incomplete = true; gaps.unreadLive++; },
+        onMalformedRow: finding => {
+          if (!malformedRowCouldBelong(finding, args.taskId, windowStart ?? finding.timestamp ?? "")) return;
+          incomplete = true;
+          if (finding.kind === "live-torn-tail") gaps.liveTornTails++;
+          else gaps.malformedRows++;
+        },
+      }, args.io)) {
+        if (liveOnly && row.task_id === args.taskId && (row.step === "run.start" || row.step === "dispatch.claim") &&
+            typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts))) {
+          if (firstRun === undefined || Date.parse(row.ts) < Date.parse(firstRun)) firstRun = row.ts;
+        }
+        if (row.step !== "report.followups") continue;
+        if (row.task_id !== args.taskId || row.pr_url !== args.prUrl) continue;
+        if (!Array.isArray(row.entries)) { incomplete = true; gaps.invalidValues++; continue; }
+        for (const raw of row.entries as Array<{ type?: unknown; text?: unknown } | null>) {
+          if (!raw || !["research", "task", "action"].includes(String(raw.type)) || typeof raw.text !== "string" || !raw.text.trim() || /[\r\n]/.test(raw.text)) {
+            incomplete = true; gaps.invalidValues++; continue;
+          }
+          const entry: HarvestableFollowUp = { type: raw.type as HarvestableFollowUp["type"], text: raw.text };
+          entries.set(JSON.stringify(entry), entry);
+          if (entries.size > 256) throw new Error("promise harvest exceeds its bounded entry limit");
+        }
+        if (!liveOnly) {
+          const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+          if (unreportedFollowUps(observation.promised, followUpReport(found), observation.planRecords).length === 0) {
+            return { ...observation, harvested: found, harvestCorpusComplete: false };
+          }
+        }
+      }
+      if (liveOnly && !liveRead) { incomplete = true; liveNotObserved = true; }
+      const found = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      if (unreportedFollowUps(observation.promised,
+        followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...found]), observation.planRecords).length === 0) {
+        return { ...observation, harvested: found, harvestCorpusComplete: !liveOnly && !incomplete };
+      }
+    }
+    const harvested = [...entries.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const report = followUpReport([...(parseHarvestableFollowUps(args.implementationReport ?? "") ?? []), ...harvested]);
+    if (incomplete && unreportedFollowUps(observation.promised, report, observation.planRecords).length > 0) {
+      return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest corpus is unreadable or malformed; ${gapReason()}; absence is unproved` };
+    }
+    return { ...observation, harvested, harvestCorpusComplete: !incomplete };
+  } catch (error) { return { state: "unknown", cause: "promise-harvest-incomplete", reason: `promise harvest unavailable: ${String(error)}; ${gapReason()}` }; }
+  finally { clearTimeout(timer); }
+}
+
+/** One immutable preparation binds the promise observation to both claiming and judging. */
+export async function preparePromisedReviewDecision(args: {
+  input: ReviewDecisionDigestInput; headCheckoutDir?: string;
+  task: { id: string; sourcePath?: string }; ledgerPath: string; prUrl: string;
+  prCreatedAt?: string; fetchPrCreatedAt?: (prUrl: string) => Promise<string>;
+}): Promise<{ decisionDigest: string; judge: (evidence: ReviewEvidence) => Promise<ReviewVerdict> }> {
+  const input = structuredClone(args.input);
+  const { headCheckoutDir, ledgerPath, prUrl } = args, task = { ...args.task };
+  const sources = await observePromisedFollowUps({
+    diff: input.diff, headSha: input.headSha, headCheckoutDir, task,
+  });
+  const observation = await recoverPromisedFollowUpReports(sources, {
+    ledgerPath, taskId: task.id, prUrl, implementationReport: input.implementationReport,
+    prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
+  });
+  return {
+    decisionDigest: reviewDecisionDigest({ ...input, promisedFollowUpObservation: observation }),
+    judge: evidence => judgeReviewAsync([...input.acceptance], {
+      ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
+      headCheckoutDir, promisedFollowUpObservation: observation,
+    }),
   };
 }
 
@@ -4797,6 +5077,7 @@ function unwiredAdvisoriesFor(
   taskDeclaredFiles: string[] | undefined,
   openTaskIds: ReadonlySet<string> | undefined,
   openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
+  criteria: readonly AcceptanceCriterion[],
 ): { advisories: UnwiredAdvisory[]; reachabilityScanned: number | null } {
   const out: UnwiredAdvisory[] = [];
   let reachabilityScanned: number | null = null;
@@ -4831,7 +5112,7 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles);
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, admittedProofTests(diff, criteria));
   if (violating.length > 0) {
     out.push({
       reasonCode: "scope_violation",
@@ -5036,6 +5317,20 @@ export function judgeReview(
       criterionRefusals[i],
     ),
   );
+  const promiseObservation = evidence.promisedFollowUpObservation ??
+    (diffFiles.some(path => /^docs\/adr\/[^/]+\.md$/.test(path))
+      ? { state: "unknown" as const, reason: "promise source was not observed" } : undefined);
+  if (promiseObservation?.state === "unknown") {
+    verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: promiseObservation.reason, proof_exec: "cannot_evaluate",
+      ...(promiseObservation.cause ? { cause: promiseObservation.cause } : { loadError: promiseObservation.reason }) });
+  } else if (promiseObservation && promiseObservation.promised.length > 0) {
+    const report = followUpReport([...(parseHarvestableFollowUps(evidence.implementationReport ?? "") ?? []), ...(promiseObservation.harvested ?? [])]);
+    const missing = unreportedFollowUps(promiseObservation.promised, report, promiseObservation.planRecords);
+    if (missing.length > 0) verdicts.push({ claim: "promised follow-ups reported for harvest", proof: "", met: false, floorMet: false,
+      reason: `unreported promised follow-ups (copy each into a typed ## Follow-ups entry; rewording or deleting the promise text does not satisfy it): ${missing.map(p => `${p.path}: ${p.text}`).join("; ")}`,
+      proof_exec: "not_executable" });
+  }
   const testTheater = detectTestTheater(evidence.diff);
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s doc. `!planOnly` is the
@@ -5090,6 +5385,7 @@ export function judgeReview(
     evidence.taskDeclaredFiles,
     evidence.openTaskIds,
     evidence.openTaskDeclaredFiles,
+    criteria,
   );
 
   const unmet = verdicts.filter((v) => !v.met);
@@ -5182,7 +5478,9 @@ export function judgeReview(
     changesetContradictions.length === 0 && refusalContradictions.length === 0 && unprovenancedDecisionsEntries.length === 0;
   const summary =
     state === "pending"
-      ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find((v) => v.proof_exec === "cannot_evaluate")?.loadError ?? "proof test files could not load"}`.slice(0, 140)
+      ? (verdicts.some(v => v.loadError !== undefined)
+        ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
+        : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
       : state === "success"
       ? planOnly
         ? planOnlySummary(verdicts.length, evidence.planLint)
@@ -5218,6 +5516,8 @@ export function judgeReview(
 
   return {
     state,
+    ...(promiseObservation !== undefined && (promiseObservation.state === "unknown" || promiseObservation.promised.length > 0)
+      ? { promisedFollowUpObservation: promiseObservation } : {}),
     cannotEvaluate,
     ...proofSandboxRecord(unsandboxedBefore),
     criteria: verdicts,
@@ -7919,11 +8219,17 @@ function changedSymbols(lines: readonly DiffLine[]): Map<string, Set<string>> {
     files.add(file);
     symbols.set(name, files);
   };
+  const calls = new Map<string, { add: Set<string>; del: Set<string> }>();
   for (const l of lines) {
     if (l.kind !== "add" && l.kind !== "del") continue;
     const d = parseDef(l.text);
     if (d) add(d.name, l.file);
-    for (const name of calledNames(l.text)) add(name, l.file);
+    const fileCalls = calls.get(l.file) ?? { add: new Set<string>(), del: new Set<string>() };
+    calls.set(l.file, fileCalls);
+    for (const name of calledNames(l.text)) fileCalls[l.kind].add(name);
+  }
+  for (const [file, fileCalls] of calls) {
+    for (const name of fileCalls.add) if (fileCalls.del.has(name)) add(name, file);
   }
   return symbols;
 }
@@ -8081,6 +8387,7 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * test/instrument-surface-completeness.test.ts derive candidates from the live tree on every run. */
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
+  "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
@@ -8104,6 +8411,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // script that job's `run:` step calls).
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
+  "^scripts/security-merge-producer\\.mjs$",
+  "^src/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
   "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
@@ -8231,6 +8540,7 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "claim, for the same reason, as scripts/rule25-precheck.mjs above. It also FAILS OPEN on an " +
     "unreadable merged surface, so it cannot manufacture a refusal CI would not already reach.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/clock-sweep-aggregate.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep-deliver.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/flake-retry-aggregate.mjs":
@@ -10252,7 +10562,7 @@ export interface PostReviewStatusGuardedOpts {
 type ReviewerCodeFreshness =
   | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
   | { status: "stale"; codeSha: string; originMainSha: string; changedPaths?: string[]; diffUnreadable?: string }
-  | { status: "unreadable"; reason: string };
+  | { status: "unreadable"; reason: string; hostGap?: "cwd-missing" };
 
 export interface PostReviewStatusGuardedResult {
   posted: boolean;
@@ -10308,7 +10618,8 @@ export async function postReviewStatusGuarded(
       reason: freshnessRefusal,
       reviewer_code_freshness: freshness.status,
       ...(freshness.status === "unreadable"
-        ? { reviewer_code_reason: freshness.reason }
+        ? { reviewer_code_reason: freshness.reason,
+            ...(freshness.hostGap !== undefined ? { reviewer_code_host_gap: freshness.hostGap } : {}) }
         : {
             reviewer_code_sha: freshness.codeSha,
             origin_main_sha: freshness.originMainSha,
@@ -10458,7 +10769,8 @@ export async function postReviewStatusGuarded(
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
     }
-    if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") && opts.prUrl &&
+    if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
+        !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
       // Load escalation only for this exceptional pending path. Its worker graph reaches review
       // through eval-card; a top-level import closes a cycle and fails the dependency gate.

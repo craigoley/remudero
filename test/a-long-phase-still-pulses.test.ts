@@ -31,7 +31,10 @@ function onePlan(): { plan: Plan; dir: string } {
 interface Row { step: string; extra: Record<string, unknown>; atMs: number }
 
 /** One dispatch whose worker holds the loop's attention for `workMs`, optionally blocking it first. */
-async function longDispatch(opts: { workMs: number; blockMs?: number; pulse: boolean }): Promise<Row[]> {
+async function longDispatch(
+  opts: { workMs: number; blockMs?: number; pulse: boolean },
+  block?: { startMs?: number; endMs?: number },
+): Promise<Row[]> {
   const { plan, dir } = onePlan();
   const merged = new Set<string>();
   const rows: Row[] = [];
@@ -42,8 +45,10 @@ async function longDispatch(opts: { workMs: number; blockMs?: number; pulse: boo
         refreshMerged: () => (id) => merged.has(id),
         runOne: async (id): Promise<RunResult> => {
           if (opts.blockMs) {
-            const until = Date.now() + opts.blockMs;
+            const from = Date.now();
+            const until = from + opts.blockMs;
             while (Date.now() < until) { /* a synchronous block, as a sync gh/git call would be */ }
+            if (block) { block.startMs = from; block.endMs = Date.now(); }
           }
           await new Promise((r) => setTimeout(r, opts.workMs));
           merged.add(id);
@@ -89,11 +94,16 @@ test("without the pulse, the same long phase writes no daemon.* row — the gap 
 });
 
 test("a blocked event loop writes no pulse while blocked, and the next pulse tick names the stall as daemon.loop_lag", async () => {
-  const rows = await longDispatch({ blockMs: 150, workMs: 60, pulse: true });
+  // The block's own bounds are measured inside the worker: the pool may log daemon.iteration before or
+  // after the worker body starts, so that row is not a safe anchor for where the block sits.
+  const block: { startMs?: number; endMs?: number } = {};
+  const rows = await longDispatch({ blockMs: 150, workMs: 60, pulse: true }, block);
   const iteration = rows.find((r) => r.step === "daemon.iteration");
   assert.ok(iteration, "the fixture must dispatch");
-  const blockEndMs = iteration.atMs + 150;
-  const duringBlock = rows.filter((r) => r.step === LIVENESS_PULSE_STEP && r.atMs > iteration.atMs && r.atMs < blockEndMs - 5);
+  assert.ok(block.startMs !== undefined && block.endMs !== undefined, "the worker must have blocked the loop");
+  const blockStartMs = block.startMs;
+  const blockEndMs = block.endMs;
+  const duringBlock = rows.filter((r) => r.step === LIVENESS_PULSE_STEP && r.atMs > blockStartMs && r.atMs < blockEndMs - 5);
   assert.equal(duringBlock.length, 0, "a blocked loop must not look alive");
   const lag = rows.find((r) => r.step === "daemon.loop_lag" && r.extra.phase === "pulse");
   assert.ok(lag, `the pulse reports the stall; steps were ${rows.map((r) => r.step).join(",")}`);

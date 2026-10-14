@@ -24,6 +24,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -74,6 +76,7 @@ export interface MemoryReservationEntry {
   /** The process holding the occupancy. Its verified exit ends the occupancy (a crashed worker). */
   owner: ProcessIdentity;
   workerClass: WorkerClass;
+  entry_kind?: "bundle" | "tsx";
   estimateMib: number;
   estimateSource: EstimateSource;
   openedAt: string;
@@ -144,6 +147,7 @@ export const DEFAULT_ESTIMATE_MIB: Readonly<Record<WorkerClass, number>> = {
 
 export interface OpenReservationInput {
   workerClass: WorkerClass;
+  entryKind?: "bundle" | "tsx";
   /** A measured estimate, with its sample count. Absent means the class default, said so. */
   measured?: { estimateMib: number; samples: number };
   root?: string;
@@ -152,6 +156,8 @@ export interface OpenReservationInput {
 export interface MemoryReservationHandle {
   /** The entry id, or undefined when the open itself failed (the worker proceeds regardless). */
   readonly id: string | undefined;
+  /** True only after this handle's entry was successfully published to its existing ledger. */
+  readonly published?: boolean;
   bindRoot(pid: number): void;
   releaseOccupancy(): void;
 }
@@ -192,6 +198,28 @@ export interface SweepResult {
 
 const seenDiagnostics = new Set<string>();
 const ownReservations = new Map<string, MemoryReservationEntry>();
+
+/** Read-only binding for a NEW isolated run, never a foreign or already-running lease.
+ * Uses canonical owner copies AND the published record; unknown storage is not fresh capacity. */
+export function ownedMemoryRunBinding(id: string, deps: HostMemoryLedgerOptions = {}):
+  { state: "fresh" } | { state: "bound"; roots: readonly ProcessIdentity[] } | { state: "unavailable"; reason: string } {
+  try {
+    const ctx = contextOf(deps), owned = [...ownReservations].find(([path, entry]) => path.startsWith(`${ctx.dir}/`) && entry.id === id);
+    const observation = observeSentinel(ctx, false);
+    if (observation.state !== "present") throw new Error(`canonical reservation store ${observation.state}`);
+    if (!owned) throw new Error("no original owned reservation");
+    const [path, memory] = owned, disk = JSON.parse(ctx.read(path)) as MemoryReservationEntry;
+    const actual = ctx.probe(process.pid);
+    if (actual.state !== "alive" || memory.owner.pid !== process.pid || memory.owner.start !== actual.start ||
+        disk.id !== id || disk.owner.pid !== memory.owner.pid || disk.owner.start !== memory.owner.start ||
+        JSON.stringify(disk.generation) !== JSON.stringify(memory.generation) || JSON.stringify(ctx.generation) !== JSON.stringify(memory.generation) ||
+        memory.occupancyReleasedAt !== undefined || disk.occupancyReleasedAt !== undefined ||
+        JSON.stringify(disk.roots) !== JSON.stringify(memory.roots) || JSON.stringify(disk.tree) !== JSON.stringify(memory.tree)) {
+      throw new Error("owned reservation identity/publication changed");
+    }
+    return memory.roots.length === 0 && memory.tree.length === 0 ? { state: "fresh" } : { state: "bound", roots: memory.roots.map(root => ({ ...root })) };
+  } catch (error) { return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) }; }
+}
 const sentinelIds = new Map<string, string>();
 const pendingResets = new Map<string, string>();
 const pendingMissing = new Set<string>();
@@ -318,6 +346,32 @@ export function defaultInstance(root: string, readMountinfo = () => readFileSync
 export function defaultMemoryLedgerLocation(): { dir: string; scope: "host" | "local" } {
   const slot = resolveTestSlotDir();
   return { dir: join(slot.dir, "host-memory"), scope: slot.scope === "configured" || slot.scope === "host-scratch" ? "host" : "local" };
+}
+
+const require = createRequire(import.meta.url);
+
+export const MEMORY_ADMISSION_LOCK_BUSY = "ERR_MEMORY_ADMISSION_LOCK_BUSY";
+
+/** The existing SQLite BEGIN IMMEDIATE contract, without a busy wait or a second reservation store.
+ * Its OS lock ends on close or process death. The action is synchronous: never hold it over a spawn or back-off. */
+export function withMemoryAdmissionLock<T>(action: () => T, location = defaultMemoryLedgerLocation()): T {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  let db: DatabaseSync | undefined;
+  try {
+    try {
+      db = new DatabaseSync(join(location.dir, ".admission-lock.sqlite"), { timeout: 0 });
+      db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { errcode?: number }).errcode;
+      if (code === 5 || code === 6) throw Object.assign(new Error("admission-lock-held"), { code: MEMORY_ADMISSION_LOCK_BUSY });
+      throw new Error(`admission-lock-unavailable: ${String((error as Error).message ?? error)}`);
+    }
+    const result = action();
+    db.exec("COMMIT");
+    return result;
+  } finally {
+    db?.close();
+  }
 }
 
 interface Context {
@@ -476,7 +530,7 @@ function mergeAndPersist(ctx: Context, entry: MemoryReservationEntry, deps: Host
   } : entry);
 }
 
-const NOOP_HANDLE: MemoryReservationHandle = { id: undefined, bindRoot: () => undefined, releaseOccupancy: () => undefined };
+const NOOP_HANDLE: MemoryReservationHandle = { id: undefined, published: false, bindRoot: () => undefined, releaseOccupancy: () => undefined };
 
 /**
  * Open one reservation at worker-claim time. NEVER throws: on any failure it logs a diagnostic and
@@ -502,6 +556,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       generation: ctx.generation,
       owner: { pid: ownerPid, start: owner.state === "alive" ? owner.start : "unknown" },
       workerClass: input.workerClass,
+      ...(input.entryKind ? { entry_kind: input.entryKind } : {}),
       estimateMib: input.measured?.estimateMib ?? DEFAULT_ESTIMATE_MIB[input.workerClass],
       estimateSource: input.measured ? { kind: "measured", samples: input.measured.samples } : { kind: "default-unmeasured" },
       openedAt: nowIso,
@@ -514,14 +569,22 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
     recordError(deps, "open", error);
     return NOOP_HANDLE;
   }
+  let published = false;
   try {
     persist(ctx, entry);
+    published = true;
   } catch (error) {
     // The handle keeps the entry in memory and retries the write on bind/release.
     recordError(deps, "open-write", error);
   }
+  return handleForEntry(ctx, entry, deps, published);
+}
+
+function handleForEntry(ctx: Context, initial: MemoryReservationEntry, deps: HostMemoryLedgerOptions, published: boolean): MemoryReservationHandle {
+  let entry = initial;
   return {
     id: entry.id,
+    get published() { return published; },
     bindRoot(pid: number): void {
       try {
         const probed = ctx.probe(pid);
@@ -529,6 +592,7 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
         const identity = { pid, start: probed.state === "alive" ? probed.start : "unknown" };
         entry = { ...entry, roots: union(entry.roots, [identity]), tree: union(entry.tree, [identity]) };
         mergeAndPersist(ctx, entry, deps);
+        published = true;
       } catch (error) {
         recordError(deps, "bind", error);
       }
@@ -543,6 +607,33 @@ export function openMemoryReservation(input: OpenReservationInput, deps: HostMem
       }
     },
   };
+}
+
+/** Reclaim a live child's existing record after a daemon restart, preserving its tree and estimate. */
+export function adoptMemoryReservation(
+  id: string,
+  identity: ProcessIdentity & { generation: ContainerGeneration },
+  deps: HostMemoryLedgerOptions = {},
+): { handle: MemoryReservationHandle; entry: MemoryReservationEntry } | undefined {
+  try {
+    if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error("invalid reservation id");
+    const ctx = contextOf(deps);
+    const entry = readEntry(ctx, entryPath(ctx, id));
+    if (!entry || entry.id !== id || !sameGeneration(entry.generation, ctx.generation) ||
+        !sameGeneration(identity.generation, ctx.generation) || entry.occupancyReleasedAt !== undefined ||
+        !entry.roots.some((root) => root.pid === identity.pid && root.start === identity.start) ||
+        identityState(ctx, identity) !== "alive") return undefined;
+    const pid = deps.ownerPid ?? process.pid;
+    const owner = ctx.probe(pid);
+    if (owner.state !== "alive" || owner.start === "unknown") throw new Error("adopting owner identity unreadable");
+    const claimed = { ...entry, owner: { pid, start: owner.start }, verifiedAt: ctx.clock.iso() };
+    persist(ctx, claimed);
+    rememberOwn(ctx, claimed);
+    return { handle: handleForEntry(ctx, claimed, deps, true), entry: claimed };
+  } catch (error) {
+    recordError(deps, "adopt", error);
+    return undefined;
+  }
 }
 
 /** Walk the listing for descendants of every live recorded identity, adding each new one as (pid, start). */

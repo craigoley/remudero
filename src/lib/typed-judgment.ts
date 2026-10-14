@@ -5,15 +5,15 @@ import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
 /**
  * Typed-choice judgment (W1-T4672) — Jev's model (TypeSafe AI; reference agent
  * https://github.com/browser-use/jev-ultrafast, docs https://docs.typesafe.ai/introduction):
- * ONE stateless, tool-less call that answers a fixed-option question with a probability
- * DISTRIBUTION over those options, in ~100-180ms, rather than a full agent session that
- * self-reports a scalar confidence.
+ * A tool-less, one-turn SDK worker answers a fixed-option question with a probability
+ * DISTRIBUTION. This adopts the typed-question pattern, not TypeSafe's runtime or latency:
+ * the ordinary Remudero worker still starts, and its latency must be measured independently.
  *
  * WHY: {@link "./risk-judge.js".RiskJudgeVerdict.confidence} is the judge's OWN self-report —
  * a 0.85 confidence produced a wrong escalation (docs/forensics/risk-judge.md, #4316,
- * MEASURED 2026-09-06). A typed-choice call has no self-reported scalar to get wrong: the
- * model MUST spend its whole probability mass across the declared option set, and any
- * response that does not is REJECTED outright rather than coerced into a guess.
+ * MEASURED 2026-09-06). A model-generated distribution is still a judgment, not measured
+ * calibration. Normalization proves only the output contract: the model MUST spend its
+ * probability mass across the declared options, or its response is REJECTED, never coerced.
  *
  * TOOL-LESS AND ONE TURN, BY CONSTRUCTION: {@link TYPED_JUDGMENT_TOOLS} is empty and
  * {@link TYPED_JUDGMENT_MAX_TURNS} is 1 — there is nothing to explore and nothing to retry
@@ -67,7 +67,10 @@ export function buildTypedJudgmentPrompt<TOption extends string>(opts: {
   question: string;
   options: readonly TOption[];
 }): string {
-  const exampleEntries = opts.options.map((o, i) => `"${o}": ${i === 0 ? "0.7" : "0.0"}`).join(", ");
+  if (opts.options.length === 0 || new Set(opts.options).size !== opts.options.length) {
+    throw new Error("typed judgment requires non-empty distinct options");
+  }
+  const example = JSON.stringify(Object.fromEntries(opts.options.map(o => [o, 1 / opts.options.length])));
   return [
     opts.question,
     "",
@@ -78,7 +81,8 @@ export function buildTypedJudgmentPrompt<TOption extends string>(opts: {
     `MACHINE-READABLE OUTPUT (required, and nothing else on the line): emit exactly one`,
     `JSON object on a single line, prefixed TYPED_JUDGMENT:, whose keys are exactly the`,
     `options above:`,
-    `  TYPED_JUDGMENT: {${exampleEntries}}`,
+    "The example illustrates formatting only, not an answer to this input.",
+    `  TYPED_JUDGMENT: ${example}`,
   ].join("\n");
 }
 
@@ -89,6 +93,9 @@ export function parseTypedJudgmentResponse<TOption extends string>(
   text: string,
   options: readonly TOption[],
 ): TypedJudgmentResult<TOption> {
+  if (options.length === 0 || new Set(options).size !== options.length) {
+    return { kind: "rejected", reason: "typed judgment requires non-empty distinct options", raw: text };
+  }
   const match = text.match(/TYPED_JUDGMENT:[ \t]*([^\r\n]+)$/m);
   if (!match) {
     return { kind: "rejected", reason: "no TYPED_JUDGMENT line found", raw: text };
@@ -115,20 +122,20 @@ export function parseTypedJudgmentResponse<TOption extends string>(
     return { kind: "rejected", reason: `missing option(s): ${missing.join(", ")}`, raw: text };
   }
 
-  const distribution = {} as Record<TOption, number>;
+  const entries: [TOption, number][] = [];
   let sum = 0;
   for (const option of options) {
     const value = record[option];
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
       return { kind: "rejected", reason: `option "${option}" was not a finite probability in [0, 1]`, raw: text };
     }
-    distribution[option] = value;
+    entries.push([option, value]);
     sum += value;
   }
   if (Math.abs(sum - 1) > TYPED_JUDGMENT_SUM_TOLERANCE) {
     return { kind: "rejected", reason: `distribution summed to ${sum.toFixed(3)}, not 1`, raw: text };
   }
-  return { kind: "distribution", distribution };
+  return { kind: "distribution", distribution: Object.fromEntries(entries) as Record<TOption, number> };
 }
 
 /** The option with the highest mass — `undefined` for an empty distribution (never

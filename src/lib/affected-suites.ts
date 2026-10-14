@@ -67,6 +67,9 @@ export interface AffectedSelection {
    *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
   impact?: string[];
   impactFallback?: string;
+  /** Commits the base is past the impact map's sha, when known: the shadow record carries it so the
+   *  arm's miss rate can be read by distance and IMPACT_MAP_STALENESS_BOUND set from it. */
+  impactDistance?: number;
   /** W1-T6084 — set when a read map was asked for and cannot speak for this change (missing, stale,
    *  not an ancestor of the base): census membership and the non-code full-run triggers then follow
    *  today's rules, and this says why. */
@@ -603,6 +606,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     selection.impact = arm.suites;
     selection.recentOnly.impact = arm.recentOnly;
     if (arm.fallback !== undefined) selection.impactFallback = arm.fallback;
+    if (input.impact.map && input.impact.drift.distance !== undefined) selection.impactDistance = input.impact.drift.distance;
   }
   return selection;
 }
@@ -892,7 +896,10 @@ export interface ShadowFailure {
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
 export function shadowRecord(
   selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
-): { fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; failures: ShadowFailure[] } {
+): {
+  fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; impactDistance?: number;
+  failures: ShadowFailure[];
+} {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
@@ -910,6 +917,7 @@ export function shadowRecord(
     ...(narrow ? { narrowSize: narrow.size } : {}),
     ...(impact ? { impactSize: impact.size } : {}),
     ...(selection.impactFallback === undefined ? {} : { impactFallback: selection.impactFallback }),
+    ...(selection.impactDistance === undefined ? {} : { impactDistance: selection.impactDistance }),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
       floor: verdict(floor, recentOnlyFloor, file),

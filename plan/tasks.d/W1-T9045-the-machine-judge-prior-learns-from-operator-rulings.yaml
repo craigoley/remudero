@@ -1,0 +1,43 @@
+- id: W1-T9045
+  title: "THE MACHINE JUDGE'S FAMILY PRIOR LEARNS FROM THE OPERATOR'S RULINGS — an approval counts only once its task merges, production never sets isMerged, the flow-blocker family looks for a gardener record that does not exist, and machine-judge verdicts never reach judge calibration"
+  repo: remudero
+  depends_on: [W1-T9042]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — how a family's earned confidence bar moves
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T5406, W1-T8830]
+  files: [src/lib/machine-filing-judge.ts, test/the-machine-judge-prior-learns-from-operator-rulings.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main (src/lib/machine-filing-judge.ts):
+    - `familyTrackRecord` is Beta(1+merged+garden α−3, 1+declined+garden β−1) and `earnedConfidenceBar` = 1−(1−0.7)·2·mean.
+    - An operator approval (`recordOperatorRelease`) credits nothing until the task MERGES, and production never passes
+      `isMerged`, so merges are read from the shard's `status:`. That stays `queued` on shipped tasks (doctrine
+      a-shard-s-field-is-not-a-completion-signal).
+    - The family name must match the gardener's state file: flow-blocker looks for `flow-blocker-gardener.json`, but that
+      gardener is `flow-remedy`, so the family never gets a garden record.
+    - Machine-judge verdicts log `machine_judge.ruled`, not `risk_judge.decision`, so judge-calibration.ts never sees them.
+    - Unanswered escalations add neither credit nor debit, so the prior is starved exactly where escalations pile up.
+    Net effect: the prior cannot learn that a family's filings are good, so autonomy never grows.
+  design: |
+    1. An operator approval or release credits the family when it is given; an operator decline, or a retirement under
+       the silence policy, debits it. A merged build (credited by its squash-body `Remudero-Task:` line, not shard
+       status) still credits.
+    2. An explicit family -> gardener-state table, so flow-blocker reads flow-remedy's record. Test it against every
+       registered ladder gardener's origin prefix.
+    3. Log each machine-judge verdict where judge-calibration.ts reads, so the judge's calibration is measured like every
+       other judge.
+  acceptance:
+    - claim: "an operator approval moves the family's earned bar before the task merges"
+      proof: "grep: test(\"W1-T9045: an operator approval moves the family's earned bar before the task merges\" in test/the-machine-judge-prior-learns-from-operator-rulings.test.ts"
+    - claim: "every ladder gardener's origin family reads that gardener's own record"
+      proof: "grep: test(\"W1-T9045: every ladder gardener's origin family reads its own gardener record\" in test/the-machine-judge-prior-learns-from-operator-rulings.test.ts"
+  falsifier: |
+    Record an operator approval for a flow-blocker filing that has not merged. At origin/main the family's bar is
+    unchanged and its garden record is missing; with the change the bar moves and the flow-remedy record is read.

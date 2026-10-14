@@ -50,6 +50,18 @@
       "grepHint": "0005. Apache-2.0, and the core is never relicensed"
     },
     {
+      "path": "docs/adr/0006-precompiled-daemon-child-entries.md",
+      "title": "0006. Run daemon children from a precompiled, source-keyed bundle, not tsx",
+      "summary": "Status: Proposed",
+      "grepHint": "0006. Run daemon children from a precompiled, source-keyed bundle, not tsx"
+    },
+    {
+      "path": "docs/adr/0007-build-runs-outlive-the-daemon.md",
+      "title": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code",
+      "summary": "Status: Proposed",
+      "grepHint": "0007. Run each build in a child process that outlives the daemon, and restart the daemon only for its own code"
+    },
+    {
       "path": "docs/adr/README.md",
       "title": "Architecture Decision Records",
       "summary": "MASTER-PLAN §5 TIER 3: ADR discipline for IRREVERSIBLE calls. A short",
@@ -98,6 +110,18 @@
       "grepHint": "Audit fixtures"
     },
     {
+      "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
+      "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
+      "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",
+      "grepHint": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)"
+    },
+    {
+      "path": "docs/audits/pr-5389-coverage-shard-classification.md",
+      "title": "PR #5389 coverage-shard (1/4) failure — flake or regression? (W1-T4347)",
+      "summary": "Scope: W1-T4347. Read-only forensic pass: one artifact, no source, script or test edited, no fix",
+      "grepHint": "PR #5389 coverage-shard (1/4) failure — flake or regression? (W1-T4347)"
+    },
+    {
       "path": "docs/audits/recon-2026-07-21.md",
       "title": "Remudero — Production Readiness Review (fresh-eyes recon)",
       "summary": "Date: 2026-07-21 · Reviewer: external recon pass, no project history · Method: 7 parallel source audits + direct measurement of the live clone, state dir, laun…",
@@ -114,6 +138,12 @@
       "title": "Worktree base provisioning — a read-only forensic pass (2026-09-02)",
       "summary": "Scope: W1-T2625. Read-only. No source changed. The trigger is the follow-up harvest from run",
       "grepHint": "Worktree base provisioning — a read-only forensic pass (2026-09-02)"
+    },
+    {
+      "path": "docs/author-gate-accounting.md",
+      "title": "Whole-gate cost and dependency provenance",
+      "summary": "The author gate checks installed dependency metadata and real tool bytes before",
+      "grepHint": "Whole-gate cost and dependency provenance"
     },
     {
       "path": "docs/base-ref-contract.md",
@@ -764,10 +794,22 @@
       "grepHint": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05"
     },
     {
+      "path": "docs/reservation-backed-skill-eval.md",
+      "title": "Reservation-backed skill eval qualification",
+      "summary": "The operator selected this policy on 2026-10-13: a separately approved, bounded",
+      "grepHint": "Reservation-backed skill eval qualification"
+    },
+    {
       "path": "docs/review-gate.md",
       "title": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)",
       "summary": "`remudero-review` is a REQUIRED status check on `main`, alongside `ci-gate`.",
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
+    },
+    {
+      "path": "docs/security-merge-policy.md",
+      "title": "Exact-head high/critical merge protection",
+      "summary": "This is a staged, trusted metadata producer, not a claim that repository protection",
+      "grepHint": "Exact-head high/critical merge protection"
     },
     {
       "path": "docs/semgrep-native-ce.md",

@@ -16,7 +16,7 @@ const message: PlainInboxMessage = {
   options: [{ label: "Explain the scope", consequence: "Ask for the evidence." }, { label: "Leave undecided", consequence: "No authorization is provided." }],
   source: "writer",
 };
-const card = { headline: message.headline, what_happened: message.whatHappened, decision: message.whatWeNeed, options: message.options };
+const card = { headline: message.headline, what_happened: message.whatHappened, decision: message.whatWeNeed, options: message.options.map((option, i) => ({ ...option, intent: i === 0 ? "reply" : "keep" })) };
 const current = (p = proposal) => ({ ...message, sourceFingerprint: plainSourceFingerprint(p) });
 function stateDir(): string {
   const dir = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plain-source-`)), "state");

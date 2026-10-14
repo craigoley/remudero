@@ -6,6 +6,7 @@ import { basename, join, relative } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
+import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
@@ -20,7 +21,6 @@ import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
-  ciFrictionEvidence,
   ciFrictionRemedyRationale,
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
@@ -240,6 +240,10 @@ export interface CiFrictionRound {
    *  named, the files a main merge brought in. The evidence a drafted remedy carries. */
   detail?: string;
   pricing?: "median-proxy";
+  /** W1-T9057: what the round's failing checks named — titles, an excerpt, the tail's source. */
+  evidence?: CiFailureEvidence[];
+  /** W1-T9057: the pull request's URL, when the ledger recorded one. */
+  prUrl?: string;
 }
 
 /** A round this old counts half; one twice as old a quarter. A smooth fade, never a cutoff date,
@@ -279,13 +283,26 @@ export function priceCiFrictionCauses(
     rows.set(key, row);
   }
   if (gateFireRates?.status === "measured") {
+    // A gate costs friction only when it fires: a green shard run is the price of running CI, and pricing EVERY run made
+    // the eight coverage-shard legs the eight costliest "causes" (W1-T7358 & co., 2,200–3,900 min each) with no round
+    // behind any of them. Matrix legs of one check are one cause (ciCheckFamily), as on the ci-log path. A report written
+    // before `redMinutes` existed prices nothing rather than mistaking total runtime for friction.
+    const families = new Map<string, { minutes: number; redRuns: number; redPrs: number }>();
     for (const g of gateFireRates.gates) {
-      if (g.minutes <= 0) continue;
-      const cause: CiFrictionCause = { kind: "check", name: g.gate };
+      if (!(g.redMinutes !== undefined && g.redMinutes > 0)) continue;
+      const family = families.get(ciCheckFamily(g.gate)) ?? { minutes: 0, redRuns: 0, redPrs: 0 };
+      family.minutes += g.redMinutes;
+      family.redRuns += g.redRuns;
+      // Summed over legs, so a PR red on two legs counts twice: context only, never the ranking.
+      family.redPrs += g.redPrs ?? 0;
+      families.set(ciCheckFamily(g.gate), family);
+    }
+    for (const [name, family] of families) {
+      const cause: CiFrictionCause = { kind: "check", name };
       const hand = ledgerRounds.filter((r) => r.pricing === "median-proxy" && ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(cause));
       const proxyMinutes = hand.reduce((sum, r) => sum + r.minutes * (nowMs === undefined ? 1 : ciFrictionRecencyWeight(r.at, nowMs)), 0);
-      rows.set(ciFrictionCauseKey(cause), { cause, minutes: g.minutes + proxyMinutes, rounds: g.redRuns + hand.length,
-        prSet: new Set(), prs: g.prs + new Set(hand.map((r) => r.pr)).size });
+      rows.set(ciFrictionCauseKey(cause), { cause, minutes: family.minutes + proxyMinutes, rounds: family.redRuns + hand.length,
+        prSet: new Set(), prs: family.redPrs + new Set(hand.map((r) => r.pr)).size });
     }
   }
   return [...rows.values()]
@@ -322,6 +339,31 @@ export function runPrIndex(records: readonly LedgerRecord[]): Map<string, number
     if (pr !== undefined && !index.has(r.run_id)) index.set(r.run_id, pr);
   }
   return index;
+}
+
+/** W1-T9057: `run_id -> pull request URL`, from the same `pr.opened` rows {@link runPrIndex} reads. */
+export function runPrUrlIndex(records: readonly LedgerRecord[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const r of records) {
+    if (r.step !== "pr.opened" || typeof r.run_id !== "string" || typeof r.pr_url !== "string") continue;
+    if (prNumberFromUrl(r.pr_url) !== undefined && !index.has(r.run_id)) index.set(r.run_id, r.pr_url);
+  }
+  return index;
+}
+
+/** W1-T9057: the failing checks a `fix.dispatch` row's `ci_failures` named, with what each carried. */
+function failureEvidenceOf(row: LedgerRecord): CiFailureEvidence[] {
+  if (!Array.isArray(row.ci_failures)) return [];
+  const out: CiFailureEvidence[] = [];
+  for (const f of row.ci_failures as Array<Record<string, unknown>>) {
+    if (typeof f?.check !== "string") continue;
+    const tests = Array.isArray(f.tests) ? f.tests.filter((t): t is string => typeof t === "string").slice(0, CI_FAILURE_TESTS_CAP) : [];
+    const excerpt = typeof f.excerpt === "string" && f.excerpt !== "" ? f.excerpt.slice(0, CI_FAILURE_EXCERPT_CAP) : undefined;
+    const tailSource = typeof f.tail_source === "string" ? f.tail_source : undefined;
+    if (tests.length === 0 && excerpt === undefined) continue;
+    out.push({ check: f.check, tests, ...(excerpt !== undefined ? { excerpt } : {}), ...(tailSource !== undefined ? { tailSource } : {}) });
+  }
+  return out;
 }
 
 const minutesBetween = (fromIso: unknown, toIso: unknown): number | undefined => {
@@ -403,12 +445,13 @@ export function poolOrTimeoutSignature(lines: readonly string[]): string | undef
 /** The signature of a red check whose log is a test runner's but names no failing test. */
 export const RED_WITH_NO_FAILING_TEST = "red with no failing test";
 
-/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
- *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
- *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
-export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
-  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
-  if (!bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b))) return undefined;
+/** True when the (timestamp-stripped) lines are a test runner's log. */
+function isTestRunnerLog(bodies: readonly string[]): boolean {
+  return bodies.some((b) => /^\s*(?:(?:not )?ok \d+ - |# Subtest: |[#ℹ] (?:tests|pass|fail) \d+|[✔✖] )/.test(b));
+}
+
+/** W1-T9057: every failure a test runner's log NAMES, in log order, with where the first sits. */
+function namedRunnerFailures(bodies: readonly string[]): { named: string[]; firstNamedAt: number } {
   const named: string[] = [];
   let firstNamedAt = -1;
   for (const [i, b] of bodies.entries()) {
@@ -421,6 +464,61 @@ export function testRunnerFailureSignature(lines: readonly string[]): string | u
       named.push(name.trim());
     }
   }
+  return { named, firstNamedAt };
+}
+
+/** BACKSTOP (W1-T9057): bounds the failing titles a `fix.dispatch` row keeps per failing check. */
+export const CI_FAILURE_TESTS_CAP = 5;
+/** BACKSTOP (W1-T9057): bounds the log characters a `fix.dispatch` row keeps per failing check. */
+export const CI_FAILURE_EXCERPT_CAP = 600;
+
+const stripLogTimestamp = (l: string): string => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "");
+
+/** The distinct failing test titles a runner's log names (at most `cap`); `[]` for any other log. */
+export function testRunnerFailures(logTail: string, cap = CI_FAILURE_TESTS_CAP): string[] {
+  const bodies = logTail.split("\n").map(stripLogTimestamp);
+  if (!isTestRunnerLog(bodies)) return [];
+  return [...new Set(namedRunnerFailures(bodies).named)].slice(0, cap);
+}
+
+/** At most {@link CI_FAILURE_EXCERPT_CAP} characters of the log around its first failure line (the
+ *  tail's end when none is marked), timestamps removed. `undefined` for an empty tail. */
+export function ciFailureExcerpt(logTail: string, cap = CI_FAILURE_EXCERPT_CAP): string | undefined {
+  const lines = logTail.split("\n").map((l) => stripLogTimestamp(l).trimEnd());
+  if (lines.every((l) => l.trim() === "")) return undefined;
+  const at = lines.findIndex((l) => /^\s*not ok \d+ - |✖|\bFAIL\b|\bError\b|refused|BLOCKED/.test(l));
+  const from = at < 0 ? Math.max(0, lines.length - 12) : Math.max(0, at - 1);
+  return lines.slice(from, from + 14).join("\n").trim().slice(0, cap);
+}
+
+/** What one failing check of a `fix.dispatch` row carries beyond its signature (W1-T9057). */
+export interface CiFailureEvidence {
+  check: string;
+  tests: string[];
+  excerpt?: string;
+  tailSource?: string;
+}
+
+/** The `ci_failures` entry a `fix.dispatch` row ledgers for one failing check. */
+export function ciFailureLedgerEntry(f: { name: string; logTail: string; tailSource?: string }): {
+  check: string; signature: string | null; tests: string[]; excerpt: string | null; tail_source: string | null;
+} {
+  return {
+    check: f.name,
+    signature: ciFailureSignature(f.logTail) ?? null,
+    tests: testRunnerFailures(f.logTail),
+    excerpt: ciFailureExcerpt(f.logTail) ?? null,
+    tail_source: f.tailSource ?? null,
+  };
+}
+
+/** `undefined` when the tail is not a test runner's log; else its first structured failure (the
+ *  failing test file, a failing test's name, a truncated coverage report, a named retry), or
+ *  {@link RED_WITH_NO_FAILING_TEST} when the runner reported none. */
+export function testRunnerFailureSignature(lines: readonly string[]): string | undefined {
+  const bodies = lines.map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, ""));
+  if (!isTestRunnerLog(bodies)) return undefined;
+  const { named, firstNamedAt } = namedRunnerFailures(bodies);
   const testFileRe = /(test\/[\w./-]+\.test\.[mc]?[jt]s)/;
   const file = named.map((n) => testFileRe.exec(n)?.[1]).find((f) => f !== undefined);
   if (file !== undefined) return file;
@@ -458,11 +556,25 @@ function ciLogCauses(r: LedgerRecord, redByHead: ReadonlyMap<string, string[]>, 
     ? own.map((f) => ({ check: f.check as string, signature: typeof f.signature === "string" ? f.signature : undefined }))
     : (typeof r.head_sha === "string" ? redByHead.get(r.head_sha) ?? [] : []).map((check) => ({ check, signature: undefined as string | undefined }));
   if (failures.length === 0) return [{ kind: "check", name: "ci-log" }];
-  return failures.map(({ check, signature }) => ({
-    kind: "check",
-    name: `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${signature && flaky.has(signature) ? ":flaky" : ""}`,
-  }));
+  // W1-T9056: an aggregator is red only because a producer was, so once a producer names its failure the
+  // aggregator is dropped from the round's split rather than taking a share of it.
+  const producerNamed = failures.some((f) => f.signature && !CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(f.check)));
+  const names = new Set<string>();
+  for (const { check, signature } of failures) {
+    if (producerNamed && CI_AGGREGATOR_FAMILIES.has(ciCheckFamily(check))) continue;
+    const flakySuffix = signature && flaky.has(signature) ? ":flaky" : "";
+    // A failing test file is one cause whichever check it ran in; any other signature stays per-check.
+    names.add(signature && CI_TEST_FILE_SIGNATURE.test(signature)
+      ? `test:${signature}${flakySuffix}`
+      : `ci-log:${kebabSlug(ciCheckFamily(check), 40)}${signature ? `:${kebabSlug(signature, 60)}` : ""}${flakySuffix}`);
+  }
+  return [...names].map((name) => ({ kind: "check" as const, name }));
 }
+
+/** W1-T9056: checks red only because a producer check was — never a cause of their own when one names it. */
+const CI_AGGREGATOR_FAMILIES: ReadonlySet<string> = new Set(["coverage-ratchet", "ci-required", "ci-gate"]);
+/** A signature that is exactly a failing test file's path (what {@link testRunnerFailureSignature} returns for one). */
+const CI_TEST_FILE_SIGNATURE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
 
 /** `head_sha -> the red checks the sweep saw on it`, from `sweep.disposed` (its `red_checks`, or
  *  the check its reason names, "<check> failed on <sha>"). */
@@ -478,6 +590,22 @@ function redChecksByHead(records: readonly LedgerRecord[]): Map<string, string[]
   return index;
 }
 
+/** W1-T9057: `pr -> titles` of the `test.flake_retry` rows whose retry ALSO failed. */
+function alsoFailedTitlesByPr(records: readonly LedgerRecord[]): Map<number, string[]> {
+  const index = new Map<number, string[]>();
+  for (const r of records) {
+    if (r.step !== "test.flake_retry" || r.retry_outcome !== "also_failed" || !Array.isArray(r.titles) || !Array.isArray(r.pr_numbers)) continue;
+    const titles = (r.titles as unknown[]).filter((t): t is string => typeof t === "string" && t !== "");
+    for (const pr of r.pr_numbers as unknown[]) {
+      if (typeof pr !== "number") continue;
+      const list = index.get(pr) ?? [];
+      for (const t of titles) if (!list.includes(t)) list.push(t);
+      index.set(pr, list);
+    }
+  }
+  return index;
+}
+
 interface RoundBoundary {
   ts: string;
   detail?: string;
@@ -489,6 +617,8 @@ interface RoundBoundary {
   elapsed?: number;
   /** The pull request the round's head belongs to, for a run that logged no `pr.opened`. */
   pr?: number;
+  prUrl?: string;
+  evidence?: CiFailureEvidence[];
 }
 
 /** `head_sha -> pull request`, from any row naming both (the sweep's `sweep.disposed`). The daemon
@@ -515,6 +645,10 @@ export function headPrIndex(records: readonly LedgerRecord[]): Map<string, numbe
 export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): CiFrictionRound[] {
   const prByRun = runPrIndex(records);
   const prByHead = headPrIndex(records);
+  const urlByRun = runPrUrlIndex(records);
+  const urlByHead = new Map<string, string>();
+  for (const r of records) if (typeof r.head_sha === "string" && typeof r.pr_url === "string" && !urlByHead.has(r.head_sha)) urlByHead.set(r.head_sha, r.pr_url);
+  const alsoFailedByPr = alsoFailedTitlesByPr(records);
   const redByHead = redChecksByHead(records);
   const flaky = new Set(records.filter((r) => r.step === "test.flake_retry" && typeof r.file === "string").map((r) => r.file as string));
   // A refusal belongs to the latest dispatch of the same run on the same round: a numbered round
@@ -540,7 +674,7 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
         : "";
       const conflicted = Array.isArray(r.conflicted_files) ? (r.conflicted_files as unknown[]).filter((f) => typeof f === "string").slice(0, 3).join(", ") : "";
       const detail = [`${String(r.mode)} round`, named, conflicted ? `conflicted: ${conflicted}` : ""].filter(Boolean).join(" — ");
-      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined };
+      const boundary: RoundBoundary = { ts: r.ts, detail, round, cause: causeFromDispatchMode(r.mode), split, elapsed, pr: typeof r.head_sha === "string" ? prByHead.get(r.head_sha) : undefined, prUrl: typeof r.head_sha === "string" ? urlByHead.get(r.head_sha) : undefined, evidence: failureEvidenceOf(r) };
       list.push(boundary);
       byRun.set(r.run_id, list);
       const key = roundKey(r);
@@ -571,7 +705,18 @@ export function ciFrictionRoundsFromLedger(records: readonly LedgerRecord[]): Ci
       const minutes = boundary.elapsed ?? (runPr !== undefined ? minutesBetween(prevTs, boundary.ts) : undefined);
       if (pr !== undefined && minutes !== undefined) {
         const causes = boundary.split ?? [boundary.cause];
-        for (const cause of causes) rounds.push({ pr, cause, minutes: minutes / causes.length, at: boundary.ts, ...(boundary.detail ? { detail: boundary.detail } : {}) });
+        const prUrl = urlByRun.get(runId) ?? boundary.prUrl;
+        // A `test.flake_retry` row whose retry ALSO failed names the titles a round's own log may not have carried.
+        const titles = alsoFailedByPr.get(pr) ?? [];
+        const evidence = boundary.evidence !== undefined && boundary.evidence.length > 0
+          ? boundary.evidence
+          : titles.length > 0 && boundary.cause.kind === "check" ? [{ check: "test.flake_retry", tests: titles.slice(0, CI_FAILURE_TESTS_CAP) }] : [];
+        for (const cause of causes) {
+          rounds.push({ pr, cause, minutes: minutes / causes.length, at: boundary.ts, ...(boundary.detail ? { detail: boundary.detail } : {}),
+            ...(evidence.length > 0 ? { evidence } : {}),
+            // The link rides with the evidence it belongs to: a round that names nothing keeps the shape it always had.
+            ...(evidence.length > 0 && prUrl !== undefined ? { prUrl } : {}) });
+        }
       }
       prevTs = boundary.ts;
     }
@@ -616,6 +761,26 @@ export type CiFrictionGit = (args: string[]) => string;
  *  a full-history walk per shard took about a minute each on this repo (measured 2026-10-02). */
 export const CI_FRICTION_HISTORY_SINCE = "--since=60.days";
 
+/**
+ * When each of `ids` merged on `refName`: the OLDEST commit whose body carries an anchored `Remudero-Task: <id>` line
+ * (`trailerTaskIds`). A GitHub squash body puts that line mid-body, where git's `%(trailers)` never looks — read that
+ * way, main credited 38 ids against 1,541 body lines from 2026-09-25 to 2026-10-13, so a merged remedy stayed
+ * unmerged and its effect was never measured. ONE `git log`, bounded by an id-scoped `--grep`, not by age: a remedy's
+ * credit must not expire while its cause is still priced.
+ */
+export function bodyCreditedMergeTimes(git: CiFrictionGit, refName: string, ids: readonly string[]): Map<string, string> {
+  const wanted = new Set(ids.filter(id => /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(id)));
+  const merges = new Map<string, string>();
+  if (wanted.size === 0) return merges;
+  const grep = `--grep=^Remudero-Task:[[:space:]]*(${[...wanted].join("|")})[[:space:]]*$`;
+  for (const record of git(["log", refName, "-E", grep, "--format=%x1e%cI%x1f%B"]).split("\x1e")) {
+    const [at, body] = record.split("\x1f");
+    // `git log` lists newest first, so overwriting keeps the oldest crediting commit.
+    if (at?.trim() && body !== undefined) for (const id of trailerTaskIds(body)) if (wanted.has(id)) merges.set(id, at.trim());
+  }
+  return merges;
+}
+
 /** `path -> commit time` from one `git log --name-only` walk; `pick` keeps the oldest or newest. */
 export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<string, string> {
   const out = new Map<string, string>();
@@ -634,7 +799,7 @@ export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<s
 }
 
 /** Read every task whose `origin:` names a ci-friction cause from `refName`, and when each one's build
- *  merged: the commit carrying its `Remudero-Task:` trailer, else the commit that set it `merged`. */
+ *  merged: the commit whose body carries its `Remudero-Task:` line, else the commit that set it `merged`. */
 export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, refName = "origin/main", onUnreadable: (path: string, reason: string) => void = () => {}): CiFrictionRemedyTask[] {
   let listed = "";
   try {
@@ -644,11 +809,6 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     if ((e as { status?: number }).status !== 1) throw e;
   }
   const paths = listed.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => l.replace(`${refName}:`, ""));
-  const merges = new Map<string, string>();
-  for (const line of git(["log", refName, CI_FRICTION_HISTORY_SINCE, "--format=%cI%x09%(trailers:key=Remudero-Task,valueonly,separator=%x2C)"]).split("\n")) {
-    const [at, ids] = line.split("\t");
-    for (const id of (ids ?? "").split(",").map((value) => value.trim()).filter(Boolean)) if (at) merges.set(id, at);
-  }
   // Source registration needs a delivery on main's first-parent history. A feature commit's
   // authored time cannot describe its eventual merge; the older remedy credit reader stays intact.
   const builds = new Map<string, Array<{ at: string; revision: string; changed: string[] }>>();
@@ -678,9 +838,13 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      const mergedAt = merges.get(task.id);
-      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(mergedAt ? { mergedAt } : {}) });
+      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path });
     }
+  }
+  const merges = bodyCreditedMergeTimes(git, refName, tasks.map(task => task.id));
+  for (const task of tasks) {
+    const mergedAt = merges.get(task.id);
+    if (mergedAt) task.mergedAt = mergedAt;
   }
   const fallbackPaths = [...new Set(tasks.filter(task => task.status === "merged" && !task.mergedAt && task.path).map(task => task.path!))];
   if (fallbackPaths.length > 0) {
@@ -830,6 +994,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
+    readSource: (file) => git(["show", `${pinned()}:${file}`]),
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -920,6 +1085,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
         if (!m) return [];
         const file = m[1]!;
+        if (/^src\/lib\/ci-friction-[^/]+\.ts$/.test(file)) return [];
         // A test file is evidence, never an owner — under a test/ directory or named *.test.*.
         if (/(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file)) return [];
         return [{ file, hits: Number(m[2]) }];
@@ -966,8 +1132,63 @@ export interface CiFrictionDraft {
   price: CiFrictionCausePrice;
   rung: number;
   owner: CiFrictionOwner;
-  rounds: readonly RemedyRound[];
+  rounds: readonly GardenRemedyRound[];
   prior?: Extract<CiFrictionCauseState, { state: "draft" }>["prior"];
+}
+
+/** A {@link RemedyRound} that also carries what its failing checks named (W1-T9057). */
+export interface GardenRemedyRound extends RemedyRound {
+  evidence?: CiFailureEvidence[];
+  prUrl?: string;
+  pricing?: "median-proxy";
+}
+
+/** A round belongs to `key` when its own cause key is `key`, or `key` is a CHECK FAMILY (the gate-priced
+ *  `check:<family>`) and the round failed in that family: its failing check names it, or its ci-log cause key does. */
+export function ciFrictionRoundMatchesCause(round: GardenRemedyRound, key: string): boolean {
+  if (round.causeKey === key) return true;
+  if (!key.startsWith("check:") || key.startsWith("check:ci-log:")) return false;
+  const family = key.slice("check:".length);
+  return round.causeKey.startsWith(`check:ci-log:${kebabSlug(family, 40)}`)
+    || (round.evidence ?? []).some((e) => ciCheckFamily(e.check) === family);
+}
+
+const logLine = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").trimEnd();
+
+/** The RECENT ROUNDS block of a drafted rationale: newest first, one per pull request, each with its
+ *  PR link, failing test titles and a log excerpt where the `fix.dispatch` row carried them. */
+export function ciFrictionRoundLines(rounds: readonly GardenRemedyRound[], key: string, limit = 5): string[] {
+  const seen = new Set<number>();
+  const picked = rounds
+    .filter((r) => r.at !== undefined && ciFrictionRoundMatchesCause(r, key))
+    .sort((a, b) => b.at!.localeCompare(a.at!))
+    .filter((r) => (seen.has(r.pr) ? false : (seen.add(r.pr), true)))
+    .slice(0, limit);
+  if (picked.length === 0) return ["- (none recorded)"];
+  return picked.flatMap((r) => {
+    const link = r.prUrl !== undefined ? `PR #${r.pr} (${r.prUrl})` : `PR #${r.pr}`;
+    const tests = [...new Set((r.evidence ?? []).flatMap((e) => e.tests))].slice(0, CI_FAILURE_TESTS_CAP);
+    const excerpt = (r.evidence ?? []).find((e) => e.excerpt !== undefined)?.excerpt;
+    return [
+      `- ${link} at ${r.at}: ${logLine((r.detail ?? "").slice(0, 200)) || "(no detail recorded)"}`,
+      ...(tests.length > 0 ? [`    failing tests: ${tests.map(logLine).join("; ")}`] : []),
+      ...(excerpt !== undefined ? ["    log excerpt:", ...excerpt.split("\n").map((l) => `      | ${logLine(l)}`)] : []),
+    ];
+  });
+}
+
+/** The rationale a drafted remedy carries: {@link ciFrictionRemedyRationale}'s, with its RECENT ROUNDS block
+ *  rebuilt from the family-matched rounds, and a gate-priced cause described by what priced it. */
+export function ciFrictionDraftRationale(draft: CiFrictionDraft, key: string): string[] {
+  const { price, owner } = draft;
+  const lines = ciFrictionRemedyRationale({ key, minutes: price.minutes, rounds: price.rounds, prs: price.prs, owner, evidence: [], prior: draft.prior });
+  const heading = lines.indexOf("RECENT ROUNDS (newest first):");
+  const end = lines.findIndex((l, i) => i > heading && l === "");
+  const gatePriced = !draft.rounds.some((r) => r.causeKey === key && r.pricing !== "median-proxy");
+  const head = gatePriced
+    ? [`MEASURED by the ci-friction gardener: ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} red run(s) within the measured window on ${price.prs} pull request(s).`, ...lines.slice(1, heading + 1)]
+    : lines.slice(0, heading + 1);
+  return [...head, ...ciFrictionRoundLines(draft.rounds, key), ...(end < 0 ? [] : lines.slice(end))];
 }
 
 /** The title a drafted remedy's regression test must carry — task-scoped, and never containing " in ",
@@ -976,10 +1197,12 @@ export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
   return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
 }
 
-/** The slug a drafted shard's filename and its regression test share. Equal names are what make the
- *  test the shard's OWN falsifier to the sizing rule, so a remedy is one owner file plus its test. */
+/** Shard and regression share a slug; cause words must not classify that regression as a rule suite.
+ *  The full cause stays in origin and evidence, including when its filename needs a neutral hash. */
 export function ciFrictionShardStem(key: string): string {
-  return kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  const stem = kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+  return RULE_SUITE_NAME_RE.test(stem)
+    ? `ci-friction-remedy-${createHash("sha256").update(key).digest("hex").slice(0, 16)}` : stem;
 }
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. It names the
@@ -1003,15 +1226,7 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
       { claim: `the harness no longer spends a fix round on ${key}`, proof: `grep: test("${ciFrictionRemedyTestTitle(taskId, key)}" in ${testPath}` },
     ],
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
-    rationale: ciFrictionRemedyRationale({
-      key,
-      minutes: price.minutes,
-      rounds: price.rounds,
-      prs: price.prs,
-      owner,
-      evidence: ciFrictionEvidence(draft.rounds, key),
-      prior: draft.prior,
-    }),
+    rationale: ciFrictionDraftRationale(draft, key),
   }).text;
 }
 
@@ -1115,8 +1330,9 @@ export interface CiFrictionGardenSources {
 const LADDER_DEPTH = 8;
 
 /** Rounds in the shape the remedy module reads. */
-export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): RemedyRound[] {
-  return rounds.map((r) => ({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.at ? { at: r.at } : {}), ...(r.detail ? { detail: r.detail } : {}) }));
+export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): GardenRemedyRound[] {
+  return rounds.map((r) => ({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.at ? { at: r.at } : {}), ...(r.detail ? { detail: r.detail } : {}),
+    ...(r.evidence ? { evidence: r.evidence } : {}), ...(r.prUrl ? { prUrl: r.prUrl } : {}), ...(r.pricing ? { pricing: r.pricing } : {}) }));
 }
 
 /**
@@ -1138,10 +1354,13 @@ export function ciFrictionLadder(input: {
   const remedyRounds = remedyRoundsOf(input.rounds);
   const ladder: CiFrictionCauseLine[] = [];
   let next: CiFrictionInventory["next"];
-  for (const price of input.priced.slice(0, LADDER_DEPTH)) {
+  for (const [rank, price] of input.priced.entries()) {
+    // The scorecard reports the top LADDER_DEPTH causes, but a settled cause there (retired, open, measuring, escalated)
+    // never hides a draftable one below it: eight such causes used to leave `next` undefined and the gardener silent.
+    if (rank >= LADDER_DEPTH && next) break;
     const key = ciFrictionCauseKey(price.cause);
     const line: CiFrictionCauseLine = { cause: key, minutes: price.minutes, state: "draft" };
-    ladder.push(line);
+    if (rank < LADDER_DEPTH) ladder.push(line);
     if (price.cause.kind === "conflict") {
       line.state = "delegated";
       continue;

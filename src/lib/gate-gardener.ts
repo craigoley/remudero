@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { fixedClock, systemClock } from "./clock.js";
@@ -60,47 +61,98 @@ export const DEFUSE_VERDICTS_FILE = "gate-gardener-defuse-verdicts.json";
 const DEFUSE_RUN_TIMEOUT_MS = 15 * 60_000;
 type DefuseVerdict = "confirmed" | "shifted_passed" | "control_failed";
 
+export interface ShiftedSuiteMeasurement { passed: boolean; pass: number; tests: number }
+interface ShiftedSuiteOptions {
+  execFile?: (command: string, args: string[], options: {
+    cwd: string; env: NodeJS.ProcessEnv; encoding: "utf8"; stdio: "pipe"; timeout: number; maxBuffer: number;
+  }) => string;
+}
+
 /** The slice of scripts/pure-test-pool.mjs (the test judge) the defuse run uses. A plain .mjs, so no types. */
 interface DefuseJudge {
-  prepareJudgedRun(): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string }; cleanup(): void };
+  prepareJudgedRun(options: { makeDir: () => string }): { args: string[]; env: Record<string, string>; read(): { tallyText: string; markerText: string } };
   judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
-  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean };
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; given: number; reported: number; tests: number | null; failed: number | null };
   describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
 }
 // Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
 const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
 
-/** Run `file` under the repo's own test invocation plus scripts/clock-shift.mjs. A nonzero exit is
- *  a red suite; a run killed or never started has no exit status and is rethrown, never read as red.
- *  W1-T8380: an exit 0 is a pass only when the judge (scripts/pure-test-pool.mjs) heard `file` reach
- *  its own summary. A file that exits 0 part-way — a real `process.exit(0)` — loses the very test a
- *  shift was run to break, so that run reaches no verdict and throws with the judge's line. */
-export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number): boolean {
-  const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays) };
-  delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
-  delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-  const judge = loadDefuseJudge();
-  const judged = judge.prepareJudgedRun();
-  const args = judge.judgedNodeTestArgs(
-    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file],
-    judged.args,
-  );
-  // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
-  const load = readHostLoad();
-  const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
+/** Shared runner: measured TAP counts prove a crossing (W1-T7812) only when the named file
+ *  reaches its own summary (W1-T8380). A partial exit 0 reaches no verdict. */
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
+  execFile = execFileSync,
+  measure = false,
+}: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
+  readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
+  const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
   try {
+    const judge = loadDefuseJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => {
+      const dir = join(privateRoot, "judge");
+      mkdirSync(dir);
+      return dir;
+    } });
+    const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
+    delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
+    delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
+    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file], judged.args);
+    // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
+    const load = readHostLoad();
+    const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
+    const childEnv: NodeJS.ProcessEnv = { ...env, ...judged.env };
+    // Shifted proof children are not part of the enclosing CI coverage measurement. Inheriting
+    // NODE_V8_COVERAGE makes an intentional early-exit fixture corrupt the parent coverage report.
+    childEnv.NODE_V8_COVERAGE = "";
+    childEnv.NODE_OPTIONS = (childEnv.NODE_OPTIONS ?? "")
+      .replace(/(^|\s)(?:"--experimental-test-coverage"|'--experimental-test-coverage'|--experimental-test-coverage)(?=\s|$)/g, "$1")
+      .trim();
+    if (!childEnv.NODE_OPTIONS) delete childEnv.NODE_OPTIONS;
+    let output: string;
+    let status = 0;
     try {
-      execFileSync(child.file, child.args, { cwd: repoRoot, env: { ...env, ...judged.env }, stdio: "ignore", timeout: DEFUSE_RUN_TIMEOUT_MS });
-    } catch (e) {
-      if (typeof (e as { status?: unknown }).status === "number") return false;
-      throw e;
+      output = execFile(child.file, child.args, { cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+    } catch (error) {
+      const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
+      if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
+      status = failure.status;
+      output = String(failure.stdout ?? "");
     }
-    const verdict = judge.judgeRun([file], { status: 0, pool: false, root: repoRoot, ...judged.read() });
-    if (verdict.complete) return true;
-    throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+    const count = (name: string): number => {
+      const match = new RegExp(`^# ${name} (\\d+)\\s*$`, "m").exec(output);
+      if (!match) throw new Error(`shifted suite ${file}: no # ${name} TAP summary`);
+      const value = Number(match[1]);
+      if (!Number.isSafeInteger(value)) throw new Error(`shifted suite ${file}: invalid # ${name} TAP count`);
+      return value;
+    };
+    const tests = count("tests"), pass = count("pass"), fail = count("fail"), cancelled = count("cancelled");
+    const skipped = count("skipped"), todo = count("todo");
+    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
+      throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
+    }
+    const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
+    if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
+      throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
+    }
+    const verdict = judge.judgeRun([file], { status, pool: false, root: repoRoot, ...judged.read() });
+    if (verdict.tests !== tests || verdict.failed !== fail) {
+      throw new Error(`shifted suite ${file}: TAP counts disagree with the end-of-run tally (tests ${verdict.tests}, fail ${verdict.failed})`);
+    }
+    if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
+      throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+    }
+    const measurement = { passed: status === 0, pass, tests };
+    return measure ? measurement : measurement.passed;
   } finally {
-    judged.cleanup();
+    rmSync(privateRoot, { recursive: true, force: true });
   }
+}
+
+/** Census adapter; the gardener keeps its existing boolean seam. */
+export function runSuiteShiftedMeasured(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions = {}): ShiftedSuiteMeasurement {
+  return runSuiteShifted(repoRoot, file, shiftDays, { ...options, measure: true });
 }
 
 export type GateEdit =

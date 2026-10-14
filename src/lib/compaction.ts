@@ -1,4 +1,5 @@
 import { visibleCriteria, type AcceptanceCriterion, type Task } from "./plan.js";
+import { checkpointCommitSubject } from "./unfinished-checkpoint.js";
 
 /**
  * One compaction event observed in an SDK message stream (MASTER-PLAN §8B:
@@ -93,21 +94,12 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  * to commit (the implement OUTPUT CONTRACT above, and `renderFixPrompt`'s fix-rung
  * footer in run-task.ts), so the two can never drift.
  *
- * WHY IT EXISTS: `commitlint` is a REQUIRED check. It does NOT lint the base..head commit
- * range — W1-T129 relocated the gate to the PR TITLE ALONE (this repo squash-merges every
- * PR via `COMMIT_OR_PR_TITLE`, so branch commits never reach main and linting them failed
- * PRs over history that would never exist post-merge), and W1-T351 made that a LIVE
- * `gh pr view` read in ci.yml rather than a stale opened-event snapshot. Verified against
- * ci.yml (job `commitlint`, step "the PR title — read LIVE via `gh pr view`"): the only
- * base..head mention left in that file is the comment explaining the relocation. A
- * malformed TITLE still blocks the merge exactly like a failing test — hooks/commit-msg lints
- * commits, never the PR title, so nothing local catches it first, and the
- * W1-T76 fix rung has no move for a CI-check failure and escalates a SPEC question instead
- * (#304, #306, #406, #427/#428). Because GitHub's `COMMIT_OR_PR_TITLE` squash title falls
- * back to a lone commit's own subject when a PR has exactly ONE commit, the rules below
- * govern BOTH the PR title and your run's FINAL commit subject — earlier checkpoint
- * (`wip:`) commits are additional history that a squash-merge discards, not a linted
- * artifact.
+ * HOSTED commitlint reads the PR title live (W1-T129/W1-T351). LOCAL preflight-author and
+ * preflight run commitlintStep over the range with configured ignores and emitterChecksStep
+ * over its non-merge commits; a commit hook
+ * validates an individual message. Squashing branch history does not waive these local gates.
+ * Checkpoints are conventional yet unfinished; both the final subject and explicit PR title
+ * must name the finished work, never its checkpoint. No history or validation policy changes.
  *
  * The rules below are MEASURED against the real CLI (see test/commit-message.test.ts),
  * not inferred. In particular there is NO acronym exemption: `SSE stream severed`,
@@ -115,12 +107,14 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  */
 export function commitMessageContractLines(): string[] {
   return [
-    "- COMMIT MESSAGE — `commitlint` is a REQUIRED check, but it lints ONLY the PR TITLE (read",
-    "  LIVE via `gh pr view`, W1-T351) — NOT every commit on the branch. This repo squash-merges",
-    "  every PR, so branch commits never reach main; that is also why `wip:` checkpoint commits",
-    "  (see CHECKPOINT AS YOU GO, above) never block a merge. A malformed TITLE still blocks the",
-    "  merge exactly like a failing test, so these rules govern the PR title AND your run's FINAL",
-    "  commit subject (a lone-commit PR's squash title falls back to that commit's own subject):",
+    "- COMMIT MESSAGE — HOSTED `commitlint` checks the PR TITLE, read LIVE via `gh pr view`.",
+    "  LOCAL preflight/preflight-author check the branch commit range, not only a title:",
+    "  commitlint applies its configured ignore rules; emitter-checks validates non-merge commits.",
+    "  Commit hooks validate individual messages too. This repo squash-merges every PR, but",
+    "  discarding branch history at merge does NOT waive local range checks or make a checkpoint final.",
+    "  Use `chore(checkpoint):` for unfinished checkpoints; legacy `wip:` history still resumes",
+    "  and can fail local validation. The explicit PR title AND your run's FINAL commit subject",
+    "  must name finished work, never a checkpoint (a lone-commit squash can use that subject):",
     "  * Conventional Commits: `type(scope): subject` — type is one of build|chore|ci|docs|",
     "    feat|fix|perf|refactor|revert|style|test, lower-case.",
     "  * The header (that whole first line) must be <= 100 CHARACTERS. Count characters, not",
@@ -409,11 +403,11 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     // store and refs — only HEAD and the index are per-worktree — so a commit made in here
     // writes its objects into the parent's `.git/objects` and moves `refs/heads/<branch>`, both
     // outside the reaper's reach; an uncheckpointed wipe leaves index archaeology or nothing, a
-    // checkpointed one leaves `git log <branch>`. These commits cost main NOTHING (see COMMIT
-    // MESSAGE below): this repo squash-merges every PR, so `wip:` commits never reach main.
+    // checkpointed one leaves `git log <branch>`. The conventional marker keeps local message gates
+    // and unfinished-work recognition compatible; squash merging does not exempt branch history.
     "- CHECKPOINT AS YOU GO: after each meaningful unit of work — a test newly green, a decision",
     "  taken, an approach abandoned — commit everything on THIS run's branch with subject",
-    "  `wip: <what>` and a body carrying a `[remudero-context]` block: one line each for decided /",
+    `  \`${checkpointCommitSubject("<what>")}\` and a body carrying a \`[remudero-context]\` block: one line each for decided /`,
     "  remaining / failed. This worktree is reapable and its dirty files are your ONLY copy of the",
     "  work until you commit it — checkpoints land in the parent clone's shared object store and",
     "  survive a worktree wipe; nothing else does. Checkpoints are ADDITIONAL commits, never a",

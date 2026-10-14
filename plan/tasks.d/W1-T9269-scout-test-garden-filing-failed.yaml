@@ -1,0 +1,30 @@
+- id: W1-T9269
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — test.garden_filing_failed landed 19 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.64
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:test.garden_filing_failed"
+  files:
+    - test/scout-test-garden-filing-failed.test.ts
+  acceptance:
+    - claim: "test.garden_filing_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9269: test.garden_filing_failed no longer recurs\" in test/scout-test-garden-filing-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step test.garden_filing_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 17 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
+    reasons:
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The escalation rule explicitly requires HIGH when the finding cannot be verified from what is shown; the record supplies recurrence counts but no underlying rows, query controls, or supporting references.; on the change's description/files alone, no diff was read — The rationale leaves the cause unidentified and asks the builder to locate it; the sole declared file is a new test, so the proposed remedy's scope remains unspecified.; on the change's description/files alone, no diff was read — Acceptance uses grep to locate a test declaration; that proof does not establish that the test passes or that recurrence stopped because its cause was fixed."
+    judged_at: "2026-10-13T19:07:43.534Z"
+    pin: "d421a648b3ebac2cc3dd7d9f9be0c583a4e7417d6e456d2d96d7c83c6d0bcd8c"

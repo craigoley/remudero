@@ -1,0 +1,61 @@
+id: fb-1791856366582-8d0bc9
+ts: 2026-10-13T01:52:46.586Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - scripts/prompt-surface-gate.mjs (W1-T3077) demands golden-verdict evidence
+  for edits to prompt surfaces. It names FUNCTION_SOURCE_RE (prompt-render.ts,
+  learnings.ts and compaction.ts; line 25), LEARNINGS_SHARD_RE
+  (learnings/*.yaml; line 26) and MACRO_TABLE_PATH (settings/macros.yaml; line
+  234). It names nothing under .claude/skills.
+
+  - Two skills now opt into worker prompts with applies-to: implement
+  (.claude/skills/proof-preflight and .claude/skills/ci-state-forensics).
+  loadInjectableSkills (src/run-task.ts:19939) puts them into every eligible
+  implement prompt.
+
+  - W1-T4332 (merged) set the condition: if a worker lane can load
+  .claude/skills, the path belongs in the surface. That condition is now met.
+
+  - Stale comment: src/run-task.ts:19935-19937 still says skill selection
+  changes no prompt by a single byte.
+
+
+  WHAT NANOCLAW DOES (OBSERVED): every skill carrying executable fences is
+  auto-discovered and checked by one conformance suite
+  (scripts/skill-conformance.test.ts:53-56). Nothing that reaches an agent goes
+  unchecked.
+
+
+  ASK:
+
+  - Treat .claude/skills/<name>/SKILL.md as a prompt surface in
+  touchedPathSurfaces when its frontmatter carries applies-to:, and require the
+  same golden evidence as a learnings shard.
+
+  - A skill without applies-to: (an operator macro, disable-model-invocation)
+  stays exempt, as W1-T4332 ruled.
+
+  - Fix the stale comment.
+
+
+  FALSIFIER: today a diff that edits proof-preflight's body passes the gate with
+  no golden evidence. After the change it is refused.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/prompt-surface-covers-injected-skills
+thread_id: null

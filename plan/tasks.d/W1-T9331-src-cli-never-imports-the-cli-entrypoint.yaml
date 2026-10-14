@@ -1,0 +1,58 @@
+- id: W1-T9331
+  title: "src/cli/ NEVER IMPORTS THE CLI ENTRYPOINT — the run-task.ts split moves verb handlers into src/cli/commands/, and a module there that imports ../../run-task.js makes an import cycle with the HANDLERS table that imports it back; no depcruise rule forbids that edge today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: low  # Rule 19: one concern — one depcruise rule and its planted-violation falsifier; no src change
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-13: the run-task.ts serialization finding; this is step 0 of the split (W1-T9332, W1-T9333, W1-T9337, W1-T9338, W1-T9339)"
+  plan_refs: [W1-T2883, W1-T2893, W1-T26, W1-T8502, W1-T9332, W1-T9333, W1-T9337, W1-T9338, W1-T9339]
+  files: [.dependency-cruiser.cjs, test/src-cli-never-imports-the-cli-entrypoint.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    THE SPLIT THIS GUARDS. src/run-task.ts is 57,478 lines on origin/main bbab8894f. Of 329 open tasks (no
+    `Remudero-Task:` trailer on main, and a shard status that is not merged, retired, done or blocked), 105 declare it
+    in `files:`. That is 24 of the 48 dependency-met auto tasks at priority <= 1.5. It was touched by 202 of 1,439
+    main commits in the last 7 days, and 713 of 4,523 in 30. The refill pool never overlaps a running lane's files
+    (W1-T8502), so one build holding run-task.ts serializes every other run-task.ts task. The diagnosis saw it held
+    continuously from 20:12Z to 22:00Z on 2026-10-13. W1-T9332 to W1-T9339 move the most-churned verbs into
+    src/cli/commands/<verb>.ts, so a task on one verb declares a narrow file.
+    THE TRAP. W1-T2893 made `main()` dispatch through src/cli/registry.ts, which is deliberately zero-import from
+    run-task.ts, but every handler body stays in run-task.ts. A moved handler still reaches dozens of run-task.ts
+    helpers. Importing them from ../../run-task.js makes a cycle: run-task.ts's top-level `HANDLERS` imports the
+    module, and the module imports run-task.ts back. Hoisted functions survive that, but a top-level const in the
+    cycle reads as a TDZ error at load, and only for whichever file a test happens to import first.
+    `lib-no-spike-or-cli` (.dependency-cruiser.cjs) forbids src/lib -> src/cli and src/lib -> run-task.ts. Nothing
+    forbids src/cli -> run-task.ts. W1-T2883 pre-declared src/cli/ inside the lib rule, so the first file there landed
+    inside it. This task does the same for the reverse edge, before the first handler moves.
+    WHY src/cli/commands/ AND NOT src/commands/: src/cli/ is the layer W1-T2883 and W1-T2893 already established,
+    and it already sits inside the lib rule. A new top-level src/commands/ would sit outside both rules.
+  design: |
+    1. .dependency-cruiser.cjs: add a forbidden rule `cli-no-run-task`, severity `error`, from `^src/cli/` to
+       `^src/run-task\.ts$`. Its comment says that a verb module receives what it needs from run-task.ts through a
+       host parameter that the HANDLERS entry supplies (the pattern W1-T9332 to W1-T9339 use), never through an import,
+       because that import is a cycle with HANDLERS.
+    2. Unchanged: `lib-no-spike-or-cli`, src/cli/registry.ts (already compliant: it imports nothing from
+       run-task.ts), and the depcruise CI job.
+    Tests go in the new file test/src-cli-never-imports-the-cli-entrypoint.test.ts, with `test(` titles exactly as in
+    the proofs below. Reuse test/architecture-fitness.test.ts's approach: run the real depcruise binary over a planted
+    fixture under a private temp root, and over the repo's own src tree.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/src-cli-never-imports-the-cli-entrypoint.test.ts"
+    - claim: "depcruise blocks a planted src/cli/commands -> src/run-task.ts import, citing cli-no-run-task"
+      proof: 'grep: test("W1-T9331: depcruise blocks a planted src/cli/commands import of src/run-task\.ts citing cli-no-run-task" in test/src-cli-never-imports-the-cli-entrypoint.test.ts'
+    - claim: "depcruise over the repo's own src tree is clean under the new rule"
+      proof: 'grep: test("W1-T9331: depcruise over the repo src tree is clean under cli-no-run-task" in test/src-cli-never-imports-the-cli-entrypoint.test.ts'
+    - claim: "the rule is declared"
+      proof: 'grep: name: "cli-no-run-task" in .dependency-cruiser.cjs'
+  falsifier: |
+    Plant src/cli/commands/widget.ts importing "../../run-task.js". With the rule, depcruise exits non-zero and
+    names cli-no-run-task with the edge. Delete the rule and the first test sees exit 0.
+  note: |
+    EFFECT: none on its own. It holds the line for W1-T9332 to W1-T9339, so no extraction can land by importing run-task.ts.

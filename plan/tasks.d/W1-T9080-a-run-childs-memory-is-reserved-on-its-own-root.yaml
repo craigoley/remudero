@@ -1,0 +1,58 @@
+- id: W1-T9080
+  title: "A RUN CHILD'S MEMORY IS RESERVED ON ITS OWN ROOT PROCESS AND COUNTED BY EVERY GOVERNOR — a run's reservation binds to the spawned worker's pid and activeWorkerCount counts only workers inside the daemon, so a run moved into a child would vanish from the shadow budget, the review width and daemon.alive"
+  repo: remudero
+  depends_on: [W1-T9070]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how a run child's memory is reserved and counted
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7093, W1-T7094, W1-T7095, W1-T8472, W1-T9070]
+  files: [src/lib/run-child-reservation.ts, src/lib/host-memory-ledger.ts, src/lib/host-memory-learning.ts, src/lib/worker.ts, test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision C ("How the governor counts children"). Must land before any run executes in a child, so the
+    new per-lane process is never invisible to admission (operator 2026-10-13: account for this new pressure).
+    READ on origin/main 5f8d3f178:
+    - `spawnWorker` (src/lib/worker.ts) awaits `awaitMemoryAdmission`, opens the learned reservation and binds it to the
+      worker's pid (`reservationBoundContainment`). `createTreePeakSampler` (src/lib/host-memory-learning.ts) walks
+      /proc from the bound root every 15 s and sums VmHWM; a nested `node --test` runner gets its own reservation.
+    - Reservations are host-wide JSON files bound to (pid, start time) and released only when the whole tree is
+      verified gone (W1-T7093). `ownReservations` (host-memory-ledger.ts) is an in-memory set of this process's own.
+    - `activeWorkerSpawns` / `activeWorkerCount()` (worker.ts) count spawns in this process only; review admission
+      (`selectRuntimeReviewWidth`, src/lib/review-capacity.ts) and daemon.alive's `active_workers` read it.
+    - W1-T7095's wait state (`wouldWaitSince`) and enforce mode's waiting queue live in the admitting process.
+    MEASURED (core daemon.alive, 2026-10-11 22:56Z to 10-13 11:45Z, 1,634 rows past 15 min uptime): the daemon's heap
+    grows about 10 MiB per active worker, so a run's orchestration is small inside the daemon, but as a child it is a
+    whole Node process: 166-182 MiB for the run-task bundle loaded (ADR 0006, W1-T8775), plus its working set.
+  design: |
+    1. New src/lib/run-child-reservation.ts. Before the spawn, the daemon opens the learned reservation for the run's
+       class (`workerClassOfLane`: implement, fix, ...) and binds it to the child's (pid, start time) as the tree root,
+       so the tree sampler sums orchestration, worker and test runner in one tree and the class peaks learn the child's
+       cost with no new constant. The reservation id goes into the spec.
+    2. Inside a run child, `spawnWorker` neither opens a second reservation nor awaits admission when the spec carries a
+       daemon-held reservation id. A nested test reservation keeps working. Admission stays in the daemon.
+    3. Restart: at boot the daemon re-claims (adds to `ownReservations`) the reservation of every live child it adopts,
+       instead of treating it as foreign or releasing it. Release still needs the whole tree verified gone.
+    4. `activeWorkerCount()` adds `liveRunChildCount()` (src/lib/run-child-reservation.ts): live run children, read
+       from run directories through the contract's `classifyRunDir`, so the review width and daemon.alive's `active_workers` stay true.
+    5. A child that runs on the tsx fallback is reserved with `entry_kind: "tsx"` on the reservation record, so the
+       learner can tell the two populations apart.
+  acceptance:
+    - claim: "a run child's tree peak includes the child's own process as well as its worker"
+      proof: 'grep: test("W1-T9080: a run child tree peak includes the child and its worker" in test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts'
+    - claim: "a daemon restart keeps an adopted child's reservation claimed"
+      proof: 'grep: test("W1-T9080: a restart keeps an adopted child reservation claimed" in test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts'
+    - claim: "a worker spawned inside a run child opens no second reservation and awaits no admission"
+      proof: 'grep: test("W1-T9080: a worker inside a run child opens no second reservation" in test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts'
+    - claim: "activeWorkerCount counts live run children beside in-process workers"
+      proof: 'grep: test("W1-T9080: activeWorkerCount counts live run children" in test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts'
+    - claim: "the in-process worker count reads live run children through the reservation module"
+      proof: 'grep: liveRunChildCount( in src/lib/worker.ts'
+  falsifier: |
+    Keep binding to the worker's pid (today's reservationBoundContainment): the first test's tree peak misses the
+    child's own RSS. Count spawns in-process only: the fourth test reads zero with two live children.

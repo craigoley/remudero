@@ -75,7 +75,11 @@ function servedPaths(): string[] {
     const instanceAnswers = routes.filter((path) => path === "/v1/i/site/manual/approve" || path === "/v1/i/site/escalation/mark-handled")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceAnswers.length, 2, "both answer routes now names for an instance's escalations must be mounted for a registered instance");
-    return [...stable, ...instanceAsk, ...instanceControl, ...instanceControlReads, ...instanceAnswers, buildStatusStream(board).path];
+    const inbox = ["inbox", "inbox/attention-census", "inbox/proposal", "inbox/reframe"];
+    const instanceInbox = routes.filter(path => inbox.some(p => path === `/v1/i/site/${p}`))
+      .map(path => path.replace("/site/", "/{instance}/"));
+    assert.equal(instanceInbox.length, inbox.length, "every declared instance Inbox route is mounted for the real registry row");
+    return [...stable, ...instanceAsk, ...instanceControl, ...instanceControlReads, ...instanceAnswers, ...instanceInbox, buildStatusStream(board).path];
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

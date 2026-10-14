@@ -1,0 +1,75 @@
+- id: W1-T9162
+  title: "THE DRAFT LINT REFUSES A DIRECTORY AS A FILES ENTRY OR GREP TARGET — draft-directory-files and draft-directory-grep live only in assertRatificationDraftFileable, which runs at approve after an id is minted, so drafts naming `src/` or `test/fixtures/golden-verdicts/` were cached READY and refused at approve twice on 2026-10-13"
+  repo: remudero
+  depends_on: [W1-T9039]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # one concern: the draft floor applies the approve floor's directory checks; one file, src/lib/inbox.ts
+  origin: "found 2026-10-13 diagnosing approve failures after W1-T9065 (#11332) went live at the 13:06Z daemon boot; operator standing direction: fix at root, automated flow"
+  plan_refs: [W1-T9039, W1-T9062, W1-T4700, W1-T8714, W1-T5660, W1-T9065]
+  files:
+    - src/lib/inbox.ts
+    - test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts
+  status: merged
+  priority: 1  # each such draft spends a fleet approve and an id reservation and then fails, and stays READY to be tried again
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced: the core ledger's live file (positive control: 3,943
+    rows stamped 14:xx) and state/logs/approve-*.log.
+      - 14:21:00Z: approve-followup_DAEMON-1789594936651_2026-09-16T22_37_08.450Z_0: "RatificationDraftRefusedError:
+        rmd approve: refusing to file followup:DAEMON-1789594936651:2026-09-16T22:37:08.450Z:0 —
+        [draft-directory-files] W1-T9130 files entry "src/" is a directory; [draft-directory-files] W1-T9131 files
+        entry "src/" is a directory".
+      - 14:27:20Z: approve-followup_DAEMON-1789655103891_2026-09-17T14_44_50.578Z_1: "[draft-directory-files]
+        W1-T9136 files entry "test/fixtures/golden-verdicts/" is a directory".
+      - Both runs wrote approve.id_materialized first. The refusal came after the fleet lane handed the proposal
+        to approve, after an id block was reserved on origin, and after a worktree was cut.
+    WHY, READ on origin/main c226da0bb and on #11338's head c330de848 (W1-T9039, open), symbols, not lines:
+      - `assertRatificationDraftFileable` (src/lib/inbox.ts) runs `lintDraftedFragment`. It then adds two checks of
+        its own, over the parsed fragment and against the approve worktree: `[draft-directory-files]` (a `files:`
+        entry ending in "/" or naming a directory) and `[draft-directory-grep]` (a `grep:` proof whose target is a
+        directory).
+      - `lintDraftedFragment` is the draft rung's self-lint (`runDraftRung`'s first lint and its redraft loop). It
+        does not carry either check. So the drafter is never told, the draft is cached clean, and only approve finds
+        out. The same holds on #11338's head: the two checks are still only in `assertRatificationDraftFileable`.
+      - This is the class W1-T9039 fixes for the push floor's repo facts: a check only a later floor knows. W1-T9039
+        does not name these two checks. W1-T9062 (filed, queued) refuses a `files:` path the tree does NOT hold, so a
+        directory, which exists, passes it.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 383 origin heads (fetched 14:31Z) for
+    draft-directory-files: 0 hits on main, and no head reads more. W1-T9039's and W1-T9062's shards were read in
+    full. The control term W1-T9124 was read on all 383 heads.
+  design: |
+    No new bound.
+    1. ONE FLOOR CARRIES THE DIRECTORY CHECKS. Move `[draft-directory-files]` and `[draft-directory-grep]` out of
+       `assertRatificationDraftFileable` and into `lintDraftedFragment`, as block-severity violations with the same
+       check names and messages. The directory test resolves against the checkout the draft is linted in. Today
+       that is HARNESS_ROOT at the draft rung and the approve worktree at approve. Add a stat seam beside
+       `directoryExists`, injectable the same way. Approve keeps refusing exactly what it refuses today, because it
+       still calls `lintDraftedFragment`. The draft rung's bounded redraft now sees the violation and fixes it.
+    2. THE REDRAFT KNOWS WHAT TO DO. If `relintGuidanceLines` (src/lib/relint.ts) has no line for these checks, the
+       violation message itself says to name the files the task changes, never a directory. No second file needs to
+       change.
+    3. STORED DRAFTS. A cached draft already marked READY is re-judged by whatever readiness re-lint W1-T9039 and
+       W1-T9041 leave in place. This task adds no separate cache sweep. Built after W1-T9039 (depends_on), because
+       both reshape `lintDraftedFragment`'s options in src/lib/inbox.ts.
+    Tests go in a new file, test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts, with `test(` titles
+    verbatim as in the proofs. Drive `lintDraftedFragment` with a fragment declaring `src/` and one whose grep proof
+    targets a directory, over a fixture tree.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts"
+    - claim: "the draft lint blocks a files entry that is a directory"
+      proof: 'grep: test("W1-T9162: the draft lint blocks a files entry that is a directory" in test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts'
+    - claim: "the draft lint blocks a grep proof whose target is a directory"
+      proof: 'grep: test("W1-T9162: the draft lint blocks a grep proof aimed at a directory" in test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts'
+    - claim: "approve still refuses a directory files entry with the same check name"
+      proof: 'grep: test("W1-T9162: approve still refuses a directory files entry" in test/the-draft-lint-refuses-a-directory-as-a-files-entry.test.ts'
+  falsifier: |
+    Leave the two checks only in `assertRatificationDraftFileable`, and the first two tests fail. A fragment
+    declaring `src/`, like W1-T9130's draft, lints clean at the draft floor, as it did before 14:21:00Z. Drop them from
+    approve without adding them to the draft lint, and the third test fails.
+  note: |
+    EFFECT, measured from the core ledger after the merge sha deploys, with no numeric pass mark. Count approve.error
+    rows naming [draft-directory-files] or [draft-directory-grep]. Healthy shape: none.

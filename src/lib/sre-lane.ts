@@ -1,24 +1,39 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
-import { instanceForStateRoot } from "./deployer.js";
+import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
-import { evaluateFleetFlowDetectors, type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
+import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
   type RunbookPassResult,
 } from "./sre-runbooks.js";
 import { readLedgerLines } from "./status.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "./ledger-union.js";
+import {
+  CONTROL_INTERVENTION_STEPS,
+  deriveControlInterventions,
+  interventionFromLedgerRow,
+  interventionIncidentEvent,
+  interventionKey,
+  interventionLedgerLine,
+  OPERATOR_INTERVENTION_STEP,
+  type OperatorInterventionRow,
+} from "./operator-interventions.js";
 
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -314,10 +329,16 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
-  const flowRows = await evaluateFleetFlowDetectors({
-    stateDir: deps.stateDir, nowMs: now, detectors: deps.detectors ?? SRE_LANE_DETECTORS,
-    readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent,
-  });
+  const detectors = deps.detectors ?? SRE_LANE_DETECTORS;
+  const flowInput = { stateDir: deps.stateDir, nowMs: now, readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent };
+  // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
+  // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
+  const flowRows = [
+    ...await evaluateIdleCapacityDetectors({ ...flowInput, detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID) }),
+    ...await evaluateStrandedTaskDetectors({ ...flowInput, detectors }),
+    // W1-T8264: every hand action is a cause-classed intervention, routed as one incident per class.
+    ...await routeOperatorInterventions({ ...flowInput, detectors }),
+  ];
   const store = readSreLaneStore(deps.stateDir);
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
@@ -389,13 +410,19 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 export function daemonSreLaneInput(
   input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
+  const instance = resolveSreLaneInstance({
+    stateRoot: dirname(input.stateDir),
+    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+  });
+  const name = instance.resolved ? instance.name : "unknown";
   return {
     stateDir: input.stateDir,
     root: input.root,
+    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
-        .map((row) => incidentEventFromLedgerRow(row, input.repo))
+        .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
     hasOpenTask: () => false,
     framesFor: () => [],
@@ -495,4 +522,76 @@ export function resolveSreLaneInstance(input: {
   }
   if (row === undefined) return { resolved: false, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
   return { resolved: true, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
+}
+
+// ── W1-T8264: hand actions as cause-classed interventions ─────────────────────────────────────
+
+/** Every ledger step the control-surface deriver and its cause lookup read. */
+const INTERVENTION_INPUTS: readonly string[] = [
+  ...CONTROL_INTERVENTION_STEPS, "cli.invoked", "dispatch.circuit_broken", "dispatch.circuit_broken.verified", OPERATOR_INTERVENTION_STEP,
+];
+const INTERVENTION_WINDOW_MS = 7 * DAY_MS;
+const interventionReaders = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+
+function interventionMemoryPath(stateDir: string): string {
+  return join(stateDir, "operator-interventions.json");
+}
+
+/**
+ * Derive the control-surface interventions from the ledger, write each new one as an `operator.intervention` row,
+ * and route every intervention (control and the PR-surface rows the fix-lane gardener wrote) as ONE
+ * `incident.event` of kind `intervention` named by its cause class. The dedupe memory lives beside the fleet-flow
+ * store, keyed by {@link interventionKey}: a re-read of the same window never routes a second event.
+ */
+export async function routeOperatorInterventions(input: FleetFlowInput): Promise<LedgerLine[]> {
+  const sinceMs = input.nowMs - INTERVENTION_WINDOW_MS;
+  let rows: readonly Record<string, unknown>[];
+  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs);
+  else {
+    const key = JSON.stringify([input.stateDir, INTERVENTION_INPUTS]);
+    let memo = interventionReaders.get(key);
+    if (!memo) {
+      const pattern = new RegExp(`"step"\\s*:\\s*"(?:${INTERVENTION_INPUTS.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})"`);
+      memo = createLedgerRotationMemo((records) => records.filter((r) => typeof r.step === "string" && INTERVENTION_INPUTS.includes(r.step)), { pattern });
+      interventionReaders.set(key, memo);
+    }
+    const result = await readLedgerUnionRecordsMemoized(input.stateDir, memo, {
+      since: fixedClock(sinceMs).iso(), rotationWindowMs: INTERVENTION_WINDOW_MS, step: [...INTERVENTION_INPUTS], refuseIncomplete: true,
+    });
+    if (!result.ok) throw new Error(`Operator-intervention ledger unreadable: ${result.unread.join(", ")}`);
+    rows = result.rows;
+  }
+  const write = (line: LedgerLine) => {
+    if (input.writeEvent) input.writeEvent(line);
+    else appendLedger(join(input.stateDir, LEDGER_FILENAME), line, { clock: fixedClock(input.nowMs) });
+  };
+  const all = new Map<string, OperatorInterventionRow>();
+  for (const row of rows) {
+    const read = interventionFromLedgerRow(row);
+    if (read) all.set(interventionKey(read), read);
+  }
+  const path = interventionMemoryPath(input.stateDir);
+  const memory = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { routed?: string[] }) : {};
+  if (memory.routed !== undefined && !Array.isArray(memory.routed)) throw new Error(`Invalid operator-intervention memory: ${path}`);
+  const routed = new Set(memory.routed ?? []);
+  // A row already in the ledger, or already routed, is never written a second time (a reader that lags the
+  // pass's own writes must not mint it again).
+  const recorded = new Set([...all.keys(), ...routed]);
+  for (const derived of deriveControlInterventions(rows.filter((r) => r.step !== OPERATOR_INTERVENTION_STEP))) {
+    const key = interventionKey(derived);
+    if (!recorded.has(key)) write(interventionLedgerLine(derived));
+    all.set(key, derived);
+  }
+  const events: LedgerLine[] = [];
+  for (const [key, row] of [...all].sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at))) {
+    if (routed.has(key) || !(Date.parse(row.at) <= input.nowMs)) continue;
+    const event = interventionIncidentEvent(row, input.nowMs);
+    write(event);
+    events.push(event);
+    routed.add(key);
+  }
+  // Keep only keys still inside the window: an older intervention is no longer re-read, so it cannot be re-routed.
+  const live = [...routed].filter((key) => Date.parse(key.slice(key.lastIndexOf("|") + 1)) > sinceMs);
+  writeAtomic(path, JSON.stringify({ routed: live }) + "\n");
+  return events;
 }

@@ -1,0 +1,94 @@
+- id: W1-T8707
+  title: "Repository quality backlog and efficiency retain the evidence their graphs require"
+  repo: remudero
+  depends_on: [W1-T8684]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.25
+  budget_usd: 45.00
+  risk: high
+  origin: "operator console graph approval 2026-10-12; measure automated flow and self improvement"
+  plan_refs: [W1-T5904, W1-T7421, W1-T8533, W1-T8667, W1-T4950]
+  files: [src/lib/repository-flow.ts, src/lib/repository-flow-history.ts, src/lib/pr-open.ts, src/lib/sweep.ts, src/lib/read-model-worker.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/repository-flow-quality.test.ts, test/repository-flow-history.test.ts, test/repository-flow-quality-wiring.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The first Flow and Quality producer can measure PR throughput and observed repair load from
+    existing caches, but current green cannot reconstruct first-pass success, current open counts
+    cannot reconstruct yesterday's backlog, and window spend divided by window merges is not
+    attributable cost per delivered PR. These three graph families were explicitly approved by
+    the operator and must not vanish when the first slice lands. Add bounded durable evidence at
+    existing observation seams, leaving historical gaps unknown and all existing action authority
+    unchanged. Do not rebuild W1-T8667, infer historical gardener parentage or revive factory UI.
+  design: |
+    Extend the existing repository-flow-v1 optional contract after W1-T8684. Capture compact
+    source-owned evidence at existing PR publication/sweep/cache refresh seams; no new timer,
+    GitHub walk, provider call, request-time history scan or browser measurement authority.
+    Store bounded durable checkpoints/samples using the repo's atomic write/rotation machinery,
+    exact repository and source generation. Distinguish data observed by the daemon from data
+    merely discovered later. Capture no raw prompts, bodies, CI logs, credentials or identities
+    beyond bounded PR/head/round/task/run references needed for existing scoped evidence links.
+
+    First-pass success requires proof of the publication's initial head, the required-check set
+    and policy snapshot, complete pagination and that head's latest check attempts. A later
+    already-green discovery is not a first pass. Pending, cancelled, skipped, neutral, missing,
+    expired and failed checks retain their own policy-aware states. Report evidenced eligible,
+    passing and unknown counts with the denominator/cohort; include still-open PRs rather than a
+    merged-only survivor cohort. Do not count repeated failures as separate broken PRs. Preserve
+    code repair versus flake rerun versus infrastructure/conflict/unknown classifications only
+    where exact source evidence permits; do not label a whole cancelled main run a code defect.
+
+    Repair-to-green latency starts at an observed failing required-head snapshot and ends only
+    at complete verified required-current-head green. Track head changes and exact repair round,
+    keep pending/open episodes right-censored, expose sample count and p50/p90, and never substitute
+    fix.done FIXED, a push timestamp, merge or a ledger backfill timestamp for green completion.
+    Daily backlog uses the day's last complete observed scoped open-PR inventory sample with
+    sample time and covered period: awaiting review, required checks red, conflict and blocked
+    states plus oldest age. Preserve overlapping reasons without summing them into an invented
+    distinct-PR total. No sample means a gap, not an empty queue; no fabricated pre-install history.
+
+    Efficiency uses exact task/run/producer-receipt to delivered-PR joins, canonical raw producer
+    dedup across rotation, known-priced subtotal and unpriced/unlinked counts with consistent PR
+    cohorts/windows. Reuse W1-T8667's compact cost semantics when served; its incompleteness must
+    not block independently valid first-pass/backlog graphs. Shared host/fleet costs and ambiguous
+    shared daemon run ids are not assigned to a repo/PR. Distinguish provider cash, modeled cost,
+    token accounting and actual operator effort. A useful rate may be partial with explicit
+    coverage, never a fabricated cash total or causal ROI claim. Gardeners can consume the same
+    comparable source evidence to propose a bounded follow-up; this task does not add automatic
+    promotion, close an Inbox item, weaken a gate or enable new gardeners.
+
+    Bound checkpoint size, identity sets, daily sample retention and projection output separately;
+    dedup observations while retaining current source time, not renewing it on HTTP reads. Refuse
+    genuine overflow by name while preserving valid independent graph families and ordinary
+    Analytics. Cover cold restore, interrupted/failed atomic writes, legacy snapshots, malformed
+    versions, two repos sharing PR numbers, required-policy changes, repeated retries, partial
+    pages, no samples, cross-window merges, ambiguous joins and real-priced zero versus unknown.
+    Default producer/writer/worker plus cached HTTP tests are required, not fake-only fold tests.
+    Validate OpenAPI/API-client parity and published-head discrimination before normal review/CI.
+  acceptance:
+    - claim: "first-pass success requires initial-head required-policy evidence and includes unknown and open cohorts"
+      proof: 'unit test: W1-T8707: first-pass quality requires complete initial-head evidence'
+    - claim: "repair latency closes only on required-current-head green and preserves censored episodes"
+      proof: 'unit test: W1-T8707: repair recovery uses verified head clocks and open censoring'
+    - claim: "durable daily backlog samples survive restart without inventing missing historical inventories"
+      proof: 'unit test: W1-T8707: retained backlog preserves source samples overlapping reasons and gaps'
+    - claim: "delivered-work efficiency preserves exact producer joins and priced unpriced and shared-cost semantics"
+      proof: 'unit test: W1-T8707: delivered PR efficiency refuses incompatible cost cohorts'
+    - claim: "default evidence collection reaches bounded cached graphs and failures preserve independent sections"
+      proof: 'unit test: W1-T8707: default quality collection survives restore and named source failure'
+    - claim: "the production worker consumes the repository flow collector"
+      proof: 'grep: captureRepositoryFlow( in src/lib/read-model-worker.ts'
+    - claim: "the existing production sweep records durable repository flow history"
+      proof: 'grep: recordRepositoryFlowHistory( in src/lib/sweep.ts'
+  falsifier: |
+    Remove initial-head identity or page coverage, change fix.done into recovery evidence, renew
+    missing backlog days to zero, attribute a shared run to its last PR, or omit atomic writer/
+    worker wiring. The corresponding committed-tree physical test must fail. Restore source,
+    require real TAP/native author/census, instrumented same-tree coverage, stored acceptance,
+    current-head governed review/hosted CI, and separate merge/adoption/live-data receipts.
+  note: |
+    Research: https://dora.dev/guides/dora-metrics/ requires speed and quality in context rather
+    than a volume target. https://docs.github.com/en/rest/checks/runs and
+    https://docs.github.com/en/rest/pulls/pulls distinguish current commit checks, attempts and
+    paginated PR history; those API clocks must not be replaced with application discovery time.

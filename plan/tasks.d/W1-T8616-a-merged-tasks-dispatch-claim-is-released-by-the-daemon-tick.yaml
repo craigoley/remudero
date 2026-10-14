@@ -1,0 +1,95 @@
+- id: W1-T8616
+  title: "A MERGED TASK'S DISPATCH CLAIM IS RELEASED BY THE DAEMON TICK — the evidence arm of decideDispatchClaimRelease fires only when something tries to dispatch an already-merged task, and drain's eligibility filter never does, so on 2026-10-12 at 15:13Z every one of the 8 claims under refs/rmd-dispatch/* on origin belonged to a merged task, one of them minted on 10-08, and the status board escalates each one as MANUAL"
+  repo: remudero
+  depends_on: []  # W1-T8176 (queued, P2) also edits the boot claim sweep in src/run-task.ts and src/lib/dispatch-claim.ts; this task adds a tick-side sweep beside it and does not touch the boot sweep, so the two are not serialized
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the daemon deletes refs/rmd-dispatch/* claims that other lanes honour; a wrong release reopens the double-dispatch race the claim exists to close
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-12 (\"Go ahead with the filing\")"
+  plan_refs: [W1-T1268, W1-T2446, W1-T2784, W1-T5047, W1-T5024, W1-T8176, W1-T396, W1-T147]
+  files: [src/lib/daemon.ts, src/lib/dispatch-claim.ts, src/run-task.ts, test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 32360d06a. Symbols, not lines.
+    THE ARMS. `decideDispatchClaimRelease` (src/lib/dispatch-claim.ts) releases on arm 1 (holder), arm 2 (evidence: the
+    task's work is observed landed, so "any host may drop it"), arm 3 (dead-claimant) or leaves it to arm 4 (operator).
+    Arm 2 is reached from three places, and none of them runs for a merged task in normal operation:
+      - runTask's W1-T2446 hoist (src/run-task.ts, under `dispatch.refused_already_merged`) calls
+        `releaseDispatchClaimAsync(..., { evidenceObserved: true })`. It runs only when something asks runTask to dispatch
+        a task that `isMerged` already credits. The hoist's own comment says drain's eligibility filter and the daemon's
+        console-kick loop "already guard their own paths", so a merged task is never offered and the hoist never runs.
+      - The `claimOutcome === "taken"` arm of runTask passes `evidenceObserved: isMerged(task)`. It is after the same refusal.
+      - `releaseReplacedContainerClaims` (dispatch-claim.ts) takes an optional `isMerged` and passes it as
+        `evidenceObserved` for every listed claim. Its one caller, the daemon boot sweep in `daemonCommand`
+        (src/run-task.ts, logged `dispatch.claim_released` surface boot-sweep), does not pass `isMerged`. It cannot:
+        the sweep runs right after the drain lock, before the first `refreshMerged`.
+    So a merged task's claim stays until an operator deletes it. `staleDispatchClaimEscalations` (dispatch-claim.ts,
+    called from `buildStatusBoard` in src/lib/status-board.ts) escalates a cross-host claim older than
+    `DISPATCH_CLAIM_STALE_THRESHOLD_MS` as MANUAL and does not consult `isMerged`. The LATCHES row in status-board.ts
+    already says "credited MERGED, so this claim is stale" (W1-T2446) and leaves the drop to the operator.
+    MEASURED 2026-10-12 15:13Z, `git ls-remote origin 'refs/rmd-dispatch/*'`: 8 claims, W1-T6369, W1-T7092, W1-T7727,
+    W1-T7753, W1-T7754, W1-T7755, W1-T7756, W1-T8396. Merged set, positive control: 2126 distinct `Remudero-Task:`
+    trailers on origin/main commit bodies since 2026-09-01. Five claims match a trailer exactly (W1-T6369 #10118,
+    W1-T7092 #10339, W1-T7727 #10769, W1-T7754 #10853, W1-T8396 #11085). The other three have no trailer. The plan
+    reconciler (#10984, #10822) credited them merged, and their shards read `status: merged`; W1-T7753 shipped as #10782,
+    whose commit body names it. So 8 of 8 are merged tasks by the trailer-or-credit union, and 5 of 8 by trailer
+    alone. At ~13:40Z the brief counted 6 of 12; W1-T8230 (merged, #11082) has since left the list.
+    W1-T8176's 2026-10-11 14:30Z evidence shows the boot sweep meeting six of these claims (W1-T6369, W1-T7092,
+    W1-T7727, W1-T7753, W1-T7754, W1-T7755) and leaving each on arm operator, "no landed work observed yet".
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d (52 shards name a dispatch claim) and the plan/tasks.d
+    additions on all 281 origin heads (24 added shard files, all read: none names a dispatch claim). W1-T8176
+    releases a claim whose run's lock the boot reaped. W1-T5047 (merged) releases a replaced container's claims.
+    Neither releases a merged task's claim.
+    W1-T147 (queued, verify: human) shares src/lib/daemon.ts and src/run-task.ts as an overnight chaos drill. It
+    releases no claim; this task adds one tick-side claim release.
+  design: |
+    No timer, no age, and no fixed count. The proof is the merged projection the tick already built.
+    1. A TICK-SIDE SWEEP. Add `releaseLandedDispatchClaims` to src/lib/dispatch-claim.ts. It takes the async reserver,
+       an `isMerged` and an `isIndeterminate`, and lists `refs/rmd-dispatch/*` with one `ls-remote`. For each claim
+       whose task `isMerged` credits and the projection does not mark indeterminate, it calls
+       `releaseDispatchClaimAsync(taskId, reserver, { evidenceObserved: true })`. Any host may run it, because arm 2
+       needs no liveness answer, so W1-T396's cross-host question never arises.
+    2. PIN THE DROP. Today the evidence arm drops with no `expect`. The sweep drops with `--force-with-lease` pinned to
+       the holder sha it listed, so a claim re-minted after the listing survives. Two hosts racing the same claim
+       both stay safe: the loser's drop fails and its row says `dropped: false`.
+    3. WIRE IT TO THE TICK. `runDaemon` (src/lib/daemon.ts) calls a new optional `DaemonDeps.releaseLandedClaims` once
+       per cycle, right after the `parkedBlockers` reconciliation that already reads the cycle's `isMerged`. It is
+       started and not awaited, like the sweep, so a slow `ls-remote` never holds the loop. `daemonCommand` wires it with
+       `dispatchClaimReserverAsyncFor` and the same `isIndeterminate` it already builds.
+    4. ONE NAMED ROW PER RELEASE. Each release writes `dispatch.claim_released` with `surface: "tick-sweep"`, `arm`,
+       `release`, `dropped`, `reason`, the holder sha it judged, and the crediting `pr_url` from the projection. A claim
+       left alone writes nothing, so a quiet tick adds no rows. A failed listing writes `dispatch.claim_sweep_failed`
+       with `surface: "tick-sweep"` and the git stderr, never an empty list read as "no claims".
+    5. THE ONE EXCEPTION. `--rerun` dispatches a merged task on purpose. A claim whose mint row (`findClaimMintRow`)
+       belongs to a run that also wrote `dispatch.rerun_override` is left alone, and the row says so.
+    6. Unchanged: arms 1, 3 and 4, the boot sweep, W1-T8176's scope, and `staleDispatchClaimEscalations`, whose
+       population shrinks on its own once these claims are released.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive `releaseLandedDispatchClaims` with an
+    injected async reserver and the daemon tick with injected deps.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts"
+    - claim: "a claim on a task the merged projection credits is released by the tick on the evidence arm, with one dispatch.claim_released row naming surface tick-sweep"
+      proof: 'grep: test("W1-T8616: a merged task claim is released by the tick" in test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts'
+    - claim: "a claim on an unmerged or indeterminate task is left alone and writes no row"
+      proof: 'grep: test("W1-T8616: an unmerged or indeterminate task claim is left alone" in test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts'
+    - claim: "the drop is pinned to the listed holder, so a claim re-minted after the listing survives"
+      proof: 'grep: test("W1-T8616: a claim re-minted after the listing survives the drop" in test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts'
+    - claim: "a --rerun lane's claim on a merged task is left alone"
+      proof: 'grep: test("W1-T8616: a rerun lane claim on a merged task is left alone" in test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts'
+    - claim: "the tick-side sweep exists in dispatch-claim.ts"
+      proof: "grep: releaseLandedDispatchClaims in src/lib/dispatch-claim.ts"
+  falsifier: |
+    Remove the tick call, and a fixture of the 10-12 shape (claims on merged W1-T6369 and W1-T8396, one claim on an
+    unmerged task) keeps all three claims after any number of ticks. Drop the `isMerged` check, and the unmerged claim
+    is released. Drop the pinned `expect`, and the re-minted-claim test loses its claim. Drop the rerun exception, and
+    the rerun test loses its claim.
+  note: |
+    EFFECT, measured after merge with no fixed pass mark: `git ls-remote origin 'refs/rmd-dispatch/*'` against the
+    merged trailer-or-credit union. Healthy shape: no claim on a merged task survives a tick on any host. Also count
+    `dispatch.claim_released` rows with surface tick-sweep, and MANUAL stale-claim escalations whose task is merged.

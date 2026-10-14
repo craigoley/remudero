@@ -1,0 +1,26 @@
+- id: W1-T8947
+  title: "The isolation lane's worker calls name their served model in only 88.7% of joined calls (102/115, 7-day window) — restore servedModel at the isolation ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `isolation`, field `servedModel`: 102/115 joined worker calls (88.7%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The isolation probe spawns via benchmarkNonDispatchSpawn('isolation') in src/lib/isolation.ts; src/lib/benchmark-evidence.ts names what servedModel reads (terminal.servedModel)."
+  design: |
+    DIAGNOSE FIRST. Find which isolation-lane worker calls land without served_model: a provider whose stream carries no model id (W1-T4650 / W1-T4707 already name that as an unreportable reason, not missing data), or the non-dispatch spawn wrapper dropping WorkerResult.servedModel before the ledger row is written.
+    THEN EITHER restore: thread the worker's servedModel into the isolation-lane terminal row; OR, where the provider declares the model unreportable, record the named servedModelReason so the lane is excused honestly rather than counted missing.
+    Only 13 of 115 calls are missing, so expect a narrow path (e.g. a failed/timed-out probe row), not a wholesale omission.
+    Rule 19 merits test: one integration test must prove served-model identity or its named unreportable reason survives the isolation spawn-to-ledger-to-evidence-reader path; isolated per-file proofs cannot establish that invariant.
+    NOT IN SCOPE: lowering the 90% floor, editing the gardener, or touching other lanes (daemon is W1-T8374; ci-judge, review etc. have their own entries).
+  acceptance:
+    - claim: "a test drives the isolation probe's non-dispatch spawn path, including a failed or timed-out probe, and feeds the resulting ledger rows into the benchmark evidence reader: a reported served model is retained and counted observed, while a provider-declared unreportable model retains its named reason and is excused rather than missing"
+      proof: "unit test: test/isolation-lane-served-model.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-isolation-served-model
+  plan_refs: ["§7B"]
+  files: [src/lib/isolation.ts, src/lib/benchmark-evidence.ts, test/isolation-lane-served-model.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0

@@ -16,7 +16,8 @@
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
  * A COLD start, or replacing the only generation after a crash, has nothing to protect, so it promotes once
- * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
+ * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, a bounded `serve.cold_start_still_degraded`
+ * per interval while it stays so, then `serve.cold_start_ready`): gating it only kept 4317 dark.
  *
  * Kill switch: `RMD_SERVE_HANDOFF=off`, or a `handoff.off` file in the generations directory, turns a
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
@@ -34,10 +35,14 @@ export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
 export const HANDOFF_OFF_FILE = "handoff.off";
 /** BACKSTOP on a wedged boot, about 5x the slowest boot measured (66 s); never a bound on a healthy one. */
 export const STANDBY_READY_BOUND_MS = 330_000;
+/** BACKSTOP: the slowest boot measured, so a healthy cold start writes no `serve.cold_start_still_degraded` row. */
+export const COLD_START_STILL_DEGRADED_EVERY_MS = STANDBY_READY_BOUND_MS / 5;
 /** The drain's own bound (10 s) plus the exit watchdog (5 s), with room: past it the old generation is killed. */
 export const DRAIN_BACKSTOP_MS = 30_000;
 /** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
 export const SHED_BACKSTOP_MS = 10_000;
+/** W1-T8873: tier 2 (worker threads) runs at most once in this window, however many memory deferrals retry inside it. */
+export const WORKER_SHED_MIN_INTERVAL_MS = 15 * 60_000;
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
 /** The shortest gap between two handoffs: serve.ts's SERVE_HANDOFF_COALESCE_MS, the operator's 15-minute window. */
@@ -131,6 +136,8 @@ export interface ServeSupervisorOptions {
   /** W1-T8311: the host memory budget's thresholds; defaults to the active slot's plan/policy.yaml. */
   upgradeThresholds?: (activeDir: string) => ServeUpgradeThresholds | { unread: string };
   shedBackstopMs?: number;
+  /** W1-T8873: the least gap between two worker-thread sheds; defaults to {@link WORKER_SHED_MIN_INTERVAL_MS}. */
+  workerShedIntervalMs?: number;
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
@@ -147,6 +154,8 @@ interface Generation {
   asked: boolean;
   /** It dropped its caches for a handoff that has not yet replaced it. */
   shed?: boolean;
+  /** W1-T8873: when it terminated its worker threads for a handoff that has not yet replaced it; absent once restored. */
+  workersShedAt?: number;
 }
 
 export interface ServeSupervisor {
@@ -429,10 +438,12 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref()));
   const readyBoundMs = opts.readyBoundMs ?? STANDBY_READY_BOUND_MS;
+  const stillDegradedRows = Math.floor(readyBoundMs / COLD_START_STILL_DEGRADED_EVERY_MS);
   const pollMs = opts.pollMs ?? 500;
   const drainBackstopMs = opts.drainBackstopMs ?? DRAIN_BACKSTOP_MS;
   const deferMs = opts.deferMs ?? 60_000;
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
+  const workerShedIntervalMs = opts.workerShedIntervalMs ?? WORKER_SHED_MIN_INTERVAL_MS;
   const spacingBaseMs = opts.spacingBaseMs ?? 0;
   const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
   const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
@@ -447,6 +458,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let askedAgain = false;
   let stopping = false;
   let deferrals = 0;
+  let lastWorkerShedAt: number | undefined;
   let retryPending = false;
   let largestRss = 0;
   let largestRssGeneration: number | undefined;
@@ -524,19 +536,30 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     }
   };
 
-  /** The handoff gate's criteria, as names a promoted cold generation does not yet meet. */
-  const coldUnmet = async (generation: Generation): Promise<string[]> => {
+  /** The handoff gate's criteria a promoted cold generation does not yet meet, each with its readiness detail. */
+  const coldUnmet = async (generation: Generation): Promise<UnmetCriterion[]> => {
     const ready = await get(generation.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
     if (ready.status !== 200) return unmetCriteria(ready.body);
     const smoke = await smokeFailure(generation);
-    return smoke ? [smoke.criterion] : [];
+    return smoke ? [{ name: smoke.criterion, detail: smoke.detail }] : [];
   };
 
-  /** A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s. */
+  /**
+   * A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s.
+   * #8429: while it stays degraded, each interval says so with every unmet criterion's detail, never past the ready bound's worth.
+   */
   const watchColdStart = async (generation: Generation, startedAt: number): Promise<void> => {
+    let rows = 0;
+    let dueAt = startedAt + COLD_START_STILL_DEGRADED_EVERY_MS;
     while (generation === active && generation.isAlive() && !stopping) {
       await sleep(pollMs);
-      if ((await coldUnmet(generation)).length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: clock.now() - startedAt });
+      const unmet = await coldUnmet(generation);
+      const now = clock.now();
+      if (unmet.length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: now - startedAt });
+      if (now < dueAt || rows >= stillDegradedRows) continue;
+      rows += 1;
+      dueAt = now + COLD_START_STILL_DEGRADED_EVERY_MS;
+      opts.log("serve.cold_start_still_degraded", { sha: generation.slot.sha, unmet: unmet.map((c) => c.name), criteria: unmet, elapsedMs: now - startedAt, row: rows });
     }
   };
 
@@ -610,7 +633,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   };
 
   const reportAlone = async (generation: Generation, startedAt: number, readyMs: number): Promise<void> => {
-    const unmet = await coldUnmet(generation);
+    const unmet = (await coldUnmet(generation)).map((c) => c.name);
     if (unmet.length === 0) return;
     opts.log("serve.cold_start_degraded", { sha: generation.slot.sha, unmet, readyMs });
     void watchColdStart(generation, startedAt);
@@ -632,6 +655,50 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       heapBeforeBytes: done?.heapBeforeBytes, heapAfterBytes: done?.heapAfterBytes, freeBefore, freeAfter, needBytes: need(generation).needBytes,
     });
     return freeAfter;
+  };
+
+  /** One reply of `type` from `generation`, or undefined if it exits or stays silent past the backstop. */
+  const awaitReply = (generation: Generation, type: string): Promise<GenerationMessage | undefined> =>
+    new Promise<GenerationMessage | undefined>((resolve) => {
+      generation.process.onMessage((message) => message.type === type && resolve(message));
+      void generation.exited.then(() => resolve(undefined));
+      void sleep(shedBackstopMs).then(() => resolve(undefined));
+    });
+
+  /**
+   * W1-T8873, tier 2: tier 1 frees only the main heap, while the active generation's rebuildable worker threads hold
+   * most of its resident bytes. A handoff already deferred for memory asks it to terminate them; it keeps answering
+   * from the bodies it holds. Free memory is measured again; {@link restoreWorkers} ends the degraded mode.
+   */
+  const shedWorkers = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
+    const startedAt = clock.now();
+    lastWorkerShedAt = startedAt;
+    generation.workersShedAt = startedAt;
+    const reply = awaitReply(generation, GENERATION_MESSAGES.shed_workers_done);
+    generation.process.send({ type: GENERATION_MESSAGES.shed_workers });
+    const done = await reply;
+    const freeAfter = freeMemory();
+    const before = done?.beforeBytes;
+    const after = done?.afterBytes;
+    opts.log("serve.handoff_shed", {
+      tier: 2, phase: "shed", generation: generation.id, answered: done !== undefined, workers: done?.workers, workerHeapBytes: done?.heapBytes, error: done?.error,
+      beforeBytes: before, afterBytes: after, freedBytes: typeof before === "number" && typeof after === "number" ? Math.max(0, before - after) : undefined,
+      freeBefore, freeAfter, needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
+    });
+    return freeAfter;
+  };
+
+  /** Ends tier 2's degraded mode on the active generation: its worker threads start again. A no-op when none was shed. */
+  const restoreWorkers = async (reason: string): Promise<void> => {
+    const generation = active;
+    const shedAt = generation?.workersShedAt;
+    if (generation === undefined || shedAt === undefined) return;
+    generation.workersShedAt = undefined;
+    if (stopping || !generation.isAlive()) return;
+    const reply = awaitReply(generation, GENERATION_MESSAGES.restore_workers_done);
+    generation.process.send({ type: GENERATION_MESSAGES.restore_workers, reason });
+    const done = await reply;
+    opts.log("serve.handoff_shed", { tier: 2, phase: "restored", generation: generation.id, reason, answered: done !== undefined, error: done?.error, degradedMs: clock.now() - shedAt });
   };
 
   /**
@@ -735,6 +802,12 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const short = (bytes: number | undefined): bytes is number => bytes !== undefined && bytes < peakBytes;
     let free = freeMemory();
     if (short(free)) free = await shedActive(from, free);
+    // Tier 2 only once an earlier attempt was deferred for memory, and at most once per interval.
+    if (short(free) && deferrals > 0 && (lastWorkerShedAt === undefined || clock.now() - lastWorkerShedAt >= workerShedIntervalMs)) {
+      free = await shedWorkers(from, free ?? 0);
+      // Still short: the workers come back before the deferral, so the generation is not left degraded for nothing.
+      if (short(free)) await restoreWorkers("still_short");
+    }
     if (short(free)) return deferUpgrade(from, slot, { hold: "container_headroom", freeBytes: free });
     // W1-T8311: the cgroup sees only this container; the host's other containers share the same RAM.
     const reading = await hostPressure().catch((err: unknown): undefined => {
@@ -757,7 +830,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const drainMs = await drainOld(from, "handoff");
     lastDoneAt = clock.now();
     pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
-    opts.log("serve.handoff_done", { fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)) });
+    opts.log("serve.handoff_done", {
+      fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
+      ...(from.workersShedAt === undefined ? {} : { workersShedMs: lastDoneAt - from.workersShedAt }),
+    });
   };
 
   /** A promoted generation died on its own: replace it, from the previous slot when it is a different build. */
@@ -815,6 +891,8 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       }
       inFlight = handoff()
         .catch((err: unknown) => opts.log("serve.handoff_failed", { reason: errorText(err) }))
+        // Whatever ended the handoff without replacing the generation, its worker threads come back.
+        .then(() => restoreWorkers("handoff_abandoned"))
         .finally(() => {
           inFlight = undefined;
           if (askedAgain) {
@@ -835,10 +913,15 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   return supervisor;
 }
 
-function unmetCriteria(body: string): string[] {
-  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean }> } | undefined;
-  const names = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map((c) => c.name) : [];
-  return names.length > 0 ? names : ["ready"];
+interface UnmetCriterion {
+  name: string;
+  detail?: unknown;
+}
+
+function unmetCriteria(body: string): UnmetCriterion[] {
+  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean; detail?: unknown }> } | undefined;
+  const unmet = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map(({ name, detail }) => ({ name, detail })) : [];
+  return unmet.length > 0 ? unmet : [{ name: "ready", detail: report }];
 }
 
 function safeJson(text: string): unknown {

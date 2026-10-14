@@ -29,10 +29,10 @@ import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./dra
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
-import { rotationStampIso } from "./ledger-union.js";
+import { isValidRetainedStepsMetadata, rotationStampIso } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
-import { WORKER_SCOPE_ENV } from "./worker-containment.js";
+import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
  *  `host` are stamped at write time. Every worker and brain-plane call spreads the same telemetry
@@ -273,6 +273,7 @@ export function appendLedger(
     host: (opts.identity ?? hostname)(),
     actor_pid: process.pid,
     ...line,
+    gardener_origin: readGardenerOrigin(),
     actor,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
@@ -560,15 +561,21 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
+  "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
   "automerge.stale_rollup_refresh_exhausted",
+  "automerge.stale_check_rerun", // W1-T8620: the once-per-(head, run id) job re-run; forgotten, it loops.
+  "automerge.merge_refusal_escalated", // W1-T8620: once per (head, refusal text); forgotten, it re-escalates.
   "automerge.risk_override_observed",
   "incident.event", // W1-T4385: sre-lane.ts files once per fingerprint from these two;
   "incident.sampled", // rotated away, a still-burning incident reads as new and is re-filed.
+  // W1-T8264: sre-lane.ts routeOperatorInterventions dedupes a hand action by this row; rotated away, the same
+  // intervention reads as new and is routed to the SRE lane a second time.
+  "operator.intervention",
   // W1-T3646: the advisory repair lease. `priorRepairLease` reads this row to decide whether a
   // second fix lane may claim a PR already under repair, so it is decision-relevant by the same
   // test that derives this set from its consumers -- not a log line nobody reads.
@@ -594,6 +601,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.breaker_released",
   "dispatch.breaker_judged", // W1-T7742: a judge's continue resets the streak like a release; its rulings dedup.
   "run.freshness_handoff", // W1-T7747: a parked checkpoint's resume receipt (daemon.ts pendingWorkerBoundaryHandoffs).
+  "implement.checkpoint_dropped", // Retain the resolution too, so rotation cannot revive a dropped handoff receipt.
+  // W1-T8676: pendingWorkerBoundaryHandoffs (daemon.ts) re-pends the receipt a worker-error verdict consumed from
+  // this row; rotated away while that receipt stayed, the receipt would read consumed again.
+  "implement.checkpoint_kept",
+  // W1-T8676: independentFailureLatch (status.ts) reads it as the release's receipt; rotated away, it is re-written.
+  "dispatch.independent_block_released",
   // W1-T2910: `status.ts`'s projection reads this row to derive an independent-failure block and
   // clears it on a later dispatch (src/lib/status.ts, the `line.step === "dispatch.blocked_independent"`
   // arm). Rotated away, a block that was recorded stops being visible and the subtree is re-dispatched
@@ -658,14 +671,20 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
+  "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
   "sweep.actions_incident_hold",
   "sweep.actions_incident_hold.escalated",
   "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
+  "main.rule_checks.observed", // W1-T7848: mainLatestRunFromLedger folds it into main's reading; lost, an inherited rule red reads green.
+  "sweep.fold_debt_pull.ingested", // W1-T7853: foldDebtRunIdsFromLedger dedups on it; lost, CI fold debt is pulled and landed again.
+  "sweep.fold_debt_pull.dropped", // W1-T7853: the same dedup for a run whose PR closed unmerged or merged at a later head.
   "sweep.reviewer_freshness_probe", // W1-T5771: freshnessBackoff's held re-probe backoff; lost, it resets
   "sweep.capped_host_gap_rereview", // W1-T7837: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
+  "sweep.review_host_gap_rereview", // W1-T7850: priorActionsFromLedger releases the delivered-review key on it; hostGapRereviewFacts paces by it
   "sweep.fix.checkout_claim_declined",
   "sweep.fix.dispatch_failed",
   "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
@@ -675,6 +694,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // ALREADY absent here: a demotion is the one outcome invisible on the needs-human board, so
   // rotating it away loses the only evidence the judge acted.
   "escalation.judged",
+  // W1-T8868. READER: the stale re-judge pass skips an issue state already settled here
+  // (`escalation.rejudged`), and `escalation.auto_resolve_attempted` is the only record that a
+  // reversible triage action ran before its issue was opened — the audit row an undo starts from.
+  "escalation.rejudged",
+  "escalation.auto_resolve_attempted",
   // W1-T3212: `ruling.judged` is the ONLY record of what the ruling judge decided and why, on
   // both arms. Nothing else writes it, and no measurement yet establishes that this judge
   // calibrates well — reading the first weeks of these rows is what will settle that, so a
@@ -731,6 +755,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.run_gap.dispatched", // mainRunGapHistoryFromLedger: lost, a gap commit's workflows dispatch again.
   "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
   "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
+  "main.repair.fix_opened", // W1-T8575 mainRepairPrUrlsFromLedger (sweep.ts): lost, a red-main repair PR is held for the red it repairs.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
@@ -1253,10 +1278,10 @@ function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   if (!existsSync(path)) return { status: "absent" };
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RetainedStepsRecord>;
-    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { status: "unreadable" };
+    if (!isValidRetainedStepsMetadata(raw)) return { status: "unreadable" };
     const last = typeof raw.lastFullRotationMs === "number" && Number.isFinite(raw.lastFullRotationMs) ? raw.lastFullRotationMs : undefined;
     const deferral = raw.lastDeferral && typeof raw.lastDeferral.key === "string" && typeof raw.lastDeferral.atMs === "number" ? raw.lastDeferral : undefined;
-    return { status: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
+    return { status: "ok", record: { steps: raw.steps as string[], lastFullRotationMs: last, lastDeferral: deferral } };
   } catch {
     return { status: "unreadable" };
   }

@@ -1,0 +1,55 @@
+- id: W1-T9212
+  title: "A HELD PLAN PR MERGES WHEN ITS CHECKS TURN GREEN, NOT ON THE NEXT LIGHT PASS — W1-T5615 never arms a plan PR and direct-merges only when the pass that reads it sees it mergeable, so a plan PR held at review while its checks were pending waits for a later light pass: 52 held plan PRs on 2026-10-13, median 7 min, 10 over 15 min (#11322 97 min, #11265 56 min)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # the plan-PR direct-merge path and the sweep's re-evaluation of a held PR
+  band_meaning: span
+  origin: "operator session 2026-10-13 (\"go ahead with your recommended follow ups to fix and improve all of this\"): #11371 sat all-green and unmerged"
+  plan_refs: [W1-T5615, W1-T5901, W1-T6595, W1-T5733, W1-T5782]
+  files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts, test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts, test/a-plan-pr-on-unknown-mergeability-is-re-read-then-merged-or-escalated.test.ts]
+  status: merged
+  priority: 0.9 # operator-2026-10-13: green plan PRs (filings, gardener PRs) wait a light pass or more to merge; 10 waited over 15 min today, #11322 97 min
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 (core ledger, read-only; root-cause agent on #11371):
+      - #11371 (machine-judge-garden-1791902636916, one plan/ file): checks green 14:52:47Z, review PASS 14:55:00Z,
+        `automerge.plan_pr_held` 14:55:15Z (mergeable_state unknown), merged 15:10:46Z.
+      - 52 plan PRs were held then direct-merged on 10-13; median hold-to-merge 7 min; 10 over 15 min
+        (#11303 19, #11367 20, #11368 22, #11265 56, #11322 97). Holds: 52 at review time with
+        mergeable_state=blocked (required checks still pending), 35 with mergeable_state=unknown.
+      - W1-T5615 (src/lib/arm-auto-merge.ts, "A PLAN PR IS NEVER ARMED") direct-merges only when the reading pass sees
+        clean/behind/unstable/has_hooks (W1-T6595 adds blocked-with-checks-green-reviewed); otherwise it returns
+        `plan-pr-held` "held for a later pass", and the sweep's disposition (src/lib/sweep.ts, the W1-T6595
+        `plan-pr-held` reason) waits for the NEXT light pass to revisit it, with mergeability "unread this pass;
+        inherited last known".
+      - #11385 (run-unfiled-1791904472009, open when filed) fixes a different delay: the W1-T5901 one-plan-merge flag
+        held for a whole long pass. It does not shorten the hold-until-next-pass wait this task removes.
+  design: |
+    1. WHEN A HELD PLAN PR'S CHECKS TURN GREEN, RE-EVALUATE IT THEN. A plan PR held because its required checks were
+       pending (mergeable_state blocked at review) is re-evaluated when the sweep or the daemon's check-status read
+       first observes its required checks complete green at the held head, in that same observation, with a FRESH
+       mergeability read (never an inherited value), and takes W1-T5615's direct path if it reads mergeable.
+    2. WHEN GITHUB'S `unknown` SETTLES, RE-EVALUATE IT THEN. A plan PR held on unknown mergeability is re-read on the
+       next status observation (W1-T5733's bounded re-read stays the escalation backstop), not only on the next full
+       light pass.
+    3. KEEP THE SAFETY PROPERTIES. A plan PR is still never armed (W1-T5615's reason: GitHub would merge it the moment
+       checks go green, past the plan-safety reads). W1-T5901's one-plan-merge-at-a-time rule still holds (the re-
+       evaluation takes the same claim). No new fixed timer (operator rule: no hard thresholds).
+    4. MEASURE IT. Each re-evaluation writes a row naming its trigger (checks-green / mergeability-settled) and the
+       wait since the hold, so the hold-to-merge median can be re-measured against the 7 min / 97 min max above.
+    NOTE: #11385 also edits src/lib/sweep.ts; whichever lands second rebases.
+  acceptance:
+    - claim: "a plan PR held while its required checks were pending is direct-merged in the same observation in which its checks turn green and mergeability reads clean"
+      proof: 'grep: test("W1-T9212: a held plan PR merges when its checks turn green" in test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts'
+    - claim: "a plan PR held on unknown mergeability is re-read and merged on the next status observation, never on an inherited stale reading"
+      proof: 'grep: test("W1-T9212: a held plan PR on unknown mergeability merges when it settles" in test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts'
+    - claim: "the re-evaluation never arms a plan PR and respects the one-plan-merge rule"
+      proof: 'grep: test("W1-T9212: the re-evaluation never arms and takes the one-plan-merge claim" in test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts'
+  falsifier: |
+    Remove the re-evaluation on the checks-green observation: the fixture plan PR held at review with checks pending
+    stays held after its checks turn green until a later light pass, and the first test fails. Arm it instead of
+    direct-merging: the third test fails.

@@ -38,6 +38,7 @@ function fixture(opts: { manifest?: Record<string, number>; planOnly?: boolean }
   writeFileSync(join(root, ".nvmrc"), process.versions.node + "\n");
   writeFileSync(join(root, ".gitignore"), "node_modules\ncoverage\n");
   symlinkSync(join(ROOT, "node_modules"), join(root, "node_modules"));
+  writeFileSync(join(root, "package-lock.json"), readFileSync(join(ROOT, "package-lock.json")));
   writeFileSync(join(root, "scripts/diff-class.mjs"), "// This fixture has no census path readers.\n");
   writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, "scripts/lint-plan-offline.mjs"), "console.log('fixture lint-plan passed');\n");

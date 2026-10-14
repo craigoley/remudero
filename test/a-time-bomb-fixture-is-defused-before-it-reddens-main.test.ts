@@ -71,11 +71,17 @@ test("W1-T5539: a crossing inside the lead horizon files one defuse shard only w
   const inv = spec.inventory();
   const actions = inv.candidates.filter((a) => a.class === "defuse");
   assert.equal(actions.length, 1, "two stamps in one file produce only one finding");
+  const blocked = await fixture();
+  const refusedPass = runGarden(gateGardenSpec(blocked.deps, blocked.probes, { ...blocked.sources, admissionViolations: () => ["refused here"] }), blocked.deps);
+  assert.deepEqual(refusedPass.plan?.acting, ["defuse"]);
+  assert.equal(blocked.landed.length, 0);
+  assert.equal(blocked.minted(), 0, "an inadmissible filing must not reserve an id");
+  assert.match(String(blocked.rows.find((r) => r.step === "gate.garden_filing_failed")?.extra?.reason), /machine-filing-admission/);
+  // W1-T8523: the base admission now recognises a defuse draft, so the real pass files exactly one shard.
   const pass = runGarden(spec, f.deps);
   assert.deepEqual(pass.plan?.acting, ["defuse"]);
-  assert.equal(f.landed.length, 0);
-  assert.equal(f.minted(), 0, "an inadmissible filing must not reserve an id");
-  assert.match(String(f.rows.find((r) => r.step === "gate.garden_filing_failed")?.extra?.reason), /machine-filing-admission/);
+  assert.equal(f.landed.length, 1);
+  assert.equal(f.minted(), 1);
   const path = "plan/tasks.d/W1-T6001-defuse-fixture.yaml";
   const { text, refused } = renderDefuseShard(actions[0]!, "W1-T6001");
   assert.equal(refused, undefined, "the shared renderer alone cannot see base-only admission");
@@ -90,11 +96,11 @@ test("W1-T5539: a crossing inside the lead horizon files one defuse shard only w
   assert.match(task.rationale!, /injected clock/);
   assert.match(task.rationale!, /relative/);
   assert.match(task.acceptance![0]!.claim!, /past.*2026-10-18/);
-  assert.equal(f.rows.filter((r) => r.step === "gate_garden.defuse_filed").length, 0);
+  assert.equal(f.rows.filter((r) => r.step === "gate_garden.defuse_filed").length, 1);
   const code = await lintPlanCommand(["--plan", join(f.repo.dir, "plan/tasks.yaml"), "--base", "HEAD"], {
     offline: true, repoRoot: f.repo.dir,
   });
-  assert.equal(code, 1, "REFUSED criterion 1: base admission requires a plan.ts change outside the declared scope");
+  assert.equal(code, 0, "criterion 1: base admission admits the defuse draft once plan.ts recognises it (W1-T8523)");
 });
 
 test("W1-T5539: a covered fixture is deferred, not refiled", async () => {

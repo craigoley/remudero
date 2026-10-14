@@ -24,6 +24,7 @@ usage:
   rmd plan-reconcile [--plan <path>] [--write]   # Flip status: queued to merged on shards the credit projection reports merged.
   rmd proof-queue-audit [--plan <path>]   # Report every open task's acceptance proof that can never resolve, split by cause.
   rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
+  rmd pr-checks <pr-number> [--repo <name>]   # Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.
   rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]   # Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]   # Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
@@ -35,6 +36,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>   # Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
   rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd live-edits --tree <daemon-checkout|install-checkout> --checkout <dir> --state-root <dir> [--json]   # Preserve, escalate, then restore tracked edits holding a live checkout behind origin/main.
   rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> | --clear) [--json]   # Count, spool or clear one of the host watchdog's own alarms (crash loop, launcher refusals).
@@ -59,6 +61,7 @@ usage:
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
   rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
+  rmd skill-eval <proposal-id> --confirm-spend   # Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
@@ -221,6 +224,16 @@ rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--
 
 W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS every FAST_GATE_STEPS entry (lib/ci-parity.ts) — RENDERED here from that table, never retyped, so a later row changes this line with no edit to this string: rule-checks:population, cli-reference:check, claims, learnings-budget-ratchet, jscpd, comment-load-signal, depcruise, api-client:check, no-hand-rolled-fetch:check, source-size-signal, lint-plan:fast, census:self-path-proof, census:bound-kind, census:ledger-literal, census:catch-erasure, census:negative-reachability, census:authority, census:no-shallowing, census:no-draft-pr, worker-branch-shape:check, census-precheck — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code
 
+### `rmd pr-checks`
+
+Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.
+
+```
+rmd pr-checks <pr-number> [--repo <name>]
+```
+
+W1-T3083: the terminal caller of the one correct rollup derivation — unions the head's check runs with its combined commit statuses (rollupFromRest), so a status such as remudero-review is never dropped for lacking a conclusion, and keeps only the latest attempt per check name (dedupeRollupByLatestAttempt), so a superseded failure never outranks its later success. FAILS CLOSED: a word that is neither known-OK (SUCCESS/SKIPPED/NEUTRAL) nor known-FAIL is printed as pending, never green; the sets are imported from lib/sweep.ts. Exit 0 nothing red (pending is listed, not failed), 1 something red, 2 bad usage or a FAILED read — a dead fetch is never reported as no red checks.
+
 ### `rmd hand-worktree`
 
 Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.
@@ -332,6 +345,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd inspect`
+
+Read an explicit state directory without CLI housekeeping, audit writes, credentials or self-sync.
+
+```
+rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>
+```
+
+Explicit read-only entry point for ledger-grep and skill effectiveness only. Requires an existing absolute --state-dir; never provisions HOME config or state. Runs before CLI invocation logging, temp cleanup, credential refresh and source freshness. Unknown verbs, lifecycle writes and unsupported flags are refused before dispatch. Reads the complete archive-plus-live union and refuses incomplete history. Ordinary command behavior is unchanged.
 
 ### `rmd progress-watchdog`
 
@@ -572,6 +595,16 @@ rmd replay-goldens --confirm-spend --ledger <path> [--limit N]
 ```
 
 W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.
+
+### `rmd skill-eval`
+
+Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
+
+```
+rmd skill-eval <proposal-id> --confirm-spend
+```
+
+Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
 
 ### `rmd check-acceptance`
 

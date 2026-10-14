@@ -1,0 +1,57 @@
+- id: W1-T8925
+  title: "A CONSUMER-REPO PUSH RECORDS ITS COVERAGE PRECHECK AS NOT APPLICABLE, NEVER AS COVERED — the pre-push coverage precheck applies core's src/*.ts filter and core's diff-class selector to every repository, so a remudero-console or remudero-site push is ledgered `covered` with 0 suites (\"no changed src file\") or `unavailable` (diff-class ENOENT on test/), a vacuous green for a gate that never ran"
+  repo: remudero
+  depends_on: [W1-T8918]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # the push gate on all three coverage-precheck call sites (fix rung, fallback push, its repair) for every enrolled repo
+  band_meaning: span
+  origin: "operator session 2026-10-13: consumer-repo audit after W1-T8918/W1-T8920 (operator: go with all of your recommendations)"
+  plan_refs: [W1-T8918, W1-T8920, W1-T5074, W1-T7744]
+  files: [src/run-task.ts, test/a-consumer-repo-push-records-its-coverage-precheck-as-not-applicable.test.ts]
+  status: queued
+  priority: 1 # operator-2026-10-13: the push coverage gate is silently a no-op for every consumer-repo push and ledgers it as covered
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 in the consumer daemons' ledgers (read-only sweep, rows since 2026-10-06):
+      remudero-console (/mnt/rmd/remudero-console-state/state): push.coverage_precheck x8 — 7 `covered` ("no changed
+      src file for diff-coverage to prove", suites 0; first CONSOLE-T120 2026-10-06T17:58Z) and 1 `unavailable`
+      (CONSOLE-T100 2026-10-09T01:16Z: "diff-class --list-census-suites exited 1 ... ENOENT: no such file or directory,
+      scandir '<worktree>/test'").
+      remudero-site (~/rmd-site-state/state): push.coverage_precheck x1 `covered`, suites 0 (PORTAL-T39 2026-10-08T18:20Z).
+    Neither row is a measurement. The console keeps its code under app/ and lib/ and its tests under tests/unit/, so
+    `COVERAGE_SRC_FILE = /^src\/.*\.ts$/` (src/run-task.ts ~18531) matches nothing and coveragePrecheck returns
+    `covered`; when a change does touch a src/ path, the affected-suite selector runs core's diff-class against the
+    consumer tree and reads `test/` (absent) — `unavailable`. Every consumer push therefore carries a precheck row that
+    says the diff was proven covered (or could not be read) when no consumer test ran. Same class as W1-T8918 (fix-rung
+    census) and W1-T8920 (fast gate and pre-open gate): a core-only check applied to a consumer worktree, failing
+    silently. Verified on origin/main efd226b50: `coveragePrecheck` (~18645) is reached from three call sites with no
+    repository check — `rung.fix_push` (~18732), `fallback_push` (~20765) and `fallback_push.repair` (~20779).
+    NOT A GAP: the fresh-tree review spawn (`spawnRmdReviewForFreshTree`, ~2055) runs core's own origin/main tree, and
+    garden checkouts (`gardenCheckout`, ~38340) are core worktrees; neither touches a consumer tree.
+  design: |
+    1. coveragePrecheck takes the push's repository identity from its caller (the task's or PR's repo), decided by the
+       same harness-repository predicate W1-T8918 introduces for the fix rung — never by whether src/ or test/ happens
+       to exist in the tree. An absent identity keeps today's behaviour, so existing core callers and fixtures are
+       unchanged.
+    2. For a repository that is not the harness's own, the precheck runs nothing and returns outcome "not-applicable"
+       with the repo and the reason ("core's diff-coverage selector does not apply to <repo>"); `coveragePushRefusal`
+       never refuses on it, and the `push.coverage_precheck` row records "not-applicable", never "covered".
+    3. All three call sites pass the identity, so the fix rung, the fallback push and its repair agree.
+    NOT IN SCOPE: giving consumer repos a coverage precheck of their own (a consumer that declares one runs it from its
+    own tree in a later task); the fast gate (W1-T8920); the fix-rung census check (W1-T8918).
+  acceptance:
+    - claim: "a consumer-repo push that changes a src/ path records the coverage precheck as not-applicable and runs no core selector"
+      proof: 'grep: test("W1-T8925: a consumer-repo push records its coverage precheck as not applicable" in test/a-consumer-repo-push-records-its-coverage-precheck-as-not-applicable.test.ts'
+    - claim: "a consumer-repo push with no src/ change is never ledgered as covered"
+      proof: 'grep: test("W1-T8925: a consumer-repo push with no src change is not reported as covered" in test/a-consumer-repo-push-records-its-coverage-precheck-as-not-applicable.test.ts'
+    - claim: "a core push still runs the coverage precheck exactly as before"
+      proof: 'grep: test("W1-T8925: a core push still runs the coverage precheck" in test/a-consumer-repo-push-records-its-coverage-precheck-as-not-applicable.test.ts'
+  falsifier: |
+    Drive coveragePrecheck for a gitRepo() consumer worktree (app/, lib/, tests/unit/, no src/ or test/) with a
+    non-core repo identity. At origin/main a change under app/ returns outcome "covered" with 0 suites, and a change
+    under src/ returns "unavailable" naming diff-class and ENOENT on test/; with the change both return
+    "not-applicable". Gate on directory presence instead of repo identity and the third test reds for a core branch
+    that deletes test/.

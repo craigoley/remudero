@@ -1,0 +1,50 @@
+- id: W1-T8879
+  title: "THE SHADOW MEMORY BUDGET WOULD IDLE HALF THE BOX — it sums every live claim's class p90 (median 6.9 GB of claims against 1.17 GB resident, 5.7x) and calls the difference unrealized-reservations, so its 48 h shadow verdicts would defer 69% of garden, 80% of implement and 74% of review starts, while a joint-quantile of the same measured peaks is ~4.0-4.5 GB: the budget claims a calibrated joint quantile and back-tests itself before enforce can be switched on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how the shadow budget sizes concurrent claims; its mode stays shadow
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: no VM resize; right-size with what we have"
+  plan_refs: [W1-T7093, W1-T7094, W1-T7095]
+  files: [src/lib/host-memory-shadow.ts, test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8. Estimates: /mnt/scratch/rmd/test-slots/host-memory/estimates/state2.ndjson
+    (15,785 samples). Ledger 48 h, deduplicated.
+    OBSERVED:
+    - Per-class tree peaks, p50/p90/p99 MiB: implement 723/2904/4548, review 319/1008/2793, fix 290/1277/4061, garden
+      226/1100/1397.
+    - Live claims: p50 5, p90 7, max 14.
+    - Each claim's estimate is its class p90. The sum across live claims has median 6.9 GB vs 1.17 GB resident;
+      `unrealizedMib` p50 6.1 GB.
+    - A Monte Carlo over the measured peaks for a 5-tree mix: sum of p90s 6.1 GB ≈ joint p99 6.3 GB; joint p90 4.5 GB.
+      `hostClaimMib` (typical + one tail) is 4.0 GB.
+    - Shadow `would_admit=false` for 69% garden, 80% implement, 74% review, 55% advisory.
+    - The realized container peak exceeded the projection in 42% of 30-min windows (back-test), because later starts are
+      not modelled.
+    - Tree peaks are a sum of per-process VmHWM, which overstates concurrency (members peak at different times).
+    INFERRED: enforcing today's model would idle about half the fleet with no measured safety gain.
+    OWNERSHIP: W1-T7093/7094/7095 (merged) built the ledger, shadow verdicts and fairness; none calibrates the claim.
+  design: |
+    1. Replace the sum of per-claim p90s with a joint quantile over the live claims' measured peak distributions:
+       - the convolution of the empirical per-class samples, or the existing typical + one-tail rule where samples are
+         too few;
+       - a policy quantile (default p95).
+    2. Measure tree memory as concurrent RSS sampled per tree, not sum-of-VmHWM, for new samples. Old samples stay, marked
+       with their basis.
+    3. Back-test continuously: each shadow verdict's projection vs the realized container peak in the next 30 min.
+       Ledger the miss rate per scenario. `hostMemoryBudget.mode: enforce` is refused unless the back-test miss rate is
+       ≤ the policy bound over the last 24 h (the config loader names the evidence).
+    4. The mode stays shadow; no limit or concurrency change.
+  acceptance:
+    - claim: "the shadow budget sizes concurrent claims with a calibrated joint quantile, ledgers its back-test miss rate, and refuses an enforce mode that its own back-test does not support"
+      proof: 'grep: test("W1-T8879: the memory budget claims a calibrated joint quantile" in test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts'
+  falsifier: |
+    Restore the sum of per-claim p90s: the fixture with five live claims projects 6.1 GB instead of ≤4.6 GB, and the test
+    fails. Drop the enforce refusal: the config with a 42% miss rate is accepted, and the test fails.

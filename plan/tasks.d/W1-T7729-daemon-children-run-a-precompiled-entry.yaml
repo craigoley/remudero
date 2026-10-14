@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: core memory follow-up to the machine-judge re-landing loop (#10678)"
   plan_refs: [W1-T7728, W1-T5724, W1-T3176]
   files: [docs/adr/0006-precompiled-daemon-child-entries.md, docs/adr/README.md, docs/docs-index.json, scripts/build-child-entries.mjs, deploy/Dockerfile, test/a-daemon-child-entry-is-precompiled.test.ts]
-  status: queued
+  status: merged
   priority: 1.2 # operator-2026-10-12: core container under its own memory pressure in 25% of budget rows; cut real footprint first
   attempts: 0
   rationale: |

@@ -1,0 +1,103 @@
+- id: W1-T9252
+  title: "AN OPERATOR ACTION AND ITS OUTCOME APPEAR ON THE ITEM'S THREAD — reframe, decline, restore, approve and release are recorded only as ledger rows, and GET /v1/inbox/thread builds a thread from the opening message plus the thread store alone, so the console's email-style thread never shows what the operator did or what the fleet did in response; and some Needs your decision items (Board review, machine-judge) have no readable or writable thread at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high # spans the thread store, the thread routes and view, the operator verbs (inbox.ts, panel-graph.ts, run-task.ts) and a boot backfill; no verdict, classification or dispatch change
+  band_meaning: span
+  origin: "operator session 2026-10-13 17:20Z: console thread view (CONSOLE-T129) review: operator actions missing from threads; 17:40Z: console #2101 reply composer gets not-found on Board review and machine-judge items"
+  plan_refs: [W1-T2494, W1-T8826, W1-T8831, W1-T9062]
+  files:
+    - src/lib/inbox-thread.ts
+    - src/lib/inbox-responder.ts
+    - src/lib/inbox.ts
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-thread-view.ts
+    - src/run-task.ts
+    - test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts
+  status: merged
+  priority: 0.9 # operator-2026-10-13: the console inbox thread view (CONSOLE-T129) waits on this core contract; at priority 1 it sat behind ~22 ready priority-1 tasks with no dispatch
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host (read-only): craigoley/remudero/standing-debt:4 carries four `ratify.reframed`
+    rows (02:51, 02:52, 11:19, 11:20Z) with the operator's feedback verbatim, and machine-judge:W1-T6372 a reframe at
+    02:52Z plus a release (`ratify.approved`, `released: verify-human`, task_id W1-T6372) at 11:55Z; neither thread on
+    GET /v1/inbox/thread shows any of it. The console thread view (CONSOLE-T129, live 2026-10-13) therefore reads as
+    an unanswered ask the operator already answered.
+    ROOT CAUSE on origin/main: `detailFor` (src/lib/inbox-responder.ts) builds `messages` as `openingMessage(item)` plus
+    the stored thread rows of `<inboxRoot>/state/inbox-threads.jsonl`. The only writers of that store are
+    `recordThreadMessage` (src/lib/escalate.ts) and `answerThread` (src/lib/inbox-responder.ts, a reply typed IN the
+    thread). The operator verbs write ledger rows only: `reframeProposal` (`ratify.reframed`, src/lib/inbox.ts),
+    `applyProposalVerdict` (`panel.proposal_declined` / `panel.proposal_restored`, src/lib/inbox.ts, reached from the
+    panel routes in src/lib/panel-graph.ts), `approveParkedTask` (`ratify.approved` with `released: verify-human`,
+    src/run-task.ts) and the approve run (`ratify.approved`, `approve.shards_written`, `ratify.approve_refused`). The
+    fleet's results are ledger rows too: the redraft (`inbox.drafted` with `proposal_id`, src/lib/inbox.ts) and the
+    filed shard or refusal. Deriving the thread from the live ledger at read time is not enough: compaction prunes
+    state/ledger.ndjson, so the history would vanish.
+    SECOND DEFECT (coordinator report 2026-10-13 17:40Z, console #2101 deployed 17:36Z): on Board review items
+    (`board-review:escalation:#<n>`) and on machine-judge:/verify-human: items with no stored conversation, the console's
+    "Reply on this thread" composer gets core's not-found from POST /v1/inbox/thread/reply, and GET /v1/inbox/thread
+    fails, so the console shows "The rest of this thread could not be loaded." On origin/main every thread route admits an
+    id only through `operatorThreadItems` (src/lib/panel-graph.ts: `buildInboxThreadRoute`, `buildInboxThreadReplyRoute`,
+    `buildInboxThreadReadRoute`), which re-derives the item set from a live classification, while the console lists
+    items from the persisted `inbox` view's `needsYou` pages and the `inbox-thread` view resolves them with `itemOf`
+    (src/lib/inbox-thread-view.ts). Both kinds are operator-owned per `inboxOwner` (src/lib/inbox-owner.ts), so the owner
+    filter alone does not explain the miss: the two membership sets disagree somewhere. The builder reproduces the 404
+    for one live Board review and one machine-judge needsYou item FIRST and names the guard that refuses each.
+  design: |
+    1. One writer, `appendThreadEvent` in src/lib/inbox-thread.ts: appends a ThreadMessage to the item's inbox thread
+       (`inboxThreadIdentity(proposalId)`) carrying `extra.event = { kind, key }`, and is a no-op when a message with
+       the same `extra.event.key` is already on that thread (idempotent: a retried verb, a re-run backfill and a
+       crash-replay each write it once). `key` is the source ledger row's `run_id` + `step` + `ts`. A thread-store
+       write failure is logged and never fails the verb (the ledger row stays the record of truth).
+    2. Operator events, `role: "reply"` (rendered `from: "operator"`), written by the verb that writes the ledger row:
+       kind `reframed` (text: the feedback verbatim), `declined` (the reason), `restored`, `approved` (approve of a
+       ready proposal) and `released` (`rmd approve <taskId>` of a parked task: written to EVERY open task-referent
+       proposal of that task — `verify-human:`, `machine-judge:` — so each thread shows the release). An action taken
+       by a reply in the thread (`answerThread`, which already writes its own `extra.did` message) writes no second
+       event: same key, or skip when the verb's caller is the responder.
+    3. Fleet outcome events, `role: "escalation"` (rendered `from: "daemon"`): kind `redrafted` (a new draft for a
+       reframed proposal is ready, from the `inbox.drafted` row), `task_filed` (the shard ids an approve wrote),
+       `released_to_fleet` (the parked task is now dispatchable) and `refused` (the approve was refused, with the
+       plain reason). Text is plain language, no ids beyond the task id.
+    4. `storedMessageView` passes `extra.event` through; `detailFor` orders messages by `ts` (opening message first),
+       and `attention` / `waitingOn` keep reading the LAST message, so a thread whose last message is the operator's
+       action reads waiting on the fleet, not the operator.
+    5. One-shot backfill on daemon boot: walk the ledger UNION (live + archives, the reader `rmd ledger-grep` uses)
+       for the operator-action and outcome steps above and append each missing event through `appendThreadEvent`
+       (the key makes it safe to re-run). Bounded to the proposals the registry holds.
+    6. Every item the `needsYou` pages serve has a thread. ONE membership predicate, the needsYou item set, admits an id
+       to GET /v1/inbox/thread, POST /v1/inbox/thread/reply, POST /v1/inbox/thread/read and the `inbox-thread` view, so a
+       listed item can never 404 on its own thread. A thread with no stored messages reads as its opening message (no
+       write is needed to create it); the first reply creates the stored thread.
+    7. A reply on any needsYou item reaches the daemon as direction for that item: `answerThread` handles it, and a reply
+       it does not resolve as decline or restore is applied as reframe feedback (`reframeProposal`, a `ratify.reframed`
+       row and a redraft), the same effect as `rmd reframe`, then shows on the thread as a `reframed` event (item 2).
+    THREAD ID MAPPING (pin for the console): threadId = `thread:<proposalId>::inbox::-::-` (`inboxThreadId`), where
+    proposalId is the needsYou item's `proposalId` verbatim (it may hold `:` and `#`); the console percent-encodes the
+    whole threadId in the query and the path, and core maps back with `proposalIdOfThread`. No other id form is served.
+    CONSOLE CONTRACT (pin for remudero-console, CONSOLE-T129 thread view): `ThreadMessageView.extra.event` is
+    `{ kind: "reframed" | "declined" | "restored" | "approved" | "released" | "redrafted" | "task_filed" |
+    "released_to_fleet" | "refused", key: string }`; `from` is `operator` for the first five and `daemon` for the
+    rest; `ts` is epoch ms; messages arrive in chronological order. The console renders an event message as a compact
+    status line (who did what, when) and the text as its body; it never de-duplicates (core already does).
+  acceptance:
+    - claim: "a reframe, a decline and a restore each appear once on the item's thread, in order, from the operator"
+      proof: 'grep: test("W1-T9252: reframe, decline and restore each appear once on the thread in order" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "releasing a parked task with rmd approve appears on the thread of every open ask about that task"
+      proof: 'grep: test("W1-T9252: a release appears on every open ask thread for the task" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "the fleet's redraft, filed task and refusal appear as daemon messages after the action that caused them"
+      proof: 'grep: test("W1-T9252: a redraft, a filed task and a refusal follow the operator action" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "re-running the backfill or retrying a verb writes no duplicate event"
+      proof: 'grep: test("W1-T9252: a retried verb and a re-run backfill write each event once" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "an action taken by a reply in the thread is not echoed twice"
+      proof: 'grep: test("W1-T9252: a thread-reply action is not echoed as a second event" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "a reply to a Board review item and to a machine-judge item with no conversation succeeds and appears on its thread"
+      proof: 'grep: test("W1-T9252: a reply to a Board review or machine-judge item succeeds and appears on its thread" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "every item the needsYou pages serve reads its thread through GET /v1/inbox/thread and the inbox-thread view"
+      proof: 'grep: test("W1-T9252: every needsYou item has a readable thread" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'
+    - claim: "a reply the responder does not resolve as decline or restore becomes reframe feedback for the item"
+      proof: 'grep: test("W1-T9252: a thread reply reaches the daemon as reframe direction" in test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts'

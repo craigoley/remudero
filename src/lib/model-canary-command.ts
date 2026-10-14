@@ -6,6 +6,8 @@ import { canarySuiteDigest, commonCanarySuite, weeklyCanarySuite, MODEL_CANARY_V
 import { projectCanaryRuns, type CanaryRun } from "./model-canary-metrics.js";
 import { renderCanaryReport } from "./model-canary-report.js";
 import { retentionCanaryProtocol } from "./model-canary-retention.js";
+import { contextCanaryProtocol } from "./model-canary-context.js";
+import { randomBytes } from "node:crypto";
 import { rotatingCanarySuite } from "./model-canary-rotation.js";
 
 function boundedInput(input: string, limit = 8 * 1024 * 1024): string {
@@ -66,6 +68,7 @@ export function canaryCommand(argv: readonly string[]) {
     throw new Error("usage: model-canary-command prepare <private-out-dir> | project <private-out-dir> <run-array.json>");
   if (command === "prepare") {
     const daily = commonCanarySuite(), weekly = weeklyCanarySuite();
+    const namespace = randomBytes(32).toString("hex");
     const manifest = { version: MODEL_CANARY_VERSION, state: "prepared-not-activated", dailyCases: daily.length,
       weeklyCases: weekly.length, suiteHash: canarySuiteDigest([...daily, ...weekly]),
       tasks: [...daily, ...weekly].map(({ expected: _heldOut, ...task }) => task),
@@ -77,7 +80,13 @@ export function canaryCommand(argv: readonly string[]) {
         return { turns, suiteHash: p.suiteHash, instruction: p.instruction,
           prompts: p.cases.map(c => ({ id: c.id, prompt: c.prompt })), sampleUnit: "whole-conversation" };
       }),
-      deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "native-protocol-prepared-adapter-pending", cacheProfiles: "pending-real-transport-coverage" } };
+      contextProfiles: ([2048, 16384, 65536] as const).flatMap(bytes => (["first-use", "repeat"] as const).map(treatment => {
+        const p = contextCanaryProtocol(bytes, treatment, namespace);
+        return { version: p.version, bytes, byteUnit: p.byteUnit, treatment, namespace, suiteHash: p.suiteHash,
+          cacheGuarantee: p.cacheGuarantee, sampleUnit: p.sampleUnit,
+          tasks: p.cases.map(({ expected: _scorerOnly, ...task }) => task) };
+      })),
+      deeperWeekly: { patchExecution: "pending-isolated-scorer", retention25And50Turns: "native-protocol-prepared-adapter-pending", cacheProfiles: "native-byte-protocol-prepared-adapter-pending" } };
     privateOutput(outDir, "model-canary-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
     return { state: manifest.state, suiteHash: manifest.suiteHash };
   }

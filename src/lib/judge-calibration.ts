@@ -65,6 +65,9 @@ export const JUDGE_CALIBRATION_METHOD = {
     "a judge's corrected rate is the verdict-count-weighted sum of its strata's estimates, variance sum(w^2 * var); " +
     "unknown when any stratum is unknown",
   agreement: "Cohen's kappa on binary pass/fail; unknown when chance agreement is 1",
+  rates:
+    "true-positive rate = P(judge pass | human pass), true-negative rate = P(judge fail | human fail), " +
+    "each with a Wilson interval at z and unknown below minPairedObservations labels in its own human class",
 } as const;
 
 type Row = Record<string, unknown>;
@@ -503,6 +506,31 @@ export function cohensKappa(
   return { state: "estimated", kappa: (observedAgreement - chance) / (1 - chance), observedAgreement, count };
 }
 
+/** One class-conditional rate against the human label, or `unknown` with the reason. */
+export type JudgeRate =
+  | { state: "estimated"; rate: number; lower: number; upper: number; count: number }
+  | { state: "unknown"; reason: string; count: number };
+
+/** Kappa can read healthy while the rare human-fail class goes unseen, and a review judge's costly
+ *  error is passing work a human fails — so each class gets its own rate and its own floor. */
+export function judgeTruePositiveTrueNegative(
+  pairs: ReadonlyArray<{ judge: boolean; human: boolean }>,
+  minPaired: number = MIN_PAIRED_OBSERVATIONS,
+): { truePositive: JudgeRate; trueNegative: JudgeRate } {
+  const rateFor = (humanPass: boolean): JudgeRate => {
+    const members = pairs.filter((p) => p.human === humanPass);
+    const count = members.length;
+    const name = humanPass ? "human-pass" : "human-fail";
+    if (count < minPaired) return { state: "unknown", reason: count === 0 ? `no-${name}-labels` : `too-few-${name}-labels (${count} of ${minPaired})`, count };
+    const rate = members.filter((p) => p.judge === humanPass).length / count;
+    const z2 = JUDGE_INTERVAL_Z ** 2;
+    const centre = (rate + z2 / (2 * count)) / (1 + z2 / count);
+    const half = (JUDGE_INTERVAL_Z * Math.sqrt(rate * (1 - rate) / count + z2 / (4 * count ** 2))) / (1 + z2 / count);
+    return { state: "estimated", rate, lower: clamp01(centre - half), upper: clamp01(centre + half), count };
+  };
+  return { truePositive: rateFor(true), trueNegative: rateFor(false) };
+}
+
 /** One judge x author-model cell of the matrix. */
 export interface JudgeStratum {
   judge: { kind: JudgeKind; model: string };
@@ -512,6 +540,7 @@ export interface JudgeStratum {
   sampled: number;
   labelled: number;
   humanAgreement: JudgeAgreement;
+  humanRates: { truePositive: JudgeRate; trueNegative: JudgeRate };
   corrected: JudgeEstimate;
 }
 
@@ -522,6 +551,7 @@ export interface JudgeSummary {
   rawPassRate: number;
   labelled: number;
   humanAgreement: JudgeAgreement;
+  humanRates: { truePositive: JudgeRate; trueNegative: JudgeRate };
   corrected: JudgeEstimate;
 }
 
@@ -595,6 +625,9 @@ function cellStatistics(verdicts: readonly JudgeVerdict[], human: ReadonlyMap<st
     humanAgreement: labelsUnavailable !== undefined
       ? { state: "unknown" as const, reason: labelsUnavailable, count: 0 }
       : cohensKappa(pairs.map((p) => [p.judge, p.human] as const), minPaired),
+    humanRates: labelsUnavailable !== undefined
+      ? { truePositive: { state: "unknown" as const, reason: labelsUnavailable, count: 0 }, trueNegative: { state: "unknown" as const, reason: labelsUnavailable, count: 0 } }
+      : judgeTruePositiveTrueNegative(pairs, minPaired),
     corrected: labelsUnavailable !== undefined
       ? { state: "unknown" as const, reason: labelsUnavailable, labelled: 0 }
       : ppiEstimate(pairs, unlabelled, minPaired),
@@ -706,6 +739,7 @@ export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCal
       rawPassRate: cell.rawPassRate,
       labelled: cell.labelled,
       humanAgreement: cell.humanAgreement,
+      humanRates: cell.humanRates,
       corrected: labelsUnavailable !== undefined ? cell.corrected : stratifiedEstimate(strata.filter((s) => `${s.judge.kind}:${s.judge.model}` === id)),
     };
   });

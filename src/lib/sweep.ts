@@ -27,8 +27,12 @@ import { basename, dirname, join } from "node:path";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
-  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingTestFilesFromCiFailures, isMainGreenOnItsOwnHead, mainFailingTestFiles,
+  baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
+  isMainGreenOnItsOwnHead, mainFailingTestFiles, RULE_CHECKS_CHECK,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
+  assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
+  refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
+  type ImportClosureRead, type RefreshArm, type RefreshClearance, type RefreshHistorySource,
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
@@ -36,12 +40,15 @@ import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
   armOutcomeReason,
+  heldPlanPrFromLedger,
+  PLAN_PR_REEVALUATED_STEP,
   decideArmReprobeFromFacts,
   armFailureAction,
+  armFailureIsRateLimited,
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
-  mergeDirectViaRest,
+  mergeDirectViaRestAsync,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -61,14 +68,14 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
-import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
@@ -84,7 +91,11 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import {
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
+  readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
+} from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
@@ -229,9 +240,11 @@ import {
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
+  type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
+import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
   rollupFromRest,
@@ -273,6 +286,7 @@ import {
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
+import { FOLD_DEBT_PULL_ERROR_STEP, foldDebtRunIdsFromLedger, landFoldDebt, pullFoldDebtEntries } from "./fold-debt-pull.js";
 import {
   REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
@@ -1466,6 +1480,11 @@ export interface BuildSweepEffectsDeps {
   productionProgressJudge?: boolean;
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
+  /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
+  /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
+  readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
+  reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
   readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
   owner: string;
@@ -1825,6 +1844,7 @@ export function rebaseDirtyFleetBranchViaGit(
 
 /** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
 const settledMutationVerdictArtifacts = new Set<number>();
+const settledFoldDebtArtifacts = new Set<number>(); // W1-T7853, the same per-process settle
 /** W1-T6022: changed-file sources by `<owner>/<repo>@<head>:<path>`, process-lifetime like the set above. */
 const prFileSources = new Map<string, string>();
 
@@ -1849,6 +1869,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "readerAgreement",
   "fixProgressJudge", // W1-T7096
   "reproduceFailingTestsOnMain",
+  "readTestImportClosure", // W1-T8396
+  "reproduceFailingTestsOnMerge", // W1-T8396
   "arm",
   "readArmFacts",
   "close",
@@ -1883,6 +1905,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reconcileMainRunGaps",
   "readFleetState",
   "pullMutationVerdicts",
+  "pullFoldDebt",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -1988,6 +2011,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readerAgreement"
   | "fixProgressJudge"
   | "reproduceFailingTestsOnMain"
+  | "readTestImportClosure"
+  | "reproduceFailingTestsOnMerge"
   | "arm"
   | "readArmFacts"
   | "close"
@@ -2025,6 +2050,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
+  | "pullFoldDebt"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -2549,9 +2575,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         armAuto: () => { throw new Error("Pull request is in clean status"); },
         armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
-        mergeDirect: (prUrl) => {
+        mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -2600,6 +2626,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
       // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
       const folded = sweepArmAttemptOutcome(outcome, attemptError);
+      // W1-T8620: a refused direct merge hands GitHub's refusal text to the armed-idle branch.
+      if (folded === "direct-merge-failed" && attemptError !== undefined) return { outcome: folded, error: attemptError };
       return typeof folded === "object" ? { ...folded, error: attemptError } : folded;
     },
 
@@ -2918,11 +2946,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           cause: "ci",
           ...contractRevisionFor(pr),
           summary: `required check "${check.name}" ${CANCELLED_CHECK_ESCALATION_SUMMARY[kind]} — ${pr.prUrl}`,
-          detail:
-            `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
-            `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
-            `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
-            `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+          detail: CANCELLED_CHECK_ESCALATION_DETAIL[kind](pr, check, reason),
           options: [
             {
               label: "investigate",
@@ -4160,6 +4184,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
     reproduceFailingTestsOnMain: deps.reproduceFailingTestsOnMainImpl,
+    readTestImportClosure: deps.readTestImportClosureImpl,
+    reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
 
     // W1-T3422/W1-T3577 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
@@ -4482,6 +4508,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
+    // W1-T7853 — fold debt a CI run filed, written into this checkout's plan/feedback and landed.
+    pullFoldDebt: async (ingested) => {
+      try {
+        const input = {
+          owner,
+          repo,
+          ingested,
+          settled: settledFoldDebtArtifacts,
+          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          root: repoRoot,
+          log,
+          land: deps.landFeedbackImpl,
+        };
+        return landFoldDebt(pullFoldDebtEntries(input), input);
+      } catch (e) {
+        log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
+    },
+
     // W1-T2620 (design iv) — THE LEAF IS THE ONE THAT EXISTS: the SAME `pushEmptyCommit` leaf
     // `repushAbsent` (above) and `sweepPostFixReverification`'s own redrive (this file) already
     // use — never a second outward path, and never `updateBranchImpl` (`armedButStalled`'s own
@@ -4709,7 +4756,7 @@ export async function refreshStaleRollupAfterRefusal(
 ): Promise<string> {
   const appendLine = deps.appendLine ?? appendLedger;
   const base = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
-  if (pr.mergeableState !== "blocked" || pr.mergeable !== true) {
+  if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
   const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
@@ -4760,6 +4807,175 @@ export async function refreshStaleRollupAfterRefusal(
   appendLine(deps.ledgerPath, { ...base, step: STALE_ROLLUP_REFRESHED_STEP, outcome,
     ...(newHead === undefined ? {} : { new_head_sha: newHead }), superseded_failures: supersededFailures });
   return `stale-rollup refresh: ${outcome}`;
+}
+
+/** W1-T6404's own precondition: only a head GitHub reports blocked AND mergeable is refreshed. */
+export function staleRollupRefreshApplies(pr: Pick<OpenPrView, "mergeable" | "mergeableState">): boolean {
+  return pr.mergeableState === "blocked" && pr.mergeable === true;
+}
+
+/** W1-T8620 — the one job re-run a stale required check earns per (head sha, stale run id). The row
+ *  is written BEFORE the POST; a later row of the same step with `outcome: "deferred"` voids it. */
+export const STALE_CHECK_RERUN_STEP = "automerge.stale_check_rerun";
+/** W1-T8620 — the one escalation a refused green merge earns per (head sha, GitHub's refusal text). */
+export const MERGE_REFUSAL_ESCALATED_STEP = "automerge.merge_refusal_escalated";
+
+export type StaleCheckShape = "superseded" | "gate-older-than-inputs";
+export type MergeRefusalClass =
+  | { kind: "stale-check"; check: string; shape: StaleCheckShape; staleRunId?: number; outrankedByRunId?: number;
+      jobId?: string; reason: string }
+  | { kind: "real-red" | "transient" | "other"; check?: string; reason: string };
+
+const REQUIRED_CHECK_REFUSAL = /Required status check ["']([^"']+)["'] is/i;
+const rollupEntryState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+const rollupEntryName = (c: RollupCheckEntry) => c.name ?? c.context ?? "";
+
+/** W1-T8620 — PURE: why GitHub refused a green armed merge. `stale-check` when the check its text
+ *  names is red only by a stale verdict: a superseded failed run whose newest run passed (W1-T4908),
+ *  a newest run CANCELLED, or a failed ci-gate that concluded before the newest of the checks it
+ *  gates (`required`, ci-gate's REQUIRED list) while every one of them is green (#11096).
+ *  `real-red` when that check's newest run failed or is still running; `transient` for a rate-limit
+ *  or transport refusal; `other` for anything else, including an unreadable rollup. */
+export function classifyMergeRefusal(
+  error: string | undefined,
+  rollup: readonly RollupCheckEntry[] | undefined,
+  required: readonly string[] = [],
+): MergeRefusalClass {
+  const text = error?.trim() ?? "";
+  if (text === "") return { kind: "other", reason: "GitHub's refusal carried no text" };
+  const check = text.match(REQUIRED_CHECK_REFUSAL)?.[1];
+  if (check === undefined) {
+    if (armFailureIsRateLimited(text) || armFailureAction(text) === "transient") {
+      return { kind: "transient", reason: `transient refusal: ${text}` };
+    }
+    return { kind: "other", reason: `refusal names no required check: ${text}` };
+  }
+  if (!rollup) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup is unreadable` };
+  const { latest, superseded } = classifyRollupSupersession(rollup);
+  const newest = latest.find((c) => rollupEntryName(c) === check);
+  if (!newest) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup carries no run of it` };
+  const state = rollupEntryState(newest);
+  const jobOf = (c: RollupCheckEntry) => c.jobId ?? checkJobId(c);
+  if (state === "CANCELLED") {
+    return { kind: "stale-check", check, shape: "superseded", staleRunId: rollupRunId(newest), jobId: jobOf(newest),
+      reason: `"${check}"'s newest run ${rollupRunId(newest) ?? "?"} was cancelled` };
+  }
+  if (REQUIRED_CHECK_OK.has(state)) {
+    const stale = superseded.filter((s) => rollupEntryName(s.entry) === check && !s.pendingRerun).at(-1);
+    if (!stale) return { kind: "other", check, reason: `"${check}"'s newest run passed and no superseded red of it remains` };
+    const staleRunId = rollupRunId(stale.entry);
+    const outrankedByRunId = rollupRunId(stale.supersededBy);
+    return { kind: "stale-check", check, shape: "superseded", staleRunId, outrankedByRunId, jobId: jobOf(stale.entry),
+      reason: `"${check}" run ${staleRunId ?? "?"} failed, superseded by passing run ${outrankedByRunId ?? "?"}` };
+  }
+  if (!REQUIRED_CHECK_FAIL.has(state)) return { kind: "real-red", check, reason: `"${check}"'s newest run is still running` };
+  if (check === CI_GATE_CHECK_NAME) {
+    const gated = required.filter((name) => name !== CI_GATE_CHECK_NAME);
+    if (gated.length === 0) return { kind: "other", check, reason: "ci-gate's newest run failed and its REQUIRED list is unreadable" };
+    const inputs = gated.map((name) => latest.find((c) => rollupEntryName(c) === name));
+    const present = inputs.filter((c): c is RollupCheckEntry => c !== undefined);
+    const allGreen = present.length === gated.length && present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+    const lastInput = present.reduce<RollupCheckEntry | undefined>((acc, c) =>
+      acc === undefined || (c.completedAt ?? "") > (acc.completedAt ?? "") ? c : acc, undefined);
+    if (allGreen && newest.completedAt && lastInput?.completedAt && lastInput.completedAt > newest.completedAt) {
+      const staleRunId = rollupRunId(newest);
+      const outrankedByRunId = rollupRunId(lastInput);
+      return { kind: "stale-check", check, shape: "gate-older-than-inputs", staleRunId, outrankedByRunId, jobId: jobOf(newest),
+        reason: `run ${staleRunId ?? "?"} concluded before its gated ${rollupEntryName(lastInput)} run ${outrankedByRunId ?? "?"}` };
+    }
+  }
+  return { kind: "real-red", check, reason: `"${check}"'s newest run failed` };
+}
+
+const staleCheckRerunKey = (headSha: string, runId: unknown, jobId: unknown, check: unknown) =>
+  `${headSha}@${String(runId ?? jobId ?? check)}`;
+
+/** W1-T8620 — every (head, stale run id) whose one job re-run the ledger has spent, less deferrals. */
+export function staleCheckRerunKeysFromLedger(lines: ReadonlyArray<Record<string, unknown>>): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.step !== STALE_CHECK_RERUN_STEP || typeof l.head_sha !== "string") continue;
+    const key = staleCheckRerunKey(l.head_sha, l.stale_run_id, l.job_id, l.check_name);
+    if (l.outcome === "deferred") out.delete(key);
+    else out.add(key);
+  }
+  return out;
+}
+
+/** W1-T8620 — act on a refused green armed merge by its classified reason. A stale check is re-run
+ *  once per (head, run id), never re-merged blind; a real red and a transient refusal are left to the
+ *  next pass; anything else escalates once per (head, refusal text). W1-T6404's refresh still answers
+ *  a refusal with no text, or one naming no check at a head GitHub reports blocked. */
+export async function actOnMergeRefusal(
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "repushAbsent" | "readCiGateRollup" | "readCiGateRequired"
+    | "requeueCheck" | "escalate" | "appendLine">,
+  pr: OpenPrView,
+  error: string | undefined,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): Promise<string> {
+  const refusal = error?.trim() ?? "";
+  if (refusal === "") return refreshStaleRollupAfterRefusal(deps, pr, ledgerLines);
+  const appendLine = deps.appendLine ?? appendLedger;
+  const base = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+  let rollup: RollupCheckEntry[] | undefined;
+  let rollupError: string | undefined;
+  if (REQUIRED_CHECK_REFUSAL.test(refusal) && deps.readCiGateRollup) {
+    try {
+      rollup = await deps.readCiGateRollup(pr);
+    } catch (e) {
+      const reason = String((e as Error)?.message ?? e);
+      rollupError = reason; // carried into the escalation an unreadable rollup earns
+    }
+  }
+  const verdict = classifyMergeRefusal(refusal, rollup, deps.readCiGateRequired?.() ?? []);
+  const escalateOnce = async (why: string): Promise<string> => {
+    const done = ledgerLines.some((l) => l.step === MERGE_REFUSAL_ESCALATED_STEP && l.pr_number === pr.prNumber &&
+      l.head_sha === pr.headSha && l.refusal === refusal);
+    if (done) return `${why}; already escalated at this head`;
+    const reason = `GitHub refused a green armed merge of #${pr.prNumber} at ${pr.headSha.slice(0, 7)}: ${refusal} — ${why}`;
+    try {
+      await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...base, step: MERGE_REFUSAL_ESCALATED_STEP, kind: verdict.kind, refusal, escalated: false,
+        error: String((e as Error)?.message ?? e) });
+      return `${verdict.kind}: ${why}; escalation failed`;
+    }
+    appendLine(deps.ledgerPath, { ...base, step: MERGE_REFUSAL_ESCALATED_STEP, kind: verdict.kind, refusal, escalated: true, reason });
+    return `${verdict.kind}: ${why} — escalated`;
+  };
+  switch (verdict.kind) {
+    case "transient":
+      return `transient — the next pass retries (${refusal})`;
+    case "real-red":
+      return `real-red ${verdict.check}: ${verdict.reason} — re-runs nothing; the next pass's disposition owns it`;
+    case "stale-check": {
+      const label = `stale-check ${verdict.check} (${verdict.reason})`;
+      const key = staleCheckRerunKey(pr.headSha, verdict.staleRunId, verdict.jobId, verdict.check);
+      if (staleCheckRerunKeysFromLedger(ledgerLines).has(key)) {
+        return escalateOnce(`${label} — refused again after its one job re-run`);
+      }
+      const row = { ...base, step: STALE_CHECK_RERUN_STEP, check_name: verdict.check, shape: verdict.shape,
+        stale_run_id: verdict.staleRunId ?? null, outranked_by_run_id: verdict.outrankedByRunId ?? null,
+        job_id: verdict.jobId ?? null, refusal };
+      appendLine(deps.ledgerPath, row);
+      let outcome: JobRequeueOutcome;
+      try {
+        outcome = jobRequeueOutcome(deps.requeueCheck
+          ? await deps.requeueCheck(pr, { name: verdict.check, ...(verdict.jobId === undefined ? {} : { jobId: verdict.jobId }) })
+          : false);
+      } catch (e) {
+        outcome = { kind: "failed", error: String((e as Error)?.message ?? e) };
+      }
+      if (outcome.kind === "deferred") {
+        appendLine(deps.ledgerPath, { ...row, outcome: "deferred", deferral: outcome.refusal, error: outcome.error });
+        return `${label} — job re-run deferred (${outcome.refusal})`;
+      }
+      return `${label} — job re-run ${outcome.kind === "dispatched" ? "requested" : `failed${outcome.error ? `: ${outcome.error}` : ""}`}`;
+    }
+    default:
+      if (verdict.check === undefined && staleRollupRefreshApplies(pr)) return refreshStaleRollupAfterRefusal(deps, pr, ledgerLines);
+      return escalateOnce(rollupError === undefined ? verdict.reason : `${verdict.reason} (${rollupError})`);
+  }
 }
 
 /** W1-T5956 — does a re-arm after an ejection spend the bound? Not while Actions reads degraded or
@@ -6750,6 +6966,17 @@ const CANCELLED_CHECK_ESCALATION_SUMMARY: Record<CancelledCheckEscalationKind, s
   "cancelled-twice": "cancelled twice on the same head",
   "requeue-deferral-backstop": `requeue refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times while its run was in flight`,
 };
+const CANCELLED_CHECK_ESCALATION_DETAIL: Record<CancelledCheckEscalationKind,
+  (pr: OpenPrView, check: CancelledRequiredCheck, reason: string) => string> = {
+  "cancelled-twice": (pr, check, reason) =>
+    `The gate-reconciliation lane (W1-T1223) re-queued required check "${check.name}"'s job once ` +
+    `on head ${pr.headSha}, and it was reported CANCELLED again on that SAME head — ${reason}. ` +
+    `A concurrency group cancelling it, a capacity fault, or a workflow-level cancel are all beyond ` +
+    `what a second re-queue could fix; nothing in this PR's own diff caused this.`,
+  "requeue-deferral-backstop": (pr, check, reason) =>
+    `GitHub refused ${CHECK_REQUEUE_DEFERRAL_BACKSTOP} times to requeue required check "${check.name}"'s job ` +
+    `on head ${pr.headSha} while its run was still in flight — ${reason}.`,
+};
 
 export type JobRerunRefusal = "already_running" | "not_current_attempt";
 export type JobRequeueOutcome =
@@ -8188,11 +8415,39 @@ export interface MainLatestRun {
   failingChecks: readonly string[];
   /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
   observedChecks?: readonly string[];
+  /** W1-T7848: what a probe saw of the rule suites at this `sha`; main's own CI never runs `rule-checks`. */
+  ruleChecks?: { state: "red" | "green"; suites: readonly string[] };
+  /** W1-T7848: main's CI reading, present only when a rule-suite probe turned `state` red. */
+  ciState?: string;
+}
+
+/** W1-T7848 — a base-reproduction probe of the suites a `rule-checks` red names, at one main sha: `red` when
+ *  every one fails there, `green` when every one passes. One row per main sha and suite set. */
+export const MAIN_RULE_CHECKS_OBSERVED_STEP = "main.rule_checks.observed";
+
+function ruleChecksObservationKey(mainSha: unknown, suites: readonly string[]): string {
+  return `${String(mainSha)}@${[...suites].sort().join(",")}`;
+}
+
+/** Fold the rule-suite rows at main's head into its reading. Any red suite at that sha keeps rule-checks red;
+ *  a row for any other sha is ignored, because main has moved and the next probe decides. */
+function withRuleChecks(run: MainLatestRun, rows: readonly Record<string, unknown>[]): MainLatestRun {
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((n): n is string => typeof n === "string") : []);
+  const atHead = rows.filter((row) => row.main_sha === run.sha);
+  const red = [...new Set(atHead.filter((row) => row.state === "red").flatMap((row) => strings(row.failing_suites)))];
+  const green = [...new Set(atHead.filter((row) => row.state === "green").flatMap((row) => strings(row.suites)))];
+  if (red.length === 0 && green.length === 0) return run;
+  const observedChecks = run.observedChecks === undefined ? {} : { observedChecks: [...new Set([...run.observedChecks, RULE_CHECKS_CHECK])] };
+  if (red.length === 0) return { ...run, ...observedChecks, ruleChecks: { state: "green", suites: green } };
+  return { ...run, state: "red", failingChecks: [...new Set([...run.failingChecks, RULE_CHECKS_CHECK])], ...observedChecks,
+    ruleChecks: { state: "red", suites: red }, ...(run.state === "red" ? {} : { ciState: run.state }) };
 }
 
 export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
   let latest: MainLatestRun | undefined;
+  const ruleRows: Record<string, unknown>[] = [];
   for (const line of lines) {
+    if (line.step === MAIN_RULE_CHECKS_OBSERVED_STEP) ruleRows.push(line);
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
     // A failing check outside ci-gate's required set (a shard under a required aggregate) is still
     // one main's run fails: the census below names it, so the failing list must too, or a PR red on
@@ -8207,7 +8462,7 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
         : {}),
     };
   }
-  return latest;
+  return latest === undefined ? undefined : withRuleChecks(latest, ruleRows);
 }
 
 export const BASE_RED_STOOD_DOWN_STEP = "sweep.base_red.stood_down";
@@ -8237,10 +8492,16 @@ export function fixedOnMainTestFiles(
 
 /** W1-T6405 — the one ledger row of a fixed-on-main refresh, written by the fix rung and the stalled-stage rung alike. */
 export function baseFixedRefreshRow(
-  runId: string, pr: OpenPrView, mainSha: string, testFiles: readonly string[], outcome: string,
+  runId: string, pr: OpenPrView, mainSha: string, testFiles: readonly string[], outcome: string, checks: readonly string[] = [],
 ) {
+  // W1-T8396: `check_names` names the red this refresh was taken on, so no arm repeats it on the head it makes.
   return { run_id: runId, task_id: pr.taskId ?? "SWEEP", step: BASE_FIXED_REFRESH_STEP, pr_number: pr.prNumber,
-    head_sha: pr.headSha, main_sha: mainSha, test_files: [...testFiles], outcome };
+    head_sha: pr.headSha, main_sha: mainSha, test_files: [...testFiles], check_names: [...checks], outcome };
+}
+
+/** W1-T8396 — the checks of a red whose failure names a probeable test file. */
+function testFileChecks(failures: readonly CiFailure[]): string[] {
+  return [...new Set(failures.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name))];
 }
 
 /** Per `pr@head`: the check a prior pass stood down as a base red, whether its one refresh was
@@ -8249,6 +8510,7 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
   stoodDown: Map<string, string>;
   refreshed: Set<string>;
   reproducedBeforeGreen: Set<string>;
+  mainRepairPrUrls: Set<string>;
 } {
   const stoodDown = new Map<string, string>();
   const refreshed = new Set<string>();
@@ -8262,8 +8524,26 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
     if (line.step === BASE_RED_REFRESH_STEP || line.step === BASE_FIXED_REFRESH_STEP) refreshed.add(key);
     if (line.step === "sweep.base_reproduction" && line.verdict === "reproduced") reproduced.add(key);
   }
-  return { stoodDown, refreshed, reproducedBeforeGreen };
+  return { stoodDown, refreshed, reproducedBeforeGreen, mainRepairPrUrls: mainRepairPrUrlsFromLedger(lines) };
 }
+
+function mainRepairPrUrlsFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  return new Set(lines.flatMap((line) => (line.step === "main.repair.fix_opened" && typeof line.pr_url === "string" ? [line.pr_url] : [])));
+}
+
+/** W1-T8575 — main's own repair: a `main-repair-<sha12>` task (fix, revert and ratchet-record PRs
+ *  alike) or a PR a `main.repair.fix_opened` row names. Its red is never main's to wait out. */
+export function isMainRepairPr(pr: Pick<OpenPrView, "taskId" | "prUrl">, ledgerLines: readonly Record<string, unknown>[]): boolean {
+  return isMainRepairPrIn(pr, mainRepairPrUrlsFromLedger(ledgerLines));
+}
+
+function isMainRepairPrIn(pr: Pick<OpenPrView, "taskId" | "prUrl">, repairPrUrls: ReadonlySet<string>): boolean {
+  return pr.taskId?.startsWith("main-repair-") === true || repairPrUrls.has(pr.prUrl);
+}
+
+/** W1-T8575 — required checks that judge only the PR's own body, title or proofs (each re-runs on
+ *  `edited`). Main's red cannot reach them, so absence from main's run never makes them base red. */
+export const PR_BODY_SCOPED_CHECKS: readonly string[] = ["proof-discrimination", "acceptance-author-gate", "commitlint"];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
 
@@ -8276,11 +8556,15 @@ export function decideBaseRed(
   history: ReturnType<typeof baseRedHistoryFromLedger>,
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
+  // W1-T8575: the PR that repairs main is never held until main is green.
+  if (isMainRepairPrIn(pr, history.mainRepairPrUrls)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
   if (main?.state === "red" && main.observedChecks !== undefined) {
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
-    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
+    const absent = main.ciState !== undefined ? undefined
+      : names.find((name) => !main.observedChecks!.includes(name) && !PR_BODY_SCOPED_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
@@ -8288,7 +8572,7 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  if (recorded !== undefined && names.includes(recorded) && !PR_BODY_SCOPED_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -11355,6 +11639,10 @@ function criteriaFromLedgerValue(value: unknown): CriterionVerdict[] | undefined
  *  reads it to release the delivered-review key, and {@link hostGapRereviewFacts} to pace the next. */
 export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
 
+/** W1-T7850: the ledger step that records one re-review of a verdict whose POST was refused because its reviewer
+ *  checkout vanished (`review.post_refused` carrying `reviewer_code_host_gap`). Folded like {@link HOST_GAP_REREVIEW_STEP}. */
+export const REFUSED_POST_HOST_GAP_REREVIEW_STEP = "sweep.review_host_gap_rereview";
+
 const rowMs = (row: Record<string, unknown>): number | undefined => {
   const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
   return Number.isNaN(at) ? undefined : at;
@@ -11375,9 +11663,10 @@ export function hostGapRereviewFacts(
   for (const line of lines) {
     if (line.head_sha !== pr.headSha) continue;
     const at = rowMs(line);
-    if (line.step === HOST_GAP_REREVIEW_STEP && line.pr_url === pr.prUrl) {
+    if ((line.step === HOST_GAP_REREVIEW_STEP || line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) && line.pr_url === pr.prUrl) {
       if (at !== undefined) {
-        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string") : [] });
+        history.push({ atMs: at, skips: Array.isArray(line.skips) ? line.skips.filter((s): s is string => typeof s === "string")
+          : typeof line.host_gap === "string" ? [line.host_gap] : [] });
         startedAtMs = at;
       }
     } else if (line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -11727,6 +12016,14 @@ export interface SweepDeps {
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<BaseProbeResult>;
+  /** W1-T8396: what a refresh arm reads before merging main into a red head whose failing test files
+   *  are known — each failing test's import closure, and the failing tests run on a trial merge of the
+   *  head with main's tip. Unwired, the arm keeps today's refresh and its {@link REFRESH_CLEARANCE_STEP}
+   *  row says why. */
+  readTestImportClosure?: ImportClosureRead;
+  reproduceFailingTestsOnMerge?: (
+    pr: OpenPrView, files: readonly string[], mainTipSha: string,
+  ) => Promise<BaseProbeResult>;
   strikeLadder?: StrikeLadderEffects;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
@@ -12061,6 +12358,8 @@ export interface SweepDeps {
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
+  /** W1-T7853 — pulls the fold debt CI filed (see fold-debt-pull.ts); returns the rows to append. */
+  pullFoldDebt?: (ingested: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -12164,6 +12463,11 @@ interface PriorActions {
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
   reviewFreshnessRefusals: Map<string, ReviewerCodeFreshnessRefusal>;
+  /** W1-T7850 — exact-input keys whose terminal verdict was computed and REFUSED because its reviewer checkout
+   *  vanished (`reviewer_code_host_gap`). Neither a freshness refusal (no probe, no backoff) nor a durable one: the
+   *  host gap earns a fresh review of the same input. `requestedForRefusal` is true once a
+   *  {@link REFUSED_POST_HOST_GAP_REREVIEW_STEP} row answers THIS refusal. */
+  reviewHostGapRefusals: Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -12219,6 +12523,27 @@ function standDownAlreadyLogged(
 function reviewOutcomeKeyForPr(pr: OpenPrView): string {
   const taskId = reviewOutcomeTaskIdFor(pr);
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
+}
+
+function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  if (pr.reviewState !== "pending") return false;
+  const row = lines.findLast(row => row.task_id === reviewOutcomeTaskIdFor(pr) && row.pr_url === pr.prUrl &&
+    row.head_sha === pr.headSha &&
+    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+  if (row?.step !== "review.posted" || row.state !== "pending") return false;
+  if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
+  if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
+  const verdict = row.decision_verdict as ReviewVerdict | undefined;
+  if (verdict?.criteria?.some(criterion => criterion.proof_exec === "cannot_evaluate" &&
+      criterion.cause !== "promise-harvest-incomplete" && !/^promise harvest (?:unavailable:|corpus is unreadable)/.test(criterion.loadError ?? criterion.reason))) return false;
+  const observation = verdict?.promisedFollowUpObservation;
+  return observation?.state === "unknown" && (observation.cause === "promise-harvest-incomplete" ||
+    /^promise harvest (?:unavailable:|corpus is unreadable)/.test(observation.reason));
+}
+
+function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
+  // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
+  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
 }
 
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
@@ -12846,6 +13171,7 @@ function priorActionsFromLedger(
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
   const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
+  const reviewHostGapRefusals = new Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -12880,7 +13206,7 @@ function priorActionsFromLedger(
     // W1-T7837 — a host-gap re-review request RELEASES the delivered key of the verdict it supersedes, the way
     // W1-T5840 releases an overtaken failure: the review claim then admits one fresh review of the same head and
     // body. A review.posted row after it re-adds the key, so the release lasts one review.
-    if (line.step === HOST_GAP_REREVIEW_STEP) {
+    if (line.step === HOST_GAP_REREVIEW_STEP || line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP) {
       if (typeof line.task_id === "string" && typeof line.head_sha === "string") {
         const key = reviewOutcomeKey(
           line.task_id,
@@ -12890,6 +13216,11 @@ function priorActionsFromLedger(
         );
         reviewDelivered.delete(key);
         reviewDeliveredFailureAt.delete(key);
+        // W1-T7850: the request answers the refusal it names (`refusal_at`), not a later one.
+        const refused = reviewHostGapRefusals.get(key);
+        if (line.step === REFUSED_POST_HOST_GAP_REREVIEW_STEP && refused && refused.attemptedAt === line.refusal_at) {
+          refused.requestedForRefusal = true;
+        }
       }
       continue;
     }
@@ -12920,6 +13251,15 @@ function priorActionsFromLedger(
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
+          }
+        } else if (line.reviewer_code_freshness === "unreadable" && typeof line.reviewer_code_host_gap === "string") {
+          // W1-T7850: a vanished reviewer checkout is a host gap, not an unprovable source — it enters neither
+          // `reviewFreshnessRefusals` (no probe of the daemon's own code, no backoff) nor `reviewRefused`.
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewHostGapRefusals.get(key);
+          if (!existing || (!Number.isNaN(parsed) && (existing.attemptedAt === undefined || parsed > existing.attemptedAt))) {
+            reviewHostGapRefusals.set(key, { attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
+              hostGap: line.reviewer_code_host_gap, requestedForRefusal: false });
           }
         } else if (isRetryableReviewerCodeFreshnessRefusal(line)) {
           const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
@@ -13036,7 +13376,7 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key))) reviewDelivered.delete(key);
+    if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -13048,6 +13388,7 @@ function priorActionsFromLedger(
     reviewRefused,
     reviewRetryableThrows,
     reviewFreshnessRefusals,
+    reviewHostGapRefusals,
     reviewDiffCeilingRefused,
     reviewRetryableThrowCounts,
     riskRefused,
@@ -13689,38 +14030,58 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
-   *  fresh one taken after it. */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before this reading would have held container-short or host-short; the
+   *  reading is then the fresh one taken after it. */
   reclaim?: SlackReclaimRecord;
 }
 
-/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
- *  `reread` after a collection. Undefined when this process has no reclaimer. */
-export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+/** The daemon's own reclaim, as a reading's caller hands it in: given the short pool's figure (the container working
+ *  set, or the host's MemAvailable for `pool` "host"), reclaim once and call `reread` after a collection; `reread`
+ *  returns the same pool's fresh figure. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (
+  figureMib: number | undefined,
+  reread: () => number | undefined,
+  pool?: SlackReclaimPool,
+) => SlackReclaimRecord | undefined;
 
 /** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
-export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
-  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+export const installedSlackReclaim: SlackReclaim = (figureMib, reread, pool) =>
+  installedDaemonSlackReclaimer()?.reclaim(figureMib, reread, pool);
 
 /**
  * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
  * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
- * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
- * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. A paced or unavailable reclaim
+ * keeps `first`, named.
+ *
+ * W1-T9358 — A HOST-SHORT READING RECLAIMS TOO. The daemon's pages are the host's, so its freed slack is host memory:
+ * on 2026-10-14 00:19-00:31Z three host-short holds kept 3 empty lanes idle with no reclaim, while reclaims in the same
+ * hour freed 0.18-2.24 GB each. A host-short reading hands the reclaimer the host's MemAvailable, so its evidence
+ * pacing waits on the binding pool's own figure. ONE RECLAIM PER READING: a reading that already carries a reclaim (a
+ * container-short reading whose re-read came back host-short) is never reclaimed again. Any other tier, or no
+ * reclaimer, returns `first` unchanged.
  */
-export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+export function reclaimBeforeHold<T extends {
+  tier?: string;
+  container?: ContainerMemoryHeadroom;
+  hostAvailableMib?: number;
+  reclaim?: SlackReclaimRecord;
+}>(
   first: T,
   reread: () => T,
   reclaim: SlackReclaim | undefined,
 ): T {
-  if (first.tier !== "container-short" || reclaim === undefined) return first;
-  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
-    ? reading.container.workingSetMib : undefined;
+  if (reclaim === undefined || first.reclaim !== undefined) return first;
+  const pool: SlackReclaimPool | undefined = first.tier === "container-short" ? "container"
+    : first.tier === "host-short" ? "host" : undefined;
+  if (pool === undefined) return first;
+  const figure = (reading: T) => pool === "host" ? reading.hostAvailableMib
+    : reading.container !== undefined && "workingSetMib" in reading.container ? reading.container.workingSetMib : undefined;
   let fresh: T | undefined;
-  const record = reclaim(workingSet(first), () => {
+  const record = reclaim(figure(first), () => {
     fresh = reread();
-    return workingSet(fresh);
-  });
+    return figure(fresh);
+  }, pool);
   if (record === undefined) return first;
   return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
@@ -14275,6 +14636,7 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
   const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
   const stuckStages = new Map<string, Record<string, unknown>>();
@@ -14334,6 +14696,7 @@ export async function runSweep(
     const fixedFiles = fields.blocker === "own-red"
       ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
+      readRefreshHistory(pr);
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
       const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
@@ -14341,11 +14704,17 @@ export async function runSweep(
       if (prior === undefined && !baseRedHistory.refreshed.has(refreshKey) && deps.updateBranch) {
         // This pass's ONE base-red refresh went to another PR: the next pass takes this one.
         if (baseRedRefreshPr !== undefined && baseRedRefreshPr !== pr.prNumber) return;
-        baseRedRefreshPr = pr.prNumber;
-        try { outcome = await deps.updateBranch(pr); }
-        catch (error) { outcome = `error: ${String(error)}`; }
-        appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome));
-        baseRedHistory.refreshed.add(refreshKey);
+        // W1-T8396: a fixed-on-main read is evidence only when merging main can clear the red.
+        const checks = testFileChecks(pr.ciFailures ?? []);
+        const clearance = await assessRefresh(pr, "stalled-stage", checks, fixedFiles, mainTipSha);
+        if (clearance.refresh) {
+          baseRedRefreshPr = pr.prNumber;
+          try { outcome = await deps.updateBranch(pr); }
+          catch (error) { outcome = `error: ${String(error)}`; }
+          appendLine(deps.ledgerPath, baseFixedRefreshRow(deps.runId, pr, mainTipSha, fixedFiles, outcome, checks));
+          baseRedHistory.refreshed.add(refreshKey);
+          recordRefresh(pr, checks, fixedFiles, outcome);
+        } else outcome = `refused: ${clearance.evidence}`;
       }
       if (outcome === "updated" || outcome === "head-moved") {
         const row = { pr_number: pr.prNumber, ...fields, diagnosis: "fixed-on-main", bound_minutes: bound.minutes,
@@ -14624,6 +14993,18 @@ export async function runSweep(
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
+  // W1-T7848: one `main.rule_checks.observed` row per main sha and suite set, across passes.
+  const ruleObservations = new Set(ledgerLines.filter((line) => line.step === MAIN_RULE_CHECKS_OBSERVED_STEP).map((line) =>
+    ruleChecksObservationKey(line.main_sha, (Array.isArray(line.failing_suites) ? line.failing_suites : Array.isArray(line.suites) ? line.suites : [])
+      .filter((suite): suite is string => typeof suite === "string"))));
+  const observeRuleChecks = (pr: OpenPrView, mainSha: string, verdict: string, suites: readonly string[]) => {
+    const key = ruleChecksObservationKey(mainSha, suites);
+    if (suites.length === 0 || (verdict !== "reproduced" && verdict !== "clear") || ruleObservations.has(key)) return;
+    ruleObservations.add(key);
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: MAIN_RULE_CHECKS_OBSERVED_STEP, main_sha: mainSha,
+      ...(verdict === "reproduced" ? { state: "red", failing_suites: [...suites] } : { state: "green", suites: [...suites] }),
+      pr_number: pr.prNumber, head_sha: pr.headSha });
+  };
   const probeMain = async (pr: OpenPrView, reproductionFiles: readonly string[], mainSha: string,
     reproduce: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>) => {
     const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainSha, file)));
@@ -14650,6 +15031,80 @@ export async function runSweep(
     appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
     if (probed.setup_error === undefined) for (const file of files) reproductionCache.set(probeCacheKey(mainSha, file.file), file);
     return row;
+  };
+  // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
+  const refreshRecords = refreshRecordsFromLedger(ledgerLines);
+  const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
+  const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  const oldestRefreshRow = new Map<string, number>();
+  for (const row of ledgerLines) {
+    if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
+    const at = Date.parse(String(row.ts));
+    if (Number.isFinite(at)) oldestRefreshRow.set(row.step, Math.min(at, oldestRefreshRow.get(row.step) ?? Infinity));
+  }
+  const refreshHistory = new Map<number, { source: RefreshHistorySource; unread: string[] }>();
+  // W1-T8533: retention is capped; only a live span covering the PR's whole life proves absence.
+  const readRefreshHistory = (pr: OpenPrView): { source: RefreshHistorySource; unread: string[] } => {
+    const cached = refreshHistory.get(pr.prNumber);
+    if (cached !== undefined) return cached;
+    const created = Date.parse(pr.createdAt ?? "");
+    if (Number.isFinite(created) && refreshSteps.every(step => (oldestRefreshRow.get(step) ?? Infinity) <= created)) {
+      const history = { source: "live" as const, unread: [] };
+      refreshHistory.set(pr.prNumber, history);
+      return history;
+    }
+    const union = resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`, undefined, { step: refreshSteps });
+    const rows = parseLedger(union.matches.join("\n"));
+    const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
+    refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
+    for (const [key, evidence] of refusedRefreshClearancesFromLedger(rows)) {
+      if (!refusedClearances.has(key)) refusedClearances.set(key, evidence);
+    }
+    for (const key of baseRedHistoryFromLedger(rows).refreshed) baseRedHistory.refreshed.add(key);
+    const unread = [...union.unread, ...(union.unclassified ?? [])];
+    if (!union.ok && unread.length === 0) unread.push(dirname(deps.ledgerPath));
+    const history = { source: !union.ok || unread.length > 0 ? "unreadable" as const : "union" as const, unread };
+    refreshHistory.set(pr.prNumber, history);
+    return history;
+  };
+  /** W1-T8396 — may merging main clear this head's red? Main's delta since the head's merge base, each
+   *  failing test's import closure, the refresh history and a trial merge decide; one row records it.
+   *  A refusal already recorded for this head and main is reused, never re-read or re-probed. */
+  const assessRefresh = async (
+    pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
+  ): Promise<RefreshClearance> => {
+    const history = readRefreshHistory(pr);
+    const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
+    const decided = refusedClearances.get(memo);
+    if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
+    let mainChangedFiles: string[] | undefined;
+    try {
+      mainChangedFiles = (await deps.readRedBaseRefreshFacts?.(pr))?.baseChangedFiles;
+    } catch (error) {
+      // An unread delta is no evidence either way: `mainPathsReachingRed` then proves nothing.
+      log("sweep.red_base_refresh.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+    }
+    let closure: ReadonlyMap<string, ReadonlySet<string>> | undefined;
+    try {
+      closure = deps.readTestImportClosure ? await deps.readTestImportClosure(pr, testFiles, mainSha) : undefined;
+    } catch (error) {
+      // An unreadable closure is unknown, never empty: the pre-filter cannot refuse on it.
+      log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+    }
+    const clearance = await assessRefreshClearance({
+      failingTestFiles: testFiles,
+      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
+      priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
+        : history.source === "unreadable" ? undefined : false,
+    }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
+      ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },
+        clearance, history.source, history.unread) });
+    if (!clearance.refresh) refusedClearances.set(memo, clearance.evidence);
+    return clearance;
+  };
+  const recordRefresh = (pr: OpenPrView, checks: readonly string[], testFiles: readonly string[], outcome: string) => {
+    if (outcome === "updated") refreshRecords.set(pr.prNumber, [...(refreshRecords.get(pr.prNumber) ?? []), { checks: [...checks], testFiles: [...testFiles] }]);
   };
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
@@ -14863,6 +15318,16 @@ export async function runSweep(
       if (pulled.length > 0) log("sweep.mutation_verdict_pull.ingested", { rows: pulled.length });
     } catch (e) {
       log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
+  if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
+    try {
+      for (const row of await deps.pullFoldDebt(foldDebtRunIdsFromLedger(ledgerLines))) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", ...row } as Parameters<typeof appendLine>[1]);
+      }
+    } catch (e) {
+      log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
 
@@ -15114,8 +15579,9 @@ export async function runSweep(
     }
     claimedReviewKeys.add(reviewKey);
     try {
-      const fresh = priorActionsFromLedger(readLedger(deps.ledgerPath), openPrs);
-      const delivered = fresh.reviewDelivered.has(reviewKey);
+      const freshLines = readLedger(deps.ledgerPath);
+      const fresh = priorActionsFromLedger(freshLines, openPrs);
+      const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
@@ -15614,10 +16080,13 @@ export async function runSweep(
     const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
     // A refusal on this exact input after the current pending post proves its owner
     // finished. An older refusal cannot preempt a newer review in flight.
+    const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
+    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt;
     const refusedCurrentPending = pr.reviewState === "pending" &&
-      freshnessRefusal?.attemptedAt !== undefined && Number.isFinite(pendingSince) &&
-      freshnessRefusal.attemptedAt >= pendingSince;
-    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
+      refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
+      refusalAttemptedAt >= pendingSince;
+    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
+    const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : promiseHarvestRetryView(pr, ledgerLines);
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -15632,6 +16101,45 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    if (disposition === "post-review" && harvestIncomplete) {
+      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
+    }
+    // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
+    // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
+    // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
+    if (hostGapRefusal !== undefined && disposition === "post-review" && !hostGapRefusal.requestedForRefusal) {
+      const skips = [hostGapRefusal.hostGap];
+      const facts = hostGapRereviewFacts(pr, ledgerLines);
+      const paced = facts.history.length > 0;
+      const hostGapState = { history: facts.history, skips,
+        ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
+        nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
+      const hostGapPlan = await planHostGapRereview(hostGapState, {
+        judge: deps.fixProgressJudge,
+        input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
+        log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
+          task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
+      });
+      const checkout = hostGapProblem(hostGapRefusal.hostGap);
+      if (hostGapPlan.kind === "rereview") {
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        if (!deps.dryRun) {
+          appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
+            task_id: reviewOutcomeTaskIdFor(pr), step: REFUSED_POST_HOST_GAP_REREVIEW_STEP, pr_number: pr.prNumber,
+            pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
+            refusal_at: hostGapRefusal.attemptedAt, host_gap: hostGapRefusal.hostGap,
+            rereview_ordinal: facts.history.length + 1, reason: hostGapPlan.reason });
+        }
+        prior.reviewDelivered.delete(reviewKey);
+        hostGapRefusal.requestedForRefusal = true;
+        disposition = "post-review";
+        reason = `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
+      } else {
+        disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
+        reason = hostGapPlan.reason;
+        if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+      }
+    }
     if (headIdentityRed(pr) && !isDispatchedRunBranch(pr.headRefName)) {
       const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", from_pr: pr.prNumber,
         from_head: pr.headRefName, head_sha: pr.headSha };
@@ -16557,7 +17065,8 @@ export async function runSweep(
                   : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";
                 const stillIdle = !["direct-merged", "head-unavailable", "ledger-refused", "hold-refused",
                   "draft-refused", "stack-parent-refused"].includes(armOutcomeName ?? "unknown");
-                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown" });
+                const idleError = typeof armResult === "object" && armResult !== null ? armResult.error : undefined;
+                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown", ...(idleError === undefined ? {} : { error: idleError }) });
               }
               // W1-T6595: a held plan PR's row names the hold, never an arm that was not attempted.
               if (armOutcomeName === "plan-pr-held") {
@@ -16580,7 +17089,9 @@ export async function runSweep(
                 }
               }
               if (armedIdleDue && armOutcomeName === "direct-merge-failed") {
-                standDownReason = `arm outcome: ${armOutcomeName}; ${await refreshStaleRollupAfterRefusal(deps, pr, ledgerLines)}`;
+                // W1-T8620: classify GitHub's refusal first; W1-T6404's fresh sha is never a stale check's first answer.
+                const refusalText = typeof armResult === "object" && armResult !== null ? armResult.error : undefined;
+                standDownReason = `arm outcome: ${armOutcomeName}; ${await actOnMergeRefusal(deps, pr, refusalText, ledgerLines)}`;
               }
               break;
             }
@@ -16962,7 +17473,11 @@ export async function runSweep(
               }
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S. Stand down while main is red,
               // then spend this pass's ONE update-branch press once main is green; never a fix.
-              const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              let baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              if (baseRed.kind === "refresh") {
+                readRefreshHistory(pr);
+                baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+              }
               if (baseRed.kind !== "own") {
                 baseRedStandDownPrs.add(pr.prNumber);
                 acted = false;
@@ -16973,6 +17488,14 @@ export async function runSweep(
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 if (baseRed.kind === "refresh" && deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (readRefreshHistory(pr).source === "unreadable") {
+                    const clearance = await assessRefresh(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
+                      baseReproductionFiles(pr.ciFailures ?? []), mainSha);
+                    if (!clearance.refresh) {
+                      standDownReason = `base red refresh refused: ${clearance.evidence} — ${clearance.reason}`;
+                      break;
+                    }
+                  }
                   baseRedRefreshPr = pr.prNumber;
                   let outcome: string;
                   try {
@@ -16987,6 +17510,8 @@ export async function runSweep(
                 if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
                 standDownReason = baseRed.kind === "refresh"
                   ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : baseRed.check === RULE_CHECKS_CHECK && mainLatestRun?.ruleChecks?.state === "red"
+                    ? `base red: rule-checks fails at main ${mainSha}: a probe reproduced ${mainLatestRun.ruleChecks.suites.join(", ")} there — not this diff's; no fix dispatched, the branch refreshes once main is green`
                   : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
                     ? `base red: ${baseRed.check} is absent from main's latest run (${decidedSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
                     : mainLatestRun?.state === "red"
@@ -17184,6 +17709,8 @@ export async function runSweep(
                 const row = await probeMain(pr, reproductionFiles, mainTipSha, deps.reproduceFailingTestsOnMain);
                 const { verdict } = row;
                 const contradicted = verdict !== "clear" && reproductionFiles.every((file) => ciContradictedProbeFiles([...reproductionHistory, { ...row, step: "sweep.base_reproduction" }]).has(file));
+                // W1-T7848: what this probe saw of main's rule suites, the only observer rule-checks has on main.
+                if (!contradicted) observeRuleChecks(pr, mainTipSha, verdict, failingRuleSuitesFromCiFailures(ciFailuresForFix));
                 if (contradicted) {
                   appendLine(deps.ledgerPath, { ...row, step: BASE_REPRODUCTION_CONTRADICTED_STEP });
                 } else if (verdict === "reproduced") {
@@ -17216,17 +17743,25 @@ export async function runSweep(
                 // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
                 // reproduced — a head BEHIND that main still takes it once before any fix round.
                 const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
-                if (verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key)) {
+                if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) readRefreshHistory(pr);
+                const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
+                // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
+                // fixed it" — refresh only on evidence the merge can clear it; a refusal is the PR's own red.
+                const refreshChecks = testFileChecks(ciFailuresForFix);
+                const clearance = refreshable && deps.updateBranch && baseRedRefreshPr === undefined
+                  ? await assessRefresh(pr, fixedOnMain ? "base-fixed" : "base-red", refreshChecks, reproductionFiles, mainTipSha) : undefined;
+                if (refreshable && clearance?.refresh !== false) {
                   acted = false;
-                  if (deps.updateBranch && baseRedRefreshPr === undefined) {
+                  if (deps.updateBranch && clearance !== undefined) {
                     baseRedRefreshPr = pr.prNumber;
                     let outcome: string;
                     try { outcome = await deps.updateBranch(pr); }
                     catch (error) { outcome = `error: ${String(error)}`; }
                     appendLine(deps.ledgerPath, fixedOnMain
-                      ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, outcome)
-                      : { ...row, step: BASE_RED_REFRESH_STEP, outcome });
+                      ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, outcome, refreshChecks)
+                      : { ...row, step: BASE_RED_REFRESH_STEP, outcome, check_names: refreshChecks });
                     baseRedHistory.refreshed.add(key);
+                    recordRefresh(pr, refreshChecks, reproductionFiles, outcome);
                     standDownReason = fixedOnMain
                       ? `failing test file(s) ${reproductionFiles.join(", ")} already fixed on main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched or strike spent`
                       : `base reproduction clear at main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched`;
@@ -18071,6 +18606,7 @@ export async function runSweep(
       review_key: job.reviewKey,
       review_input_digest: job.pr.reviewInputDigest,
       review_mode: job.mode.kind,
+      ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });
@@ -18515,8 +19051,11 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
 let lightPassSpawningReservations = 0;
 let lightPassPlanFilingReservations = 0;
 const lightPassReservedHeads = new Set<string>();
-// W1-T5901: at most one plan PR direct-merges across overlapping light passes.
-let lightPassPlanMergeInFlight = false;
+// W1-T5901: at most one plan PR direct-merges across overlapping light passes. The claim is the
+// owning pass's token, released when ITS candidate's sweep settles, not when that whole pass ends:
+// a pass also awaits every other PR it disposes, and on 2026-10-13 one ran ~20 min, deferring every
+// overlapping pass's ready plan PR (#11367, #11368, #11371 waited 16-22 min, all green).
+let lightPassPlanMergeOwner: symbol | undefined;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
 // W1-T5931: full-pass reviews in flight; with the light reservations, one process-wide review count.
 let fullPassReviewsInFlight = 0;
@@ -18555,6 +19094,7 @@ export async function runSweepLightPass(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLedgerLines;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines));
   const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs);
   const freshnessBackoffs = new Set<string>();
   for (const pr of openPrs) {
@@ -18631,10 +19171,25 @@ export async function runSweepLightPass(
     if (refillArmed) void refillFreedLanes();
   };
   // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
-  const planMergeCandidate = lightPassPlanMergeInFlight
-    ? undefined
-    : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
-  if (planMergeCandidate) lightPassPlanMergeInFlight = true;
+  const planMergeToken = Symbol("light-pass-plan-merge");
+  // W1-T9212: the pass that owns the claim also re-evaluates every OTHER held plan PR it observes ready,
+  // one at a time under that same claim, instead of leaving each for a later pass.
+  const planMerges = lightPassPlanMergeOwner !== undefined
+    ? []
+    : selectLightPassPlanMerges(openPrs, policy, now, selectionLedgerLines);
+  const planMergeCandidate = planMerges[0];
+  if (planMergeCandidate) lightPassPlanMergeOwner = planMergeToken;
+  const releasePlanMerge = (): void => {
+    if (lightPassPlanMergeOwner === planMergeToken) lightPassPlanMergeOwner = undefined;
+  };
+  const planMergeSequence = new Map<number, { index: number; done: Promise<void>; finish: () => void }>();
+  planMerges.forEach((pr, index) => {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    planMergeSequence.set(pr.prNumber, { index, done, finish });
+  });
+  const lastPlanMergeNumber = planMerges.at(-1)?.prNumber;
+  const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -18666,7 +19221,7 @@ export async function runSweepLightPass(
     reviewReservations,
     log: deps.log,
   });
-  const claimFixAdmission = repairAdmission.claim;
+  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -18727,7 +19282,8 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      if (planMergeCandidate?.prNumber === pr.prNumber) {
+      const planMergeTurn = planMergeSequence.get(pr.prNumber);
+      if (planMergeTurn !== undefined) {
         // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
         // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
         // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
@@ -18752,7 +19308,28 @@ export async function runSweepLightPass(
           });
         };
       }
-      return runSweep([pr], scopedDeps, policy).finally(() => {
+      // W1-T9212: a held plan PR waits for the plan PR ahead of it, so the claim covers one merge at a time.
+      const previousPlanMerge = planMergeTurn !== undefined && planMergeTurn.index > 0
+        ? planMergeSequence.get(planMerges[planMergeTurn.index - 1]!.prNumber)?.done : undefined;
+      const heldAtSelection = planMergeTurn !== undefined
+        ? heldPlanPrFromLedger(selectionLedgerLines, pr) : undefined;
+      const sweepOne = async (): Promise<SweepSummary> => {
+        if (previousPlanMerge !== undefined) await previousPlanMerge;
+        return runSweep([pr], scopedDeps, policy);
+      };
+      return sweepOne().then(async (summary) => {
+        if (heldAtSelection !== undefined && !deps.dryRun) {
+          const disposed = readLedger(deps.ledgerPath).findLast((l) => l.step === "sweep.disposed" &&
+            l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+          reevaluationRows(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: PLAN_PR_REEVALUATED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, trigger: heldAtSelection.trigger,
+            wait_ms: Math.max(0, now - heldAtSelection.heldAtMs),
+            ...(typeof disposed?.arm_outcome === "string" ? { arm_outcome: disposed.arm_outcome } : {}) });
+        }
+        return summary;
+      }).finally(() => {
+        planMergeTurn?.finish();
+        if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
       });
     }),
@@ -18866,7 +19443,7 @@ export async function runSweepLightPass(
   refillArmed = true;
   return summaries;
   } finally {
-    if (planMergeCandidate) lightPassPlanMergeInFlight = false;
+    releasePlanMerge();
     for (const [number, release] of releases) {
       if (!detachedNumbers.has(number)) release();
     }
@@ -18883,12 +19460,30 @@ export function selectLightPassPlanMerge(
   now: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): OpenPrView | undefined {
+  return selectLightPassPlanMerges(openPrs, policy, now, ledgerLines)[0];
+}
+
+/** W1-T9212 — the plan PRs ONE light pass merges under its single claim, in the order it takes them:
+ *  the {@link selectLightPassPlanMerge} choice first (a held plan PR, longest-held first, outranks one
+ *  never held), then every OTHER held plan PR this pass observes ready. A plan PR that was never held
+ *  keeps W1-T5901's one-per-pass bound. A PR GitHub still reads unmergeable is re-read by its own arm,
+ *  never merged on the hold's inherited reading. */
+export function selectLightPassPlanMerges(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): OpenPrView[] {
   const attempts = (pr: OpenPrView): number =>
     ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
       l.head_sha === pr.headSha && l.arm_attempted === true).length;
-  return openPrs
+  const ready = openPrs
     .filter((pr) => pr.isPlanFiling === true && deriveDisposition(pr, policy, now).disposition === "mergeable")
-    .sort((a, b) => attempts(a) - attempts(b) || a.prNumber - b.prNumber)[0];
+    .map((pr) => ({ pr, held: heldPlanPrFromLedger(ledgerLines, pr) }));
+  ready.sort((a, b) =>
+    (a.held?.heldAtMs ?? Infinity) - (b.held?.heldAtMs ?? Infinity) || attempts(a.pr) - attempts(b.pr) ||
+    a.pr.prNumber - b.pr.prNumber);
+  return ready.filter((entry, index) => index === 0 || entry.held !== undefined).map((entry) => entry.pr);
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
@@ -19521,7 +20116,7 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
 }
 
@@ -19532,7 +20127,9 @@ export interface MemoryGovernorResult {
  *
  *  TIERED for the container: below the floor it defers only while live work in this container can still free
  *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
- *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm's tier is unchanged; its caller
+ *  (`memoryGovernorGateFor`) reclaims the daemon's slack once before a host-short hold, as before a container-short
+ *  one (W1-T9358, see {@link reclaimBeforeHold}). */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
@@ -20027,9 +20624,9 @@ function readPrTerminalLiveCursor(ledgerPath: string): PrTerminalLiveCursor {
   }
 }
 
-/** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
- *  written once, so each is read once per process; only an archive that failed to open is re-read. */
-const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Map<string, ArchivedTerminal> }>();
+/** Only actionable PR keys stay in memory; consumed keys can be read again from rotation digests. */
+export const terminalUnionScans = createSizedMemo<string, ArchivedTerminal & { signature: string }>();
+const terminalMemoKey = (ledgerPath: string, key: string): string => `${dirname(ledgerPath)}\0${key}`;
 
 /** The newest archived terminal row of a PR: its ts and state (a merged fact is final and wins). */
 interface ArchivedTerminal {
@@ -20037,29 +20634,57 @@ interface ArchivedTerminal {
   state: string;
 }
 
-function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
+function terminalArchiveSignature(dir: string): string | undefined {
+  try {
+    const digest = createHash("sha256");
+    for (const entry of ledgerRotationEntries(fs.readdirSync(dir), dir)) {
+      const stat = fs.statSync(entry.path);
+      digest.update(JSON.stringify([entry.path, stat.size, stat.mtimeMs]));
+    }
+    return digest.digest("hex");
+  } catch (error) {
+    // Reason: an unreadable inventory cannot validate a hit; the union read below reports unread archives.
+    return undefined;
+  }
+}
+
+function terminalKeysInArchives(ledgerPath: string, wanted: ReadonlySet<string>): { keys: ReadonlyMap<string, ArchivedTerminal>; unread: number } {
   const dir = dirname(ledgerPath);
-  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Map<string, ArchivedTerminal>() };
-  terminalUnionScans.set(dir, memo);
+  const signature = terminalArchiveSignature(dir);
+  const keys = new Map<string, ArchivedTerminal>();
+  const missing = new Set<string>();
+  for (const key of wanted) {
+    const cached = terminalUnionScans.get(terminalMemoKey(ledgerPath, key));
+    if (signature !== undefined && cached?.signature === signature) keys.set(key, cached);
+    else missing.add(key);
+  }
+  if (missing.size === 0) return { keys, unread: 0 };
+  const digests = ledgerRotationDigests(dir, (rows) => rows.filter((row) => row.step === PR_TERMINAL_STEP).map((row) =>
+    ({ step: row.step, pr_url: row.pr_url, ts: row.ts, state: row.state })), { holder: "sweep-pr-terminal", reducerVersion: "1" });
   const read = readLedgerUnionRecordsSync(dir, {
-    pattern: /"step":"pr\.terminal"/,
+    step: PR_TERMINAL_STEP,
     dedupe: false,
     readLiveRecords: () => [],
     rotationRecords: (entry, parse) => {
-      if (memo.scanned.has(entry.path)) return { rows: [], torn: 0, tornLines: [] };
-      const records = parse();
-      memo.scanned.add(entry.path);
-      return records;
+      const read = digests.rotationRecords(entry, parse);
+      return { ...read, rows: read.rows.filter((row) => {
+        const key = prUrlKey(row.pr_url);
+        return key !== undefined && missing.has(key);
+      }) };
     },
     onRecord: (row) => {
       const key = row.step === PR_TERMINAL_STEP ? prUrlKey(row.pr_url) : undefined;
-      if (!key) return;
+      if (!key || !missing.has(key)) return;
       const next = { ts: typeof row.ts === "string" ? row.ts : "", state: String(row.state) };
-      const had = memo.keys.get(key);
-      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) memo.keys.set(key, next);
+      const had = keys.get(key);
+      if (!had || (had.state !== "merged" && (next.state === "merged" || next.ts >= had.ts))) keys.set(key, next);
     },
   });
-  return { keys: memo.keys, unread: read.unread.length };
+  if (read.unread.length === 0 && signature !== undefined) for (const key of missing) {
+    const value = keys.get(key);
+    if (value) terminalUnionScans.set(terminalMemoKey(ledgerPath, key), { ...value, signature });
+  }
+  return { keys, unread: read.unread.length };
 }
 
 /**
@@ -20080,6 +20705,7 @@ export function runPrTerminalReconcile(
     collectPrTerminalKeys(cursor, deps.readLedger(deps.ledgerPath));
   }
   const { named } = cursor;
+  const actionable = new Set<string>();
   const pending: ClosedPrFact[] = [];
   let needsArchives = false;
   for (const [key, prUrl] of named) {
@@ -20087,10 +20713,15 @@ export function runPrTerminalReconcile(
     const fact = covered === true ? undefined : lookup(prUrl);
     if (fact && prUrlKey(fact.prUrl) === key) {
       pending.push(fact);
+      actionable.add(key);
       if (covered === undefined) needsArchives = true;
     }
   }
-  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath) : undefined;
+  const prefix = `${dirname(deps.ledgerPath)}\0`;
+  for (const key of terminalUnionScans.keys()) {
+    if (key.startsWith(prefix) && !actionable.has(key.slice(prefix.length))) terminalUnionScans.delete(key);
+  }
+  const archived = needsArchives ? terminalKeysInArchives(deps.ledgerPath, actionable) : undefined;
   let appended = 0;
   for (const fact of pending) {
     const key = prUrlKey(fact.prUrl)!;
@@ -20099,7 +20730,10 @@ export function runPrTerminalReconcile(
       // a live closed fact with a named row after it: the PR was reopened and closed again
     } else {
       const archivedFact = archived?.keys.get(key);
-      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) continue;
+      if (archivedFact && (archivedFact.state === "merged" || !((cursor.namedTs.get(key) ?? "") > archivedFact.ts))) {
+        terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
+        continue;
+      }
     }
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
       run_id: deps.runId,
@@ -20114,6 +20748,7 @@ export function runPrTerminalReconcile(
     });
     cursor.terminalSeq.set(key, cursor.seq++);
     cursor.terminalState.set(key, fact.state);
+    terminalUnionScans.delete(terminalMemoKey(deps.ledgerPath, key));
     appended++;
   }
   return { named: named.size, appended, unionRead: archived !== undefined };
@@ -20144,6 +20779,18 @@ export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[]
   const seen = new Map<number, OpenIssue>();
   for (const label of RETIRABLE_ESCALATION_LABELS) {
     for (const issue of issues.listOpen?.(label) ?? []) {
+      seen.set(issue.number, issue);
+    }
+  }
+  return [...seen.values()];
+}
+
+/** W1-T9390 — {@link listRetirableEscalationIssues} for a rung on the daemon loop: each label's read is
+ *  awaited on an {@link AsyncIssueGateway}, with the same dedupe by number and the same whole-list contract. */
+export async function listRetirableEscalationIssuesAsync(issues: AsyncIssueGateway): Promise<OpenIssue[]> {
+  const seen = new Map<number, OpenIssue>();
+  for (const label of RETIRABLE_ESCALATION_LABELS) {
+    for (const issue of (await issues.listOpen?.(label)) ?? []) {
       seen.set(issue.number, issue);
     }
   }
@@ -20420,7 +21067,7 @@ export interface StaleEscalationRejudgeOptions {
   /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
    *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
    *  the type this rung hands back ({@link EscalationJudgeDecision}) cannot even express "close". */
-  demote: (url: string, reason: string) => void;
+  demote: (url: string, reason: string) => void | Promise<void>;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -20436,6 +21083,11 @@ export interface StaleEscalationRejudgeOptions {
    *  exactly like a fresh install with no history yet; this never widens who gets judged, only
    *  whether a given observed state is judged MORE THAN ONCE. */
   alreadyJudgedStateKeys?: ReadonlySet<string>;
+  triage?: {
+    mode: EscalationTriageMode;
+    evidence?: (e: Escalation) => TriageEvidence;
+    autoResolve?: (candidate: StaleEscalationRejudgeCandidate, action: TriageAction) => Promise<void>;
+  };
 }
 
 /** One candidate's outcome this pass. */
@@ -20535,12 +21187,27 @@ export async function runStaleEscalationRejudge(
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
     // birth judge was never asked either.
+    let evidence: TriageEvidence = {};
+    let evidenceError: string | undefined;
+    try {
+      evidence = deps.triage?.evidence?.(c.escalation) ?? {};
+    } catch (err) {
+      // not erased: the unreadable evidence becomes a deliver verdict naming this error just below.
+      evidenceError = String(err);
+    }
+    const first = triageEscalation(c.escalation, evidence);
     let verdict: EscalationJudgeVerdict;
-    if (isEscalationJudgeExempt(c.escalation)) {
+    if (evidenceError !== undefined) {
+      verdict = { decision: "deliver", reason: `triage evidence unreadable (${evidenceError})` };
+    } else if (isEscalationJudgeExempt(c.escalation)) {
       verdict = { decision: "deliver", reason: `${c.escalation.class} is operator-owned by rule — exempt from judgement` };
+    } else if (first.decidedBy !== "default") {
+      verdict = { decision: first.kind === "digest" ? "demote" : "deliver", reason: first.reason };
     } else {
       try {
-        verdict = await deps.judge(c);
+        const proposed = await deps.judge(c);
+        verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
+          ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
@@ -20551,6 +21218,30 @@ export async function runStaleEscalationRejudge(
             `re-judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
             "leave needs-human, never silently hiding work from the operator",
         };
+      }
+    }
+
+    const triaged = evidenceError !== undefined
+      ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
+      : triageEscalation(c.escalation, evidence, verdict);
+    if (!deps.dryRun && deps.triage) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: c.escalation.taskId, step: "escalation.triaged",
+        class: c.escalation.class, issue_url: c.issueUrl, state_key: c.stateKey,
+        triage_mode: deps.triage.mode, triage_outcome: triaged.kind,
+        triage_decided_by: triaged.decidedBy, triage_reason: triaged.reason,
+        ...(triaged.kind === "auto_resolve" ? { triage_action: triaged.action } : {}),
+      });
+    }
+    if (deps.triage) verdict = {
+      decision: deps.triage.mode === "act" && triaged.kind === "digest" ? "demote" : "deliver",
+      reason: triaged.reason,
+    };
+    if (!deps.dryRun && deps.triage?.mode === "act" && triaged.kind === "auto_resolve" && deps.triage.autoResolve) {
+      try {
+        await deps.triage.autoResolve(c, triaged.action);
+      } catch (err) {
+        log("sweep.escalation_auto_resolve.failed", { issue_url: c.issueUrl, reason: String(err) });
       }
     }
 
@@ -20596,7 +21287,7 @@ export async function runStaleEscalationRejudge(
       continue;
     }
     try {
-      deps.demote(c.issueUrl, verdict.reason);
+      await deps.demote(c.issueUrl, verdict.reason);
       demoted++;
       results.push({
         issueUrl: c.issueUrl,
@@ -20628,6 +21319,90 @@ export async function runStaleEscalationRejudge(
   const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged, demoted, results, judgedStateKeys };
   log("sweep.escalation_rejudge.summary", { total: summary.total, rejudged: summary.rejudged, demoted: summary.demoted });
   return summary;
+}
+
+// ── W1-T9390: THE ESCALATION-TRIAGE RUNG'S HISTORY, READ OFF THE LOOP ───────────────────────────
+//
+// OBSERVED 2026-10-14 on the core daemon: every full sweep since #11487 (W1-T8868) froze the loop
+// 57-105 s in `sweepEscalationTriage`, which gunzipped and parsed all 450 rotations synchronously,
+// kept every row, and copied that array once per open issue. The rung reads only the slice below.
+
+/** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
+const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
+
+/** The escalation-triage rung's slice of the ledger union, as a whole-corpus read would answer it. */
+export type EscalationTriageHistoryReader = (stateDir: string) => Promise<LedgerUnionRecordRead>;
+
+/**
+ * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
+ * reader is passed. Each pass first loads every rotation it has not yet seen OFF the loop, through
+ * {@link createLedgerRotationMemo}'s async `load`, which leaves a durable digest of the step slice; the
+ * {@link createIncrementalLedgerUnion} read that follows answers those rotations from their digests, keeps
+ * them in memory, and reads the live file from where the previous pass stopped. No time window: an issue
+ * born in the oldest rotation is still found. `refuseIncomplete` holds: an unread rotation gives no rows.
+ */
+export function createEscalationTriageHistoryReader(
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer> } = {},
+): EscalationTriageHistoryReader {
+  const fsDeps = io.fs ?? realLedgerFs;
+  const stat = fsDeps.statSync ?? realLedgerFs.statSync;
+  const steps = [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP];
+  const identity = { holder: "sweep.escalation-triage-history", reducerVersion: "1" };
+  const union = createIncrementalLedgerUnion(identity, fsDeps);
+  // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
+  const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
+  // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
+  const pattern = new RegExp(steps.map((step) => step.replaceAll(".", "\\.")).join("|"));
+  const statKey = (path: string): string => {
+    const s = stat(path);
+    return `${s.size}:${s.mtimeMs}`;
+  };
+  let loaded = new Map<string, string>();
+  return async (stateDir) => {
+    let names: string[] = [];
+    try {
+      names = fsDeps.readdirSync(stateDir);
+    } catch {
+      // deliberate: the union read below lists the directory itself and answers for an unreadable one.
+    }
+    const current = new Map<string, string>();
+    const fresh: LedgerCorpusEntry[] = [];
+    for (const entry of ledgerRotationEntries(names, stateDir)) {
+      let key: string;
+      try {
+        key = statKey(entry.path);
+      } catch {
+        // deliberate: an unstattable rotation is left to the union read, which reports it unread.
+        continue;
+      }
+      current.set(entry.path, key);
+      if (loaded.get(entry.path) !== key) fresh.push(entry);
+    }
+    if (fresh.length > 0) {
+      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)), {
+        holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
+      });
+      await memo.load(fresh);
+    }
+    loaded = current;
+    return union(stateDir, { step: steps, refuseIncomplete: true });
+  };
+}
+
+/** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
+export function indexEscalationTriageHistory(rows: readonly Record<string, unknown>[]): {
+  births: Map<string, Record<string, unknown>>;
+  judgedStateKeys: Set<string>;
+} {
+  const births = new Map<string, Record<string, unknown>>();
+  const judgedStateKeys = new Set<string>();
+  for (const row of rows) {
+    if (row.step === ESCALATION_REJUDGED_STEP && typeof row.state_key === "string") judgedStateKeys.add(row.state_key);
+    else if (typeof row.issue_url === "string" && row.triage_subject && ESCALATION_TRIAGE_BIRTH_STEPS.includes(String(row.step))) {
+      births.set(row.issue_url, row);
+    }
+  }
+  return { births, judgedStateKeys };
 }
 
 // ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) ────────────────────────────────────────────

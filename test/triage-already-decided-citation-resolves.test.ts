@@ -84,6 +84,23 @@ test("W1-T4936: an already-decided verdict citing a task id in the plan still cl
   assert.equal(withFiles.action, "error", "the changed-files guard still runs first");
 });
 
+test("a citation naming a file by anchor, line, bare shard filename or id-only stub resolves and closes the feedback", () => {
+  const shard = "W1-T4707-an-unreportable-served-model-is-not-missing-data.yaml";
+  const evidence: triage.CitationEvidence = {
+    planIds: new Set(["W1-T4707", "W1-T3245"]),
+    pathExists: (p) => ["docs/forensics/triage.md", "src/lib/x.ts", `plan/tasks.d/${shard}`].includes(p),
+  };
+  const citation = `see docs/forensics/triage.md#the-bounded-retry, src/lib/x.ts:42-50, ${shard} and plan/tasks.d/W1-T3245`;
+  const r = triage.unresolvedCitationReferents(citation, evidence);
+  assert.deepEqual(r.unresolved, [], "every shorthand the triage judge writes names a real referent (#10911, #11067, #10263)");
+  assert.equal(decide(citation, evidence).action, "no_task");
+
+  const missing = triage.unresolvedCitationReferents("docs/forensics/nope.md#x, plan/tasks.d/W1-T9999 and W1-T9998-gone.yaml", evidence);
+  assert.deepEqual(missing.unresolved, ["W1-T9999", "W1-T9998", "docs/forensics/nope.md#x", "plan/tasks.d/W1-T9999", "W1-T9998-gone.yaml"],
+    "an anchor, stub or bare filename that names nothing real is still unresolved");
+  assert.equal(decide("docs/forensics/nope.md#x already decided this", evidence).action, "grill");
+});
+
 test("W1-T4936: an already-decided citation naming nothing checkable is routed to a grill", () => {
   for (const citation of ["yes", "already answered in the design discussion", "see #4242", "it is fine and/or done"]) {
     const d = decide(citation);

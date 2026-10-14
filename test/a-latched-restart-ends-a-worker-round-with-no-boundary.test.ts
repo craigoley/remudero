@@ -75,7 +75,7 @@ test("W1-T8139: a latched restart ends an implement round mid-worker", async () 
     return true;
   });
   assert.equal(r.pushes, 1, "the checkpoint is pushed before the lane is released");
-  assert.match(r.commits[0], /^wip: yield at daemon restart\n/);
+  assert.match(r.commits[0], /^chore\(checkpoint\): yield at daemon restart\n/);
   assert.match(r.commits[0], /Remudero-Task: W1-T8139/);
   const yielded = r.rows.find((row) => row.step === RECYCLE_YIELD_LEDGER_STEP);
   assert.equal(yielded?.fields.decision, "acted");

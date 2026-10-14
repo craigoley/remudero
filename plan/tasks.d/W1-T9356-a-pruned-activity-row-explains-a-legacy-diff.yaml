@@ -1,0 +1,45 @@
+- id: W1-T9356
+  title: "THE NOW VIEW NEVER PASSES ITS SHADOW BECAUSE THE CLASSIFIER LOOKS FOR COMPACTION'S MISSING ROWS ONLY AMONG FACT ROWS — a task's lastActivityAt comes from run_activity (the newest NON-fact row per run), live-file compaction keeps 193 steps and drops the rest, so legacy reads an older time and the view a newer one; unseenBy queries only `fact`, finds nothing, and calls every such diff real (2026-10-14: about one real diff per sample on now@core and now@site, e.g. LIVE-EDITS-daemon-checkout legacy 01:52Z vs view 04:08Z, a pruned live_edits.escalated row): the evidence also reads run_activity, so a run's newest row that legacy's own rows lack explains the diff as legacy_horizon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — which rows the view-shadow evidence counts as unseen by legacy
+  band_meaning: span
+  origin: "operator session 2026-10-14: serve memory investigation; the now view's shadow is what keeps the legacy board worker (~337 MB resident) alive, and the operator asked to fix its recurring diff"
+  plan_refs: [W1-T6017]
+  files: [src/lib/view-shadow.ts, test/a-pruned-activity-row-explains-a-legacy-diff.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main, the live ledgers and the retained-steps file (read-only).
+    OBSERVED (view.shadow_diff, now, 00:48Z-01:10Z, 45 samples): every sample's `real` diffs are
+    board.tasks[...].lastActivityAt on core (followup:DAEMON-1790001204828:..., legacy 14:48:40Z, view 16:35:14Z) and on site
+    (LIVE-EDITS-daemon-checkout, legacy 01:52:47Z, view 04:08:00Z), plus board.counts.queued on core (legacy 690, view 674).
+    view.shadow_summary: now ready=false, streak 1. Five other views are ready (nav-badge since 10-04, 31,466 samples).
+    - The site view's 04:08:00.995Z row is `live_edits.escalated`. isFactStep("live_edits.escalated") is false, so the
+      projector keeps it only as the run's run_activity row, which the board's activity stand-in (BOARD_RUN_ACTIVITY_STEP)
+      dates the task by.
+    - The site live file was fully rotated at 2026-10-13T21:18:21Z keeping 193 steps; escalation.issue_opened (the 01:52Z
+      row) is retained and live_edits.escalated is not. So legacy, which reads the live file, dates the task 01:52Z.
+    - Ruling Q1: the full-history view is right. view-shadow.ts unseenBy already explains a row "compaction prunes the
+      live file per step", but it queries `fact` only, so a pruned non-fact row is never found and the diff is `real`.
+    OWNERSHIP: W1-T6017 (queued, unclaimed) changes which instance's databases the evidence reads; this changes which
+    table one helper reads. Same function family, separate concern.
+  design: |
+    1. readShadowEvidence's unseen-by-legacy check also reads run_activity (when the table exists) for the diff's task
+       ids with ts_ms between legacy's horizon and its read time. A run's activity row whose instant legacy's own rows
+       (legacyRowIndex) hold no row at, for that task, makes the task unseen by legacy, the same as a pruned fact row.
+    2. Nothing else changes: a fact-only store reads as before, a task legacy's rows hold at that instant is not
+       explained, and with no legacy rows the activity row explains nothing.
+  acceptance:
+    - claim: "a lastActivityAt diff whose newer time is a run's activity row the live file no longer holds is legacy_horizon; with that row in legacy's rows, or with no legacy rows, it stays real"
+      proof: 'grep: test("W1-T9356: a pruned activity row explains a legacy diff" in test/a-pruned-activity-row-explains-a-legacy-diff.test.ts'
+    - claim: "the unseen-by-legacy evidence reads run_activity"
+      proof: 'grep: FROM run_activity WHERE task_id IN in src/lib/view-shadow.ts'
+  falsifier: |
+    Drop the run_activity read: the fixture's pruned live_edits.escalated row is not found, the lastActivityAt diff
+    classifies real, and the test fails.

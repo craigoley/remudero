@@ -6097,13 +6097,17 @@ test("armAutoMerge: the W1-T230 guards are untouched — no task id and a ledger
 });
 
 test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh — every dep body runs, none is guessed", () => {
+  const STUB_HEAD = "5".repeat(40);
+  const STUB_BASE = "6".repeat(40);
   const bin = mkdtempSync(join(tmpdir(), "gh-stub-"));
   writeFileSync(
     join(bin, "gh"),
     // `headSha` reads over REST now (`gh api repos/{o}/{r}/pulls/{n}`), so the stub answers on
     // $1=api and in REST's own shape — mapRestPr reads head.sha. `pr merge` still falls through
-    // to the exit-0 arm below, exactly as before.
-    '#!/bin/sh\ncase "$1" in api) echo "{\\"number\\":1,\\"html_url\\":\\"u\\",\\"updated_at\\":\\"t\\",\\"head\\":{\\"ref\\":\\"b\\",\\"sha\\":\\"stub1234\\"}}";; *) exit 0;; esac\n',
+    // to the exit-0 arm below, exactly as before. The exact-head security admission reads the
+    // same row plus its changed files before the merge write: a docs-only change is complete
+    // evidence CodeQL does not scan, so the merge write is admitted at this head.
+    '#!/bin/sh\ncase "$*" in *"/files"*) echo "[{\\"filename\\":\\"docs/a.md\\"}]";; api*) echo "{\\"number\\":1,\\"html_url\\":\\"u\\",\\"updated_at\\":\\"t\\",\\"state\\":\\"open\\",\\"changed_files\\":1,\\"base\\":{\\"ref\\":\\"main\\",\\"sha\\":\\"' + STUB_BASE + '\\",\\"repo\\":{\\"full_name\\":\\"craigoley/remudero\\"}},\\"head\\":{\\"ref\\":\\"b\\",\\"sha\\":\\"' + STUB_HEAD + '\\"}}";; *) exit 0;; esac\n',
     { mode: 0o755 },
   );
   const oldPath = process.env.PATH;
@@ -6114,7 +6118,7 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
     // cannot address rather than falling back to a gh --json read.
     assert.equal(
       d.headSha("https://github.com/craigoley/remudero/pull/1"),
-      "stub1234",
+      STUB_HEAD,
       "headSha reads head.sha off the REST single-PR response",
     );
     // These three reach `gh pr merge` for real, against the PATH-stubbed `gh` written above —

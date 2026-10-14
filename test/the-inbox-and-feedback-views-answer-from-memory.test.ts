@@ -94,8 +94,9 @@ test("the legacy inbox view pages the last classification without classifying", 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   assert.equal((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox`)).status, 200);
-  const answered = legacy.compute(new URLSearchParams({ section: "needsYou" }));
+  // W1-T8825: the slow lane records when it first saw each item, so it has run before the legacy side is compared with it.
   const view = (await refreshInboxClassification(deps, {}, fixedClock(T0))).bodies.find((b) => b.key === "section=needsYou")!;
+  const answered = legacy.compute(new URLSearchParams({ section: "needsYou" }));
   assert.ok(!("error" in answered));
   assert.deepEqual(answered.data, view.data, "the shadow comparator's legacy side equals the slow lane's body over the same classification");
   assert.match(String((legacy.compute(new URLSearchParams({ section: "needsYou", cursor: "99" })) as { error: string }).error), /no such page/);
