@@ -196,3 +196,97 @@ test("W1-T9077: the newest current engine behind main ledgers engine.lag", async
   assert.equal((await newestCurrentEngine(state, shas[1]!, { repoDir: repo, log: tip.log, isCurrent: () => true }))?.sha, shas[1]);
   assert.deepEqual(tip.rows, []);
 });
+
+const failing = (code?: number) => async (): Promise<string> => {
+  throw Object.assign(new Error(`git failed${code === undefined ? "" : ` (${code})`}`), code === undefined ? {} : { code });
+};
+
+test("W1-T9077: listEngines reads a missing engines directory as none and surfaces any other fault", () => {
+  const state = tmp();
+  assert.deepEqual(listEngines(state), [], "no engines/ is no engines");
+  writeFileSync(join(state, "engines"), "not a directory");
+  assert.throws(() => listEngines(state), (err: NodeJS.ErrnoException) => err.code === "ENOTDIR", "a real fault is not read as none");
+});
+
+test("W1-T9077: pruning clears an engine even when git cannot unregister or prune it", async () => {
+  const state = tmp();
+  const old = plantEngine(state, 1, 1000);
+  const newest = plantEngine(state, 2, 2000);
+  const removed = await pruneEngineTrees(state, { repoDir: state, probe, git: failing(128) });
+  assert.deepEqual(removed, [hashOf(1)]);
+  assert.ok(!existsSync(old), "the directory is cleared although `git worktree remove` and `prune` both failed");
+  assert.ok(existsSync(newest));
+});
+
+test("W1-T9077: a build whose git cut fails is a typed failure, not a throw", async () => {
+  const state = tmp();
+  const { rows, log } = collect();
+  const result = await ensureEngineTree(state, shaOf(5), hashOf(5), { repoDir: state, storeRoot: state, log, git: failing() });
+  assert.deepEqual(result, { kind: "failed", reason: "git failed" });
+  assert.equal(rows[0]?.step, "engine.build_failed");
+  assert.equal(rows[0]?.extra?.reason, "git failed");
+  assert.deepEqual(listEngines(state), []);
+});
+
+test("W1-T9077: an unrecorded leftover at the engine path is cleared before the new tree is moved in", async () => {
+  const { repo, shas } = repoWithCommits(1);
+  const state = tmp();
+  const hash = hashOf(80);
+  const leftover = enginePath(state, hash);
+  mkdirSync(leftover, { recursive: true });
+  writeFileSync(join(leftover, "stale.txt"), "a build that died after its move");
+  const result = await ensureEngineTree(state, shas[0]!, hash, {
+    repoDir: repo, storeRoot: join(state, "store"),
+    linkNodeModules: () => "linked", materialize: () => ({ outcome: "hit", hash }),
+  });
+  assert.deepEqual(result, { kind: "built", root: leftover, ms: (result as { ms: number }).ms });
+  assert.ok(!existsSync(join(leftover, "stale.txt")), "the leftover is gone");
+  assert.ok(existsSync(join(leftover, "src", "entry.ts")), "the engine tree sits where the leftover was");
+  assert.equal(listEngines(state)[0]?.sha, shas[0]);
+  rmSync(repo, { recursive: true, force: true });
+});
+
+test("W1-T9077: the default currency judgement reads the engine's own bundle manifest", async () => {
+  const state = tmp();
+  const noManifest = plantEngine(state, 1, 1000);
+  const { rows, log } = collect();
+  const git = async (): Promise<string> => "";
+  assert.equal(await newestCurrentEngine(state, shaOf(1), { repoDir: state, log, git }), undefined, "no manifest is not current");
+  assert.equal(rows[0]?.step, "engine.lag");
+  assert.equal(rows[0]?.extra?.engine_sha, null);
+  // A manifest naming an entry that cannot be vouched for is not current either: every entry must be.
+  mkdirSync(join(noManifest, "dist", "child-entries"), { recursive: true });
+  writeFileSync(join(noManifest, "dist", "child-entries", "manifest.json"), JSON.stringify({ entries: [{ name: "run-child" }] }));
+  const second = collect();
+  assert.equal(await newestCurrentEngine(state, shaOf(1), { repoDir: state, log: second.log, git }), undefined);
+  assert.equal(second.rows[0]?.extra?.engine_sha, null);
+});
+
+test("W1-T9077: git's exit 1 means not-an-ancestor, any other failure skips the candidate with a reason", async () => {
+  const state = tmp();
+  plantEngine(state, 1, 1000);
+  const notAncestor = collect();
+  assert.equal(await newestCurrentEngine(state, shaOf(9), { repoDir: state, log: notAncestor.log, git: failing(1), isCurrent: () => true }), undefined);
+  assert.deepEqual(notAncestor.rows.map((r) => r.step), ["engine.lag"], "exit 1 is an answer, not a skip");
+
+  const unknown = collect();
+  assert.equal(await newestCurrentEngine(state, shaOf(9), { repoDir: state, log: unknown.log, git: failing(128), isCurrent: () => true }), undefined);
+  assert.deepEqual(unknown.rows.map((r) => r.step), ["engine.candidate_skipped", "engine.lag"]);
+  assert.equal(unknown.rows[0]?.extra?.source_hash, hashOf(1));
+  assert.match(String(unknown.rows[0]?.extra?.reason), /git failed \(128\)/);
+});
+
+test("W1-T9077: an unreadable commits-behind count still returns the engine and says so", async () => {
+  const state = tmp();
+  plantEngine(state, 1, 1000);
+  const { rows, log } = collect();
+  const git = async (_repo: string, args: readonly string[]): Promise<string> => {
+    if (args[0] === "rev-list") throw new Error("rev-list down");
+    return "";
+  };
+  const found = await newestCurrentEngine(state, shaOf(9), { repoDir: state, log, git, isCurrent: () => true });
+  assert.equal(found?.sha, shaOf(1));
+  assert.equal(rows[0]?.step, "engine.candidate_skipped");
+  assert.match(String(rows[0]?.extra?.reason), /commits-behind unreadable: rev-list down/);
+  assert.deepEqual(rows[1], { step: "engine.lag", extra: { engine_sha: shaOf(1), main_sha: shaOf(9), commits_behind: null } });
+});
