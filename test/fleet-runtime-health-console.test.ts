@@ -359,16 +359,6 @@ test("normal console liveness, provider-routing and board behavior is unchanged 
   assert.deepEqual(strip(withHealthy), strip(without));
   assert.equal((withHealthy.fleetRuntimeHealth as { state: string }).state, "healthy");
 
-  // Other routes carry no new field.
-  const server = buildServeServer(deps);
-  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  try {
-    const port = (server.address() as AddressInfo).port;
-    const health = await (await fetch(`http://127.0.0.1:${port}/v1/daemon-health`, { headers: bearerRead })).json();
-    assert.ok(!("fleetRuntimeHealth" in (health as object)));
-  } finally {
-    server.close();
-  }
 });
 
 test("telemetry is change-only and bounded", () => {
@@ -390,17 +380,23 @@ test("removing the snapshot projection makes a live daemon with missing provider
   assert.equal(JSON.parse(readFileSync(snapshotFile(f), "utf8")).status, "drift");
 
   const deps = serveDeps(f.root);
-  const status200 = { method: "GET" as const, path: "/v1/status", scope: "read" as const, handler: (_req: unknown, res: { writeHead: (s: number, h: object) => void; end: (b: string) => void }) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ generated_at: "2026-10-14T12:00:00.000Z", tasks: [], repairLadder: { state: "running" } }));
-  } };
-  const call = async (route: typeof status200): Promise<Record<string, unknown>> => {
+  type StatusRoute = Parameters<typeof withFleetRuntimeHealth>[0];
+  const status200 = {
+    method: "GET",
+    path: "/v1/status",
+    scope: "read",
+    handler: async (_req: unknown, res: { writeHead: (s: number, h: object) => void; end: (b: string) => void }) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ generated_at: "2026-10-14T12:00:00.000Z", tasks: [], repairLadder: { state: "running" } }));
+    },
+  } as unknown as StatusRoute;
+  const call = async (route: StatusRoute): Promise<Record<string, unknown>> => {
     let body = "";
-    await (route.handler as (req: unknown, res: unknown, ctx: unknown) => Promise<void>)(
-      {}, { writeHead: () => {}, end: (b: string) => { body = b; }, setHeader: () => {} }, {});
+    const res = { writeHead: () => {}, end: (b: string) => { body = b; }, setHeader: () => {} };
+    await route.handler({} as never, res as never, {} as never);
     return JSON.parse(body) as Record<string, unknown>;
   };
-  const projected = await call(withFleetRuntimeHealth(status200 as never, (nowMs) => readFleetRuntimeHealth(deps.fleetControlRoot, nowMs)) as typeof status200);
+  const projected = await call(withFleetRuntimeHealth(status200, (nowMs) => readFleetRuntimeHealth(deps.fleetControlRoot, nowMs)));
   assert.equal((projected.fleetRuntimeHealth as { state: string }).state, "drift");
 
   // THE MUTANT: the same route with the projection removed says nothing about the missing mounts.

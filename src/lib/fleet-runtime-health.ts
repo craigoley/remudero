@@ -118,14 +118,16 @@ export function readFleetRuntimeHealth(
   try {
     raw = readText(fleetRuntimeHealthPath(root));
   } catch (error) {
+    // ENOENT is a producer that never ran (or an older host); any other read failure is distinct, and neither is healthy.
     return unknown((error as NodeJS.ErrnoException).code === "ENOENT" ? "no-snapshot" : "unreadable");
   }
   if (raw.length > MAX_SNAPSHOT_BYTES) return unknown("malformed");
   let body: unknown;
   try {
     body = JSON.parse(raw);
-  } catch {
-    return unknown("malformed");
+  } catch (error) {
+    // Not JSON: a torn or foreign file is "malformed" (never healthy); the parser's message can echo file content, so it is not carried.
+    return unknown(error instanceof SyntaxError ? "malformed" : "unreadable");
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return unknown("malformed");
   const record = body as Record<string, unknown>;
