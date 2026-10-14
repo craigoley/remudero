@@ -137,7 +137,7 @@ test("an escalate ruling parks the machine shard and reaches the inbox with the 
     assert.match(proposals[0]!.summary, /it rewrites the merge policy/);
     let asked = 0;
     await runMachineFilingJudge(ports(root, async () => (asked++, verdict("low", 0.9))).p);
-    assert.equal(asked, 0, "a pinned escalation stays settled while the record is unchanged");
+    assert.equal(asked, 0, "a pinned escalation stays settled while the record and its evidence are unchanged and no re-ask is due (W1-T8830)");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

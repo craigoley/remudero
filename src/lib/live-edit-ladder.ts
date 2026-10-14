@@ -86,6 +86,10 @@ export interface LiveEditState {
   escalationFailedLogged?: boolean;
   restoreRefusedTree?: string;
   restoredAtMs?: number;
+  /** The edit set the previous reading saw. Tiers 2 and 3 act only on a set two readings agree on: a reading taken
+   *  while another git process is mid-way through a fast-forward of this checkout sees that merge's half-written
+   *  tree as tracked edits (LIVE-EDITS #11528, 2026-10-14: twice, 3 s before the merge's own reflog entry). */
+  seenTree?: string;
   /** A restore whose issue comment no actor could post yet. */
   noticePending?: string;
 }
@@ -290,7 +294,7 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
     await deliverNotice(d, state, statePath, log);
     // The episode is over. A notice nobody could post yet outlives it; nothing else does.
     if (readState(statePath).noticePending) {
-      writeState(statePath, { since: undefined, tree: undefined, confirmedTree: undefined, failedTree: undefined, restoreRefusedTree: undefined, escalationFailedLogged: undefined });
+      writeState(statePath, { since: undefined, tree: undefined, confirmedTree: undefined, failedTree: undefined, restoreRefusedTree: undefined, escalationFailedLogged: undefined, seenTree: undefined });
     } else if (existsSync(statePath)) unlinkSync(statePath);
     return { tree: d.tree, tier: 0, dirty: false, restored: false, reason: "no tracked edits" };
   }
@@ -335,6 +339,11 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
     const base = { tree: d.tree, dirty: true, since: state.since, pressure, paths, patch: confirmed ? state.patch : undefined, ref: confirmed ? state.ref : undefined };
     const facts = { paths, patch: base.patch, ref: base.ref, behind, pressure, threshold, head, main: main || head };
 
+    if (state.seenTree !== key) {
+      // One reading is not yet an edit: an in-flight fast-forward reads exactly like one until its ref moves.
+      writeState(statePath, { seenTree: key });
+      return { ...base, tier: 1, restored: false, reason: `first reading of this edit set at pressure ${pressure}: preserved, deferring until a second reading sees it` };
+    }
     if (pressure < threshold) return { ...base, tier: 1, restored: false, reason: `pressure ${pressure} < ${threshold}: preserved, deferring` };
 
     if (!state.escalatedUrl && d.escalate) {

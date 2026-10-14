@@ -29,7 +29,8 @@
  * more of the last hour than the footprint does (before the daemon has written one).
  *
  * THE CONTAINER CEILING JUDGES ITS OWN PRESSURE. The container check defers when the projected working set (working set +
- * the claims above + the daemon's typical growth) crosses memory.high (#10486's tuner sets it), or while the container
+ * the claims above + the daemon's typical growth) crosses memory.high (#10486's tuner sets it) and its flags predict
+ * own pressure beyond sampling noise (unlearned: the projection alone), or while the container
  * is AT its ceiling now: a crossing of its memory.high (memory.events `high`) within the minute before a verdict that
  * finds its OWN tasks stalled past the PSI thresholds (its memory.pressure). Its own swap-in is reported, not judged: it
  * ran at 500-1800 pages/s with no crossing (the host's reclaim). Pressure unread: the static `containerReserveMib`.
@@ -262,6 +263,8 @@ export interface ShadowInputs {
   /** Whether the host's swap-in has been followed by stall, from the instance's verdict history. Absent: unlearned,
    *  so the swap-in rate alone decides. */
   swapStall?: SwapStallRelation;
+  /** Whether projection flags predict this container's own pressure. Absent: the projection alone decides. */
+  containerLift?: ContainerLift;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
 }
@@ -279,6 +282,17 @@ export type SwapStallRelation =
     noise: number;
   }
   | { unlearned: string };
+
+/** Projection flags followed by own pressure, compared with all closed verdicts. */
+export type ContainerLift =
+  | { samples: number; afterProjection: number; afterAny: number; noise: number }
+  | { unlearned: string };
+
+export interface ContainerPressureSample {
+  at: number;
+  projected: boolean;
+  pressed: boolean;
+}
 
 export type ContainerPressureInput =
   | {
@@ -360,6 +374,8 @@ export interface ShadowVerdict {
     containerReserveMib: number;
     /** The working set the container check projects: working set + its claim + this daemon's typical growth. */
     containerProjectedMib: number | null;
+    /** The projection's learned lift over the pressure base rate, or why the projection alone decides. */
+    containerBasis: string;
     /** The level the projection is judged against: memory.high, or memory.high less `containerReserveMib` when the
      *  container's pressure is unread. Its basis also names a container at its ceiling now. */
     containerOnsetMib: number | null;
@@ -512,6 +528,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let containerProjected: number | null = null;
   let onset: { mib: number; basis: string } | null = null;
   const pressure = containerPressureOf(inputs.containerPressure, policy);
+  const containerRelation = containerPredictsPressure(inputs.containerLift);
   if ("unread" in inputs.container) widen("container-unread", margin, inputs.container.unread);
   else {
     containerCurrent = inputs.container.currentMib;
@@ -526,7 +543,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       onset = containerOnsetOf(pressure, containerCeiling, policy);
       // Named only when a reading was attempted; an input without one (a pure caller) keeps the static reserve silently.
       if (pressure.unread !== undefined && inputs.containerPressure !== undefined) widen("container-pressure-unread", 0, pressure.unread);
-      if (pressure.sighted || containerProjected > onset.mib) reasons.add("container-ceiling");
+      if (pressure.sighted || (containerProjected > onset.mib && containerRelation.counts)) reasons.add("container-ceiling");
     }
   }
 
@@ -585,6 +602,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       containerWorkingSetMib: containerWorkingSet,
       containerReserveMib: policy.containerReserveMib,
       containerProjectedMib: containerProjected,
+      containerBasis: containerRelation.basis,
       containerOnsetMib: onset?.mib ?? null,
       containerOnsetBasis: onset?.basis ?? null,
       containerSwapInPagesPerSec: pressure.swapIn,
@@ -677,6 +695,41 @@ export function swapStallRelationOf(history: SwapStallSample[], now: number, pol
   const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
   const afterSwapIn = swapping.filter((s) => followed(s.at)).length / swapping.length;
   return { samples: swapping.length, afterSwapIn, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / swapping.length) };
+}
+
+/** Same closed windows, history span, minimum and noise as the swap-in relation; the outcome is OWN pressure. */
+export function containerLiftOf(history: ContainerPressureSample[], now: number): ContainerLift {
+  const closed = history.filter((s) => now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS);
+  const pressed = history.filter((s) => s.pressed && s.at <= now).map((s) => s.at).sort((x, y) => x - y);
+  const followed = (at: number): boolean => {
+    let lo = 0;
+    let hi = pressed.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pressed[mid]! < at) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < pressed.length && pressed[lo]! <= at + SWAP_STALL_WINDOW_MS;
+  };
+  const flagged = closed.filter((s) => s.projected);
+  if (flagged.length < SWAP_STALL_MIN_SAMPLES) {
+    return { unlearned: `${flagged.length} of ${SWAP_STALL_MIN_SAMPLES} flagged verdicts with a closed window` };
+  }
+  const afterAny = closed.filter((s) => followed(s.at)).length / closed.length;
+  const afterProjection = flagged.filter((s) => followed(s.at)).length / flagged.length;
+  return { samples: flagged.length, afterProjection, afterAny, noise: 2 * Math.sqrt(afterAny * (1 - afterAny) / flagged.length) };
+}
+
+function containerPredictsPressure(relation: ContainerLift | undefined): { counts: boolean; basis: string } {
+  if (relation === undefined) return { counts: true, basis: "the projection alone: no container history read" };
+  if ("unlearned" in relation) return { counts: true, basis: `the projection alone: ${relation.unlearned}` };
+  const pct = (v: number): string => `${Math.round(v * 100)}%`;
+  const counts = relation.afterProjection - relation.afterAny > relation.noise;
+  return {
+    counts,
+    basis: `projection ${counts ? "predicts" : "does not predict"} pressure: ${pct(relation.afterProjection)} of ${relation.samples} ` +
+      `flagged verdicts were followed by it, against ${pct(relation.afterAny)} of all (noise ${pct(relation.noise)})`,
+  };
 }
 
 /** Whether swap-in past the threshold counts in this verdict, and the basis a row records. */
@@ -935,8 +988,8 @@ function readPsi(read: ShadowMemoryPorts["readFile"], path = "/proc/pressure/mem
 }
 
 /** The instance's pressure store, beside its ledger: the previous verdict's pswpin and memory.events `high` counts (any
- *  process of the instance, so a short-lived child still measures a rate) and the swap-in history its swap-in arm
- *  learns from. A store written before #10907's successor also holds `sightings`, which nothing reads any more and the
+ *  process of the instance, so a short-lived child still measures a rate) and the swap-in and container projection
+ *  histories. A store written before #10907's successor also holds `sightings`, which nothing reads any more and the
  *  next write drops. */
 export const CONTAINER_PRESSURE_FILE = "container-pressure.json";
 /** BACKSTOP on the swap-in history kept; six hours of verdicts is about a thousand. */
@@ -946,6 +999,8 @@ interface PressureStore {
   prior?: { at: number; pswpin?: number; high?: number };
   /** [at, pages/s or null, 1 when stalled]: compact, since the store is rewritten on every verdict. */
   swap: Array<[number, number | null, 0 | 1]>;
+  /** [at, 1 when projection exceeds onset, 1 when under own pressure]. */
+  container: Array<[number, 0 | 1, 0 | 1]>;
 }
 
 function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
@@ -954,14 +1009,17 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
     parsed = JSON.parse(read(path)) as Partial<PressureStore>;
   } catch (error) {
     void error; // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
-    return { swap: [] };
+    return { swap: [], container: [] };
   }
   const finite = (...n: unknown[]): boolean => n.every((v) => typeof v === "number" && Number.isFinite(v));
   const prior = parsed.prior && finite(parsed.prior.at) ? parsed.prior : undefined;
   const swap = Array.isArray(parsed.swap)
     ? parsed.swap.filter((s) => Array.isArray(s) && finite(s[0]) && (s[1] === null || finite(s[1])) && (s[2] === 0 || s[2] === 1))
     : [];
-  return { ...(prior ? { prior } : {}), swap };
+  const container = Array.isArray(parsed.container)
+    ? parsed.container.filter((s) => Array.isArray(s) && finite(s[0]) && (s[1] === 0 || s[1] === 1) && (s[2] === 0 || s[2] === 1))
+    : [];
+  return { ...(prior ? { prior } : {}), swap, container };
 }
 
 /**
@@ -971,8 +1029,8 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
  */
 function readContainerPressure(
   ports: ShadowMemoryPorts, root: string, now: number, policy: HostMemoryBudgetPolicy,
-  host: { swapIn: ShadowInputs["swapIn"]; psi: ShadowInputs["psi"] },
-): { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation } {
+  snapshot: ShadowInputs,
+): { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
   const store = readPressureStore(ports.readFile, path);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
@@ -1011,18 +1069,27 @@ function readContainerPressure(
   };
   const history: SwapStallSample[] = store.swap.map(([at, pagesPerSec, stalled]) => ({ at, pagesPerSec, stalled: stalled === 1 }));
   const swapStall = swapStallRelationOf(history, now, policy);
-  const hostPsi = "unread" in host.psi ? null : host.psi;
+  const containerLift = containerLiftOf(store.container.map(([at, projected, pressed]) => ({
+    at, projected: projected === 1, pressed: pressed === 1,
+  })), now);
+  const hostPsi = "unread" in snapshot.psi ? null : snapshot.psi;
   const stalled = hostPsi !== null && (hostPsi.someAvg10 > policy.psiSomeAvg10Max || (hostPsi.fullAvg10 ?? 0) > policy.psiFullAvg10Max);
-  const rate = "pagesPerSec" in host.swapIn ? Math.round(host.swapIn.pagesPerSec) : null;
+  const rate = "pagesPerSec" in snapshot.swapIn ? Math.round(snapshot.swapIn.pagesPerSec) : null;
   const swap = [...store.swap, [now, rate, stalled ? 1 : 0] as [number, number | null, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
-  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap };
+  // Evaluate the same pure projection as the caller, before storing this outcome; this row cannot train its own lift.
+  const numbers = evaluateShadowMemory({ ...snapshot, containerPressure, swapStall, containerLift }, policy).numbers;
+  const flagged = numbers.containerProjectedMib !== null && numbers.containerOnsetMib !== null &&
+    numbers.containerProjectedMib > numbers.containerOnsetMib;
+  const container = [...store.container, [now, flagged ? 1 : 0, numbers.containerPressed ? 1 : 0] as [number, 0 | 1, 0 | 1]]
+    .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container };
   try {
     ports.writeFile(path, `${JSON.stringify(next)}\n`);
   } catch (error) {
     void error; // Unwritable: this verdict still judges from its reading; the next one measures no rate and learns less.
   }
-  return { containerPressure, swapStall };
+  return { containerPressure, swapStall, containerLift };
 }
 
 function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["container"] {
@@ -1338,12 +1405,11 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   const container = readContainer(ports.readFile);
   const swapIn = readSwapIn(ports.readFile, now, policy.staleReadingMs);
   const psi = readPsi(ports.readFile);
-  return {
+  const inputs: ShadowInputs = {
     memAvailable: readMemAvailable(ports.readFile),
     swapIn,
     psi,
     container,
-    ...readContainerPressure(ports, start.root, now, policy, { swapIn, psi }),
     ledger: { state: ledger.state, ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: {
@@ -1355,6 +1421,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
+  return { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
 }
 
 /** A shared host store is the authority; one that establishes nothing is UNKNOWN, never local silence as stopped. */

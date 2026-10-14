@@ -563,6 +563,15 @@ function assessReviewReuse(
  * directly from the number, because an id that is enumerable but UNDERIVABLE would convert a
  * visible orphan into an invisible one, which is strictly worse than leaving it alone.
  */
+/** The stalled-stage reason as an escalation SUMMARY: its age and episode start dropped. A stalled-stage
+ *  escalation dedups on its exact title (`headDedup: "independent"`), and the title carried "for 32 minutes" and
+ *  "since <ts>", so each pass that re-escalated the same (PR, blocker, diagnosis) after a restart or a re-read
+ *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
+ *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
+export function stalledStageEscalationSummary(reason: string): string {
+  return reason.replace(/^(PR stage stalled: .+?) for \d+ minutes \(BACKSTOP \d+\); since [^;]*;/, "$1;");
+}
+
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
   // W1-T5866: the `unfiled` branch-shape sentinel is every ad-hoc PR's id, never one PR's — it maps to `PR-<n>` here
   // exactly as it does for the review rows (W1-T5839), so two run-unfiled PRs never share an escalation.
@@ -3212,7 +3221,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           ...contractRevisionFor(pr),
-          summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
+          summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
             `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,

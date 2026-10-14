@@ -13,6 +13,29 @@ const VERSION = "1.180.0";
 const RULE_ID = "rmd-native-qualification-sentinel";
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
+const safePath = (path) => typeof path === "string" && path.length <= 256 &&
+  /^[A-Za-z0-9_@.+/-]+$/.test(path) && !path.startsWith("/") &&
+  !path.split("/").includes("..") ? path : null;
+// Semgrep's JSON error_type has human-readable enum labels too. Accept only these
+// schema labels, never arbitrary spaced strings that could carry source or secrets.
+const humanErrorTypes = new Set(["Lexical error", "Syntax error", "Other syntax error", "AST builder error",
+  "Rule parse error", "Invalid YAML", "Internal matching error", "Semgrep match found", "Too many matches",
+  "Fatal error", "Out of memory", "Fixpoint timeout", "Stack overflow", "Timeout during interfile analysis",
+  "OOM during interfile analysis", "Missing plugin", "Pattern parse error", "Incompatible rule"]);
+
+function errorLocations(error, type) {
+  // PartialParsing's variant payload lists omitted source locations; ordinary spans
+  // instead use `file`. Missing location evidence remains null, not an empty census.
+  const raw = type === "PartialParsing" && Array.isArray(error.type?.[1]) ? error.type[1] : error.spans;
+  if (!Array.isArray(raw)) return { locations: null, locationCount: null, locationsTruncated: false };
+  return { locationCount: raw.length, locationsTruncated: raw.length > 8,
+    locations: raw.slice(0, 8).map((span) => {
+      const start = span?.start?.line, end = span?.end?.line;
+      const valid = Number.isSafeInteger(start) && start > 0 && start <= 10000000 &&
+        Number.isSafeInteger(end) && end >= start && end <= 10000000;
+      return { path: safePath(span?.path ?? span?.file), startLine: valid ? start : null, endLine: valid ? end : null };
+    }) };
+}
 
 export function summarizeReports(report, sarif, exitCode) {
   assert.ok(Number.isInteger(exitCode), "scanner exit status is unavailable");
@@ -39,11 +62,13 @@ export function summarizeReports(report, sarif, exitCode) {
     const rawPath = error.path ?? error.spans?.[0]?.file;
     // Error messages and snippets may include source or secrets. Retain only constrained labels,
     // safe repository-relative identities and a hash of the complete private error corpus.
-    const path = typeof rawPath === "string" && rawPath.length <= 256 &&
-      /^[A-Za-z0-9_@.+/-]+$/.test(rawPath) && !rawPath.startsWith("/") &&
-      !rawPath.split("/").includes("..") ? rawPath : null;
-    return { type: typeof type === "string" && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(type) ? type : "UNKNOWN",
-      level: ["error", "warn", "warning", "info"].includes(error.level) ? error.level : "UNKNOWN", path };
+    const path = safePath(rawPath);
+    const ruleIdObserved = error.rule_id == null ? null : ids.includes(error.rule_id);
+    return { type: typeof type === "string" && (humanErrorTypes.has(type) || /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(type)) ? type : "UNKNOWN",
+      level: ["error", "warn", "warning", "info"].includes(error.level) ? error.level : "UNKNOWN", path,
+      // Echo only IDs in this run's already-rendered rule inventory, not raw error data.
+      ruleId: ruleIdObserved && /^[A-Za-z0-9_.:-]{1,256}$/.test(error.rule_id) ? error.rule_id : null,
+      ruleIdObserved, ...errorLocations(error, type) };
   });
   return {
     version: report.version, scannerExitCode: exitCode,
