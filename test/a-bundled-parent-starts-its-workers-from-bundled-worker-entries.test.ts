@@ -89,7 +89,13 @@ test("W1-T8777: a bundled parent starts its worker from the bundled worker entry
   const mod = await loadBuild();
   const root = makeTree();
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  await mod.buildChildEntries({ root, entries: [ENTRY], workers: [WORKER] });
+  // The build runs under plain node, as deploy/Dockerfile runs it. This also keeps the worker loop's coverage
+  // honest: Node's merge lets a file's plain-node instances (every CLI child) overwrite the lines of its
+  // tsx-transformed instance, so a line run only under tsx reads as never run.
+  const build = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `const m = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)}); await m.buildChildEntries(${JSON.stringify({ root, entries: [ENTRY], workers: [WORKER] })});`],
+  { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, NODE_OPTIONS: "" } });
+  assert.equal(build.status, 0, `the plain-node build ran: ${build.stderr}`);
   // Plain node: no tsx loader anywhere, as a bundled serve or daemon would run.
   const run = spawnSync(process.execPath, [join(root, mod.OUT_DIR, "fixture-main.mjs")], { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, NODE_OPTIONS: "" } });
   assert.equal(run.status, 0, `the bundled parent's worker ran: ${run.stderr}`);
