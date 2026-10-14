@@ -17,7 +17,7 @@
     - src/lib/pr-open.ts
     - src/run-task.ts
     - test/the-remaining-check-proof-sites-use-the-shared-bundle-launcher.test.ts
-  status: queued
+  status: merged
   priority: 0.9
   attempts: 0
   rationale: |

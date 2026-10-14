@@ -15,7 +15,7 @@
     - src/lib/git-push.ts
     - src/lib/inbox.ts
     - test/a-joining-approve-cuts-its-own-worktree.test.ts
-  status: queued
+  status: merged
   priority: 1  # the join is the path every fleet approve takes while a ratify PR is open, which is most of the time once approves run
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-13: the revalidation garden flips to act only when every shadow 'resolved' is correct; the first shadow pass (14:52Z) had one would-be close and it was wrong"
   plan_refs: [W1-T8864]
   files: [src/lib/issue-revalidation-garden.ts, test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts, test/the-revalidation-garden-never-closes-on-an-absence.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

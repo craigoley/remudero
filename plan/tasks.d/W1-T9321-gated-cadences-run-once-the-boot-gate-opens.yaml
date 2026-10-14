@@ -15,7 +15,7 @@
     - test/gated-cadences-run-once-the-boot-gate-opens.test.ts
     # W1-T9072's "never run beside a tick-1 lane" test asserts measurement and retro run only after lane A ends, at the next iteration top; that ordering is the defect, so its assertions change (its test title, and so its plan proof, stay)
     - test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
-  status: queued
+  status: merged
   priority: 0.5  # silent outage of every gated cadence on the core daemon since 2026-10-13T14:22Z: compaction (corpus 515 -> 523 archives and climbing), the retro trigger, auto-triage, intake rungs, measurement, digest, ci-learning, board review, benchmark cohort, wipe-test
   attempts: 0
   rationale: |

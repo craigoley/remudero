@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-13: no VM resize; make the Codex sessions move happen automatically at the next recycle through optional injected recycle steps"
   plan_refs: [W1-T3626, W1-T3676, W1-T6110, W1-T8861]
   files: [deploy/recycle-actions.sh, deploy/recycle-actions/codex-sessions-to-data-disk.sh, deploy/codex-sessions-mount.sh, deploy/recycle-container.sh, deploy/host-update.sh, deploy/install-host-units.sh, test/a-recycle-runs-its-pending-actions-in-the-stopped-window.test.ts, test/recycle-container.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

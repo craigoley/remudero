@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit"
   plan_refs: [W1-T5380, W1-T6311]
   files: [src/lib/ci-friction-remedy.ts, src/lib/ci-friction-gardener.ts, test/a-ci-friction-remedy-is-owned-by-the-code-its-failing-test-exercises.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

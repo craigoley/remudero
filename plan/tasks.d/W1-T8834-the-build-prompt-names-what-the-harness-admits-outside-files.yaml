@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: forensics on W1-T3741's four refused dispatches (operator: go through all follow-ups)"
   plan_refs: [W1-T5386, W1-T2651, W1-T3741, W1-T401, W1-T2650]
   files: [src/lib/prompt-render.ts, src/lib/review.ts, test/the-build-prompt-names-what-the-harness-admits-outside-files.test.ts, test/prompt-manifest.test.ts, test/the-worker-gets-the-headlines.test.ts, test/what-a-worker-loads.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

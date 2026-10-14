@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: spot-check of the revalidation garden's fixed-code shadow verdicts (passes 18:00Z-20:27Z); operator approved building the gap fix"
   plan_refs: [W1-T8864, W1-T9181]
   files: [src/lib/issue-revalidation-garden.ts, test/the-revalidation-judge-sees-the-commits-that-name-an-issue.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
