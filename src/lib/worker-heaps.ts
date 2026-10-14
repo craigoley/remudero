@@ -68,13 +68,15 @@ export interface TrackedWorker {
 }
 
 const SELF_MODULE = "worker-heaps";
-/** `<module>:<function>` of the first frame outside node and this module: the call that spawned the thread. */
+/** W1-T9370: startWorker constructs serve's workers, so a frame of its module is never the site that asked for one. */
+const SPAWN_HELPER_MODULE = "child-entry-argv";
+/** `<module>:<function>` of the first frame outside node, this module and the spawn helper: the call that spawned the thread. */
 export function spawnSite(stack: string | undefined): string {
   for (const line of (stack ?? "").split("\n").slice(1)) {
     const frame = /^\s*at (?:(.+?) \()?(.+?):\d+:\d+\)?$/.exec(line);
     const module = frame ? basename(frame[2]).replace(/\.[cm]?[jt]s$/, "") : "";
     // A source-mapped frame and import.meta.url can disagree on path and extension; the module name cannot.
-    if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE) continue;
+    if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE || module === SPAWN_HELPER_MODULE) continue;
     return `${module}:${frame[1] ?? "<module>"}`;
   }
   return "unknown";

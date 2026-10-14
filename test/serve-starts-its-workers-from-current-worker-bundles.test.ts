@@ -1,0 +1,133 @@
+// test/serve-starts-its-workers-from-current-worker-bundles.test.ts — W1-T9370.
+//
+// Serve's main thread runs under tsx, and each worker it starts used to load its .ts module graph through tsx too:
+// 82 MB used / 218 MB of heap per isolate on now-view.ts's graph, against 22 / 57 for a bundle without tsx.
+// startWorker starts a tsx parent's worker from the tree's current worker bundle (W1-T8777) with tsx dropped from
+// its execArgv, and from its .ts source on every doubt. These tests run a real fixture tree and real workers.
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Worker, WorkerOptions } from "node:worker_threads";
+import { execArgvWithoutTsx, setWorkerEntryLog, startWorker, type StartWorkerDeps } from "../src/lib/child-entry-argv.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = join(REPO_ROOT, "scripts", "build-child-entries.mjs");
+const HELPER = join(REPO_ROOT, "src", "lib", "child-entry-argv.ts");
+const WORKER = "src/lib/fixture-worker.ts";
+interface BuildModule { buildChildEntries(opts: { root: string; entries: { name: string; source: string }[]; workers?: readonly string[] }): Promise<unknown> }
+const build = async (root: string): Promise<void> => {
+  await ((await import(pathToFileURL(SCRIPT).href)) as BuildModule).buildChildEntries({ root, entries: [], workers: [WORKER] });
+};
+
+/** A tree whose worker module starts itself through startWorker, as serve's worker modules do. */
+function makeTree(t: { after: (fn: () => void) => void }): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-serve-worker-tree-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "src", "lib"), { recursive: true });
+  writeFileSync(join(root, "package.json"), '{ "name": "fixture", "type": "module" }\n');
+  writeFileSync(join(root, "package-lock.json"), '{ "lockfileVersion": 3 }\n');
+  writeFileSync(join(root, WORKER), [
+    'import { isMainThread, parentPort } from "node:worker_threads";',
+    `import { runsBundled } from ${JSON.stringify(HELPER)};`,
+    "if (!isMainThread) parentPort!.postMessage({ bundled: runsBundled(), execArgv: process.execArgv });",
+  ].join("\n") + "\n");
+  return root;
+}
+const selfUrl = (root: string): string => pathToFileURL(join(root, WORKER)).href;
+
+/**
+ * Starts the fixture worker from this tsx test process, as serve's main thread starts its own. The execArgv is given,
+ * not inherited: this runner preloads test/setup/tmp-hygiene.ts, a TypeScript preload serve never has (case 6).
+ */
+function run(root: string, deps: StartWorkerDeps = {}, options: WorkerOptions = { execArgv: ["--import", "tsx"] }): Promise<{ bundled: boolean; execArgv: string[] }> {
+  return new Promise((resolve, reject) => {
+    const worker = startWorker(selfUrl(root), options, { storeRoot: false, ...deps });
+    worker.once("message", (m) => { void worker.terminate(); resolve(m as { bundled: boolean; execArgv: string[] }); });
+    worker.once("error", reject);
+  });
+}
+
+test("W1-T9370: serve starts its workers from current worker bundles", async (t) => {
+  assert.ok(process.execArgv.some((a) => /tsx/.test(a)) || /tsx/.test(process.env.NODE_OPTIONS ?? ""), "this test is a tsx parent");
+  const rows: Array<Record<string, unknown>> = [];
+  setWorkerEntryLog((step, extra) => void rows.push({ step, ...extra }));
+  t.after(() => setWorkerEntryLog(undefined));
+
+  // 1. A current bundle: the worker runs it, with no tsx loader in its execArgv; the decision is ledgered once.
+  const current = makeTree(t);
+  await build(current);
+  const fromBundle = await run(current);
+  assert.equal(fromBundle.bundled, true, "the worker runs its bundle");
+  assert.ok(!fromBundle.execArgv.some((a) => /tsx/.test(a)), `no tsx in the worker: ${fromBundle.execArgv.join(" ")}`);
+  assert.equal((await run(current)).bundled, true, "the next start reuses the decision");
+  assert.deepEqual(rows, [{ step: "worker.entry_resolved", module: WORKER, kind: "bundle", reason: "source-hash-match" }]);
+
+  // 2. The switch off: the .ts source, as before.
+  assert.equal((await run(current, { env: { RMD_BUNDLED_WORKERS: "0" } })).bundled, false);
+
+  // 3. A stale bundle: the .ts source, and why.
+  const stale = makeTree(t);
+  await build(stale);
+  writeFileSync(join(stale, WORKER), "// edited after the build\n", { flag: "a" });
+  assert.equal((await run(stale)).bundled, false);
+  assert.equal(rows.at(-1)?.reason, "source-changed");
+
+  // 4. A refused start (a flag a worker rejects): the .ts source, and the module stays on it.
+  const refused = makeTree(t);
+  await build(refused);
+  let attempts = 0;
+  const refuse: StartWorkerDeps["construct"] = (url, options) => {
+    attempts++;
+    if (String(url).endsWith(".mjs")) throw Object.assign(new Error("invalid execArgv"), { code: "ERR_WORKER_INVALID_EXEC_ARGV" });
+    return startWorker(url, options, { override: url });
+  };
+  assert.equal((await run(refused, { construct: refuse })).bundled, false);
+  assert.equal((await run(refused, { construct: refuse })).bundled, false);
+  assert.equal(attempts, 3, "one refused bundle start, then the source each time");
+  assert.match(String(rows.at(-1)?.reason), /^bundle-start-refused: invalid execArgv/);
+
+  // 5. Serve's own flags: node refuses `--expose-gc` in a worker's execArgv, so the start drops what node names and
+  //    retries once; the flag is in force for the whole process anyway.
+  const serveFlags = makeTree(t);
+  await build(serveFlags);
+  const asServe = await run(serveFlags, {}, { execArgv: ["--expose-gc", "--import", "tsx"] });
+  assert.equal(asServe.bundled, true, "serve's worker runs its bundle");
+  assert.deepEqual(asServe.execArgv, [], "neither tsx nor the refused flag reaches the worker");
+  assert.equal(rows.at(-1)?.kind, "bundle", "a dropped flag demotes nothing");
+
+  // 6. A parent that preloads a TypeScript file: its workers keep their source, and why; the preload is never dropped.
+  const preloads = makeTree(t);
+  writeFileSync(join(preloads, "src", "preload.ts"), "export {};\n");
+  await build(preloads);
+  assert.equal((await run(preloads, {}, { execArgv: ["--import", "tsx", "--import", join(preloads, "src", "preload.ts")] })).bundled, false);
+  assert.equal(rows.at(-1)?.reason, `parent-preloads-typescript: ${join(preloads, "src", "preload.ts").slice(-80)}`);
+});
+
+test("a bundle-started worker that exits before it speaks demotes its module; one that spoke keeps it", async (t) => {
+  const root = makeTree(t);
+  await build(root);
+  const started: string[] = [];
+  const fake = (speak: boolean): StartWorkerDeps["construct"] => (url) => {
+    started.push(String(url).endsWith(".mjs") ? "bundle" : "source");
+    const w = new EventEmitter() as unknown as Worker;
+    setImmediate(() => { if (speak) w.emit("message", {}); w.emit("exit", 1); });
+    return w;
+  };
+  const exit = (w: Worker): Promise<void> => new Promise((r) => w.once("exit", () => r()));
+  await exit(startWorker(selfUrl(root), { execArgv: ["--import", "tsx"] }, { storeRoot: false, construct: fake(true) }));
+  await exit(startWorker(selfUrl(root), { execArgv: ["--import", "tsx"] }, { storeRoot: false, construct: fake(false) }));
+  await exit(startWorker(selfUrl(root), { execArgv: ["--import", "tsx"] }, { storeRoot: false, construct: fake(false) }));
+  assert.deepEqual(started, ["bundle", "bundle", "source"], "a terminated lane that worked keeps its bundle; a silent crash does not");
+});
+
+test("only tsx's loader flags leave a bundled worker's execArgv", () => {
+  assert.deepEqual(execArgvWithoutTsx(["--import", "tsx", "--max-old-space-size=4096"]), ["--max-old-space-size=4096"]);
+  assert.deepEqual(execArgvWithoutTsx(["--import", "/app/node_modules/tsx/dist/loader.mjs", "--enable-source-maps"]), ["--enable-source-maps"]);
+  assert.deepEqual(execArgvWithoutTsx(["--import=file:///app/node_modules/tsx/dist/esm/index.mjs", "--require", "tsx/cjs", "--import", "./x.mjs"]), ["--import", "./x.mjs"]);
+  assert.deepEqual(execArgvWithoutTsx(["--loader", "tsx", "--trace-warnings"]), ["--trace-warnings"]);
+  assert.deepEqual(execArgvWithoutTsx(["--import", "tsxlike", "--import", "my-tsx-helpers"]), ["--import", "tsxlike", "--import", "my-tsx-helpers"], "a name that merely contains tsx stays");
+});
