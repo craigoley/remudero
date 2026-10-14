@@ -144,56 +144,64 @@ The parts of the decision:
   `/app`, or a tree that ran the build) benefited, and everything else fell
   back to tsx. With the store, a fresh worktree at a stored source hash gets
   a copy of the stored build.
+- **The shared store, built by W1-T8776.** This was this record's
+  hash-addressed store follow-up and it is now implemented, so it is a
+  description of the code and not a promise. It is a store shared by all
+  worktrees at one source hash, built once per main revision by the daemon.
+  The bundle is not run from the store with the tree root passed in. It is
+  **materialized** into the spawning tree's `dist/child-entries/`, because
+  the recipe leaves bare imports external and resolves each module's
+  `import.meta.url` relative to the bundle. A bundle run from the store
+  would resolve `node_modules` and `src/` paths inside the store, not the
+  tree. As built in `src/lib/child-entry-store.ts`:
+  - **Location and key.** The store is `<config.root>/child-entries/<sourceHash>/`.
+    `sourceHash` stays the only key and never includes the tree's path.
+  - **Filling the store.** `buildIntoStore(tree)` runs the tree's own
+    `scripts/build-child-entries.mjs` in a child process, first with
+    `--hash` and then with `--out <temp>`. The `--out` run builds into a
+    private directory, laid out as `<tree>/dist/child-entries`, and then
+    renames that directory into place.
+  - **When it runs.** `src/run-task.ts` calls `buildIntoStore` once the
+    managed checkout is at main (refresh `current` or `fast_forwarded`),
+    without awaiting it. It ledgers `child_entry.store_built`
+    (hash, ms, bytes) or `child_entry.store_build_failed` (reason).
+  - **No double build.** A hash already stored is a no-op only after its
+    payloads validate. A concurrent publisher never replaces another
+    owner's completed valid build.
+  - **Isolation: copy, never link.** `childEntryArgv` asks the store only
+    when the tree's own bundle is not current. It copies the stored files
+    with `COPYFILE_FICLONE | COPYFILE_EXCL` (a reflink where the
+    filesystem supports one, an ordinary copy otherwise), never a
+    hardlink. A controlled hardlink shared the store's inode, so a write
+    in one worktree mutated the store. The copy goes into a staging
+    directory beside the target.
+  - **Validation before running.** Before publishing, it validates the
+    STAGED copy. After the atomic rename it re-judges the tree with
+    `childEntryIsCurrent`, and only then runs the bundle. Every stored,
+    staged and materialized check is that one `childEntryIsCurrent` (its
+    `outDir` and `treeHash` options), not a second guard. Any doubt means
+    tsx. The launch carries the store's answer (`store`: hit or miss with
+    a reason), and its reason reads `store-hit` on a hit. A caller that
+    passes a `log` ledgers `child_entry.store_hit` / `child_entry.store_miss`.
+    The check-proof callers pass none, so the hit rate reads from the
+    plan-PR preflight's existing `plan_pr.check_proof_child` reason.
+  - **Retention.** A stored hash is dropped once no main revision of the
+    last day and no live worktree uses it. "Used by main" means its
+    directory's mtime is refreshed by each `built`/`present`/hit.
+    "Used by a live worktree" means the source hash a registered
+    worktree's own manifest names. There is no fixed count.
+  - **Not proven.** The receipt proves isolation, not that blocks are
+    physically shared. Whether a reflink happens depends on the host
+    filesystem.
+- **Where the follow-ups below are tracked.** The first is plan task
+  W1-T8775 (merged, #11255) for the first check-proof spawn site, with
+  W1-T9279 for the three remaining ones. The worker-thread entries are
+  W1-T8777. The garden and preflight children are W1-T8778. The
+  hash-addressed store that this list used to name is the section above,
+  built by W1-T8776, so it is no longer owed.
 - Follow-up tasks this record files:
   - switch the check-proof spawn sites (`checkProofChildArgv`, W1-T7728) to
     the bundle when `childEntryIsCurrent` holds, with tsx as the fallback;
-  - a hash-addressed bundle store shared by all worktrees at one source hash.
-    It is built once per main revision by the daemon. **Amended by W1-T8776**:
-    the bundle is not run from the store with the tree root passed in. It is
-    **materialized** into the spawning tree's `dist/child-entries/`, because
-    the recipe leaves bare imports external and resolves each module's
-    `import.meta.url` relative to the bundle. A bundle run from the store
-    would resolve `node_modules` and `src/` paths inside the store, not the
-    tree. The decision, as built in `src/lib/child-entry-store.ts`:
-    - **Location and key.** The store is `<config.root>/child-entries/<sourceHash>/`.
-      `sourceHash` stays the only key and never includes the tree's path.
-    - **Filling the store.** `buildIntoStore(tree)` runs the tree's own
-      `scripts/build-child-entries.mjs` in a child process, first with
-      `--hash` and then with `--out <temp>`. The `--out` run builds into a
-      private directory, laid out as `<tree>/dist/child-entries`, and then
-      renames that directory into place.
-    - **When it runs.** `src/run-task.ts` calls `buildIntoStore` once the
-      managed checkout is at main (refresh `current` or `fast_forwarded`),
-      without awaiting it. It ledgers `child_entry.store_built`
-      (hash, ms, bytes) or `child_entry.store_build_failed` (reason).
-    - **No double build.** A hash already stored is a no-op only after its
-      payloads validate. A concurrent publisher never replaces another
-      owner's completed valid build.
-    - **Isolation: copy, never link.** `childEntryArgv` asks the store only
-      when the tree's own bundle is not current. It copies the stored files
-      with `COPYFILE_FICLONE | COPYFILE_EXCL` (a reflink where the
-      filesystem supports one, an ordinary copy otherwise), never a
-      hardlink. A controlled hardlink shared the store's inode, so a write
-      in one worktree mutated the store. The copy goes into a staging
-      directory beside the target.
-    - **Validation before running.** Before publishing, it validates the
-      STAGED copy. After the atomic rename it re-judges the tree with
-      `childEntryIsCurrent`, and only then runs the bundle. Every stored,
-      staged and materialized check is that one `childEntryIsCurrent` (its
-      `outDir` and `treeHash` options), not a second guard. Any doubt means
-      tsx. The launch carries the store's answer (`store`: hit or miss with
-      a reason), and its reason reads `store-hit` on a hit. A caller that
-      passes a `log` ledgers `child_entry.store_hit` / `child_entry.store_miss`.
-      The check-proof callers pass none yet, so the hit rate reads from
-      the plan-PR preflight's existing `plan_pr.check_proof_child` reason.
-    - **Retention.** A stored hash is dropped once no main revision of the
-      last day and no live worktree uses it. "Used by main" means its
-      directory's mtime is refreshed by each `built`/`present`/hit.
-      "Used by a live worktree" means the source hash a registered
-      worktree's own manifest names. There is no fixed count.
-    - **Not proven.** The receipt proves isolation, not that blocks are
-      physically shared. Whether a reflink happens depends on the host
-      filesystem.
   - emit the worker-thread entries (read models, slow lane, status, board)
     as their own bundles, located through the manifest, before any parent
     that starts them is bundled;
