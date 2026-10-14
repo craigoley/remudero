@@ -106,6 +106,7 @@ test("each placeholder form independently blocks a draft while ordinary titles a
     assert.deepEqual(lintDraftedFragment(amended((t) => {
       t.acceptance[0].proof = proof;
       t.files.push("test/future.test.ts");
+      t.design = "CREATES: test/future.test.ts";
     }),
       PROPOSAL, GOOD_STAMP, KNOWN), []);
   }
@@ -120,7 +121,7 @@ test("placeholder findings stay draft-only for inherited plan tasks", () => {
   }
 });
 
-test("directory checks use the injected worktree predicate and permit future files in existing directories", () => {
+test("directory checks use the injected worktree predicate and reject undeclared future files", () => {
   const fragment = amended((t) => { t.files = ["plan/ratification/future.md", "MASTER-PLAN.md"]; });
   const seen: string[] = [];
   const lint = (exists: boolean) => lintDraftedFragment(fragment, PROPOSAL, GOOD_STAMP, KNOWN, (path) => {
@@ -129,7 +130,11 @@ test("directory checks use the injected worktree predicate and permit future fil
   });
   assert.ok(lint(false).some((v) => v.check === "draft-missing-directory" && /"plan"/.test(v.message)));
   assert.deepEqual(lint(true), []);
-  assert.deepEqual(seen, ["plan", "plan"]);
+  assert.deepEqual(seen, ["plan/ratification/future.md", "MASTER-PLAN.md", "plan",
+    "plan/ratification/future.md", "MASTER-PLAN.md", "plan"]);
+  const directoriesOnly = lintDraftedFragment(fragment, PROPOSAL, GOOD_STAMP, KNOWN, (path) => path === "plan");
+  assert.deepEqual(directoriesOnly.map((v) => v.check), ["draft-path-missing", "draft-path-missing"],
+    "an existing parent directory cannot stand in for a declared file");
   assert.deepEqual(lintDraftedFragment(amended((t) => { t.title = "tighten the W1-T7001 input guard"; }),
     PROPOSAL, GOOD_STAMP, KNOWN), []);
 });
