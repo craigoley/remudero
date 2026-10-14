@@ -739,9 +739,8 @@ fi
 #    --dry-run and passes. host: kill/pkill/killall (not `kill -0`/`-l`), docker restart/stop/kill/rm/rmi/
 #    down/prune/pause, systemctl restart/stop/kill, rm -r/-f and `git worktree prune` sent to `ssh remudero`,
 #    also via `sh -c`, `docker exec`, a heredoc, a here-string or a pipe into it. Read-only queries pass.
-#    W1-T9238: a host WRITE is refused too: a write redirect (`>`, `>>`, `N>`, `&>`, `>|`, `>path`) whose target is a
-#    path, and `tee` with a file operand, inside the remote command. `/dev/null` and an fd duplication (`2>&1`) run, and a
-#    redirect OUTSIDE the quoted remote command is the Mac's. A `>` glued mid-word (`ps>x`, `awk '$3>5'`) is not judged.
+#    W1-T9238: host WRITES too: a write redirect to a path (not /dev/null or `2>&1`) or `tee <file>` inside the remote
+#    command; a redirect outside it is the Mac's. A `>` glued mid-word (`ps>x`, `awk '$3>5'`) is not judged.
 #    Judged at the PROGRAM position of each quote-aware simple command, so text that only NAMES a shape (a
 #    grep, an echo, a commit message) runs. Bash tool only; inert without jq; a tripwire (file header).
 #    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...] in the
@@ -824,10 +823,10 @@ hr_refuse() {  # $1 = rule (stash|no-verify|host), $2 = message. deny exits; an 
 hr_host_refuse() {  # $1 = the destructive command as parsed
   hr_refuse host "destructive process control sent to the fleet host over ssh (\`$1\`): $HR_HOST. Read-only queries (ps, docker ps/inspect/logs, systemctl status, journalctl, cat, ls) still run. Report to the operator with the exact command you would have run, and stop."
 }
-hr_host_write_refuse() {  # $1 = the redirect or tee as parsed
+hr_host_write_refuse() {
   hr_refuse host "file write on the fleet host over ssh (\`$1\`): $HR_HOST, no \`>\` or \`tee\` into /tmp, /dev/shm, ~ or anywhere else there. Stream the output back to the Mac instead (\`ssh remudero '<query>' > <local file>\`); if a host write is truly needed, report the exact command to the operator, and stop."
 }
-hr_host_redirects() {  # host mode: refuse a write redirect to a path in the caller's t[1..]; /dev/null and fd duplication run
+hr_host_redirects() {
   local k=1 w r rest tgt dup
   while [ "$k" -lt "$n" ]; do
     w="${t[$k]}"
@@ -853,7 +852,7 @@ hr_host_redirects() {  # host mode: refuse a write redirect to a path in the cal
   done
   return 0
 }
-hr_host_tee() {  # host mode; the caller's t[i..] are tee's words: any file operand but /dev/null is a host write
+hr_host_tee() {
   local k="$i" w opts=1
   while [ "$k" -lt "$n" ]; do
     w="${t[$k]}"
