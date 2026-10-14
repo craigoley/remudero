@@ -266,7 +266,7 @@ is_cwd_in() {
       # only broad launcher roots whose cwd does not identify a particular job.
       case "$root" in "$path"/*)
         case "$path" in
-          /|"$USER_HOME"|"$USER_HOME/Remudero"|"$USER_HOME/rmd-work"|"$DEFAULT_TMP"|/tmp|/private/tmp) ;;
+          /|"$USER_HOME"|"$USER_HOME/Remudero"|"$USER_HOME/Remudero/remudero"|"$USER_HOME/rmd-work"|"$DEFAULT_TMP"|/tmp|/private/tmp) ;;
           *) return 0 ;;
         esac
         ;;
@@ -379,7 +379,7 @@ refresh_process_snapshot() {
 }
 
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
   found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
@@ -393,7 +393,8 @@ clean_artifact() {
         log "SKIP git-unverified $artifact"; return;
       }
       if [ -n "$status" ]; then log "SKIP dirty $artifact (checkout=$parent)"; return; fi
-      if ! rmd_workspace_published "$parent"; then log "SKIP $RMD_PUB_REASON $artifact (checkout=$parent)"; return; fi
+      scope="head"; [ -d "$parent/.git" ] && scope="all"
+      if ! rmd_workspace_published "$parent" "$scope"; then log "SKIP $RMD_PUB_REASON $artifact (checkout=$parent)"; return; fi
       break
     fi
     parent=$(dirname "$parent")
@@ -554,6 +555,20 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         ;;
     esac
     if is_protected "$repo"; then log "SKIP protected $repo"; continue; fi
+    nested_source=0
+    for protected_parent in "${PROTECTED[@]+"${PROTECTED[@]}"}"; do
+      case "$repo" in "$protected_parent"/*)
+        if [ -e "$protected_parent/.git" ]; then
+          relative_path=${repo#"$protected_parent"/}
+          if ! tracked_parent=$(git -C "$protected_parent" ls-files -- "$relative_path" 2>/dev/null); then
+            log "SKIP git-unverified enclosing checkout $repo"; nested_source=1; break
+          fi
+          if [ -n "$tracked_parent" ]; then log "SKIP protected tracked-nested-source $repo"; nested_source=1; break; fi
+        fi
+        ;;
+      esac
+    done
+    [ "$nested_source" = 1 ] && continue
 
     # Root mtime is a cheap first gate; then inspect source-file mtimes because
     # directory mtimes do not advance when nested files are edited.
@@ -608,6 +623,11 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     [ -n "$head" ] || {
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue;
     }
+    head_file=$(git -C "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || head_file=""
+    head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0
+    if [ "$head_stamp" -eq 0 ] || [ "$((NOW - head_stamp))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; then
+      log "SKIP recent-or-unverified-git-head $repo"; continue
+    fi
     if [ -n "$branch" ] && ! git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP branch-unverified $repo"; continue
     fi
@@ -658,6 +678,10 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         current_head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || current_head=""
         if [ "$current_head" != "$head" ] || ! rmd_workspace_published "$repo" head 1; then
           log "SKIP ref-changed-or-not-proven-published-before-remove $repo"; continue
+        fi
+        head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0
+        if [ "$head_stamp" -eq 0 ] || [ "$(( $(date +%s) - head_stamp ))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; then
+          log "SKIP recent-or-unverified-git-head-before-remove $repo"; continue
         fi
         removed_link_paths=()
         removed_link_targets=()

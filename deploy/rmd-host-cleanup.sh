@@ -409,6 +409,11 @@ worktree_clean() {
   status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain 2>/dev/null)" || return 2
   [ -z "$status" ]
 }
+git_head_idle() {
+  local repo="$1" head_file
+  head_file=$(rgit "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || return 2
+  is_idle "$head_file"
+}
 worktree_ignored_safe() {
   local status unknown tree found
   status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
@@ -472,6 +477,7 @@ sweep_worktree() {
     else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
   if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
+  if [ "$orphaned" = 0 ] && ! git_head_idle "$wt"; then log "KEEP $wt: recent or unverified Git HEAD activity"; return; fi
   is_worktree_idle "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -520,7 +526,7 @@ sweep_worktree() {
   if [ "$DRY_RUN" != 1 ]; then
     snapshot_open; snapshot_docker
     if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" ||
-       ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" ||
+       ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" || ! git_head_idle "$wt" ||
        [ "$(rgit "$wt" rev-parse HEAD 2>/dev/null)" != "$head" ] || ! worktree_saved "$wt" 1; then
       log "KEEP $wt: changed, active or not-proven-published before remove"; return
     fi
@@ -629,6 +635,7 @@ scratch_repo_check() {
     SCRATCH_REASON="Git metadata is unreadable or missing"; return 1
   fi
   if [ -f "$gitdir/locked" ]; then SCRATCH_REASON="Git worktree is locked"; return 1; fi
+  if ! git_head_idle "$repo"; then SCRATCH_REASON="recent or unverified Git HEAD activity"; return 1; fi
   worktree_clean "$repo"; status=$?
   if [ "$status" != 0 ]; then
     if [ "$status" = 1 ]; then SCRATCH_REASON="uncommitted changes"
@@ -678,15 +685,17 @@ archive_scratch_bundle() {
 PRUNED_COUNT=0
 PRUNED_BYTES=0
 keep_scratch_for_repo() {
-  local p="$1" reason="$2" entries="$3" entry repo name tree found tracked bytes
+  local p="$1" reason="$2" entries="$3" entry repo name tree found tracked bytes scope
   log "KEEP $p: $reason"
   case "$reason" in
-    *not-proven-published*|*publication-unverified*|*Git\ metadata*|*Git\ status\ failed*|*locked*|*lends*|*borrow*) return ;;
+    *not-proven-published*|*publication-unverified*|*Git\ metadata*|*Git\ status\ failed*|*Git\ HEAD\ activity*|*locked*|*lends*|*borrow*) return ;;
   esac
   while IFS= read -r entry; do
     case "$entry" in */.git) repo="${entry%/.git}" ;; *) continue ;; esac
     case "${repo#"$p"}/" in */node_modules/*|*/coverage/*) continue ;; esac
     [ -d "$repo" ] && [ ! -L "$repo" ] && [ ! -L "$entry" ] || continue
+    scope="head"; [ -d "$repo/.git" ] && scope="all"
+    if ! rmd_workspace_published "$repo" "$scope"; then log "KEEP $repo: $RMD_PUB_REASON; caches retained too"; continue; fi
     for name in node_modules coverage; do
       tree="$repo/$name"
       [ -e "$tree" ] || [ -L "$tree" ] || continue
@@ -699,6 +708,10 @@ keep_scratch_for_repo() {
         log "KEEP $tree: content scan failed (unknown)"; continue
       fi
       if [ -n "$found" ]; then log "KEEP $tree: holds a bundle or repository ($found)"; continue; fi
+      if [ "$DRY_RUN" != 1 ]; then snapshot_open; snapshot_docker; fi
+      if ! is_idle "$tree" || is_open "$tree" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$tree"; then
+        log "KEEP $tree: recent, active or unverified cache"; continue
+      fi
       bytes="$(du -sk -- "$tree" 2>/dev/null | awk '{print $1 * 1024}')"
       log "PRUNE $tree: ${bytes:-unknown} bytes, unit kept for $reason"
       if act rm -rf -- "$tree"; then

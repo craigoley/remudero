@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
@@ -18,6 +18,15 @@ export function age(path: string, hours = 13): void {
   if (!st) return;
   if (st.isDirectory()) for (const e of readdirSync(path)) age(join(path, e), hours);
   utimesSync(path, t, t);
+  // A linked worktree's HEAD lives outside its payload directory. Backdate
+  // that fixture metadata too, but never touch a path outside this fixture.
+  const marker = join(path, ".git");
+  const fixtureRoot = path.match(/^(.*\/rmd-janitor-[^/]+)(?:\/|$)/)?.[1];
+  if (st.isDirectory() && fixtureRoot && existsSync(marker) && statSync(marker).isFile()) {
+    const raw = readFileSync(marker, "utf8").trim();
+    const head = join(raw.slice("gitdir: ".length), "HEAD");
+    if (raw.startsWith("gitdir: /") && existsSync(head) && realpathSync(head).startsWith(realpathSync(fixtureRoot) + "/")) utimesSync(head, t, t);
+  }
 }
 
 export interface Fixture {

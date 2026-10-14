@@ -13,7 +13,7 @@ rmd_retirement_git() {
   local repo="$1" top
   shift
   top=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || return 128
-  GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$top" -C "$repo" "$@"
+  GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$top" -C "$repo" "$@"
 }
 rmd_publication_snapshot() {
   local repo="$1" refresh="${2:-0}" url rows i

@@ -88,6 +88,9 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
   try {
     macProbes(fx);
     const { main } = repos(fx);
+    mkdirSync(join(fx.home, "Remudero"));
+    const operator = join(fx.home, "Remudero/remudero");
+    git(fx.root, "clone", join(fx.root, "origin.git"), operator);
     const roots = [join(fx.home, "Remudero"), join(fx.home, "Remudero/remudero/.session-scratch"), join(fx.home, "rmd-work")];
     const removed: string[] = [];
     for (const [i, root] of roots.entries()) {
@@ -115,14 +118,20 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     age(join(nestedRecent, "README"), 1);
     const held = join(roots[2], "held");
     git(main, "worktree", "add", "-b", "held", held, "main"); age(held, 7);
-    writeFileSync(fx.lsofList, `${realpathSync(held)}\n`);
+    // An ordinary shell in the canonical operator checkout must not hold
+    // every unrelated nested worktree. The specific held child still stays.
+    writeFileSync(fx.lsofList, `${realpathSync(held)}\n${realpathSync(operator)}\n`);
+    const tracked = join(operator, "tracked-gitlink");
+    git(main, "worktree", "add", "-b", "tracked-child", tracked, "main");
+    git(operator, "add", "tracked-gitlink"); git(operator, "commit", "-m", "tracked nested source"); age(tracked, 7);
     const orphan = join(roots[2], "broken"); mkdirSync(orphan);
     writeFileSync(join(orphan, ".git"), "gitdir: /missing/.git/worktrees/only-work\n"); age(orphan, 7);
     const unknown = join(roots[2], "data"); mkdirSync(unknown); writeFileSync(join(unknown, "important"), "keep"); age(unknown, 7);
     const r = mac(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     for (const wt of removed) assert.equal(existsSync(wt), false, r.stdout);
-    for (const wt of [privateWt, dirty, young, nestedRecent, held, orphan, unknown, join(fx.home, "Remudero/remudero")]) assert.equal(existsSync(wt), true, r.stdout);
+    for (const wt of [privateWt, dirty, young, nestedRecent, held, orphan, unknown, operator, tracked]) assert.equal(existsSync(wt), true, r.stdout);
+    assert.match(r.stdout, /protected tracked-nested-source/);
     assert.match(r.stdout, /not-proven-published/);
     assert.match(r.stdout, /unknown-directory/);
     const report = readFileSync(join(fx.home, ".local/state/remudero/janitor-decisions.tsv"), "utf8");
@@ -169,7 +178,25 @@ test("Linux janitor protects recent real ctime even when the entire payload mtim
     const r = run(fx, { RMD_CLEANUP_FIND: "find" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(wt), true, r.stdout);
-    assert.match(r.stdout, /written within 360 min/);
+    assert.match(r.stdout, /written within 360 min|recent or unverified Git HEAD activity/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a metadata-only branch checkout protects an old workspace without treating every Git fetch as activity", () => {
+  const fx = fixture();
+  try {
+    macProbes(fx);
+    const { main } = repos(fx);
+    const root = join(fx.home, "rmd-work"); mkdirSync(root);
+    const wt = join(root, "branch-switched");
+    git(main, "worktree", "add", "-b", "old", wt, "main"); age(wt, 7);
+    git(wt, "checkout", "-b", "new-session");
+    const r = mac(fx);
+    assert.equal(r.status, 0, r.stderr + r.stdout); assert.equal(existsSync(wt), true);
+    assert.match(r.stdout, /recent-or-unverified-git-head/);
+    const linux = run(fx, { RMD_CLEANUP_WORKTREE_ROOTS: root });
+    assert.equal(linux.status, 0, linux.stderr + linux.stdout); assert.equal(existsSync(wt), true);
+    assert.match(linux.stdout, /recent or unverified Git HEAD activity/);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 

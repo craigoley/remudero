@@ -17,6 +17,11 @@ A linked workspace retires through Git only when it is clean, unlocked, owned by
 the running account, unused by processes/CWD/open files, and every payload entry
 has at least six hours of mtime **and ctime** inactivity. Git administrative
 metadata is excluded. Dependency/coverage directories count as activity too.
+The Git HEAD file is checked separately so a metadata-only branch switch is
+protected without letting routine fetch/status refreshes hold a tree forever.
+A shell in the operator checkout does not hold every nested disposable worktree;
+specific job-parent/child CWDs still do. Git-tracked nested directories and
+submodule/gitlink sources are never retired.
 
 Fresh `git ls-remote` advertisements establish recoverability. Current heads/tags
 can prove ancestry when their commit objects are available locally; PR head refs
