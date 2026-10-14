@@ -1,0 +1,95 @@
+- id: W1-T9435
+  title: Selected instance registry bindings are explicit, immutable and compatibility bounded
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: operator#2026-10-14-public-private-ops-compatibility
+  plan_refs: [W1-T4227, W1-T4265, W1-T4266, W1-T7727, W1-T9410]
+  files: [src/lib/instance-registry-selection.ts, test/one-registry-for-the-fleet.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    At main c3753e8f86581f5e0b7d4da5e05a8b2941c70481, daemonInstanceRegistryPath
+    derives a repository-layout path, while shell lifecycle readers independently
+    accept RMD_INSTANCE_REGISTRY. instanceMode preserves legacy live behavior on
+    undefined/malformed text. That legacy behavior must not be mistaken for a safe
+    fallback after an explicit private registry selection fails. The TypeScript
+    identity parser accepts mode while the shell installer/recycler do not yet
+    accept that field. Moving operational values or swapping a shared file now
+    would therefore not establish an authoritative mixed-version contract.
+    Fresh complete seven-open-head and main corpora have an exact W4227 title
+    control and the existing registry test at every head. The planned selection
+    module/document are explicitly absent; the inspected plan subject blobs and
+    actual merge-base diffs have no new selected-binding implementation. W9410's
+    recycler repair is separately claimed and remains outside this task. This
+    first package supplies a composable public read/binding contract only; later
+    consumer wiring, lifecycle grammar and private promotion require their own
+    governed scope and current evidence. It does not certify a completed split.
+  design: |
+    1. Add a small typed contract in instance-registry-selection.ts using the
+       existing identity parser. Resolve explicit CLI selection first, then
+       RMD_INSTANCE_REGISTRY, then an explicitly configured path; only genuinely
+       absent selection chooses the caller-supplied legacy path. An explicit
+       empty/invalid/relative path is a named refusal, never absence. Distinguish
+       absolute host/container paths from repository-relative writer paths; this
+       package does not implement a writer or infer private publication permission.
+    2. Provide a bounded asynchronous read on regular files, with explicit size,
+       read/cancellation and content-integrity outcomes. Read/hash/parse the same
+       bytes; do not treat a pre-read stat as a sufficient size bound, or a timeout
+       as cancellation of all operating-system work. Use a narrow reusable IO port
+       and a real default, not a synchronous daemon adapter or scanner. Selected
+       missing/unreadable/malformed/oversized/incompatible/digest-mismatched input
+       returns unknown/refused for that binding without reading a healthy legacy
+       fallback. Legacy absence remains explicit so later callers preserve their
+       documented defaults without the new contract granting live authority.
+    3. Successful reads create immutable copied identity/binding data with content
+       digest, selected-source provenance and explicit supported capabilities.
+       Pin the chosen bytes for a run; mutation or later file replacement must not
+       silently retarget it. A subsequent recheck detects changed bytes. Define
+       a tested current/next compatibility window, and refuse unsupported required
+       capabilities before use. Do not put a new root version field into existing
+       YAML, silently drop safety fields, or claim unmodified shell readers already
+       accept the new contract. Keep raw operational text and private paths out of
+       the public projection and diagnostics; expose no credential contents.
+    4. Extend the existing registry test file with behavioral old-input/new-reader,
+       explicit-selection precedence, real filesystem defaults and each refusal/
+       catch. Include a valid legacy-file trap beside failed explicit selection,
+       bounded allocation/nonregular-file controls, changed revisions/digests,
+       immutable snapshots, unsupported capabilities and independent identity
+       fixtures. Delete the actual selection/binding fix and observe failures,
+       then restore exactly and pass. Prove existing parser/projection behavior
+       remains compatible; selected unknown never means trusted or permission.
+    5. Document expand readers -> stage immutable data -> migrate one instance ->
+       retire old consumers -> remove active public values. State WORKERS CONTINUE,
+       DRAIN ONE INSTANCE, PAUSE FLEET NEW ADMISSION and FULL AFFECTED WRITER STOP
+       distinctly, with exact-target human approval and rollback requirements.
+       A pause is not zero writers; existing owner holds and current-effect checks
+       remain authoritative. Update only the generated docs index for this document.
+       Do not wire production consumers, move values, change legacy instance modes,
+       activate admission, stop workers, create schedules, alter claims/locks/state
+       formats, waive gates or rebuild W9410. All new admission behavior remains
+       opt-in SHADOW ONLY; full public Apache functionality and owner/admin override
+       remain intact. Later out-of-scope wiring requires a normally merged scope.
+    6. Commit before mapped coverage and instrument every changed source SF. Use
+       verified paths and shipped host admission; prove real defaults and every
+       catch. Run one native author per distinct committed tree, reproduce every
+       new failure on its actual unchanged pinned base and retain unknown causes.
+       Native, hosted checks, normal source merge, deployment and live assurance
+       remain distinct. No unchanged failing retry, baseline widening or exemption.
+  acceptance:
+    - claim: Explicit selection precedence never falls back after a selected failure
+      proof: 'unit test: selected registry precedence never falls back after explicit failure'
+    - claim: The real selected reader bounds input and preserves unknown integrity outcomes
+      proof: 'unit test: selected registry real reads bound input and name integrity failures'
+    - claim: Successful bindings are immutable while later revisions are detected
+      proof: 'unit test: selected registry bindings retain immutable identities across revision changes'
+    - claim: Legacy inputs and unsupported future requirements have distinct compatible outcomes
+      proof: 'unit test: selected registry compatibility preserves legacy input and refuses unsupported capabilities'
+    - claim: Public projections expose no private path or publication permission
+      proof: 'unit test: selected registry public projection grants no private publication permission'
