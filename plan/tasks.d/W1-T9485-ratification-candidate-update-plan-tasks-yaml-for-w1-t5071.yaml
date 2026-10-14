@@ -1,0 +1,23 @@
+- id: W1-T9485
+  title: "Ratification candidate: update plan/tasks.yaml for W1-T5071"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-14 proposal on proof-debt:W1-T5071, ratified via rmd approve:
+  
+    Cross-file invariant requires both plan/tasks.yaml and MASTER-PLAN.md to be updated together
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: "plan/tasks.yaml carries a ratification-candidate entry for W1-T5071, absent from the merge base, that MASTER-PLAN.md also names"
+      proof: 'grep: ratification-candidate: W1-T5071 in plan/tasks.yaml'
+    - claim: "MASTER-PLAN.md records the same W1-T5071 ratification candidate so the two files stay consistent"
+      proof: 'grep: ratification-candidate: W1-T5071 in MASTER-PLAN.md'
+  origin: "architect"
