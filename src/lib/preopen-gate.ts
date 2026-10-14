@@ -13,8 +13,9 @@
  * minutes per build and already run under CI; the fast gate is the set a build can satisfy alone.
  */
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { preflightSummaryPath } from "./ci-parity.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -36,9 +37,24 @@ export interface PreopenGateOptions {
   clock?: Clock;
 }
 
-function defaultRunGate(cwd: string): Promise<{ exitCode: number | null; error?: string }> {
+/** The harness's own `bin/rmd` (the checkout this module runs from) — what gates a worktree with no `bin/rmd` of its own. */
+export const HARNESS_RMD = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+
+/**
+ * W1-T8920 — the command that runs the fast gate for `cwd`. A worktree holding its own `bin/rmd` (the
+ * harness's repo) spawns it, as always; a consumer worktree has none, so the harness's rmd is run with
+ * `--repo-root <cwd>` instead of the spawn failing ENOENT and the build going unmeasured.
+ */
+export function preopenGateCommand(cwd: string, harnessRmd: string = HARNESS_RMD): { file: string; args: string[] } {
+  const own = join(cwd, "bin", "rmd");
+  if (existsSync(own)) return { file: own, args: ["preflight", "--fast"] };
+  return { file: harnessRmd, args: ["preflight", "--fast", "--repo-root", cwd] };
+}
+
+export function defaultRunGate(cwd: string, harnessRmd: string = HARNESS_RMD): Promise<{ exitCode: number | null; error?: string }> {
+  const { file, args } = preopenGateCommand(cwd, harnessRmd);
   return new Promise((resolve) => {
-    execFile(join(cwd, "bin", "rmd"), ["preflight", "--fast"], { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS, maxBuffer: 64 * 1024 * 1024 },
+    execFile(file, args, { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS, maxBuffer: 64 * 1024 * 1024 },
       (error, _stdout, _stderr) => {
         if (!error) return resolve({ exitCode: 0 });
         const code = typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : null;

@@ -10,7 +10,7 @@ import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
+import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -3871,14 +3871,16 @@ export function approveBatchCommitMessage(payloads: readonly RatificationPayload
 }
 
 // ── Draft placeholder ids -> concrete ids AT APPROVE TIME (lib/task-id.ts is the derivation) ──
-//
-// {@link inboxDraftPrompt} hands the worker NO real id — it emits `NEW-<n>` placeholders, never W1-T shaped, so a
-// cached draft can never pin a concrete id. {@link materializeDraftTaskIds} mints and RESERVES the real ids and
-// rewrites every placeholder before anything is written.
+// {@link inboxDraftPrompt} hands the worker NO real id, only `NEW-…` placeholders; {@link materializeDraftTaskIds}
+// mints and RESERVES the real ids and rewrites every placeholder before anything is written.
 
-/** The placeholder shape drafting workers emit: `NEW-1`, `NEW-2`, … in fragment order. Deliberately never
- *  `W1-T`-shaped, so it can never be mistaken for or collide with a real filed id. */
-const DRAFT_PLACEHOLDER_DECL_RE = /^\s*(?:-\s*)?id:\s*["']?(NEW-\d+)/gm;
+/** A drafted placeholder, never `W1-T`-shaped: the WHOLE `NEW-<letters/digits>` token, case-sensitive (NEW-1 ≠ NEW-1A ≠
+ *  NEW-1a). Reading NEW-1 out of NEW-1A minted nothing for it and leaked two unminted ids (#11378, W1-T9292). */
+const DRAFT_PLACEHOLDER_TOKEN = "NEW-[A-Za-z0-9]+";
+const DRAFT_PLACEHOLDER_DECL_RE = new RegExp(`^\\s*(?:-\\s*)?id:\\s*["']?(${DRAFT_PLACEHOLDER_TOKEN})(?![A-Za-z0-9])`, "gm");
+export const DRAFT_PLACEHOLDER_IN_TEXT_RE = new RegExp(`\\b${DRAFT_PLACEHOLDER_TOKEN}(?![A-Za-z0-9])`);
+const placeholderTokensIn = (text: string): string[] =>
+  [...text.matchAll(new RegExp(DRAFT_PLACEHOLDER_IN_TEXT_RE.source, "g"))].map((m) => m[0]);
 
 /** A fragment's placeholder ids in first-DECLARATION order (the `- id:` key, never a stray `depends_on`). Empty means
  *  nothing to materialize, never an error. */
@@ -3894,14 +3896,38 @@ export function draftPlaceholderIds(fragmentYaml: string): string[] {
   return out;
 }
 
-/** Replace every mapped placeholder — a declaration or a reference — with its real id. Word-boundary-safe, so `NEW-1`
- *  never eats into `NEW-10`: a digit run has no `\b` before it. */
+/** Replace every mapped placeholder — a declaration or a reference — with its real id. WHOLE TOKENS ONLY: `NEW-1`
+ *  never eats into `NEW-10`, `NEW-1A` or `NEW-1a`, since a placeholder is never followed by a letter or digit. */
 export function substitutePlaceholderIds(text: string, mapping: ReadonlyMap<string, string>): string {
   let out = text;
   for (const [placeholder, real] of mapping) {
-    out = out.replace(new RegExp(`\\b${placeholder}\\b`, "g"), real);
+    out = out.replace(new RegExp(`\\b${placeholder}(?![A-Za-z0-9])`, "g"), real);
   }
   return out;
+}
+
+/** W1-T9292: what would land unminted — a declared id neither minted nor `pending`, an undeclared placeholder in a
+ *  depends_on or the stamp. Run before minting (a refusal reserves nothing) and again after substitution. */
+function unmintedDraftResidue(fragmentYaml: string, stampLine: string, pending: ReadonlySet<string>): string[] {
+  const out = new Set<string>();
+  let records: unknown;
+  try {
+    records = parseYaml(fragmentYaml);
+  } catch (e) {
+    // Unparseable: what it declares cannot be known, so it is refused, never read as an empty fragment.
+    return [`the fragment does not parse as YAML (${String((e as Error)?.message ?? e).split("\n")[0]})`];
+  }
+  if (records !== null && records !== undefined && !Array.isArray(records)) return ["the fragment is not a YAML list of tasks"];
+  for (const r of (records as unknown[] | null) ?? []) {
+    const { id, depends_on: deps } = (r !== null && typeof r === "object" ? r : {}) as { id?: unknown; depends_on?: unknown };
+    const declared = String(id ?? "");
+    if (!MINTED_TASK_ID_RE.test(declared) && !pending.has(declared)) out.add(`id ${JSON.stringify(declared)}`);
+    for (const dep of Array.isArray(deps) ? deps : deps === undefined || deps === null ? [] : [deps]) {
+      for (const ref of placeholderTokensIn(String(dep))) if (!pending.has(ref)) out.add(`depends_on ${ref}`);
+    }
+  }
+  for (const token of placeholderTokensIn(stampLine)) if (!pending.has(token)) out.add(`stamp ${token}`);
+  return [...out];
 }
 
 /** What {@link materializeDraftTaskIds} needs FROM its caller, I/O-injected so its decision logic stays pure — the
@@ -3919,15 +3945,18 @@ export type DraftTaskIdMaterialization =
   | { ok: true; fragmentYaml: string; stampLine: string; ids: string[] }
   | { ok: false; reason: string };
 
-/** Materialize `NEW-<n>` placeholders into concrete, RESERVED `W1-Tnnn` ids. DEGRADE HONESTLY, NEVER GUESS — a
- *  degraded mint, or a reservation failing for anything but contention, REFUSES rather than falling back to an
- *  unreserved id, and the caller must treat `{ ok: false }` as "write nothing, open no PR": a duplicate id on main
- *  breaks `loadPlan`. */
+/** Materialize `NEW-…` placeholders into concrete, RESERVED `W1-Tnnn` ids. DEGRADE HONESTLY, NEVER GUESS: a degraded
+ *  mint, a reservation failing for anything but contention, or an id that would land unminted (W1-T9292, #11402)
+ *  REFUSES, and the caller must treat `{ ok: false }` as "write nothing, open no PR" (it releases what was reserved). */
 export function materializeDraftTaskIds(
   payload: { fragmentYaml: string; stampLine: string },
   deps: DraftTaskIdMintDeps,
 ): DraftTaskIdMaterialization {
   const placeholders = draftPlaceholderIds(payload.fragmentYaml);
+  const unminted = unmintedDraftResidue(payload.fragmentYaml, payload.stampLine, new Set(placeholders));
+  if (unminted.length > 0) {
+    return { ok: false, reason: `the draft would land an unminted task id — refusing: ${unminted.join("; ")}` };
+  }
   if (placeholders.length === 0) {
     return { ok: true, fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine, ids: [] };
   }
@@ -3946,12 +3975,13 @@ export function materializeDraftTaskIds(
   }
 
   const mapping = new Map<string, string>(placeholders.map((placeholder, i) => [placeholder, `W1-T${block.ids[i]}`]));
-  return {
-    ok: true,
-    fragmentYaml: substitutePlaceholderIds(payload.fragmentYaml, mapping),
-    stampLine: substitutePlaceholderIds(payload.stampLine, mapping),
-    ids: [...mapping.values()],
-  };
+  const fragmentYaml = substitutePlaceholderIds(payload.fragmentYaml, mapping);
+  const stampLine = substitutePlaceholderIds(payload.stampLine, mapping);
+  const residue = unmintedDraftResidue(fragmentYaml, stampLine, new Set());
+  if (residue.length > 0) {
+    return { ok: false, reason: `an unminted task id survived materialization — refusing: ${residue.join("; ")}` };
+  }
+  return { ok: true, fragmentYaml, stampLine, ids: [...mapping.values()] };
 }
 
 // ── rmd reframe — feedback redrafts through the ledger (MASTER-PLAN P25 iii, W1-T111) ────

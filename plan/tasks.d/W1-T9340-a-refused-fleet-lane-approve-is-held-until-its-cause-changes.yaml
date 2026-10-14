@@ -1,0 +1,123 @@
+- id: W1-T9340
+  title: "A REFUSED FLEET-LANE APPROVE IS HELD UNTIL ITS CAUSE CHANGES, NOT FOR A DAY — triageFleetLaneSteps holds every finding whose `file` hand-off ended in a refusal for a fixed 24 h (`withinDay`, DAY_MS), so at 23:15Z on 2026-10-13, 36 findings serve classifies ready sat held, 18 of them on a worktree race, a stale base, a fetch failure or a draft-lint refusal that a retry or a re-draft clears"
+  repo: remudero
+  depends_on: [W1-T9324]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what releases a refused hand-off; it spans the lane's hold (fleet-lane.ts), the cached-draft re-lint it reuses (inbox-replay.ts) and the main-history dep the daemon wires (run-task.ts)
+  band_meaning: span
+  origin: "operator session 2026-10-13 (~23:15Z): clean ready proposals held a day after approves refused by since-fixed races and preflight refusals"
+  plan_refs: [W1-T4089, W1-T9065, W1-T9324, W1-T9041, W1-T9039, W1-T9153, W1-T9161]
+  files:
+    - src/lib/fleet-lane.ts
+    - src/lib/inbox-replay.ts
+    - src/run-task.ts
+    - test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts
+  status: queued
+  priority: 2  # P2: findings still file, a day late; the fleet lane is not stalled
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 ~23:15Z on host remudero, read-only and niced, copied to the Mac: the core daemon's
+    state/fleet-lane-decisions.json (736 entries), state/inbox-classified.json (generated 23:15:15Z, 1,208 states) and the
+    ledger union rows `ratify.approved`, `ratify.approve_refused`, `approve.error`, `ratify.handoff_failed` from the 27
+    archives named 2026-10-12T2x and 2026-10-13 plus the live file (control: 60 `ratify.approved` rows read, and 11
+    held `file` decisions joined to one).
+    THE HOLD, read on origin/main 832014ce1 (symbols, not lines). In `triageFleetLaneSteps` (src/lib/fleet-lane.ts),
+    `decidedIds` holds every finding whose store entry is a `merge`, or a `file` decision `withinDay(d.ts)` that
+    `releasedHandoffs` did not free. W1-T9065 (#11332) frees only a hand-off that left NO outcome row; its shard keeps
+    "today's behaviour" for one that did. The code comment reads "A file is retried after a day if the finding is
+    still open". So any refusal, whatever its cause, holds the finding exactly 24 h from the decision.
+    WHAT IT HELD. 151 `file` decisions sat inside the day. Joined to their first outcome row after the decision, the 36
+    whose proposal serve now classifies `ready` were refused by:
+      - an approve worktree race, 9: `git worktree add -b run-APPROVE-...` collisions and "its run lock is held by live
+        pid" (burnRatePredicate 14:57:55Z, managedReposPath 15:02:03Z, proof-debt:W1-T4069 16:18:54Z,
+        followup:DAEMON-1789131530223 14:10:37Z, ...), and 1 "worktree base ... is BEHIND main's remote head".
+        W1-T9153 (#11392) and W1-T9161 (#11420) since changed the approve's worktree handling;
+      - the plan-PR push preflight or the approve's own draft check, 7 (DAEMON-1789594936651 [sizing]+[shard-census]
+        23:06:33Z, DAEMON-1790255312892 14:38:34Z and DAEMON-1790206008025 [blocked-task-disposition],
+        DAEMON-1790001204828, proof-debt:W1-T6266, DAEMON-1790264754758 [draft-undispatched-type], W1-T4529
+        [task-id-existence]);
+      - a `ratify.handoff_failed` fetch failure, 1 (DAEMON-1789582136457 23:05:02Z);
+      - a duplicate refusal (`duplicate_of`), 5, and a skill draft staged without its file, 3, which a day's wait does
+        not change;
+      - no outcome row in the union read, 10, all decided 23:15Z to 05:26Z, before #11332 deployed.
+    The pace was not the limit: W1-T9324 counts 167 `file` decisions in the day against 272 first-parent merges.
+    THE DAY IS WRONG BOTH WAYS. A race clears on the next pass, so the finding waits ~24 h for nothing; a duplicate
+    or a missing skill file does not clear by waiting, so it is re-approved and refused again every day. Both break
+    the operator's no-fixed-thresholds rule.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for "withinDay", "day hold", "fleet lane ... hold" and
+    "approve_refused ... not_ready" (control: W1-T9324 hits every pattern but the first) and the plan/ and
+    src/lib/fleet-lane.ts diffs of all 353 origin heads (control: plan-file-1791931696156 hits; run-W1-T9282 touches
+    fleet-lane.ts only for attention-evidence types). W1-T9324 §2 releases the hold ONLY for a band-replay proposal
+    whose re-offer post-dates the decision; this task generalizes the release to every refused hand-off, so it
+    depends on W1-T9324 (same pass, same file) and keeps its test green.
+  design: |
+    No timer and no new constant. A refused hand-off is held by a record of its refusal, and freed by evidence that
+    the refusal's cause changed. The pace (`mergedLastDay` minus filed) and one hand-off a pass are unchanged.
+    1. RECORD THE REFUSAL. When `settleHandoffs` settles a `file` hand-off on an outcome row other than
+       `ratify.approved`, store on the entry `refusal: { step, signature, sha, draftKey, count }`:
+       - `signature`, a class read from the row: `duplicate:<duplicate_of>`; `lint:<checks>` for a
+         `ratify.approve_refused` naming `[lint_clean]` or an `approve.error` "plan-PR preflight refused" naming
+         `[<check>]`s (sorted check names); `skill-file` for a skill draft staged without its file; `transient`
+         for a worktree race, a held run lock, a stale base, a fetch failure, `ratify.handoff_failed` and
+         `self_sync.refused`; otherwise `other:<sha256 of the error text with shas, pids, paths and digits blanked>`;
+       - `sha`, the tree the approve ran at (the `sha` of its `ratify.cli_started`/`ratify.cli_exited` gateway row),
+         else `originMainSha()` at settle;
+       - `draftKey`, a digest of the cached draft's `fragmentYaml` and `stampLine` the decision was made on, recorded
+         by `decide` when it files;
+       - `count`, one more than the entry's prior refusal when its signature is equal, else 1.
+    2. RELEASE ON EVIDENCE. In `triageFleetLaneSteps`, replace the `withinDay(d.ts)` hold for a settled `file`
+       entry with a check that frees it when ANY of these holds, read each pass:
+       a. its cached draft's digest differs from `refusal.draftKey`: a re-draft, a W1-T9041 or W1-T9324 re-offer, or a
+          skill re-stage changed what an approve would file (this subsumes W1-T9324 §2's replay-only release);
+       b. `lint:` signature: re-linting the current cached draft in-process with the replay's `relintCached`
+          (exported from src/lib/inbox-replay.ts, no model call) reports none of the refused checks;
+       c. `duplicate:` signature: a first-parent commit since `refusal.sha` touched the named task's shard;
+       d. `transient` and `other:` signatures: origin/main has advanced past `refusal.sha` by at least `count`
+          first-parent commits. The backoff is the finding's own repeat count, learned from its refusal record: a
+          race retries on the next main move, and a deterministic failure mislabelled transient waits longer each
+          time it repeats at an unchanged cause.
+       `skill-file` frees only by (a). A main that cannot be read frees nothing (as `releasedHandoffs` does). A
+       `merge` entry, a pending hand-off and W1-T9065's unrecorded rule are untouched. An entry settled before this
+       change, with no `refusal`, is judged as `transient` with count 1 at an unknown sha, so it frees on the first
+       pass that reads main; the one-a-pass pace bounds that wave.
+    3. SAY WHY. Each release writes `fleet_lane.hold_released` with the proposal id, the signature, and the rule
+       (a to d) that freed it, so the next approve's outcome can be joined to the evidence that re-offered it.
+    The main-history read is a new optional dep, `mainSince(sha) => { commits: number; files: string[] }` (first-parent
+    count and touched paths since `sha`), wired in src/run-task.ts beside `originMainSha` with
+    `hostWorktreeGitAsync`; absent, rules c and d free nothing.
+    Tests go in the new file test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive `triageFleetLane` over a fixture state dir with a decision store, a
+    draft cache, a classification snapshot calling the findings ready, outcome rows in the ledger, and injected
+    `originMainSha` and `mainSince`, all inside one day of the decisions.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts"
+    - claim: "a refused hand-off is offered again within the day once its cached draft changes, and held while it does not"
+      proof: 'grep: test("W1-T9340: a refused hand-off is released when its draft changes" in test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts'
+    - claim: "a lint refusal is released when the re-lint of its cached draft no longer reports the refused checks"
+      proof: 'grep: test("W1-T9340: a lint refusal is released when the re-lint clears its checks" in test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts'
+    - claim: "a transient refusal frees once main advances by its repeat count, and a repeat at an unmoved main holds"
+      proof: 'grep: test("W1-T9340: a transient refusal backs off by its own repeat count" in test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts'
+    - claim: "a duplicate refusal holds across unrelated main moves and frees when the duplicate's shard changes"
+      proof: 'grep: test("W1-T9340: a duplicate refusal waits for its duplicate to change" in test/a-refused-fleet-lane-approve-is-held-until-its-cause-changes.test.ts'
+    - claim: "each release writes its reason row"
+      proof: 'grep: fleet_lane\.hold_released in src/lib/fleet-lane.ts'
+  falsifier: |
+    Keep `withinDay(d.ts) && !released.has(id)` as the hold for a settled `file` entry, and the race fixture refused
+    an hour ago stays held after main moves, as burnRatePredicate and managedReposPath were on 2026-10-13. Free every
+    refused entry on any main move instead of by signature, and the duplicate fixture is re-approved and refused
+    again each pass. Drop `count` from rule d, and a deterministic failure classed `transient` is re-approved on every
+    main move with no backoff.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union with no numeric pass mark: for findings
+    refused by a race or a preflight check, the time from the refusal to the next `fleet_lane.decided` reads the next
+    main move or re-draft, not ~24 h; `fleet_lane.hold_released` rows name a rule for every re-offer; and no
+    `duplicate:` or `skill-file` finding is re-approved without its draft or its duplicate changing. Healthy shape: no
+    finding classified ready sits behind a refusal whose signature's evidence has changed.
+    DROPPED BESIDE THIS: `ratify.approve_refused {state: not_ready}` for a NON-lint reason (deps, anchors, conflicts)
+    as a band-replay outcome. Over the whole ledger union (524 archives from 2026-08-08), all 33 not_ready refusals
+    (2026-09-23 to 2026-10-13T18:23Z) name only `[lint_clean]`, including W1-T216 15:41:52Z and DAEMON-1789296090167
+    18:15:32Z, which W1-T9324 §1 re-lints. No non-lint not_ready refusal has ever been written.

@@ -15,7 +15,7 @@
     - src/lib/fleet-lane.ts
     - src/run-task.ts
     - test/the-fleet-lanes-approve-runs-in-an-origin-main-tree.test.ts
-  status: queued
+  status: merged
   priority: 0.5  # urgent, operator session 2026-10-13: a silent outage — the fleet lane has filed no inbox proposal since 2026-10-08, and nothing in the ledger says why
   attempts: 0
   rationale: |

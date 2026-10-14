@@ -47,6 +47,9 @@ export const ROUTE_MATCH = {
   // The CLI verbs and the console routes decide and record through the SAME applyProposalVerdict.
   decline: "POST /v1/inbox/decline",
   restore: "POST /v1/inbox/restore",
+  // W1-T8831: console-only triage verbs; they have no CLI twin, so the rows are inert like `note` above until one lands.
+  archive: "POST /v1/inbox/archive",
+  snooze: "POST /v1/inbox/snooze",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",

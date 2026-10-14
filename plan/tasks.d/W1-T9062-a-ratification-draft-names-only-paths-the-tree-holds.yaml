@@ -9,7 +9,7 @@
   risk: high # the inbox draft floor and readiness (inbox.ts), the shared path-existence predicate (plan.ts) and the approve release branch (run-task.ts)
   band_meaning: span
   origin: "operator session 2026-10-13 (clear the inbox; lean into automation): inbox redraft review, ~/Remudero-notes/inbox-brief-2026-10-13/redrafts/"
-  plan_refs: [W1-T8828, W1-T8926, W1-T8950, W1-T8714, W1-T3216, W1-T5660, W1-T512]
+  plan_refs: [W1-T8828, W1-T8926, W1-T8950, W1-T8714, W1-T3216, W1-T5660, W1-T512, W1-T9307]
   files:
     - src/lib/inbox.ts
     - src/lib/plan.ts
@@ -20,7 +20,7 @@
     - test/an-operator-verdict-releases-a-parked-task.test.ts
     - test/inbox.test.ts
   status: queued
-  priority: 1 # operator-2026-10-13: every reframed proposal came back READY with invented paths, so no operator approval of a redraft is usable
+  priority: 0.915 # operator-2026-10-13: ranked after W1-T9252 and W1-T8776; every reframed proposal came back READY with invented paths, so no operator approval of a redraft is usable
   attempts: 0
   rationale: |
     OBSERVED 2026-10-13 (operator-delegated inbox clear). The operator's 11 reframes (`rmd reframe`, direction text
@@ -64,7 +64,8 @@
        reports, resolved against the same checkout the draft is linted in and origin/main. Allowed new paths: a test
        file under test/ named after the drafted task's slug, and a path the task's `design:` declares on a line
        `CREATES: <path>`. A dirty draft goes back through the existing bounded redraft with the message in hand; a draft
-       still dirty after the bound is cached NOT-READY with the message, never surfaced as READY.
+       still dirty after the bound is cached NOT-READY with the message, never surfaced as READY. A CREATES path is
+       new-file scope only: it never stands as the call site of a call-site proof (W1-T9307 enforces that).
     3. THE DRAFTER IS GROUNDED IN THE PARKED SHARD. For a proposal whose id names a parked task (`machine-judge:<id>`,
        `verify-human:<id>`, `verify-human-automate:<id>`), `inboxDraftPrompt` pastes that task's title, `files:` and
        acceptance, and says: every `files:` path must exist (confirm with Glob before listing it), a new file is either
@@ -73,6 +74,17 @@
        satisfies the proposal and every reframe round. If it does, the drafter emits the existing structured lifecycle
        action for a release (the READY item's lifecycle-action form) naming the task id, not new tasks. Approve of
        that item releases the shard through `approveParkedTask`.
+       AMENDED 2026-10-13 (inbox redraft review, apply-log 20:37-20:57Z): a prompt that asks is not enough on its own.
+       `lifecycleAction` on a READY item is a `SkillLifecycleAction` today, so no release form exists for the drafter
+       to emit. Give the draft a release shape the harness parses: the drafter prints `RELEASE: <taskId>` in place of
+       the FRAGMENT. The parser accepts it only when <taskId> is the task the proposal id names and that task is
+       parked in the plan. `classifyProposal` reports it READY with no fragment and no filed task, and approving it
+       calls `approveParkedTask(<taskId>)` and writes no shard. The drafter emits it whenever the reframe rounds do not
+       ask for different work. OBSERVED: machine-judge:W1-T7736 was redrafted as two invented tasks
+       (scripts/merge-queue-canary.mjs, `grep: "rehearsal succeeded" in placeholder.log`, and a NEW-2 that enables
+       ruleset 24525891 against the 10-09 operator ruling). The faithful answer was to release the existing
+       verify: human shard. verify-human:W1-T216 and verify-human:W1-T204 were rewritten from scratch around invented
+       src/ci-pipeline.ts / `runForgeAttack(` and a CODEOWNERS edit that is already on main (#6610).
     5. THE RELEASE PATH RUNS IN THE CONTAINER. `approveCommand`'s task-id branch loads the plan from `repoRoot`, like
        its proposal branch, so `rmd approve <taskId>` works wherever `rmd approve <proposalId>` does.
     Tests go in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts with the titles below verbatim.
@@ -83,11 +95,14 @@
       proof: 'grep: test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
     - claim: "a parked-task proposal's draft prompt carries that shard's files and offers releasing it"
       proof: 'grep: test("W1-T9062: a parked-task proposal prompt shows the shard files and offers the release" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
+    - claim: "a release draft for a parked-task proposal files no new task, and approving it releases that shard through approveParkedTask"
+      proof: 'grep: test("W1-T9062: a release draft of a parked shard files no new task and approve releases it" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
     - claim: "rmd approve of a parked task id loads the plan from the repo, not the config root"
       proof: 'grep: test("W1-T9062: approve of a parked task id reads the plan from the repo root" in test/a-ratification-draft-names-only-paths-the-tree-holds.test.ts'
   falsifier: |
     Keep `blockingLintMessages` without an existence fact and the first test fails: a fragment declaring
     src/lib/fixWorker.ts in a fixture tree without it classifies READY. Allow every missing path and the first test
     still passes only by accident of the fixture, so the second test pins the allowed shapes both ways. Drop the parked
-    shard from the prompt and the third fails on its expected `files:` line. Keep `config.root` in the release branch
+    shard from the prompt and the third fails on its expected `files:` line. Parse no `RELEASE:` shape, or let it
+    write a shard, and the release test fails on its READY item or its shard count. Keep `config.root` in the release branch
     and the fourth fails with ENOENT on a fixture whose config root holds no plan/.

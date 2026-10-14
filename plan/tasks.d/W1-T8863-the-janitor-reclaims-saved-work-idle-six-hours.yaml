@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: the janitor cleans up anything older than six hours and untouched, without removing what we want kept or killing work in progress; no VM resize"
   plan_refs: [W1-T4770, W1-T8861, W1-T5707]
   files: [deploy/rmd-host-cleanup.sh, deploy/mac/tmp-reclaim.sh, deploy/install-host-units.sh, test/the-janitor-reclaims-saved-work-idle-six-hours.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

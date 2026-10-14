@@ -16,7 +16,7 @@
     - test/dispatch-is-not-held-behind-the-boot-cadence-gate.test.ts
     # W1-T5720's test asserts the boot's review ADMISSION precedes dispatch and each cadence; admission still precedes, but its fixture may need the review pass held open
     - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

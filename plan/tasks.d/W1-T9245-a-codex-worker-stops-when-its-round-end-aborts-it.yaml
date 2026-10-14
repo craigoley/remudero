@@ -14,7 +14,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/a-codex-worker-stops-when-its-round-end-aborts-it.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

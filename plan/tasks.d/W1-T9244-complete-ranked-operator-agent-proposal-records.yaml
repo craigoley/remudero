@@ -11,7 +11,7 @@
   band_meaning: span
   origin: operator#2026-10-13-console-agent-proposal-detail-followups
   plan_refs: [W1-T3977, W1-T4001, W1-T4555, CONSOLE-T100]
-  files: [src/lib/agent-view.ts, src/lib/nav-badge-view.ts, test/agent-view.test.ts, test/nav-badge-from-the-read-model.test.ts, test/the-nav-badge-is-one-small-view-read.test.ts, test/read-model-worker.test.ts, openapi/daemon.yaml, docs/views.md, packages/api-client/src/schema.d.ts]
+  files: [src/lib/agent-view.ts, src/lib/nav-badge-view.ts, test/agent-view.test.ts, test/nav-badge-from-the-read-model.test.ts, test/the-nav-badge-is-one-small-view-read.test.ts, test/read-model-worker.test.ts, openapi/daemon.yaml, docs/views.md, packages/api-client/src/schema.d.ts, src/lib/view-shadow.ts, src/lib/read-model-worker.ts, src/lib/views.ts, test/view-shadow.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -96,6 +96,10 @@
     Merge, runtime adoption, native parity readiness and console consumption are separate
     receipts. Filing this task is not implementation, adoption or live agent recovery.
   note: |
+    Current proposal generation must qualify its own comparisons before auto serving.
+    Persisted prior-shape counters can otherwise survive a restart while both new sides agree.
+    Declare the existing comparator, view definition, worker binding and real restart tests.
+    Retain prior history and all native floors; no synthetic diff or forced promotion is allowed.
     Generated proposal client types must be regenerated from the actual OpenAPI source.
     This required API-client parity dependency does not change acceptance or action authority.
     Reserved by native rmd next-task-id from the operator checkout for branch

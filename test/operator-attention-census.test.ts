@@ -54,15 +54,16 @@ test("decision attention distinguishes a ready approval from an ask still awaiti
       ["W1-T216", { verify: "human", repo: "remudero", title: "Held drill" }],
       ["W1-T217", { verify: "human", repo: "remudero", title: "Prepared decision" }],
     ]),
+    judgeByTask: new Map(["W1-T216", "W1-T217"].map(id => [id, { state: "judged", decision: "needs_operator", reason: "A current operator ruling is needed.", at: null }])),
   }));
   assert.equal(result.counts.decision, 3);
-  assert.deepEqual(result.decisionReadiness, { ready: 1, needsPreparation: 1, unknown: 1 });
+  assert.deepEqual(result.decisionReadiness, { ready: 1, needsPreparation: 1, needsTriage: 0, unknown: 1 });
   assert.equal(result.state, "partial", "the missing classification prevents a complete census");
 });
 
 test("W1-T4742: why-me evidence names the task and source fact", () => {
   const result = buildAttentionCensus(input({
-    judgeByTask: new Map([["W1-T216", { decision: "needs_operator", reason: "A security drill requires a bounded target." }]]),
+    judgeByTask: new Map([["W1-T216", { state: "judged", decision: "needs_operator", reason: "A security drill requires a bounded target.", at: null }]]),
   }));
   const row = result.items.find((item) => item.proposalId === "verify-human:W1-T216");
   assert.equal(row?.taskId, "W1-T216");
@@ -76,7 +77,7 @@ test("machine-judge attention includes exact task context without approving its 
     views: [view("machine-judge:W1-T5418", "decision")],
     classifications: [{ proposalId: "machine-judge:W1-T5418", state: "ready", reasons: [] }],
     taskFacts: new Map([["W1-T5418", { verify: "auto", repo: "remudero", title: "A bounded verification task", risk: "high" }]]),
-    judgeByTask: new Map([["W1-T5418", { decision: "automate", reason: "Existing evidence supports bounded engineering preparation." }]]),
+    judgeByTask: new Map([["W1-T5418", { state: "judged", decision: "automate", reason: "Existing evidence supports bounded engineering preparation.", at: null }]]),
     releasedTaskIds: new Set(["W1-T5418"]),
     releaseReceipts: new Map([["W1-T5418", "A past verify-human release, not approval of this proposal"]]),
   }));

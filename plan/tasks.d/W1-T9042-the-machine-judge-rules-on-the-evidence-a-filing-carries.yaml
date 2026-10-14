@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit (27 machine filings held for a person, 1-11 days)"
   plan_refs: [W1-T5359, W1-T5406, W1-T7724, W1-T8830]
   files: [src/lib/machine-filing-judge.ts, src/lib/machine-filing.ts, test/the-machine-judge-rules-on-the-evidence-a-filing-carries.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

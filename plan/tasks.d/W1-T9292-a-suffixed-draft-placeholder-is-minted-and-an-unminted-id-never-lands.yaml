@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/task-linter.ts
     - test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # it corrupts the plan's id space: every leaked id is a task no reservation, ownership check or id-shaped reader can see
   attempts: 0
   rationale: |
