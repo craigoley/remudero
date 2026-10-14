@@ -1719,9 +1719,11 @@ escalationTriage:
 # "act" closes only positively-evidenced issues that are not MANUAL or GRILL and whose newest comment is
 # not the operator's, at most `maxClosesPerPass` a pass; "off" stops the garden. The operator flips it
 # once the shadow verdict table over the open backlog is right (operator ruling 2026-10-13).
+# Flipped to "act" on operator 2026-10-14 ("go with your recommendations"): on 10-14 the shadow pass
+# judged #11639 resolved, and the escalation reconciler closed it about 40 min after its PR merged.
 issueRevalidation:
   mode:
-    value: "shadow"
+    value: "act"
     origin: "net-new"
   maxClosesPerPass:
     value: 5
