@@ -8,6 +8,7 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { RmdError } from "./errors.js";
 import { parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
 
 export interface RegistrySelectionInput {
@@ -89,8 +90,8 @@ const FIELDS = new Set([
   "gh_app_id", "gh_app_installation_id", "gh_app_private_key_path", "claude_dir",
   "codex_dir", "container_config_dir",
 ]);
-class ReadRefusal extends Error {
-  constructor(readonly reason: UnknownReason) { super(reason); }
+class ReadRefusal extends RmdError {
+  constructor(readonly reason: UnknownReason) { super("registry", 1, reason, { reason }); }
 }
 function sameStamp(a: RegistryFileStamp, b: RegistryFileStamp): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size
