@@ -24,7 +24,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
   automationRedactionViolation,
   validateAutomationAction,
@@ -280,7 +280,7 @@ function validInstant(value: unknown): value is string {
 }
 
 function iso(value: string): string {
-  return new Date(Date.parse(value)).toISOString();
+  return fixedClock(Date.parse(value)).iso();
 }
 
 function boundedInt(value: unknown, max: number): value is number {
@@ -617,7 +617,7 @@ export function submitAutomationTrigger(registry: AutomationTriggerRegistry, inp
     ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor } : {}),
     ...(request.requestedBy !== undefined ? { requestedBy: request.requestedBy } : {}),
     requestedAt: request.requestedAt,
-    expiresAt: new Date(expiresMs).toISOString(),
+    expiresAt: fixedClock(expiresMs).iso(),
     concurrencyKey: definition.concurrencyKey,
     ...(link.replayOf !== undefined ? { replayOf: link.replayOf } : {}),
   });
@@ -871,11 +871,11 @@ function closedBody<T extends Record<string, unknown>>(body: unknown, fields: re
  * browser cannot claim to be a verified webhook or a scheduler. `submit` is the production
  * assembly's call into {@link submitAutomationTrigger}.
  */
-export function buildAutomationTriggerRoutes(deps: {
+export function buildAutomationTriggerRoutes(input: {
   registry: AutomationTriggerRegistry;
   submit: (request: AutomationTriggerRequest) => AutomationTriggerSubmission;
 }): Route[] {
-  const { registry } = deps;
+  const { registry, submit } = input;
   const respond = (res: ServerResponse, result: AutomationTriggerSubmission): void => sendJson(res, submissionStatus(result), result);
   return [
     {
@@ -890,7 +890,7 @@ export function buildAutomationTriggerRoutes(deps: {
       scope: "write",
       tier: "middle",
       handler: jsonAction((body) => closedBody<{ triggerId: string; idempotencyKey: string }>(body, ["triggerId", "idempotencyKey"]), (input, req, res) => {
-        respond(res, deps.submit({
+        respond(res, submit({
           version: AUTOMATION_TRIGGER_VERSION,
           triggerId: input.triggerId,
           source: "manual",

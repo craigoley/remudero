@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import {
   AUTOMATION_TRIGGER_ACTIVATION_STATES,
+  AUTOMATION_TRIGGER_MAX_RUNS_PER_TRIGGER,
   AUTOMATION_TRIGGER_RUN_STATES,
   AUTOMATION_TRIGGER_VERSION,
   cancelAutomationTriggerRun,
@@ -276,4 +277,17 @@ test("a scheduled start for an expired request, or a queued run started after it
   assert.equal((cancelAutomationTriggerRun(registry, queued.run!.runId, "too late") as { code: string }).code, "run-terminal");
   assert.equal((cancelAutomationTriggerRun(registry, "atr-404", "x") as { code: string }).code, "unknown-run");
   assert.equal((completeAutomationTriggerRun(registry, "atr-404", {}) as { code: string }).code, "unknown-run");
+});
+
+test("a trigger's in-process history is bounded: past the backstop a start is refused history-full, never appended", () => {
+  const { registry } = setup();
+  register(registry, "t:loop");
+  for (let index = 0; index < AUTOMATION_TRIGGER_MAX_RUNS_PER_TRIGGER; index += 1) {
+    const runId = queue(registry, "t:loop", `loop-${index}`);
+    assert.ok(cancelAutomationTriggerRun(registry, runId, "resubmitted in a loop").ok);
+  }
+  const refused = submitAutomationTrigger(registry, webhookTriggerRequest("t:loop", "loop-final", START));
+  assert.equal(refused.outcome, "refused");
+  assert.equal((refused as { code: string }).code, "history-full");
+  assert.equal(readAutomationTriggerHistory(registry).runs.length, AUTOMATION_TRIGGER_MAX_RUNS_PER_TRIGGER);
 });
