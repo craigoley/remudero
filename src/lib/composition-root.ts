@@ -41,18 +41,16 @@ type ReviewGitExec = (cmd: string, args: string[], options: { stdio: "pipe" }) =
 function realReviewWorktree(exec: ReviewGitExec = execFileSync): ReviewWorktreeDeps {
   return {
     fetch: (repoDir, prNumber, headSha) => {
+      const fetchRef = (ref: string) =>
+        exec("git", ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", ref], { stdio: "pipe" });
       try {
-        exec(
-          "git",
-          ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", `refs/pull/${prNumber}/head`],
-          { stdio: "pipe" },
-        );
+        fetchRef(`refs/pull/${prNumber}/head`);
       } catch (error) {
         // #11708 (2026-10-14): GitHub served refs/pull/N/merge but never created refs/pull/N/head for a REST-opened PR,
         // so every review materialized nothing and posted a keyword-only FAIL. The head commit is still fetchable by sha.
         if (headSha === undefined || !/couldn't find remote ref/.test(String((error as { stderr?: unknown }).stderr ?? (error as Error)?.message ?? error))) throw error;
         try {
-          exec("git", ["-C", repoDir, "fetch", "--quiet", "--no-write-fetch-head", "origin", headSha], { stdio: "pipe" });
+          fetchRef(headSha);
         } catch {
           throw error; // the sha is not served either: the missing pull ref stays the named failure (W1-T2751)
         }
