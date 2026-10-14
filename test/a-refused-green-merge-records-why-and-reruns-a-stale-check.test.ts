@@ -7,6 +7,9 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
+// @ts-expect-error — the trusted security metadata adapter is plain ESM.
+import * as securityMergeAdapter from "../src/lib/code-scanning-merge-adapter.mjs";
+const { publishSecurityMergeDecision, readSecurityMergeDecision, readSecurityMergeDecisionSync } = securityMergeAdapter;
 import {
   buildSweepEffects, classifyMergeRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
 } from "./helpers/sweep-test.js";
@@ -18,6 +21,16 @@ const PR_URL = "https://github.com/craigoley/remudero/pull/8620";
 const GATE_REFUSAL = 'gh: Required status check "ci-gate" is failing. (HTTP 405)';
 const TEST_REFUSAL = 'gh: Required status check "test" is failing. (HTTP 405)';
 const REQUIRED = ["ci-gate", "test", "lint"];
+const BASE = "b".repeat(40);
+// GitHub's own CodeQL producer shape for a head with no new alerts, bound to this PR.
+const CLEAN_CODEQL = {
+  id: 1, name: "CodeQL", head_sha: HEAD, status: "completed", conclusion: "success",
+  app: { id: 57789, slug: "github-advanced-security", owner: { login: "github" } },
+  output: {
+    title: "No new alerts in code changed by this pull request",
+    summary: "[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A8620+tool%3ACodeQL+is%3Aopen).",
+  },
+};
 
 // #11096's mergeability: the sweep's snapshot read it unknown on every refused pass.
 function pr(overrides: Partial<OpenPrView> = {}): OpenPrView {
@@ -66,12 +79,17 @@ function harness(t: TestContext, refusal: string, rollup: RollupCheckEntry[] | u
   const root = mkdtempSync(join(tmpdir(), "rmd-refused-green-merge-"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // GitHub's own fresh read at merge time is mergeable: the refusal is the required check, not a conflict.
-  const live = { state: "open", merged: false, auto_merge: {} as unknown, draft: false,
-    head: { sha: HEAD }, base: { ref: "main" }, mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
+  // The exact-head security admission (lib/security-merge-admission.ts) reads this same row, the
+  // changed files and the head's CodeQL run before the merge write: all three answer clean here,
+  // so the refusal under test is GitHub's own, never the security gate's.
+  const live = { state: "open", merged: false, auto_merge: {} as unknown, draft: false, changed_files: 1,
+    head: { sha: HEAD }, base: { ref: "main", sha: BASE, repo: { full_name: "craigoley/remudero" } },
+    mergeable: true as boolean | null, mergeable_state: "blocked", body: "" };
   const shim = ghShim([
     { when: "/merge", exit: 1, stderr: refusal },
     { when: "/update-branch", stdout: "{}" },
     { when: "/files", stdout: '[{"filename":"src/example.ts"}]' },
+    { when: `/commits/${HEAD}/check-runs`, stdout: JSON.stringify({ total_count: 1, check_runs: [CLEAN_CODEQL] }) },
     { when: "/compare/", stdout: '{"behind_by":0}' },
     { when: "/rules/branches/main", stdout: "[]" },
     { when: "/pulls/8620", stdout: JSON.stringify(live) },
@@ -271,4 +289,38 @@ test("W1-T8620: classifyMergeRefusal names the transient and cancelled shapes", 
   // Absent is not passed: a gated check missing from the rollup leaves a failed gate a real red.
   assert.equal(classifyMergeRefusal(GATE_REFUSAL, GATE_OLDER_THAN_INPUTS.slice(0, 2), REQUIRED).kind, "real-red");
   assert.equal(classifyMergeRefusal(GATE_REFUSAL, GATE_OLDER_THAN_INPUTS, []).kind, "other");
+});
+
+test("W1-T11524: the existing merge-sweep suite exercises async exact-head security reads and publication", async () => {
+  const target = { owner: "craigoley", repo: "remudero", prNumber: 8620, expectedHead: HEAD };
+  const live = {
+    state: "open", head: { sha: HEAD },
+    base: { sha: BASE, ref: "main", repo: { full_name: "craigoley/remudero" } },
+    changed_files: 1,
+  };
+  const readSync = (path: string) => {
+    if (path.includes("/files?")) return [{ filename: "src/example.ts" }];
+    if (path.includes("/check-runs?")) return { total_count: 1, check_runs: [CLEAN_CODEQL] };
+    return live;
+  };
+  assert.equal(readSecurityMergeDecisionSync(target, readSync).decision.state, "safe");
+  const reads: string[] = [];
+  const read = async (path: string) => {
+    reads.push(path);
+    return readSync(path);
+  };
+  const observed = await readSecurityMergeDecision(target, read);
+  assert.equal(observed.decision.state, "safe");
+
+  const statuses: Array<Record<string, unknown>> = [];
+  const published = await publishSecurityMergeDecision(
+    target,
+    { read, status: async (status: Record<string, unknown>) => { statuses.push(status); } },
+    "https://github.com/craigoley/remudero/actions/runs/1",
+  );
+  assert.equal(published.published, true);
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0].sha, HEAD);
+  assert.equal(statuses[0].state, "success");
+  assert.ok(reads.filter((path) => path.endsWith("/pulls/8620")).length >= 4);
 });

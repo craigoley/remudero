@@ -48,7 +48,7 @@ import {
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
-  mergeDirectViaRest,
+  mergeDirectViaRestAsync,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -75,7 +75,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
@@ -2570,9 +2570,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         armAuto: () => { throw new Error("Pull request is in clean status"); },
         armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
-        mergeDirect: (prUrl) => {
+        mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
         },
       } : undefined;
       let attemptError: string | undefined;
