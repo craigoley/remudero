@@ -16,6 +16,8 @@ import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
@@ -336,6 +338,50 @@ export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
 const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
 const STDERR_TAIL_CHARS = 8 * 1024;
 
+/** The harness tree this module runs from: where the precompiled run-task entry for a garden child lives. */
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const TSX_LOADER_FLAG = /^(?:--import|--require|-r|--loader|--experimental-loader)$/;
+
+/** `execArgv` without the tsx loader flags (`--import tsx`, `--require .../tsx/...`, either spelling). */
+function withoutTsxLoader(execArgv: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const flag = execArgv[i]!;
+    const inline = /^(--import|--require|--loader|--experimental-loader)=(.*)$/.exec(flag);
+    if (inline) {
+      if (!/tsx/.test(inline[2]!)) kept.push(flag);
+    } else if (TSX_LOADER_FLAG.test(flag) && /tsx/.test(execArgv[i + 1] ?? "")) {
+      i++;
+    } else {
+      kept.push(flag);
+    }
+  }
+  return kept;
+}
+
+/**
+ * W1-T8778: the node argv for one garden child. With no caller-given execArgv/entry (`implicit`) and a current
+ * precompiled run-task bundle (childEntryArgv), the child runs it under plain node: the inherited tsx loader flags
+ * are dropped, the heap cap follows every other flag, and no tsx cache is opened. Any other answer, and any
+ * explicit execArgv/entry, runs exactly as before. Either way `child_entry.spawned` records the kind and why.
+ */
+export function gardenChildNodeArgv(
+  name: string,
+  args: readonly string[],
+  heapLimitMb: number,
+  inherited: { execArgv: readonly string[]; entry: string },
+  implicit: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  root: string = HARNESS_ROOT,
+): string[] {
+  const cap = `--max-old-space-size=${heapLimitMb}`;
+  const legacy = [...inherited.execArgv, cap, inherited.entry, "garden", "run", name, ...args];
+  if (!implicit) return legacy;
+  const launch = childEntryArgv(root, "run-task", "src/run-task.ts", ["garden", "run", name, ...args], undefined, { log });
+  log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", `garden run ${name}`, launch));
+  return launch.kind === "bundle" ? [...withoutTsxLoader(inherited.execArgv), cap, ...launch.argv] : legacy;
+}
+
 /**
  * The production pass: `rmd garden run <name>` as a child of THIS process's own node and loader, so the
  * child runs the same source tree and inherits the same config root, state and ledger actor. Self-sync is
@@ -392,7 +438,8 @@ export function childGardenPassSpawn(
     };
     return new Promise<number | null>((resolve, reject) => {
       // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
-      const child = spawn(execPath, [...execArgv, `--max-old-space-size=${heapLimitMb}`, entry, "garden", "run", name, ...args], {
+      const nodeArgv = gardenChildNodeArgv(name, args, heapLimitMb, { execArgv, entry }, opts.execArgv === undefined && opts.entry === undefined, log);
+      const child = spawn(execPath, nodeArgv, {
         cwd: opts.cwd,
         env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1",
           [GARDENER_ORIGIN_ENV]: gardenerOriginEnv(name, signal.passId) },
