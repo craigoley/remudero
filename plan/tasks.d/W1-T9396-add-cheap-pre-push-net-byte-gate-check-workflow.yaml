@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=71681d9b23788aae
   attempts: 0
   files:
     - .github/workflows/pre-push-net-byte-check.yml
