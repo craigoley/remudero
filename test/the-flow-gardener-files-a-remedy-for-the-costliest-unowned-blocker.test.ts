@@ -190,7 +190,7 @@ test("flow measures equal PR-hour windows, distinguishes pending and credit, and
   let escalations = 0;
   const f = fixture(root, [...before, row(2, -24), row(2, 0)], {
     planState: () => ({ tasks: [{ ...remedy, origin: `${remedy.origin}#r2` }] }),
-    escalate: e => { escalations++; assert.match(e.detail, /debit: share of PR-hours/); return "https://github.com/acme/remudero/issues/1"; },
+    escalate: e => { escalations++; assert.match(e.detail, /did not fall: share of PR-hours/); return "https://github.com/acme/remudero/issues/1"; },
     mintTaskId: () => { throw new Error("escalation must not mint"); },
   });
   const inv = f.spec.inventory();
