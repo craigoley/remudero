@@ -104,7 +104,6 @@ export const HOST_MEMORY_BUDGET_ORIGIN = "proposal";
 
 export interface HostMemoryBudgetPolicy {
   mode: ShadowMode;
-  /** Per-class overrides of `mode` (`sweep.hostMemoryBudget.classModes`); a class not named runs under `mode`. */
   classModes?: Partial<Record<WorkerClass, ShadowMode>>;
   /** MemAvailable the host must keep after every projected claim. */
   hostReserveMib: number;
@@ -175,7 +174,6 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
   return out as HostMemoryBudgetPolicy;
 }
 
-/** `classModes`: a proposal row whose value maps a worker class to a mode. An unknown class or mode throws. */
 function parseClassModes(path: string, row: Record<string, unknown>): Partial<Record<WorkerClass, ShadowMode>> {
   proposalOrigin(path, row);
   const value = mapping(`${path}.value`, row.value);
@@ -192,7 +190,6 @@ function parseClassModes(path: string, row: Record<string, unknown>): Partial<Re
   return out;
 }
 
-/** The mode one worker class runs under: its `classModes` override, else the block's `mode`. Pure. */
 export function hostMemoryBudgetModeFor(policy: Pick<HostMemoryBudgetPolicy, "mode" | "classModes">, workerClass: WorkerClass): ShadowMode {
   return policy.classModes?.[workerClass] ?? policy.mode;
 }
