@@ -27,8 +27,8 @@
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.95
+    confidence: 0.94
     reasons:
-      - "high-risk verdict at confidence 0.95 — on the change's description/files alone, no diff was read — The title and acceptance request P25 briefing groundwork, but the filed rationale requests research into named daemon hooks reaching syncPlanFromOrigin and sweepLandingSteps; the record does not explain this scope mismatch.; on the change's description/files alone, no diff was read — The sole proof checks for “scope” in the briefing document; it does not verify the promised criteria, acceptance metrics, governance alignment, or hook-reachability finding. This meets the supplied escalation condition for a finding that cannot be verified from what is shown."
-    judged_at: "2026-10-14T06:04:10.485Z"
-    pin: "5ed18c6cce1e2e0c4efa81e46596573f78980e47a79ae1791bdb07b096f59918"
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed title and acceptance concern a P25 governance briefing, while the rationale requests research confirming named daemon hooks reach syncPlanFromOrigin and sweepLandingSteps; the supplied record does not connect these objectives.; on the change's description/files alone, no diff was read — The sole proof checks for \"scope\" in the briefing; it does not verify the requested hook reachability, governance alignment, criteria, or acceptance metrics. The finding therefore cannot be verified from what is shown, meeting the stated escalation condition."
+    judged_at: "2026-10-14T06:48:34.512Z"
+    pin: "7a2e8cb1404388628b11394393a578211aec56f1e90424e2cbdd02a756aaeca8"

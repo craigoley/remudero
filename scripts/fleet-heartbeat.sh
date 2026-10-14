@@ -1137,6 +1137,70 @@ else
   esac
 fi
 
+# ── probe: does the live container still carry its commissioned mounts? (W1-T2858) ───────────────
+# `rmd serve` has no Docker socket, so THIS host-side beat is the only place the mount verdict of
+# deploy/container-runtime-contract.sh (W1-T2857) can be measured. It is written as one sanitized
+# snapshot, `state/fleet-runtime-health.json`, that Serve reads (src/lib/fleet-runtime-health.ts).
+# Expectations mirror deploy/recycle-container.sh: state and Claude always, Codex and the container
+# provider config only when their host directory exists. Host source paths are used for comparison
+# and never written; a failed verifier is `unknown`, never `healthy`, and never stops the beat.
+RUNTIME_HEALTH_FILE="${RMD_ROOT}/state/fleet-runtime-health.json"
+RUNTIME_HEALTH_VERDICT="unknown"
+RUNTIME_HEALTH_REASON="inspect-unreadable"
+RUNTIME_HEALTH_TAIL=""
+RUNTIME_HEALTH_VERIFIER="${INSTALL_DIR}/deploy/container-runtime-contract.sh"
+if [ "$RESTART_CONTAINER" = "none" ]; then
+  RUNTIME_HEALTH_REASON="skipped"
+elif ! printf '%s' "$RESTART_CONTAINER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'; then
+  RUNTIME_HEALTH_REASON="bad-container-name"
+elif [ ! -x "$RUNTIME_HEALTH_VERIFIER" ]; then
+  RUNTIME_HEALTH_REASON="verifier-missing"
+else
+  RH_HOME="${HOME:-/root}"
+  RH_STATE_DIR="${RMD_STATE_DIR:-$RMD_ROOT}"
+  RH_ARGS=(--container "$RESTART_CONTAINER"
+    --expect "$RH_STATE_DIR" /home/node/Remudero rw
+    --expect "${RMD_CLAUDE_DIR:-${RH_HOME}/.claude}" /home/node/.claude rw)
+  RH_CODEX="${RMD_CODEX_DIR:-${RH_HOME}/.codex}"
+  RH_CONFIG="${RMD_CONTAINER_CONFIG_DIR:-${RH_HOME}/.config/remudero-container}"
+  [ ! -d "$RH_CODEX" ] || RH_ARGS+=(--expect "$RH_CODEX" /home/node/.codex rw)
+  [ ! -d "$RH_CONFIG" ] || RH_ARGS+=(--expect "$RH_CONFIG" /home/node/.config/remudero rw)
+  # A hung `docker inspect` must cost this beat seconds, not the beat.
+  RH_TIMEOUT=()
+  ! command -v timeout >/dev/null 2>&1 || RH_TIMEOUT=(timeout 20)
+  RH_OUT="$(${RH_TIMEOUT[@]+"${RH_TIMEOUT[@]}"} "$RUNTIME_HEALTH_VERIFIER" "${RH_ARGS[@]}" 2>/dev/null)"
+  RH_STATUS="$(printf '%s' "$RH_OUT" | sed -n 's/^{"status":"\([a-z]*\)".*/\1/p')"
+  RH_TAIL="${RH_OUT#*\"checked\":}"
+  case "$RH_STATUS" in healthy | drift) ;; *) RH_STATUS="" ;; esac
+  if [ -n "$RH_STATUS" ] && printf '%s' "$RH_TAIL" | grep -Eq '^[0-9]+,"drift":\[.*\]\}$'; then
+    RUNTIME_HEALTH_VERDICT="$RH_STATUS"
+    RUNTIME_HEALTH_REASON=""
+    RUNTIME_HEALTH_TAIL="$RH_TAIL"
+  fi
+fi
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_RUNTIME_HEALTH_WRITE:-}" = "1" ]; then
+  RH_HOST="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+  if [ "$RUNTIME_HEALTH_VERDICT" = "unknown" ]; then
+    RH_JSON="$(printf '{"version":1,"observed_at":"%s","host":"%s","container":"%s","status":"unknown","reason":"%s"}' \
+      "$NOW_ISO" "${RH_HOST:-unknown}" "$(printf '%s' "$RESTART_CONTAINER" | tr -cd 'A-Za-z0-9_.-' | cut -c1-128)" "$RUNTIME_HEALTH_REASON")"
+  else
+    RH_JSON="$(printf '{"version":1,"observed_at":"%s","host":"%s","container":"%s","status":"%s","checked":%s' \
+      "$NOW_ISO" "${RH_HOST:-unknown}" "$RESTART_CONTAINER" "$RUNTIME_HEALTH_VERDICT" "$RUNTIME_HEALTH_TAIL")"
+  fi
+  # Atomic: Serve must never read a half-written file. Same directory, so `mv` is a rename(2).
+  if mkdir -p "${RMD_ROOT}/state" 2>/dev/null \
+    && RH_TMP="$(mktemp "${RMD_ROOT}/state/.fleet-runtime-health.XXXXXX" 2>/dev/null)"; then
+    if printf '%s\n' "$RH_JSON" > "$RH_TMP" 2>/dev/null && chmod 0644 "$RH_TMP" 2>/dev/null && mv -f "$RH_TMP" "$RUNTIME_HEALTH_FILE" 2>/dev/null; then
+      :
+    else
+      rm -f "$RH_TMP" 2>/dev/null
+      printf 'fleet-heartbeat: runtime-health snapshot not written to %s\n' "$RUNTIME_HEALTH_FILE" >&2
+    fi
+  else
+    printf 'fleet-heartbeat: runtime-health snapshot not written to %s\n' "$RUNTIME_HEALTH_FILE" >&2
+  fi
+fi
+
 # ── probe: is automatic gc disabled by a stale .git/gc.log? (W1-T2529) ───────────────────────────
 # WHAT THIS CLOSES. git writes `.git/gc.log` when a background `gc --auto` fails, and REFUSES to
 # attempt another auto-gc for as long as that file exists — the condition is self-sustaining,
@@ -1320,6 +1384,7 @@ tsx_present=${TSX_PRESENT}
 node_modules_entries=${NODE_MODULES_ENTRIES}
 install_dir=${INSTALL_DIR}
 install_head_sha=${INSTALL_SHA}
+runtime_contract_verdict=${RUNTIME_HEALTH_VERDICT}
 gc_verdict=${GC_VERDICT}
 gc_disabled_reason=${GC_DISABLED_REASON}
 config_root=${RMD_ROOT}

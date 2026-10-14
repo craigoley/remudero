@@ -14,7 +14,7 @@
     - src/lib/inbox-replay.ts
     - src/lib/fleet-lane.ts
     - test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts
-  status: queued
+  status: merged
   priority: 1  # 18 proposals the operator approved have not filed in ~22 h; 10 of them can never move, and nothing tells anyone
   attempts: 0
   rationale: |

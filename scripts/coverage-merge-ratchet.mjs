@@ -726,9 +726,10 @@ export async function writeImpactMap(directories, output, { sha, sourceRoot } = 
       throw error;
     }
   };
-  const map = buildImpactMap(coverageReports(directories, bytes), { sha, root: pathToFileURL(process.cwd() + sep).href, readSource });
+  const counts = { placed: 0, maps: 0 };
+  const map = buildImpactMap(coverageReports(directories, bytes), { sha, root: pathToFileURL(process.cwd() + sep).href, readSource, counts });
   writeFileSync(output, JSON.stringify(map));
-  return { ...bytes, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports, spawnCredited: map.spawnCredited.length };
+  return { ...bytes, ...counts, suites: map.suites.length, files: Object.keys(map.files).length, orphanReports: map.orphanReports, spawnCredited: map.spawnCredited.length };
 }
 
 export async function main(argv) {
@@ -759,7 +760,8 @@ export async function main(argv) {
     const r = await writeImpactMap(positionals, values['impact-map'], { sha: values.sha, sourceRoot: values['source-root'] });
     console.log(
       `coverage-merge-ratchet: impact map of ${r.rawFileCount} process report(s): ${r.suites} suite(s), ${r.files} source file(s), ` +
-        `${r.orphanReports} orphan report(s) -> ${values['impact-map']} (${r.spawnCredited} suite(s) credited with a child's report)`,
+        `${r.orphanReports} orphan report(s) -> ${values['impact-map']} (${r.spawnCredited} suite(s) credited with a child's report; ` +
+        `${r.placed} function span(s) placed on ${r.maps} source map(s))`,
     );
   } else if (values['premap-output']) {
     const { rawFileCount, reportCount, lineFileCount, output, premappedBytes, droppedRepeatInstances } =
