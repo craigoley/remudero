@@ -214,7 +214,7 @@ function selectedRegistryText(text: string): void {
     const field = /^ {4}([A-Za-z_]+):/.exec(line);
     if (field && !fields.has(field[1])) throw new GoLiveError("registry_target_unavailable", 503);
   }
-  if (text.includes("\0")) throw new GoLiveError("registry_target_unavailable", 503);
+  if (text.startsWith("\uFEFF") || text.includes("\0")) throw new GoLiveError("registry_target_unavailable", 503);
 }
 
 async function readSelectedRegistry(target: RegistryWriteTarget, api: GoLiveApi, expected?: SelectedRegistry): Promise<SelectedRegistry> {
