@@ -103,6 +103,42 @@ test("W1-T8883: the heap ceiling shadow learns from live samples", async () => {
   }
 });
 
+test("a boot-time proposal that throws is ledgered as daemon.heap_ceiling_shadow_failed and the daemon still runs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}heap-shadow-fail-`));
+  try {
+    let nowMs = Date.parse("2026-10-12T00:00:00Z");
+    let reads = 0;
+    const rows: Row[] = [];
+    const snapshot = (): SlackSnapshot => {
+      // The first reading is the boot-time propose(): it fails; later heartbeat readings work.
+      if (reads++ === 0) throw new Error("heap statistics unavailable");
+      return { rss_bytes: GIB, heap_used_bytes: GIB, heap_physical_bytes: GIB + MIB, external_bytes: 0, heap_size_limit_bytes: LIMIT };
+    };
+    await runDaemon(
+      fixturePlan(dir),
+      {
+        refreshMerged: () => () => true,
+        runOne: async () => { throw new Error("an idle daemon dispatches nothing"); },
+        now: () => new Date(nowMs),
+        sleep: async (ms: number) => { nowMs += ms; },
+        checkStop: () => (rows.filter((r) => r.step === "daemon.tick").length >= 2 ? "test done" : undefined),
+        log: (step, e = {}) => { rows.push({ step, extra: e }); },
+        readMemoryTelemetry: Object.assign(() => ({ rss_bytes: 1 }), { afterRow: () => {} }),
+        plainBackfill: { stateDir: dir, readProposals: () => [] },
+        heapShadowSeams: { snapshot, pid: 4242 },
+      },
+      { pollIntervalMs: POLL_MS },
+    );
+    const failed = rows.filter((r) => r.step === "daemon.heap_ceiling_shadow_failed");
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].extra.reason, "heap statistics unavailable");
+    assert.equal(shadowRows(rows).filter((r) => r.basis === "learned").length, 0, "no learned row when the proposal failed");
+    assert.ok(rows.some((r) => r.step === "daemon.tick"), "the daemon kept ticking");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function memoryIo(initial?: string): HeapSampleIo & { file: string | undefined; failWrites: boolean } {
   const io = {
     file: initial, failWrites: false,
