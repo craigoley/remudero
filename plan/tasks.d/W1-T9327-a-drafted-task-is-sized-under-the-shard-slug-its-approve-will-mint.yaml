@@ -13,7 +13,7 @@
     - src/lib/inbox.ts
     - test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts
   status: queued
-  priority: 2  # 4 push refusals in 2026-10-12..13 carry the slug exit; each spends an approve and an id, and the draft stays READY to be tried again
+  priority: 1  # 7 approve pushes refused over the slug exit 2026-10-13T05:50Z..10-14T11:44Z, 12 task ids minted and orphaned; amended 2026-10-14
   attempts: 0
   rationale: |
     OBSERVED 2026-10-13 on host remudero (~/rmd-state2/state), read niced. The band replay entry
@@ -42,6 +42,20 @@
     `plan_pr.preflight_refused` rows, 4 of them carrying the slug exit. Small, but each is an approve, an id
     reservation and a refusal, and the draft reads clean, so the band replay never re-offers it and the fleet lane
     retries it once a day.
+    AMENDED 2026-10-14 (operator-session core-error sweep), read niced from the core ledger union (393 archives
+    plus the live file) inside remudero-daemon: 7 `plan_pr.preflight_refused` rows on lane approve carry "rename this
+    shard so its filename slug", one per proposal, from 2026-10-13T05:50Z to 2026-10-14T11:44Z. They minted and
+    orphaned W1-T8988, W1-T8989, W1-T9193, W1-T9194, W1-T9197..W1-T9200, W1-T9246, W1-T9334, W1-T9385 and W1-T9429. The newest
+    is followup:DAEMON-1791360782877:2026-10-07T09:53:02.458Z:0, re-drafted `lint_clean: true` at 11:40:33Z (files
+    src/lib/review.ts and test/regression/review-config-mask.test.ts) and refused at the push preflight at 11:44:39Z
+    as W1-T9429 "(review, review-config-mask)". The shard-census half of each refusal ("W1-T3086: violating shard
+    files cannot grow past the recorded baseline") is the same violation counted by the ratchet; the census itself is
+    working as designed.
+    THE APPROVE-SIDE REPAIR IS BLIND TOO. `repairRatificationFragment` (src/lib/inbox.ts) already raises a [sizing]
+    block to risk:high + band_meaning:span before the shards are written, and `relintRatificationFragment` relints
+    after it, but both call `lintTask` with no slug. A draft already cached READY before the draft-lint fix
+    lands is never re-drafted, so it would still reach the push preflight and be refused. Sizing it under the
+    same slug at approve repairs it there, before the push.
     NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 348 origin heads for duplicateSlug, ownFalsifierSlug,
     own-falsifier and "filename slug" (control: main reads 21 shards, no head reads more). None of the 21 sizes a
     draft: W1-T2525, W1-T2814 and W1-T5677 size a shard by its own slug, which a draft does not have yet.
@@ -53,7 +67,9 @@
     A task with no title keeps today's unknown-slug behaviour, as the writer files it under its id alone. The redraft
     guidance for a slug-dependent sizing block names the title as the thing to change, since the drafter controls the
     title and not the filename. The classifier's lint in `classifyProposal` reaches the draft through the same
-    helper, so READY and the push agree.
+    helper, so READY and the push agree. `repairRatificationFragment` and `relintRatificationFragment` size each
+    task under the same `draftShardSlug`, so an approve of a draft cached before this lands repairs the slug-only
+    sizing block (its existing risk:high + band_meaning:span repair) instead of pushing a shard the preflight refuses.
     Tests go in the new file test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts, with
     `test(` titles verbatim as in the proofs below. Use the DAEMON-1790001204828 shape: a recon task at risk:low whose
     files are another concern's existing test plus one src file, titled so its slug differs from the test's.
@@ -64,6 +80,8 @@
       proof: 'grep: test("W1-T9327: a drafted task naming a test of another concern is sized as the push sizes it" in test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts'
     - claim: "a drafted task whose title slug matches its own falsifier keeps the own-falsifier discount"
       proof: 'grep: test("W1-T9327: a drafted task whose title slug names its own falsifier keeps the discount" in test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts'
+    - claim: "an approve of a draft cached before the fix sizes it under its minted slug and repairs it before the push"
+      proof: 'grep: test("W1-T9327: an approve repairs a cached draft whose sizing block appears only under its minted slug" in test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts'
     - claim: "the draft lint and the shard writer take the slug from one helper"
       proof: 'grep: draftShardSlug( in src/lib/inbox.ts'
   falsifier: |
