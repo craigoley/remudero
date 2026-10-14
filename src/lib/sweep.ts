@@ -91,7 +91,11 @@ import {
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import {
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
+  readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
+} from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
@@ -236,6 +240,7 @@ import {
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
+  type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
@@ -20780,6 +20785,18 @@ export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[]
   return [...seen.values()];
 }
 
+/** W1-T9390 — {@link listRetirableEscalationIssues} for a rung on the daemon loop: each label's read is
+ *  awaited on an {@link AsyncIssueGateway}, with the same dedupe by number and the same whole-list contract. */
+export async function listRetirableEscalationIssuesAsync(issues: AsyncIssueGateway): Promise<OpenIssue[]> {
+  const seen = new Map<number, OpenIssue>();
+  for (const label of RETIRABLE_ESCALATION_LABELS) {
+    for (const issue of (await issues.listOpen?.(label)) ?? []) {
+      seen.set(issue.number, issue);
+    }
+  }
+  return [...seen.values()];
+}
+
 /** One open needs-human issue paired with its referenced task's CURRENT derived state. */
 export interface EscalationReconcileCandidate {
   issueUrl: string;
@@ -21302,6 +21319,90 @@ export async function runStaleEscalationRejudge(
   const summary: StaleEscalationRejudgeSummary = { total: candidates.length, rejudged, demoted, results, judgedStateKeys };
   log("sweep.escalation_rejudge.summary", { total: summary.total, rejudged: summary.rejudged, demoted: summary.demoted });
   return summary;
+}
+
+// ── W1-T9390: THE ESCALATION-TRIAGE RUNG'S HISTORY, READ OFF THE LOOP ───────────────────────────
+//
+// OBSERVED 2026-10-14 on the core daemon: every full sweep since #11487 (W1-T8868) froze the loop
+// 57-105 s in `sweepEscalationTriage`, which gunzipped and parsed all 450 rotations synchronously,
+// kept every row, and copied that array once per open issue. The rung reads only the slice below.
+
+/** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
+const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
+
+/** The escalation-triage rung's slice of the ledger union, as a whole-corpus read would answer it. */
+export type EscalationTriageHistoryReader = (stateDir: string) => Promise<LedgerUnionRecordRead>;
+
+/**
+ * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
+ * reader is passed. Each pass first loads every rotation it has not yet seen OFF the loop, through
+ * {@link createLedgerRotationMemo}'s async `load`, which leaves a durable digest of the step slice; the
+ * {@link createIncrementalLedgerUnion} read that follows answers those rotations from their digests, keeps
+ * them in memory, and reads the live file from where the previous pass stopped. No time window: an issue
+ * born in the oldest rotation is still found. `refuseIncomplete` holds: an unread rotation gives no rows.
+ */
+export function createEscalationTriageHistoryReader(
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer> } = {},
+): EscalationTriageHistoryReader {
+  const fsDeps = io.fs ?? realLedgerFs;
+  const stat = fsDeps.statSync ?? realLedgerFs.statSync;
+  const steps = [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP];
+  const identity = { holder: "sweep.escalation-triage-history", reducerVersion: "1" };
+  const union = createIncrementalLedgerUnion(identity, fsDeps);
+  // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
+  const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
+  // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
+  const pattern = new RegExp(steps.map((step) => step.replaceAll(".", "\\.")).join("|"));
+  const statKey = (path: string): string => {
+    const s = stat(path);
+    return `${s.size}:${s.mtimeMs}`;
+  };
+  let loaded = new Map<string, string>();
+  return async (stateDir) => {
+    let names: string[] = [];
+    try {
+      names = fsDeps.readdirSync(stateDir);
+    } catch {
+      // deliberate: the union read below lists the directory itself and answers for an unreadable one.
+    }
+    const current = new Map<string, string>();
+    const fresh: LedgerCorpusEntry[] = [];
+    for (const entry of ledgerRotationEntries(names, stateDir)) {
+      let key: string;
+      try {
+        key = statKey(entry.path);
+      } catch {
+        // deliberate: an unstattable rotation is left to the union read, which reports it unread.
+        continue;
+      }
+      current.set(entry.path, key);
+      if (loaded.get(entry.path) !== key) fresh.push(entry);
+    }
+    if (fresh.length > 0) {
+      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)), {
+        holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
+      });
+      await memo.load(fresh);
+    }
+    loaded = current;
+    return union(stateDir, { step: steps, refuseIncomplete: true });
+  };
+}
+
+/** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
+export function indexEscalationTriageHistory(rows: readonly Record<string, unknown>[]): {
+  births: Map<string, Record<string, unknown>>;
+  judgedStateKeys: Set<string>;
+} {
+  const births = new Map<string, Record<string, unknown>>();
+  const judgedStateKeys = new Set<string>();
+  for (const row of rows) {
+    if (row.step === ESCALATION_REJUDGED_STEP && typeof row.state_key === "string") judgedStateKeys.add(row.state_key);
+    else if (typeof row.issue_url === "string" && row.triage_subject && ESCALATION_TRIAGE_BIRTH_STEPS.includes(String(row.step))) {
+      births.set(row.issue_url, row);
+    }
+  }
+  return { births, judgedStateKeys };
 }
 
 // ── POST-FIX RE-VERIFICATION RECONCILER (W1-T124) ────────────────────────────────────────────
