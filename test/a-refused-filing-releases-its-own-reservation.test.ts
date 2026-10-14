@@ -194,6 +194,13 @@ test("a host-resource filing whose PR does not open releases its reserved id", a
   assert.equal(url, undefined);
   assert.deepEqual(f.released.map(([id]) => id), ["W1-T9641"]);
   assert.match(f.released[0]![1], /^host-resource gardener: /);
+
+  // The same filing with the janitor script gone is refused by machine-filing admission before landing.
+  rmSync(join(f.root, "deploy"), { recursive: true, force: true });
+  await assert.rejects(Promise.resolve().then(() => fileConsumerVia(() => ws, mint)({ host: "azure", device: "root", consumer: "worktrees", origin: "host-resource:azure:worktrees",
+    attribution: { consumer: "worktrees", growthKbPerHour: 800000, share: 0.8, spanHours: 72, points: 144, janitorPasses: 12 } })), /machine-filing admission/);
+  assert.equal(f.released.length, 2);
+  assert.match(f.released[1]![1], /^host-resource gardener: .*machine-filing admission/);
 });
 
 test("a reservation release that cannot complete leaves the claim and says why, never throwing", async () => {
