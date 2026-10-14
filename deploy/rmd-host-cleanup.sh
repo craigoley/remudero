@@ -331,13 +331,13 @@ is_protected_worktree() {
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
   local p="$1" idle_status seed_reason
-  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   is_idle "$p"; idle_status=$?
   case "$idle_status" in
     0) ;;
     1) log "KEEP $p: written within ${IDLE_MINUTES} min"; return ;;
     *) log "KEEP $p: activity probe failed (unknown)"; return ;;
   esac
+  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   log "REMOVE $p"
   act rm -rf -- "$p"
@@ -884,7 +884,6 @@ lender_check() {
 }
 sweep_scratch_unit() {
   local p="$1" status entries entry repo head bundles bytes seed_reason
-  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
@@ -896,6 +895,7 @@ sweep_scratch_unit() {
     1) log "KEEP $p: written within ${IDLE_MINUTES} min"; return ;;
     *) log "KEEP $p: activity probe failed (unknown)"; return ;;
   esac
+  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
   if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return; fi

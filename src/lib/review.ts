@@ -29,7 +29,7 @@ import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import { configuredDependencySeedRoot, materializeDependencySeed } from "./dependency-seeds.js";
+import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -2228,9 +2228,11 @@ export function ensureDeps(
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
     const root = configuredDependencySeedRoot();
-    if (root && !existsSync(nodeModules)) materializeDependencySeed(cwd, { root, proof: true, env: proofInstallEnv(),
-      runInstall: (stage, args, env) => { exec("npm", args, { cwd: stage, env, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" }); } });
-    else exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
+    const args = root && !existsSync(nodeModules)
+      ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
+      : PROOF_INSTALL_ARGS;
+    exec(command, args, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }

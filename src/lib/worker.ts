@@ -95,7 +95,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
-import { configuredDependencySeedRoot, materializeDependencySeed } from "./dependency-seeds.js";
+import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
@@ -4649,16 +4649,22 @@ export function linkWorktreeNodeModules(
 }
 
 /** Enabled accounts give new checkouts private workspaces and caches backed by a durable generation. */
-export function provisionWorktreeNodeModules(
+export async function provisionWorktreeNodeModules(
   repoDir: string,
   worktreePath: string,
   deps: Parameters<typeof linkWorktreeNodeModules>[2] = {},
-): NodeModulesLinkOutcome {
+): Promise<NodeModulesLinkOutcome> {
   const root = configuredDependencySeedRoot();
   if (!root) return linkWorktreeNodeModules(repoDir, worktreePath, deps);
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
   try {
-    const result = materializeDependencySeed(worktreePath, { root, sourceDir: source ? dirname(source) : undefined });
+    // Seed identity, locking, copying and npm run in a bounded child, never on the daemon's event loop.
+    const args = ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)),
+      "prime", worktreePath, "--root", root, ...(source ? ["--source", dirname(source)] : [])];
+    const { stdout } = await execFilePromise(process.execPath, args, {
+      cwd: worktreePath, encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
+    });
+    const result = JSON.parse(stdout) as { status: string };
     return result.status === "present" ? "already-present" : "linked";
   } catch (error) {
     (deps.warn ?? console.error)(`dependency seed provisioning refused: ${(error as Error).message}`);
@@ -5559,6 +5565,8 @@ export function worktreeAdd(
   });
   logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
   execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+  const satelliteSource = prepareWorktreeDependencies(repoDir, worktreePath, deps);
+  linkWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
   finishWorktreeAdd(repoDir, worktreePath, deps);
   recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
 }
@@ -5586,21 +5594,22 @@ function logAddedWorktree(
   });
 }
 
-function finishWorktreeAdd(
+function prepareWorktreeDependencies(
   repoDir: string,
   worktreePath: string,
   deps: WorktreeAddDepsArg,
   exclude: () => void = () => { excludeNodeModulesFromGit(worktreePath); },
-): void {
+): string | undefined {
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   exclude();
   if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
   // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
   // before, through the unchanged call below (W1-T4260).
-  const satelliteSource = satelliteNodeModulesSource(repoDir, worktreePath, deps);
-  if (satelliteSource) provisionWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => satelliteSource });
-  else provisionWorktreeNodeModules(repoDir, worktreePath);
+  return satelliteNodeModulesSource(repoDir, worktreePath, deps);
+}
+
+function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
   // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
   // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a
   // missing local tool is attributable to provisioning rather than misdiagnosed as the worker's own diff (W1-T4003).
@@ -5746,12 +5755,14 @@ export async function worktreeAddAsync(
   } catch {
     // Excluding node_modules is best-effort, as in the sync form.
   }
-  finishWorktreeAdd(repoDir, worktreePath, deps, () => {
+  const satelliteSource = prepareWorktreeDependencies(repoDir, worktreePath, deps, () => {
     excludeNodeModulesFromGit(worktreePath, { commonDir: () => {
       if (commonDir === undefined) throw new Error("git common dir unreadable");
       return commonDir;
     } });
   });
+  await provisionWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
+  finishWorktreeAdd(repoDir, worktreePath, deps);
   let drift: CanonicalCheckoutDriftResult;
   try {
     const raw = await worktreeGit(["-C", repoDir, "rev-list", "--count", `HEAD..origin/${ref}`]);

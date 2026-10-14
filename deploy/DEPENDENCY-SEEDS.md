@@ -19,8 +19,11 @@ An explicit npm cache environment override is preserved. An empty
 `RMD_DEPENDENCY_SEED_ROOT` disables account preferences; test setup uses this
 unless a fixture supplies its own root, avoiding writes to the operator store.
 
-Enabled worker, hand-worktree and proof paths use the provisioner. Existing checkouts are retained.
-The asynchronous reviewer invokes the standalone tool in a bounded child process.
+Enabled asynchronous worker creation, hand-worktree and proof priming use the provisioner.
+Existing checkouts are retained. Worker and asynchronous reviewer provisioning invoke the
+standalone tool in a bounded child process, leaving the daemon's event loop available.
+Legacy synchronous worktree and semantic-snapshot creation retain their dependency linking;
+they do not perform a new seed install on the daemon loop.
 Root dependency stores carry `.rmd-dependency-seed-root.json`; generic Mac/Azure janitors retain
 them and their ancestors. Install `dependency-seed-guard.sh` beside deployed janitor scripts.
 The installers copy the guard before the janitor. No emergency mode reduces the six-hour floor.
