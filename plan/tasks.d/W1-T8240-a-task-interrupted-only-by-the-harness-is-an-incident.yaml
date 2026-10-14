@@ -11,7 +11,7 @@
   origin: "operator request 2026-10-11 (detect, then route): stranded-task detector"
   plan_refs: [W1-T4678, W1-T4025, W1-T5109, W1-T8164, W1-T8166, W1-T7806, W1-T8008, W1-T8203, W1-T8176]
   files: [src/lib/stranded-task-detector.ts, src/lib/sre-lane.ts, test/a-task-interrupted-only-by-the-harness-is-an-incident.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

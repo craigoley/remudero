@@ -211,8 +211,8 @@ test("classification, the operator check and the action table", () => {
   assert.deepEqual(decideAction({ verdict: still, escalationClass: "MANUAL", operatorSpokeLast: false, prior: refreshed, nowMs: NOW }), { action: "keep", guard: "refresh-not-due" });
 });
 
-test("the policy block is strict, and the shipped one is shadow", () => {
-  assert.deepEqual(loadIssueRevalidationPolicy(join(process.cwd(), "plan", "policy.yaml")), { mode: "shadow", maxClosesPerPass: 5 });
+test("the policy block is strict, and the shipped one acts on operator 2026-10-14", () => {
+  assert.deepEqual(loadIssueRevalidationPolicy(join(process.cwd(), "plan", "policy.yaml")), { mode: "act", maxClosesPerPass: 5 });
   const row = (value: unknown) => ({ value, origin: "net-new", min: 1, max: 20 });
   assert.throws(() => parseIssueRevalidationPolicy({ mode: { value: "on" }, maxClosesPerPass: row(5) }), /accepts only/);
   assert.throws(() => parseIssueRevalidationPolicy({ mode: { value: "act" }, maxClosesPerPass: row(50) }), /integer inside/);

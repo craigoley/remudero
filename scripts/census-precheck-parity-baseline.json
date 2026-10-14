@@ -84,8 +84,7 @@
     "test/tracked-source-write-guard.test.ts",
     "test/verb-census-fixture-isolation.test.ts",
     "test/workflow-guard-mutation-ratchet.test.ts",
-    "test/workspace-node-modules-root-baseline.test.ts",
-    "test/worktree-creation-census.test.ts"
+    "test/workspace-node-modules-root-baseline.test.ts"
   ],
   "ciOnlyScripts": {
     "script:baseline-monotonic-check": "mirrored by rmd preflight (src/lib/ci-parity.ts) only; the pre-push hook and census-precheck do not ask it (baseline-monotonic job)",

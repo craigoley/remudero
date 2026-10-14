@@ -67,11 +67,12 @@ test("W1-T4064: order is identical for the same plan tree and calibration snapsh
   assert.equal(JSON.stringify([...a.stridePassByTaskId!]), JSON.stringify([...b.stridePassByTaskId!]));
 });
 
-test("W1-T4064: explicit priority still sorts ahead of any computed score", () => {
+// W1-T9323: priority is one bounded input to the score, no longer the comparator's first key.
+test("W1-T4064: explicit priority no longer sorts ahead of the computed score", () => {
   const prioritized = task(old.id, { priority: 0 });
   assert.equal(nextRunnable(plan([fresh, prioritized]), () => false, {
     dispatchValueContext: calibrate([fresh, prioritized]),
-  })?.id, old.id);
+  })?.id, fresh.id);
 });
 
 test("W1-T4064: age validity is learned from terminal outcomes rather than an age cap", () => {
@@ -120,11 +121,12 @@ test("W1-T4064: ranking leaves eligibility unchanged and remains a total order a
 });
 
 test("W1-T4064: a missing filing date leaves that task unscored; unmeasured costs refuse the computed schedule", () => {
-  const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: new Map([[old.id, NOW - DAY]]) };
-  // W1-T7534: one undatable task is left unscored instead of refusing every task's schedule.
+  const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: new Map([...filed].filter(([id]) => id !== fresh.id)) };
+  // W1-T9323: one undatable task is scored at age 0 and imputed instead of refusing every task's schedule.
   const missing = buildDispatchValueContext([old, fresh], history, new Set([old.id, fresh.id]), NOW, true, "seed", snapshot);
   assert.equal(missing.kind, "ready");
-  assert.deepEqual(missing.context.costOfDelayUnscored, [fresh.id]);
+  assert.deepEqual(missing.context.costOfDelayImputed, [fresh.id]);
+  assert.equal(missing.context.costOfDelayUnscored, undefined);
   const noCosts = history.map(row => ({ ...row, cost_usd: undefined }));
   const unmeasured = buildDispatchValueContext([old], noCosts, new Set([old.id]), NOW, true, "seed", snapshot);
   assert.equal(unmeasured.kind, "refused");
@@ -188,7 +190,7 @@ test("W1-T4064: default filing reader reads committed dates from a real reposito
 });
 
 test("W1-T4064: sparse age evidence stays positive and invalid numeric evidence is refused", () => {
-  const dates = new Map([[old.id, NOW - 100 * DAY]]);
+  const dates = new Map([...filed, [old.id, NOW - 100 * DAY]]);
   const context = calibrate([old], history, dates);
   assert.ok(context.costOfDelayByTaskId!.get(old.id)! > 0, "no matched filing histories leaves a pooled prior");
   const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: dates };
@@ -196,9 +198,9 @@ test("W1-T4064: sparse age evidence stays positive and invalid numeric evidence 
     buildDispatchValueContext([old], rows, new Set([old.id]), nowMs, true, "seed", { ...snapshot, planTreeSha: treeSha, filedAtByTaskId });
   assert.deepEqual(build(history, NaN), { kind: "refused", reasons: ["unreadable-snapshot"] });
   assert.deepEqual(build(history, NOW, ""), { kind: "refused", reasons: ["unreadable-snapshot"] });
-  const future = build(history, NOW, "tree-sha", new Map([[old.id, NOW + DAY]]));
-  assert.equal(future.kind, "ready", "W1-T7534: a future filing date leaves the task unscored");
-  assert.deepEqual(future.context.costOfDelayUnscored, [old.id]);
+  const future = build(history, NOW, "tree-sha", new Map([...filed, [old.id, NOW + DAY]]));
+  assert.equal(future.kind, "ready", "W1-T9323: a future filing date is imputed at age zero");
+  assert.deepEqual(future.context.costOfDelayImputed, [old.id]);
   const tiny = history.map(row => row.cost_usd === undefined ? row : { ...row, cost_usd: 1e-310 });
   assert.deepEqual(build(tiny), { kind: "refused", reasons: [`${old.id}:unmeasured-score`] });
 });
@@ -264,7 +266,9 @@ test("W1-T4064: the daemon reads filing dates from the plan path it was given", 
     // The daemon reads the ledger against the REAL clock through a DISPATCH_VALUE_WINDOW_MS window, so a
     // fixture pinned to NOW aged out of it on 2026-10-10 (a time bomb): stamp the rows relative to real time.
     const shift = Date.now() - NOW;
-    const live = history.map(row => ({ ...row, ts: new Date(Date.parse(String(row.ts)) + shift).toISOString() }));
+    const live: Array<Record<string, unknown>> = history.map(row => ({ ...row, ts: new Date(Date.parse(String(row.ts)) + shift).toISOString() }));
+    // W1-T9323: the schedule needs a measured wait, so one planned task has a run that started after its filing.
+    live.push({ step: "run.start", task_id: old.id, run_id: "wait-evidence", task_class: "src", ts: new Date(Date.now() + 5_000).toISOString() });
     writeFileSync(join(root, "state", "ledger.ndjson"), live.map(row => JSON.stringify(row)).join("\n") + "\n");
     mkdirSync(join(repo.dir, "plan"));
     const planPath = join(repo.dir, "plan/tasks.yaml");

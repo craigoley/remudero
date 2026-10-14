@@ -14,7 +14,7 @@
     - src/lib/inbox.ts
     - src/lib/relint.ts
     - test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts
-  status: queued
+  status: merged
   priority: 1  # every fleet approve that reaches its push is refused there, so the inbox path files nothing
   attempts: 0
   rationale: |

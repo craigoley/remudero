@@ -1,0 +1,28 @@
+- id: W1-T9365
+  title: Add comment-load ceiling guard and alert in src/run-task.ts
+  repo: remudero
+  depends_on:
+    - W1-T1
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=1bb1e3eab4d88b6a
+  attempts: 0
+  files:
+    - src/run-task.ts
+  acceptance:
+    - claim: run-task.ts enforces a configurable comment-load ceiling and logs a warning when the limit is approached
+      proof: "grep: commentLoadCeiling in src/run-task.ts"
+  origin: architect
+
+  rationale: >-
+    From the 2026-09-24 follow-up on https://github.com/craigoley/remudero/pull/7006, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: `src/run-task.ts`'s comment-load ceiling was raised from 17000 to
+    17250 purely because merging two branches' independent doc comments summed past either side's
+    individual ceiling — worth watching if this recurs across future stacked merges of the same
+    file (the baseline's own header already names this as expected "bucket trick" territory). —
+    from unfiled (run DAEMON-1790255312892, https://github.com/craigoley/remudero/pull/7006)

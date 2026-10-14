@@ -1,0 +1,53 @@
+- id: W1-T9406
+  title: "THE TRIAGE JUDGE'S EVW1-T9406NCE STILL READS THE WHOLE LEDGER UNION ON THE LOOP, ONCE PER REJUDGED ESCALATION — W1-T9390 moved sweepEscalationTriage's own history read off the loop, but buildEscalationTriageRuntime's `evidence` callback (default readRows = readLedgerUnionRecordsSync over the whole state dir) still parses every rotation synchronously for each candidate it triages: the evidence reads a bounded step slice through W1-T9390's incremental reader, refreshed off the loop, with no time window"
+  repo: remudero
+  depends_on: [W1-T9390]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the escalation triage's evidence reads; high because it changes the judge's evidence source on the daemon loop
+  band_meaning: span
+  origin: "operator session 2026-10-14: follow-up to W1-T9390 (#11608), relayed by the coordinator; operator approved filing"
+  plan_refs: [W1-T9390, W1-T8868, W1-T100]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/the-triage-evidence-reads-its-slice-off-the-loop.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main eb0c3a710 and #11608's head 46bfe4f91 (run-W1-T9390-1791964262575, not yet merged).
+    ON MAIN, src/run-task.ts buildEscalationTriageRuntime: `const readRows = io.readRows ?? ((path) =>
+    readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true }).rows)`, and its returned settings'
+    `evidence: (e) => { const history = readRows(deps.ledgerPath); … }` walks that whole array three times (the newest
+    matching fix.dispatch strike, the escalation.auto_resolve_attempted rekicks, the newest row carrying task_id +
+    triage_subject + issue_url) and hands it to escalationClassSignal. escalate.ts triageRoute calls
+    `cfg?.evidence?.(e)` synchronously for each escalation it triages, so each rejudged candidate repeats a
+    whole-union gunzip and parse on the daemon loop.
+    ON #11608's HEAD, src/lib/sweep.ts createEscalationTriageHistoryReader: rotations it has not seen are loaded OFF
+    the loop through createLedgerRotationMemo's async load with a durable step-slice digest, then
+    createIncrementalLedgerUnion answers from the digests and reads the live file from where the last pass stopped;
+    no time window, refuseIncomplete kept. W1-T9390 measured the whole-union read it replaced at 57-105 s of frozen loop
+    per full sweep (450 rotations). Its steps are fixed to the birth steps and escalation.rejudged, so the evidence's
+    steps are not in it.
+    OVERLAP: W1-T100 (tasks.yaml, routing blocked_ci to the ci-log fix path) shares src/run-task.ts and src/lib/sweep.ts
+    only because both files are large hubs; this task changes only the escalation triage's evidence read.
+    ALSO SEEN, NOT THIS TASK: escalate.ts ledgerClassTier reads the union synchronously too, step-filtered to
+    panel.escalation_marked_handled, before the evidence's own classTier overrides it.
+  design: |
+    1. The history reader W1-T9390 adds takes its step list as a parameter (its current list stays the sweep's default),
+       so a second holder gets its own durable digest and incremental union.
+    2. buildEscalationTriageRuntime holds one such reader for the steps the evidence reads (fix.dispatch,
+       escalation.auto_resolve_attempted, the birth steps that carry triage_subject and issue_url, and
+       panel.escalation_marked_handled for escalationClassSignal), built once per daemon start like W1-T9390's.
+    3. Before any escalation is triaged in a pass, the runtime awaits one refresh of that slice off the loop; `evidence`
+       then reads only the refreshed slice, synchronously, and never the whole union. An unreadable slice is the same
+       refusal readRows gives today (refuseIncomplete), never an empty history.
+    4. No time window: an escalation born in the oldest rotation is judged on the same rows as today. A test injecting
+       a fixture corpus proves the slice gives the same strike, rekick count, birth and class tier as the whole-union
+       read, and that no synchronous union read happens during a pass.
+  acceptance:
+    - claim: "the triage evidence reads a step slice refreshed off the loop, with the same strike, rekick count, birth and class tier as the whole-union read, and makes no synchronous union read"
+      proof: 'grep: test("W1-T9406: the triage evidence reads its slice off the loop" in test/the-triage-evidence-reads-its-slice-off-the-loop.test.ts'
+  falsifier: |
+    Restore the readRows default: the fixture's synchronous-read spy records a whole-union read during the pass and the
+    test fails.

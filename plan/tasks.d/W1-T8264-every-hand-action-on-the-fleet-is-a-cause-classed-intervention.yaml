@@ -11,7 +11,7 @@
   origin: "operator rulings 2026-10-09 (a hand-fixed PR is a bug in rmd; operator interventions are the headline signal) + 2026-10-11 detection research: intervention ledger"
   plan_refs: [W1-T7421, W1-T2697, W1-T3683, W1-T7839, W1-T7721, W1-T4387, W1-T7650]
   files: [src/lib/operator-interventions.ts, src/lib/sre-lane.ts, src/lib/fix-lane-gardener.ts, src/lib/ledger.ts, test/every-hand-action-on-the-fleet-is-a-cause-classed-intervention.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

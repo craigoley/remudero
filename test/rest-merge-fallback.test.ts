@@ -218,13 +218,15 @@ test("a rate-limited fallback whose post-merge step throws still reports the mer
 // ── the WRITE itself: argv, refusal, and the real default binding ───────────────────────────────
 test("mergeDirectViaRest issues the REST merge through the injected exec, with the argv it builds", () => {
   const seen: Array<{ file: string; args: string[]; opts: unknown }> = [];
+  const securedHead="a".repeat(40);
   mergeDirectViaRest(PR, (file, args, opts) => {
     seen.push({ file, args, opts });
     return "";
-  });
+  },path=>path.includes('/files?')?[{filename:'docs/rest.md'}]:{state:'open',head:{sha:securedHead},
+    base:{sha:'b'.repeat(40),ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1});
   assert.equal(seen.length, 1, "exactly one write");
   assert.equal(seen[0].file, "gh");
-  assert.deepEqual(seen[0].args, ghMergePrArgv("craigoley", "remudero", 2598));
+  assert.deepEqual(seen[0].args, ghMergePrArgv("craigoley", "remudero", 2598,securedHead));
   assert.deepEqual(seen[0].opts, { encoding: "utf8", stdio: "pipe" });
 });
 
@@ -239,6 +241,16 @@ test("mergeDirectViaRest THROWS on a URL it cannot resolve, and never reaches th
     /refusing to merge blind/,
   );
   assert.equal(called, 0, "a merge that cannot be addressed must not be attempted");
+});
+test('direct merge emits exactly one verified sha and refuses a stale caller head before the write',()=>{
+ const head='a'.repeat(40),seen:string[][]=[];
+ const read=(path:string)=>path.includes('/files?')?[{filename:'docs/rest.md'}]:{state:'open',head:{sha:head},
+  base:{sha:'b'.repeat(40),ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1};
+ const exec=(_file:string,args:string[])=>{seen.push(args);return '';};
+ mergeDirectViaRest(PR,exec,read,head);
+ assert.deepEqual(seen[0].filter(arg=>arg.startsWith('sha=')),['sha='+head]);
+ assert.throws(()=>mergeDirectViaRest(PR,exec,read,'c'.repeat(40)),/security merge unknown/);
+ assert.equal(seen.length,1,'stale head never reaches REST');
 });
 
 test("mergeDirectViaRest's DEFAULT exec is the real one — reached when no fake is supplied", () => {

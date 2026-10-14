@@ -1,0 +1,62 @@
+- id: W1-T9403
+  title: "SERVE'S LARGEST THREAD IS ONE UNNAMED NUMBER — the heavy view lane's heap read 1.06-1.65 GB in every serve.memory sample of 2026-10-14 06:39-07:52Z, all after W1-T9357 merged, and nothing says how much of it is live, how much is GC slack, or which instance's held board projection holds it: each worker-heap part carries its used heap beside its committed heap, and the views lanes name each held board projection by instance with its rows and kept bytes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what serve's memory row attributes inside its worker threads; high because it adds a message to the read-model worker protocol
+  band_meaning: span
+  origin: "operator session 2026-10-14: serve memory investigation (operator approved filing the serve, allocator and worker-typecheck memory tasks)"
+  plan_refs: [W1-T5355, W1-T5480, W1-T9357, W1-T9370]
+  files: [src/lib/worker-heaps.ts, src/lib/board-projection.ts, src/lib/now-view.ts, src/lib/read-model-worker.ts, test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts]
+  status: merged
+  priority: 1.5  # measured: the heavy lane is 23-33% of serve's rss in every sample, and the next remedy cannot be chosen without this split
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 08:00Z at origin/main eb0c3a710, the 23 retained serve.memory rows of the core ledger (06:39-07:52Z),
+    the read_model/serve/deploy rows 07:25-07:59Z, docker events and the host journal (all read-only).
+    REFUTED: "serve's boot integrity build for three instances costs ~4.5 GB". read_model.integrity_started for core, site
+    and console is a SQLite quick_check (checkReadModelIntegrity -> quickCheckReadModel) on a thread that exits when done;
+    it took 0.9-2.1 s (site, console) and 11.0-11.4 s (core) at 07:28 and 07:45-07:47Z. There is no boot peak either: the
+    old serve (pid 127, booted 10-13) read 4.24-5.37 GB rss at 06:39-07:24Z and the new one 4.19-4.96 GB three minutes
+    after its start, so a per-boot-phase reading would measure nothing the 3-minute sample does not already show.
+    OBSERVED, where serve's rss lives (committed heap + external per thread, MB), seven samples with every thread sized:
+    - read-model-worker:spawnHeavyViews 1060-1645 (the largest in every sample; 1,580 at 07:31, 3 min after a boot)
+    - read-model-slow-lane:spawn 469-720; board-worker:Object.start 306-417; read-model-worker:spawn 196-525
+    - read-model-worker:spawnViews 180-502; read-model-worker:spawnOracle 84-283; main heap_total 576-762
+    W1-T9357 (merged 03:02Z, #11554) measured ONE core now-view build keeping ~422 MB after its fix. The heavy lane holds
+    one board projection per instance for the thread's life (now-view.ts, the `held` map, keyed by instance, replaced only
+    when the store changes), so core, site and console are all resident; and its reading jumps 1,060 -> 1,539 MB between
+    two samples three minutes apart, which a live set does not do. The reading cannot tell those apart:
+    threadHeap (worker-heaps.ts) reports total_heap_size + external_memory, the COMMITTED heap, and one number per thread.
+    WHY MEASURE BEFORE A REMEDY: the candidates differ by what dominates. If the held non-core projections dominate, an
+    instance's projection can be released while its now view is unread and rebuilt on demand; if the committed-minus-used
+    gap dominates, the threads' GC slack is what to give back under host pressure (the daemon's W1-T8401 reclaimer is the
+    pattern). Either remedy is filed from this task's first day of rows. W1-T9370 (code-load cost per isolate) and W1-T5064
+    (retire the legacy board worker) are separate, already-filed cuts.
+    ALSO SEEN, NOT THIS TASK: after the read-model worker is recycled while busy (read_model.worker_silent, 60+ s),
+    its nested threads answer no heap read ("thread 20's own threads unsized: no answer within 5000ms"), so 2.4-3.5 GB
+    of rss is unattributed for as long as its loop stays blocked (07:00-07:24Z and 07:43Z on). That is the blocked loop's
+    symptom, named honestly by the existing reading.
+  design: |
+    1. threadHeap (worker-heaps.ts) reads used_heap_size + external_memory as `used_bytes` beside the committed `bytes`;
+       each part and each WorkerHeapReading carry it, summed like `bytes`. A thread that cannot be read keeps its error and
+       has no `used_bytes` (absent, never zero).
+    2. createBoardProjection (board-projection.ts) counts what it keeps as it ingests: rows kept and the summed length of
+       each kept row's source text, exposed as size(): { rows, keptBytes }. Nothing else in the projection changes.
+    3. createNowView exposes heldSizes(): { [instance]: { rows, keptBytes } } over its `held` map.
+    4. A views lane (fast or heavy) posts { type: "view_holds", lane, holds } after each now build; the read-model worker
+       keeps each lane's latest and, when it answers a thread-heaps request (answerThreadHeaps), attaches it to that lane
+       thread's part as `holds: { "board:<instance>": { entries: rows, bytes: keptBytes } }`. The serve.memory row then
+       names, inside worker-heap:read-model-worker:spawnHeavyViews, each instance's held board projection.
+    5. No bound, no relief and no refusal: this is a reading. A lane that never built a now view has no `holds`.
+  acceptance:
+    - claim: "a worker-heap part reports its used heap beside its committed heap, and a views lane's part names each held board projection by instance with its rows and kept bytes"
+      proof: 'grep: test("W1-T9403: serve\.memory names the used heap of each thread and each held board projection" in test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts'
+    - claim: "the board projection reports what it keeps"
+      proof: 'grep: keptBytes in src/lib/board-projection.ts'
+  falsifier: |
+    Drop used_bytes from threadHeap, or the view_holds message: the fixture lane's part has no used_bytes or no
+    board:<instance> entry and the test fails.

@@ -533,7 +533,10 @@ jobs:
         if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
         run: |
           mkdir -p "$RUNNER_TEMP/fold-debt"
-          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
+          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' |
+            while IFS= read -r -d '' fold_debt_file; do
+              cp -- "$fold_debt_file" "$RUNNER_TEMP/fold-debt/"
+            done
       - name: Upload the fold debt main's ceiling gate filed (W1-T7853)
         if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1267,7 +1270,10 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/fold-debt"
-          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' | xargs -0 -r cp -t "$RUNNER_TEMP/fold-debt"
+          git ls-files -z --others --exclude-standard -- 'plan/feedback/fold-debt-*.yaml' |
+            while IFS= read -r -d '' fold_debt_file; do
+              cp -- "$fold_debt_file" "$RUNNER_TEMP/fold-debt/"
+            done
 
       - name: Upload the fold debt this run filed (W1-T7853)
         id: upload-fold-debt
@@ -1925,6 +1931,10 @@ jobs:
           fi
           for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
+            if [ ! -s "coverage-shards/coverage-shard-${SHARD}/lcov.info" ]; then
+              echo "coverage-ratchet: shard ${SHARD} is missing its independently generated lcov line evidence."
+              exit 1
+            fi
             if ! find "$RAW_DIR" -maxdepth 1 -type f \( -name 'coverage-bundle-*.json' -o -name 'coverage-corpus-*.json' -o -name 'coverage-premapped-*.json' \) -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
@@ -1933,6 +1943,14 @@ jobs:
           mkdir -p coverage
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
             --shard-count 8 \
+            --line-lcov coverage-shards/coverage-shard-1/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-2/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-3/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-4/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-5/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-6/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-7/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-8/lcov.info \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
             coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
             coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \

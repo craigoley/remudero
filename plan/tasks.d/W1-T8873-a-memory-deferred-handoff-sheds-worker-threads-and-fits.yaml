@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: no VM resize; optimize and right-size what we have"
   plan_refs: [W1-T8311]
   files: [src/lib/serve-supervisor.ts, src/lib/serve-generation.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

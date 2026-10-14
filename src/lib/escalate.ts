@@ -25,6 +25,17 @@ import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { inferOperatorPresence, learnLeaseMs, replyLatenciesMs } from "./presence.js";
 import type { WriteTier } from "./service.js";
+import {
+  takeAutoResolve,
+  triageEscalation,
+  type EscalationTriageMode,
+  type TriageAction,
+  type TriageEvidence,
+  type TriageOutcome,
+  type TriagePass,
+} from "./escalation-triage.js";
+import { escalationClassSignal } from "./escalation-precision.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
@@ -608,6 +619,10 @@ export type EscalationJudgeDecision = "demote" | "deliver";
  *  Retained across rotation in DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts), same change. */
 export const ESCALATION_JUDGED_STEP = "escalation.judged";
 
+/** W1-T8868 — the step {@link triageRoute} writes for EVERY newly-opened escalation, in shadow and act
+ *  mode alike: the would-be (or taken) triage outcome. READER: the operator calibrating the shadow. */
+export const ESCALATION_TRIAGED_STEP = "escalation.triaged";
+
 /** The judge's verdict. `reason` is ledgered verbatim and, on a demotion, becomes the FIRST
  *  comment on the fleet-notice issue (design clause ii) — so the demotion is never silent. */
 export interface EscalationJudgeVerdict {
@@ -619,7 +634,7 @@ export interface EscalationJudgeVerdict {
  *  the operator's own CLI escalated is exempt STRUCTURALLY, not by a field read here:
  *  `escalateCommand` (run-task.ts) calls {@link escalate}, never {@link escalateWithJudge}. */
 export function isEscalationJudgeExempt(e: Escalation): boolean {
-  return e.class === "MANUAL" || e.class === "GRILL";
+  return e.class === "MANUAL" || e.class === "HARD_STOP" || e.class === "GRILL";
 }
 
 /** Render the judge's prompt — the FULL typed {@link Escalation} at the one choke point every
@@ -708,7 +723,11 @@ export async function judgeEscalation(e: Escalation, deps: EscalationJudgeDeps):
     return { decision: "deliver", reason: `${e.class} is operator-owned by rule — exempt from judgement` };
   }
   try {
-    return await deps.judge(e);
+    const verdict = await deps.judge(e);
+    if (!verdict || !VALID_JUDGE_DECISIONS.has(verdict.decision) || typeof verdict.reason !== "string") {
+      return { ...FAIL_OPEN_JUDGE_VERDICT };
+    }
+    return verdict;
   } catch (err) {
     return {
       decision: "deliver",
@@ -891,6 +910,33 @@ export interface EscalateDeps<G extends AsyncIssueGateway = IssueGateway> {
   /** OPTIONAL (W1-T2494) — path to the JSONL thread store {@link appendThreadMessage} writes to.
    *  Every caller predating this task omits it: {@link recordThreadMessage} no-ops when unset. */
   threadStorePath?: string;
+  /** OPTIONAL (W1-T8868) — how this call triages its escalation. Absent is SHADOW mode: the would-be
+   *  outcome is ledgered as `escalation.triaged` and the escalation is delivered exactly as before. */
+  triage?: EscalateTriageSettings;
+}
+
+/** W1-T8868 — the knobs {@link triageRoute} reads. Every field is optional; an absent `execute`
+ *  entry means that action is not wired, and an auto-resolve for it is DELIVERED instead. */
+export interface EscalateTriageSettings {
+  /** `shadow` (default) ledgers and still delivers; `act` follows the outcome. */
+  mode?: EscalationTriageMode;
+  /** The shared pass allowance; absence refuses execution. */
+  pass?: TriagePass;
+  /** Caller-known evidence the escalation text cannot carry (seen window, re-kick history). */
+  evidence?: (e: Escalation) => TriageEvidence;
+  judge?: EscalationJudgeDeps["judge"];
+  /** The reversible executors, keyed by the CLOSED {@link TriageAction} set. Each returns a one-line
+   *  account of the effect AND how to undo it; a throw means the action failed → deliver. */
+  execute?: Partial<Record<TriageAction, (e: Escalation) => string | Promise<string>>>;
+  observe?: (e: Escalation, action: TriageAction, effect: string) => string | undefined | Promise<string | undefined>;
+  /** Production actions can require an async driver before starting any effect. */
+  asyncExecutors?: boolean;
+}
+
+let productionTriage: ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) | undefined;
+
+export function configureEscalationTriage(factory: typeof productionTriage): void {
+  productionTriage = factory;
 }
 
 /** Pull a PR reference out of free text — a full `/pull/<n>` URL, or a bare `PR #<n>`/`PR <n>` — and
@@ -1364,10 +1410,133 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
  *  daemon loop. The SAME steps under the async driver, so it opens, dedupes, supersedes and ledgers
  *  exactly what the sync form does. */
 export function escalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Promise<string> {
-  return runStepsAsync(escalateSteps(e, deps));
+  return runStepsAsync(escalateSteps(e, deps, true));
 }
 
-function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Steps<string> {
+/** An unreadable precision ledger propagates to the funnel's deliver fallback. */
+function ledgerClassTier(e: Escalation, ledgerPath: string): TriageEvidence["classTier"] {
+  if (e.class === "MANUAL" || e.class === "HARD_STOP") return undefined;
+  // A torn row that NAMES the step could have been the evidence that stops a digest, so it refuses;
+  // an unattributable torn line elsewhere in the corpus is a healthy ledger's normal residue.
+  let damaged = false;
+  const lines = readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: "panel.escalation_marked_handled", refuseIncomplete: true,
+    onTorn: (raw) => { if (raw.includes("panel.escalation_marked_handled")) damaged = true; },
+  });
+  if (!lines.ok || damaged) throw new Error("escalation precision history is unreadable");
+  return escalationClassSignal(lines.rows, e.class).tier;
+}
+
+/** The escalation as the later re-judge reads it back from the `issue_opened` row. An escalation whose
+ *  fields cannot be serialised is still raised: it simply carries no subject, so it is never re-judged. */
+function serialisableSubject(e: Escalation): { triage_subject?: Escalation } {
+  try {
+    return { triage_subject: JSON.parse(JSON.stringify(e)) as Escalation };
+  } catch {
+    // deliberate: an unserialisable escalation is raised without a subject (see above); nothing is lost but the re-judge.
+    return {};
+  }
+}
+
+/** Where a triaged escalation is routed when the triage ACTS (see {@link triageRoute}). */
+interface TriageRoute {
+  queueLabel: string;
+  step: string;
+  firstComment?: string;
+  extra?: Record<string, unknown>;
+  pending?: { action: TriageAction; effect: string; cfg: EscalateTriageSettings };
+}
+
+/** W1-T8868 — THE TRIAGE FUNNEL. Every escalation that opens an issue crosses this once: the outcome
+ *  is decided by {@link triageEscalation}, ALWAYS ledgered as `escalation.triaged`, and — only in `act`
+ *  mode — turned into a route. Returns `undefined` in shadow mode (deliver exactly as before). An
+ *  auto-resolve keeps the issue OPEN under the fleet-notice label with the action's effect and its
+ *  undo as the first comment; a missing executor, a spent pass cap or a throwing executor all fall
+ *  back to needs-human. */
+function* triageRoute(
+  e: Escalation,
+  deps: EscalateDeps<AsyncIssueGateway>,
+  allowAsyncJudge = false,
+): Steps<TriageRoute> {
+  let cfg: EscalateTriageSettings | undefined;
+  let mode: EscalationTriageMode = "shadow";
+  let outcome: TriageOutcome;
+  try {
+    cfg = { ...productionTriage?.(deps), ...deps.triage };
+    mode = cfg?.mode === "act" ? "act" : "shadow";
+    const evidence: TriageEvidence = { classTier: ledgerClassTier(e, deps.ledgerPath), ...cfg?.evidence?.(e) };
+    outcome = triageEscalation(e, evidence);
+    if (allowAsyncJudge && cfg?.judge && outcome.kind === "deliver" && outcome.decidedBy === "default") {
+      const verdict = yield* step(() => judgeEscalation(e, { judge: cfg!.judge! }));
+      appendLedger(deps.ledgerPath, {
+        run_id: deps.runId, task_id: e.taskId, step: ESCALATION_JUDGED_STEP,
+        class: e.class, judge_decision: verdict.decision, judge_reason: verdict.reason,
+      });
+      outcome = triageEscalation(e, evidence, verdict);
+    }
+  } catch (err) {
+    outcome = { kind: "deliver", decidedBy: "default", reason: `triage evidence unreadable (${String(err)})` };
+  }
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: e.taskId,
+    step: ESCALATION_TRIAGED_STEP,
+    class: e.class,
+    triage_mode: mode,
+    triage_outcome: outcome.kind,
+    ...(outcome.kind === "auto_resolve" ? { triage_action: outcome.action } : {}),
+    triage_decided_by: outcome.decidedBy,
+    triage_reason: outcome.reason,
+  });
+  if (mode !== "act") return { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" };
+  if (outcome.kind === "deliver") return { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" };
+  if (outcome.kind === "digest") {
+    return {
+      queueLabel: FLEET_NOTICE_LABEL,
+      step: "escalation.demoted",
+      firstComment: outcome.reason,
+      extra: { judge_reason: outcome.reason },
+    };
+  }
+  const action = outcome.action;
+  const execute = cfg?.execute?.[action];
+  const deliverBecause = (why: string): TriageRoute => {
+    appendLedger(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: e.taskId,
+      step: "escalation.auto_resolve_declined",
+      class: e.class,
+      triage_action: action,
+      reason: why,
+    });
+    return { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" };
+  };
+  if (!execute) return deliverBecause(`no executor wired for ${action}`);
+  if (cfg?.asyncExecutors && !allowAsyncJudge) return deliverBecause("action awaits the async sweep driver");
+  if (cfg?.pass === undefined || !takeAutoResolve(cfg.pass)) return deliverBecause("auto-resolve cap for this pass is unavailable or spent");
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId, task_id: e.taskId, step: "escalation.auto_resolve_attempted",
+    class: e.class, triage_action: action, head_sha: e.headSha, contract_revision: e.contractRevision,
+  });
+  let effect: string;
+  try {
+    effect = yield* step(() => execute(e));
+    if (typeof effect !== "string" || !effect.trim()) throw new Error("executor supplied no effect receipt");
+  } catch (err) {
+    return deliverBecause(`${action} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return {
+    queueLabel: FLEET_NOTICE_LABEL,
+    step: "escalation.auto_resolve_started",
+    firstComment:
+      `Auto-resolved by \`${action}\` (${outcome.reason}). ${effect}\n\n` +
+      "This issue stays open until the action's effect is observed; reopen it to undo.",
+    extra: { triage_action: action },
+    pending: { action, effect, cfg },
+  };
+}
+
+function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge = false): Steps<string> {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
@@ -1378,20 +1547,40 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): S
   if (dedup.kind === "found") return yield* recordDuplicateEscalation(resolved, dedup.issue, deps);
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
   const messageCheck = checkOperatorMessageSafe(resolved);
+  const route = yield* triageRoute(resolved, deps, allowAsyncJudge);
   const url = yield* createEscalationIssue(resolved, deps, {
-    queueLabel: NEEDS_HUMAN_LABEL,
-    step: "escalation.issue_opened",
+    queueLabel: route?.queueLabel ?? NEEDS_HUMAN_LABEL,
+    step: route?.step ?? "escalation.issue_opened",
+    ...(route?.firstComment ? { firstComment: route.firstComment } : {}),
+    extra: { ...route.extra, ...serialisableSubject(resolved) },
     messageCheck,
   });
   // W1-T4659: a new issue for a NEW head retires whichever older-head issue(s) it just superseded.
   const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
   if (prRef) yield* closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
+  if (route.pending?.cfg.observe && deps.issues.closeWithComment) {
+    try {
+      const pending = route.pending;
+      const observed = yield* step(() => pending.cfg.observe!(resolved, pending.action, pending.effect));
+      if (observed) {
+        yield* step(() => deps.issues.closeWithComment!(url, `Action effect observed: ${observed}. Reopen this issue to undo.`));
+        appendLedger(deps.ledgerPath, {
+          run_id: deps.runId, task_id: resolved.taskId, step: "escalation.auto_resolved",
+          issue_url: url, triage_action: pending.action, evidence: observed,
+        });
+      }
+    } catch (err) {
+      appendLedger(deps.ledgerPath, {
+        run_id: deps.runId, task_id: resolved.taskId, step: "escalation.auto_resolve_observation_failed",
+        issue_url: url, reason: String(err),
+      });
+    }
+  }
   return url;
 }
 
-/** THE JUDGED CHOKE POINT (W1-T349) — {@link escalate} plus the residual escalation judge. Producers
- *  opt in; anyone still calling {@link escalate}/{@link tryEscalate} gets today's unjudged
- *  needs-human behaviour. ORDER MATTERS: dedup runs FIRST, through the exact same {@link
+/** The async triage funnel with an explicit residual judge. Shadow still delivers every outcome.
+ *  ORDER MATTERS: dedup runs FIRST, through the exact same {@link
  *  lookupDuplicateEscalation} search, so the judge never sees a duplicate (and never runs at all on
  *  an unreadable surface — W1-T2912). A `demote` opens the issue fleet-notice-labelled with the
  *  judge's reason as the first comment; anything else — deliver, an exempt class, or a judge failure
@@ -1401,46 +1590,9 @@ export async function escalateWithJudge(
   e: Escalation,
   deps: EscalateDeps<AsyncIssueGateway> & EscalationJudgeDeps,
 ): Promise<string> {
-  if (e.options.length === 0) {
-    throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
-  }
-  validateEscalationOptionKinds(e);
-  const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
-  recordThreadMessage(resolved, deps);
-  const dedup = await runStepsAsync(lookupDuplicateEscalation(resolved, deps));
-  if (dedup.kind === "found") return runStepsAsync(recordDuplicateEscalation(resolved, dedup.issue, deps));
-  if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
-
-  const verdict = await judgeEscalation(resolved, deps);
-  // W1-T3166, BOTH arms: a judge that only leaves a trace when it demotes cannot be calibrated.
-  appendLedger(deps.ledgerPath, {
-    run_id: deps.runId,
-    task_id: resolved.taskId,
-    step: ESCALATION_JUDGED_STEP,
-    class: resolved.class,
-    judge_decision: verdict.decision,
-    judge_reason: verdict.reason,
-  });
-  const messageCheck = checkOperatorMessageSafe(resolved);
-  const url = await runStepsAsync(
-    verdict.decision === "demote"
-      ? createEscalationIssue(resolved, deps, {
-          queueLabel: FLEET_NOTICE_LABEL,
-          step: "escalation.demoted",
-          firstComment: verdict.reason,
-          extra: { judge_reason: verdict.reason },
-          messageCheck,
-        })
-      : createEscalationIssue(resolved, deps, {
-          queueLabel: NEEDS_HUMAN_LABEL,
-          step: "escalation.issue_opened",
-          messageCheck,
-        }),
-  );
-  // W1-T4659: same supersede as escalate() above — either branch just opened a genuinely new issue.
-  const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
-  if (prRef) await runStepsAsync(closeSupersededEscalations(resolved, prRef, dedup.open, url, deps));
-  return url;
+  return runStepsAsync(escalateSteps(e, {
+    ...deps, triage: { ...deps.triage, judge: deps.judge },
+  }, true));
 }
 
 /** NON-THROWING escalation, for callers inside a SUPERVISED LOOP. Returns the issue URL, or `null`
@@ -1462,12 +1614,12 @@ export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
 /** W1-T5283 — {@link tryEscalate} over {@link escalateAsync}: never rejects, and ledgers the same
  *  `escalation.failed` row for a failure. */
 export function tryEscalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Promise<string | null> {
-  return runStepsAsync(tryEscalateSteps(e, deps));
+  return runStepsAsync(tryEscalateSteps(e, deps, true));
 }
 
-function* tryEscalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Steps<string | null> {
+function* tryEscalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge = false): Steps<string | null> {
   try {
-    return (yield* escalateSteps(e, deps)) || null;
+    return (yield* escalateSteps(e, deps, allowAsyncJudge)) || null;
   } catch (err) {
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
@@ -1491,7 +1643,30 @@ export interface EscalateWithSummaryDeps extends EscalateDeps, SummarizeDeps {}
  *  attach a summary, the documented fail-open default. */
 export async function escalateWithSummary(e: Escalation, deps: EscalateWithSummaryDeps): Promise<string> {
   const decisionSummary = await summarizeEscalation(e, deps);
-  return escalate({ ...e, decisionSummary }, deps);
+  return escalateAsync({ ...e, decisionSummary }, deps);
+}
+
+/** Reuse the birth funnel for an existing issue, without creating or deduplicating another one. */
+export async function triageExistingEscalation(
+  e: Escalation, url: string, deps: EscalateDeps<AsyncIssueGateway>,
+  relabel: (url: string, label: string) => void | Promise<void>,
+): Promise<void> {
+  const route = await runStepsAsync(triageRoute(e, deps, true));
+  if (route.queueLabel === NEEDS_HUMAN_LABEL) throw new Error("auto-resolve declined; retain needs-human");
+  await relabel(url, route.queueLabel);
+  if (route.firstComment) await deps.issues.comment?.(url, route.firstComment);
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId, task_id: e.taskId, step: route.step, issue_url: url, ...route.extra,
+  });
+  const pending = route.pending;
+  if (pending === undefined || pending.cfg.observe === undefined || !deps.issues.closeWithComment) return;
+  const observed = await pending.cfg.observe(e, pending.action, pending.effect);
+  if (!observed) return;
+  await deps.issues.closeWithComment(url, `Action effect observed: ${observed}. Reopen to undo.`);
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId, task_id: e.taskId, step: "escalation.auto_resolved", issue_url: url,
+    triage_action: pending.action, evidence: observed,
+  });
 }
 
 /** Real gateway: `gh issue create`, scoped to `owner/repo`. Runs outside the sandbox (gh is

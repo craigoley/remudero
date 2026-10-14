@@ -22,6 +22,7 @@
     - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
     - test/heavy-build-reservation.test.ts
     - test/state-backup.test.ts
+    - test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -100,6 +101,16 @@
     worker-credential-preflight tests. So does test/fleet-heartbeat.test.ts, which
     HOST_CAUSED_SUITE_REDS (src/lib/ci-parity.ts) declares at count 2 for darwin. Those are stale
     declarations, and that is a separate item.
+
+    AMENDED 2026-10-14 (operator session, filing PR plan-file-1791983276488): a FOURTH darwin red of the same
+    class. test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts "W1-T8920: a consumer worktree
+    without bin/rmd is gated through the harness rmd" plants a fake rmd whose summary stamps finishedAt with
+    `date -u +%Y-%m-%dT%H:%M:%S.%3NZ`. BSD date has no %N, so on darwin it prints a literal `...%S.3NZ`
+    (measured: `2026-10-14T13:32:05.3NZ`), the summary's time does not parse as newer than the gate run, and the
+    gate returns {"kind":"unmeasured","reason":"the preflight summary predates this gate run"} where the test
+    expects "fail". REPRODUCED on origin/main 7f7f0ea6b on the operator Mac with
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>` and a private TMPDIR: tests 3, pass 2,
+    fail 1. The census token set below did not include `%N`, so it would not have caught this.
   design: |
     1. ONE HELPER, test/helpers/host-requirement.ts. `requiresLinux(reason)` returns `false` when
        `process.platform === "linux"`, unconditionally. On any other platform it returns
@@ -119,6 +130,9 @@
        form that BSD and GNU both accept (for example `xargs -0 -r -I{} cp {} "$RUNNER_TEMP/fold-debt/"`).
        The W1-T7853 test already runs the real step body and asserts the exact copied file set, so it
        is the evidence that CI behaviour is unchanged.
+    4a. (amended 2026-10-14) The W1-T8920 consumer-worktree fixture stamps finishedAt portably (for example
+       from the test's own `new Date().toISOString()` written into the fake script, or `node -e`), not with
+       `date +%3N`.
     5. MIGRATE the eight hand-rolled `skip:` host checks in the five files named in the rationale to
        the helper. Each one names its reason, and the three `existsSync("/proc/self/stat")` skips stop
        being able to hide a Linux failure.
@@ -133,7 +147,8 @@
            shape of test/host-capability-fixtures.test.ts: declared sites, no numeric cap.
        (c) a GNU-only flag in shell text a test can execute: workflow `run:` bodies, plus command
            strings in test sources. The token set is `cp -t`, `sed -i` with no suffix, `readlink -f`,
-           `date -d`, `stat -c`, `find … -printf` and `grep -P`. It must not match BSD-stub argument
+           `date -d`, a `date` format using `%N` (`%3N` and the like; amended 2026-10-14), `stat -c`,
+           `find … -printf` and `grep -P`. It must not match BSD-stub argument
            checks such as `"$a" = "-printf"`. deploy/ scripts are out of scope here, because
            host-capability-fixtures' `platform-tool` kind and the stat/date fallbacks already cover them.
        The census plants one violation of each kind in a fixture tree and asserts it reddens (the
@@ -160,11 +175,15 @@
       proof: 'grep: test("W1-T9310: no shell text a test can run uses a GNU-only flag" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
     - claim: "the census reddens on a planted platform skip, a planted procfs default and a planted cp -t step"
       proof: 'grep: test("W1-T9310: the census reddens on each planted violation" in test/a-host-only-test-names-its-host-through-one-helper.test.ts'
+    - claim: "the W1-T8920 consumer-worktree gate test still measures a failing consumer build (amended 2026-10-14)"
+      proof: "unit test: W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd"
+      kind: guard
   falsifier: |
     Revert test 1's `runCheck` port, and on darwin the judge-line assertion fails again with empty output.
     Put `cp -t` back in either ci.yml collect step, and the census's GNU-flag test fails on every host,
     and the W1-T7853 test fails on darwin.
     Make `requiresLinux` return a reason on Linux, and its own test fails, because on Linux it must
     return false.
-    CLOSE THIS TASK if, at build time, the three tests already pass on a clean origin/main darwin
+    Put `date +%3N` back in the W1-T8920 fixture, and the census's GNU-flag test fails on every host.
+    CLOSE THIS TASK if, at build time, the four tests (three, plus W1-T8920's) already pass on a clean origin/main darwin
     checkout AND no hand-rolled `process.platform`/`/proc` skip remains in test/.

@@ -47,6 +47,9 @@ export const ROUTE_MATCH = {
   // The CLI verbs and the console routes decide and record through the SAME applyProposalVerdict.
   decline: "POST /v1/inbox/decline",
   restore: "POST /v1/inbox/restore",
+  // W1-T8831: console-only triage verbs; they have no CLI twin, so the rows are inert like `note` above until one lands.
+  archive: "POST /v1/inbox/archive",
+  snooze: "POST /v1/inbox/snooze",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",
@@ -143,6 +146,9 @@ export const CLI_ONLY = {
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
       "pr-owner",
+      // W1-T3083: a terminal exit-code verb over one PR head's rollup, scripted from a shell; the console
+      // reads the same rollup through its own cached board surface.
+      "pr-checks",
       "hand-runs",
       // W1-T4574: an operator snapshot joining a host-local ledger with GitHub history; its only
       // export is a reviewed candidate release file, never a live console read.

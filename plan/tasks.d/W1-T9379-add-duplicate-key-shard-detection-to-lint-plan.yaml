@@ -1,0 +1,31 @@
+- id: W1-T9379
+  title: Add duplicate-key shard detection to lint-plan
+  repo: remudero
+  depends_on:
+    - W1-T9378
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=ef0c83c98753cc99
+  attempts: 0
+  files:
+    - src/lib/lintPlan.ts
+    - src/lib/plan.ts
+    - src/tests/lintPlan.test.ts
+  acceptance:
+    - claim: "lint-plan rejects duplicate-key shards (span rationale: one test needs the detector in lintPlan.ts and its wiring in plan.ts together, so it is unsatisfiable piecewise)"
+      proof: "unit test: src/tests/lintPlan.test.ts::rejects duplicate-key shard"
+    - claim: plan.ts calls the new detector
+      proof: "grep: detectDuplicateKey( in src/lib/plan.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-10-03 follow-up on https://github.com/craigoley/remudero/pull/8886, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: if the duplicate-key shard really is on main, find how it passed the
+    `lint-plan` gate before merging. The `every-shard-on-main-is-lintable` ratchet should have
+    refused it. — from unfiled (run DAEMON-1791039063857,
+    https://github.com/craigoley/remudero/pull/8886)

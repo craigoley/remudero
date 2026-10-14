@@ -123,6 +123,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   use a private TMPDIR.**
 - **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
   forever under steady merges.**
+- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair (#3030/#3039/#3043).**
 - **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
   environment and cannot reach a parameter.**
 - **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature

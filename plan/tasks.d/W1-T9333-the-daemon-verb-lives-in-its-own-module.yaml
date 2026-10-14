@@ -1,0 +1,72 @@
+- id: W1-T9333
+  title: "THE DAEMON VERB LIVES IN ITS OWN MODULE, SO A TASK ON IT DOES NOT DECLARE src/run-task.ts — daemonCommand is in the 57,478-line src/run-task.ts that 105 open tasks declare, and daemonCommand took 134 of its 713 commits in 30 days"
+  repo: remudero
+  depends_on: [W1-T9331]  # the cli-no-run-task rule must hold before a handler moves; the five extractions all declare src/run-task.ts, so dispatch serializes them
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — a verbatim move of one verb's handlers behind a host seam; behaviour, rows and exit codes are unchanged
+  band_meaning: span
+  origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
+  plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
+  files: [src/run-task.ts, src/cli/commands/daemon.ts, test/the-daemon-verb-lives-in-its-own-module.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on origin/main bbab8894f, 2026-10-13. src/run-task.ts is 57,478 lines. Of 329 open tasks (no
+    `Remudero-Task:` trailer on main, and a shard status that is not merged, retired, done or blocked), 105 declare it
+    in `files:`, including 24 of the 48 dependency-met auto tasks at priority <= 1.5. It was touched by 713 of 4,523
+    main commits in 30 days. The refill pool never overlaps a running lane's files (W1-T8502), so one build holding it
+    serializes every other run-task.ts task. The diagnosis saw it held from 20:12Z to 22:00Z on 2026-10-13.
+    CHURN, from `git log --since=30.days -p --unified=0 -- src/run-task.ts`, attributing each hunk to its enclosing
+    top-level declaration: daemonCommand was changed by 134 of those 713 commits, with 1,202 changed lines. The split takes verbs in that churn order:
+    W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review). This step moves daemonCommand (about 1,550 lines).
+    THE SEAM. W1-T2893 made `main()` dispatch through src/cli/registry.ts, but left every handler body in
+    run-task.ts. A moved handler still reaches many run-task.ts helpers. W1-T9331 forbids importing them (a cycle with
+    HANDLERS). So this step passes them in through one host parameter, the repo's existing `*Deps` pattern, instead of
+    moving the whole reachable graph at once.
+    NOT IN SCOPE: re-pointing open shards that declare src/run-task.ts for this verb. A shard edit cannot ride a code
+    PR (rule 15). The note names the plan-only follow-up.
+  design: |
+    1. Create src/cli/commands/daemon.ts. Move daemonCommand into it, plus every top-level run-task.ts symbol whose references all lie inside
+       the moved set. Find that set with a reference census over run-task.ts at the build's base: a symbol moves when
+       no reference to it remains outside the set. Keep each moved body verbatim, apart from reading its collaborators
+       from the host, so diff-coverage's relocation exemption (W1-T2325, W1-T3138) reads the moved lines as moved
+       code rather than new code.
+    2. Any other run-task.ts symbol the moved code reaches arrives through one exported
+       `DaemonCommandHost` interface, taken as a parameter. src/lib symbols are imported
+       directly. A collaborator that an earlier step already moved into src/cli/commands/ is imported from there. The
+       module imports nothing from src/run-task.ts (W1-T9331's `cli-no-run-task`).
+    3. src/run-task.ts imports the moved roots from "./cli/commands/daemon.js" under local aliases named `<root>FromModule`. It keeps every moved root that
+       was exported, or that another run-task.ts symbol calls, as a thin function with the same name and signature. That
+       function builds the host from run-task.ts's own symbols and delegates to the module. HANDLERS, every in-file
+       caller, and every test that imports a root from src/run-task.ts stay unchanged.
+    4. Unchanged: COMMANDS (scripts/rmd-help.mjs source-scans that array), and the verb's behaviour, ledger rows,
+       stdout and exit codes. No test file other than the new one is edited. If an existing test must change, the
+       move was not verbatim; fix the move, not the test.
+    5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
+       acceptable. Never shrink it by importing run-task.ts.
+    Tests go in the new file test/the-daemon-verb-lives-in-its-own-module.test.ts, with `test(` titles exactly as in the proofs below. They read the two source
+    files as text, need no git and no network, and the verb's existing behavioural tests must pass untouched.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-daemon-verb-lives-in-its-own-module.test.ts"
+    - claim: "daemonCommand is defined in the daemon module, and src/run-task.ts only delegates to it"
+      proof: 'grep: test("W1-T9333: daemonCommand is defined in its module and src/run-task\.ts only delegates to it" in test/the-daemon-verb-lives-in-its-own-module.test.ts'
+    - claim: "the daemon module imports nothing from src/run-task.ts"
+      proof: 'grep: test("W1-T9333: the daemon module imports nothing from src/run-task\.ts" in test/the-daemon-verb-lives-in-its-own-module.test.ts'
+    - claim: "the module declares the moved handler"
+      proof: 'grep: export async function daemonCommand( in src/cli/commands/daemon.ts'
+    - claim: "src/run-task.ts calls the moved handler through the module"
+      proof: 'grep: daemonCommandFromModule( in src/run-task.ts'
+  falsifier: |
+    At base, src/cli/commands/daemon.ts does not exist and run-task.ts defines daemonCommand itself, so both new tests fail. Give the module an
+    import of "../../run-task.js" and the second test fails, as does W1-T9331's depcruise rule. Leave daemonCommand's body in
+    run-task.ts beside the import and the first test fails.
+  note: |
+    EFFECT, measured after merge with no numeric pass mark: count open shards declaring src/run-task.ts, and the
+    `dispatch.serialized` and W1-T8771 `dispatch.passed_over` rows whose contended path is src/run-task.ts, before and
+    after. FOLLOW-UP (plan-only, after merge): re-point open shards whose work is in daemonCommand from src/run-task.ts to
+    src/cli/commands/daemon.ts.

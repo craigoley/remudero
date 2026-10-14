@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -187,4 +188,80 @@ test("compact source serialization can overflow independently of its pass accumu
     passId: String(i).padStart(128, "x") }));
   assert.equal((await capture(t, rows, inventory)).source.reason, "over_budget");
   assert.equal((await capture(t, rows.slice(0, -1), inventory)).source.reason, undefined);
+});
+
+async function retainedCostCorpus(t: { after(fn: () => void): void }) {
+  const { dir } = await capture(t, [parent, child]);
+  const archive = join(dir, `ledger.${observedAt.replace(/[:.]/g, "-")}.ndjson`);
+  writeFileSync(archive, JSON.stringify({ ...child, run_id: "plain-archive", total_cost_usd: 5 }) + "\n");
+  writeFileSync(archive + ".gz", gzipSync(JSON.stringify({ ...child, run_id: "gzip-archive", total_cost_usd: 7 }) + "\n"));
+  const collect = () => captureGardenerSpendSource(dir, fixedClock(Date.parse(observedAt)));
+  const control = await collect();
+  const spend = foldGardenerSpend(control, repository, materializedAt);
+  assert.equal(control.corpusComplete, true);
+  assert.equal(spend.state, "complete");
+  assert.equal(spend.totalUsd, 14, "the default reader must observe plain, gzip and live costs");
+  assert.deepEqual(spend.counts, { priced: 3, unpriced: 0, unlinked: 0 });
+  return { dir, archive, collect };
+}
+
+function assertUnlistedCostCorpus(source: GardenerSpendSource) {
+  const spend = foldGardenerSpend(source, repository, materializedAt);
+  assert.equal(source.corpusComplete, false, "a readable live ledger does not certify an unlisted archive corpus");
+  assert.equal(spend.state, "partial");
+  assert.equal(spend.reason, "incomplete_evidence");
+  assert.equal(spend.pricedSubtotalUsd, 2);
+  assert.equal(spend.totalUsd, null);
+  assert.equal(spend.gardens[0]!.pricedSubtotalUsd, 2);
+  assert.equal(spend.gardens[0]!.totalUsd, null);
+  assert.deepEqual(spend.counts, { priced: 1, unpriced: 0, unlinked: 0 });
+  assert.deepEqual(spend.coverage, { retainedCorpus: "partial", truncated: false });
+}
+
+test("gardener spend keeps known costs partial when the default filesystem cannot list archives", async t => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("POSIX directory read permissions require a non-root user; the enumeration fault test covers this case");
+    return;
+  }
+  const { dir, archive, collect } = await retainedCostCorpus(t);
+  const live = readFileSync(join(dir, "ledger.ndjson"));
+  const plain = readFileSync(archive), gzip = readFileSync(archive + ".gz");
+  try {
+    chmodSync(dir, 0o100);
+    assert.throws(() => readdirSync(dir), { code: "EACCES" });
+    assert.deepEqual(readFileSync(join(dir, "ledger.ndjson")), live,
+      "named file reads must remain available while directory enumeration fails");
+    assertUnlistedCostCorpus(await collect());
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  assert.deepEqual(readFileSync(archive), plain);
+  assert.deepEqual(readFileSync(archive + ".gz"), gzip);
+  const restored = await collect();
+  assert.equal(restored.corpusComplete, true);
+  assert.equal(foldGardenerSpend(restored, repository, materializedAt).totalUsd, 14);
+});
+
+test("gardener spend refuses complete totals on an enumeration fault while reading real live files", async t => {
+  const { dir, collect } = await retainedCostCorpus(t);
+  const originalReaddir = fs.readdirSync;
+  let refusals = 0;
+  const fault = t.mock.method(fs, "readdirSync", (path: fs.PathLike, ...args: unknown[]) => {
+    if (path === dir) {
+      refusals++;
+      throw Object.assign(new Error("fixture archive enumeration unavailable"), { code: "EACCES" });
+    }
+    return Reflect.apply(originalReaddir, fs, [path, ...args]);
+  });
+  syncBuiltinESMExports();
+  try {
+    assertUnlistedCostCorpus(await collect());
+    assert.equal(refusals, 1, "the real union must exercise the directory-listing failure path");
+  } finally {
+    fault.mock.restore();
+    syncBuiltinESMExports();
+  }
+  const restored = await collect();
+  assert.equal(restored.corpusComplete, true);
+  assert.equal(foldGardenerSpend(restored, repository, materializedAt).totalUsd, 14);
 });

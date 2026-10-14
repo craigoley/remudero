@@ -2937,7 +2937,7 @@
     "test/the-inbox-and-feedback-views-answer-from-memory.test.ts": 7000,
     "test/the-inbox-classification-refreshes-with-no-reader.test.ts": 4900,
     "test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts": 5300,
-    "test/the-inbox-draft-hook-greps-anchors-off-the-loop.test.ts": 38,
+    "test/the-inbox-draft-hook-greps-anchors-off-the-loop.test.ts": 5000,
     "test/the-inbox-draft-lead-is-chosen-by-a-bake-off.test.ts": 11,
     "test/the-inbox-holds-only-what-needs-a-human.test.ts": 20,
     "test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts": 19000,

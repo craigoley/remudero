@@ -221,6 +221,8 @@ test("escalateWithJudge: a DEMOTED escalation still carries the fleet-notice que
     ledgerPath: ledgerPath(),
     runId: "RUN-1",
     judge: async () => ({ decision: "demote", reason: "low priority, batching into the recap" }),
+    // W1-T8868: a demotion lands only in act mode; triage ships in shadow.
+    triage: { mode: "act" },
   });
   assert.equal(url, "https://github.com/craigoley/remudero/issues/2301");
   assert.ok(issues.calls[0].labels.includes(FLEET_NOTICE_LABEL));

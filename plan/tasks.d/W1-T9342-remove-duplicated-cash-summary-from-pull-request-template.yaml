@@ -1,0 +1,26 @@
+- id: W1-T9342
+  title: Remove duplicated cash summary from pull request template
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=c67af15006b748bc
+  attempts: 0
+  files:
+    - .github/pull_template.md
+  acceptance:
+    - claim: Pull request template no longer contains duplicated cash summary
+      proof: "unit test: tests/pull_template_cleanup"
+  origin: architect
+  rationale: >-
+    From the 2026-09-17 follow-up on https://github.com/craigoley/remudero/pull/5907, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: `docs/forensics/cash-actuals.md` duplicates a short summary already
+    in the PR body; once this PR merges, consider trimming the PR-description forensics to just
+    point at the doc, so the measured numbers live in one place — out of scope for this CI-green
+    fix. — from PR-5907 (run DAEMON-1789651008429,
+    https://github.com/craigoley/remudero/pull/5907)

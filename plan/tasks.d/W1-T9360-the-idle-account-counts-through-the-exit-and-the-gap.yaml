@@ -1,0 +1,68 @@
+- id: W1-T9360
+  title: "THE IDLE ACCOUNT COUNTS THROUGH THE EXIT AND THE GAP — core pid 1710758's final `lane.idle_summary` charged 73.7 slot-min, but its 3 lanes sat empty from 00:19:14 to its exit at 00:49:58 and the row stops at its last sample (00:23:21), dropping about 80; the next boot anchors its restart charge on the old process's last idle_changed row, not on its exit"
+  repo: remudero
+  depends_on: [W1-T9359]  # same files (src/lib/idle-lane-accounting.ts, src/lib/daemon.ts); W1-T9359 adds the memory cause this account then carries
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — no idle interval is lost or relabelled at a process boundary
+  band_meaning: span
+  origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T4837, W1-T4939, W1-T8235, W1-T8238, W1-T9352, W1-T9359]
+  files: [src/lib/idle-lane-accounting.ts, src/lib/daemon.ts, test/the-idle-account-counts-through-the-exit-and-the-gap.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger; one bounded read of the live ledger on the Azure host at 01:31Z, read-only,
+    plus a local copy of the rotated archives):
+      - pid 1710758 (boot 23:34:23, head 08cbabc50) wrote one `lane.idle_summary`, partial, at its freshness exit
+        00:49:58.765: window 23:34:27 to 00:49:58, slot_minutes_by_cause wip_limit 12.34, phase_bound 20.1, restart
+        25.06, unknown 16.22, total 73.72.
+      - Its `lane.idle_changed` rows: phase_bound to 3 idle slots at 00:13:49, unknown 3 at 00:13:50, wip_limit 3
+        at 00:19:14.840. No later change, so all 3 lanes stayed empty to the exit (the next dispatch was the next
+        boot's, 00:51:58, per W1-T9352).
+      - minutes_by_cause wip_limit is 4.11: exactly 00:19:14.840 to 00:23:21.728, the next held tick's sample. From
+        00:23:21.728 to the exit at 00:49:58.765 (26.6 min, 3 slots, about 80 slot-min) is in no row.
+    READ on origin/main b102674b1 (symbols):
+      - `accountIdleLaneMinutes` charges an interval only when the NEXT sample arrives.
+      - `flushIdleLaneWindow` (src/lib/daemon.ts, W1-T4939, called on every exit through `summary`) calls
+        `summarizeIdleLaneAccount(account, atMs)`, which sums what is already charged and never charges the open
+        interval from `account.lastAtMs` to `atMs`. `rollIdleLaneWindow` keeps `lastAtMs` for a next window, which an
+        exiting process never has.
+      - At boot, `chargeRestartGap(account, lastIdleLaneRecord(bootLedgerLines))` starts the `restart` charge at the
+        newest `lane.idle_changed` row's `at_ms`. That row is the old process's last CHANGE, not its exit: here
+        00:19:14.840, 30.7 minutes before the exit, so the next process would charge again the 4.11 minutes already
+        in the old row and charge a memory hold to `restart`. If rotation has moved that row out of the lines read
+        (the live ledger rotated at 00:47:53), no restart is charged at all and the exit-to-dispatch gap is lost.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 8 open PR heads (2026-10-14 01:28Z) for idle_changed,
+    chargeRestartGap, flushIdleLaneWindow and "idle_summary". Control: "idle_changed" reads 4 shards on main
+    (W1-T8235, W1-T8238, W1-T8245, W1-T9352) and 3 on each head (heads predate W1-T9352); none charges the open
+    interval at exit or anchors the restart on the exit.
+  design: |
+    No threshold, no fixed interval. The ledger already holds both ends of every gap.
+    1. THE EXIT CHARGES ITS OPEN INTERVAL. The exit flush first folds a closing sample at the flush time with the
+       state in force, so the interval from the last sample to the exit is charged to the cause holding it, at its
+       slots. The partial row's `window_end_ms` is that exit time.
+    2. THE GAP STARTS AT THE EXIT. At boot the restart charge starts at the previous process's last `lane.idle_summary`
+       `window_end_ms` (its exit flush) when that is later than its last `lane.idle_changed` row, at the slots that
+       row left idle. With no summary row, the last change row stands, as today. Nothing already charged by the old
+       process is charged again.
+    3. Both ends are read from the rows the boot already reads; a row that cannot be placed in time is skipped,
+       never guessed, as `lastIdleLaneRecord` does today.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Replay pid 1710758: wip_limit 3
+    slots from 00:19:14.840, a same-state sample at 00:23:21.728, exit at 00:49:58.765, next boot 00:50:34, first
+    dispatch 00:51:58.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-idle-account-counts-through-the-exit-and-the-gap.test.ts"
+    - claim: "an exit flush charges the interval since the last sample to the cause holding it"
+      proof: 'grep: test("W1-T9360: the exit flush charges the open interval to its cause" in test/the-idle-account-counts-through-the-exit-and-the-gap.test.ts'
+    - claim: "the next boot charges the restart from the old process's exit, and nothing the old row charged is charged twice"
+      proof: 'grep: test("W1-T9360: the restart charge starts at the old exit and never double-counts" in test/the-idle-account-counts-through-the-exit-and-the-gap.test.ts'
+    - claim: "with no exit summary the newest change row still anchors the restart"
+      proof: 'grep: test("W1-T9360: no exit summary falls back to the last change row" in test/the-idle-account-counts-through-the-exit-and-the-gap.test.ts'
+  falsifier: |
+    Keep the flush as on main: the replay's exit row charges 4.11 minutes to the holding cause, not 30.7, and the first test
+    fails. Keep the restart anchor on the change row: the second test charges 00:19:14 to 00:51:58 as restart.

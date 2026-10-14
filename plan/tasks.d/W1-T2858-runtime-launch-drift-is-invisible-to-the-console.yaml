@@ -11,7 +11,7 @@
   files: [scripts/fleet-heartbeat.sh, scripts/source-size-baseline.json, src/lib/fleet-runtime-health.ts, src/lib/serve.ts, test/fleet-runtime-health-console.test.ts]
   origin: "operator-session#azure-restart-runtime-drift-console-2026-09-04"
   plan_refs: ["W1-T483", "W1-T496", "W1-T999", "W1-T2592", "W1-T2857"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE HOST 2026-09-05T01:44Z. `remudero-daemon` was running with restart count

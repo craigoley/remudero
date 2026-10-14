@@ -1,0 +1,92 @@
+- id: W1-T9499
+  title: "3,885 OF 7,130 refs/rmd-id RESERVATIONS ARE HELD BY NOTHING AND NOTHING REAPS THEM — the 2026-10-14 census found 1,221 of them over 7 days old; extend the read-only `rmd next-task-id --audit` (W1-T3300) with `--reap`, which deletes only CANDIDATE rows past a bar derived from the measured reserve-to-PR delays, in one leased push with one ledger row per id, dry-run unless `--apply` is given"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: medium  # one concern: which remote reservations a reap deletes; dry-run by default, leased, and nothing automated runs --apply
+  origin: "operator 2026-10-14 (\"go with your recommendations\"): the refs/rmd-id census and reaper proposal of the rmd-id leak session (PR #11707)"
+  plan_refs: [W1-T3300, W1-T9488, W1-T5279, W1-T1055]
+  files: [src/run-task.ts, test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (census epoch 14:45Z) with one `git ls-remote origin 'refs/rmd-id/*' 'refs/heads/*'`
+    and a fetch of every anchor into a scratch repository. Each reservation was classified against the plan
+    declarations on main and in plan history, the run-<id>-* branches, the anchor's live holder branch, and
+    the 17 open PRs. There are 7,130 reservations:
+        shard on main ............ 3,216
+        orphan (held by nothing) . 3,885
+        holder branch live ...........  18
+        shard in plan history only ....   8
+        open run branch ...............   3
+    Orphans by anchor age: 473 are 30d+, 748 are 7-30d, 2,506 are 1-7d, 139 are 2h-1d, and 19 are under 2h.
+    By anchor source: 3,517 automatic, 358 legacy (no holder line), 6 hand-mint, 4 reclaimed. By producer:
+    scout-garden 1,490, triage 807, host-resource-garden 512, approve 354, selector-shadow-garden 99,
+    plan 62, ci-friction-garden 42, unknown 65, other 46.
+    PR #11707 and W1-T9488 stop new leaks at the source. Each releases only the caller's OWN claim, and
+    W1-T9488 rules out "reaping existing orphans" by name. That leaves the existing 3,885 orphans with no
+    owner. Every mint seeds its floor from `ls-remote 'refs/rmd-id/*'`, so every mint lists all 7k lines.
+    `--audit` (W1-T3300) already classifies each reservation as HELD, CANDIDATE or UNKNOWN, but it is
+    read-only. Its CANDIDATE bar is a fixed 14 days (`RESERVATION_AUDIT_DEFAULT_AGE_DAYS`), and it reads
+    each anchor with its own `git fetch`: 7,130 fetches a pass.
+    OPERATOR RULING, 2026-10-14: "go with your recommendations", which approves this reaper. For this
+    mechanism it overrides the CLAUDE.md doctrine line (doctrine/plan-and-task-hygiene/loser-renumbers.md:
+    "reclaiming one is an operator decision"). The decision becomes a standing, evidence-based policy
+    instead of a per-id call. A contested reservation still is never deleted: the leased delete below
+    leaves any ref that has moved.
+  design: |
+    (i) `rmd next-task-id --audit --reap` runs the existing audit (`buildReservationAuditReport`,
+        `classifyReservationAuditRows`) and acts ONLY on rows whose status is CANDIDATE. A HELD or UNKNOWN
+        row is never touched.
+    (ii) Add the anchor's live holder branch as HELD evidence. The census found 18 such reservations that
+        the audit cannot see today. Read it with `reservationHolderBranch` (task-id-reservation.ts) against
+        the same `ls-remote --heads` read the run-branch check makes.
+    (iii) ANY UNREADABLE SURFACE MEANS SKIP. If the refs read, the heads read, the open-PR read, the
+        plan-history read, or any anchor read is degraded or unknown, the pass deletes nothing. It reports
+        which surface failed. A per-row UNKNOWN is never reaped either. `--offline` refuses `--reap`.
+    (iv) THE AGE BAR IS DERIVED, NOT FIXED. Each pass re-measures the reserve-to-first-PR-open delay over
+        the HELD rows that carry both an anchor time and a holder PR or branch, from the same anchors and
+        branches the audit already reads. The bar is the LARGEST delay observed, never a quantile, so
+        every late filer seen so far would have survived it. It is never below RESERVATION_PUSH_GRACE_MS,
+        the bound the takeover path already uses. W1-T5279 measured p50 34 s and 168 of 171 within 2 h,
+        and the 3 late ones are why the bar is the maximum. With no measured population, the pass does
+        not act. The report states the bar, its basis (n, max, p50) and the population it was read from,
+        and replaces the fixed 14-day default for `--reap`. `--audit` alone is unchanged.
+    (v) READ THE ANCHORS WITH ONE FETCH. Fetch `refs/rmd-id/*` into a private namespace in one
+        `git fetch`, then read each anchor message locally. Never one fetch per ref.
+    (vi) LEASED DELETES, ONE BATCHED PUSH. Run `git push --porcelain origin --force-with-lease=<ref>:<sha>
+        ... :<ref> ...`, where each sha is the one observed in THIS pass. That is the
+        `src/lib/task-id-release.ts` primitive, batched, behind `assertClaimRefPushAllowed`. A ref that
+        moved since the read is rejected by its own lease and survives. Split the push into more than one
+        only when the refspec list would exceed the platform's argument limit.
+    (vii) ONE LEDGER ROW PER ID. A deleted id writes `task_id.reservation_released` with lane "reap",
+        `reason: "reaped: no shard/branch/PR; age <a> > bound <b>"`, the observed sha and the anchor's
+        holder line. A lease-rejected or failed id writes `task_id.reservation_release_skipped` with its
+        outcome. A ref is never deleted without its row, so the anchor stays recoverable: its message and
+        sha are in the row.
+    (viii) DRY-RUN FIRST. `--reap` without `--apply` deletes nothing. It prints every row it would reap,
+        plus the bar and its basis, and writes one `task_id.reservation_reap_planned` summary row (counts,
+        bar, basis), never one per id. Only `--reap --apply` deletes. This task wires `--apply` into
+        nothing automated: no gardener, cron or lane runs it. Enabling a recurring reap is a separate
+        operator step.
+    NOT IN SCOPE: changing when or how lanes reserve, or releasing a lane's own unused ids (W1-T9488,
+    PR #11707). Never a pattern delete.
+  acceptance:
+    - claim: "a reap deletes only CANDIDATE reservations older than the derived bar, through one leased push, and a ref that moved since the read survives"
+      proof: 'grep: test("a reap deletes only candidate reservations past the bar in one leased push" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+    - claim: "a reap with any unreadable surface deletes nothing and names the surface"
+      proof: 'grep: test("a reap with any unreadable surface deletes nothing" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+    - claim: "the reap's age bar is the largest measured reserve-to-PR delay, never below the push grace, and the report names it and its basis"
+      proof: 'grep: test("the reap bar is derived from the measured reserve-to-PR delays" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+    - claim: "a reservation whose anchor's holder branch is live is HELD, never a candidate"
+      proof: 'grep: test("a live holder branch holds a reservation" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+    - claim: "--reap without --apply deletes nothing and writes one summary row; with --apply each deleted id writes one ledger row"
+      proof: 'grep: test("a reap is a dry run unless applied, and an applied reap ledgers every id" in test/the-reservation-audit-reaps-only-its-orphaned-candidates.test.ts'
+  falsifier: |
+    Delete the CANDIDATE filter, or let a degraded surface through. The first two tests must fail with a
+    HELD, UNKNOWN or moved ref deleted from the fixture origin. Replace the derived bar with the 14-day
+    default, and the bar test must fail.

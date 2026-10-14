@@ -120,7 +120,8 @@ test("W1-T8232: the lane ledgers whether it started", async (t) => {
   assert.equal(off.laneRows[0].instance, "core");
   assert.match(String(off.laneRows[0].reason), /not the registry's primary instance/);
   // An unresolvable instance is off AND the row says why.
-  const unresolved = resolveSreLaneInstance({ stateRoot: "/nowhere", registryPath: "/nowhere/daemon-instances.yaml", readText: () => registryText("/elsewhere", true) });
+  // W1-T9500: `env: {}` — a fleet container carries RMD_INSTANCE_NAME=core, which would resolve it.
+  const unresolved = resolveSreLaneInstance({ stateRoot: "/nowhere", registryPath: "/nowhere/daemon-instances.yaml", readText: () => registryText("/elsewhere", true), env: {} });
   assert.equal(unresolved.resolved, false);
   const row = sreLaneStartRow({ instance: unresolved, env: {} });
   assert.equal(row.step, "sre_lane.disabled");

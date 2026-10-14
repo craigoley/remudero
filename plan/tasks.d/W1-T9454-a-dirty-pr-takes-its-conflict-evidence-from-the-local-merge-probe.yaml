@@ -1,0 +1,84 @@
+- id: W1-T9454
+  title: "A DIRTY PR WAITS ON GITHUB'S CONFLICT EVIDENCE WHILE THE SWEEP'S OWN MERGE PROBE ALREADY HAS IT — the conflict dispositions read only `mergeConflict` from GitHub's compare API, so a PR whose mergeable_state stays `unknown` waits MERGEABILITY_UNKNOWN_WAIT_BACKSTOP passes and then escalates 'files: none captured', while probeOpenPrMerges runs `git merge-tree` against main in the same pass and only ledgers its conflict paths; #11604 (W1-T7651) sat conflicted about 4.3 h on 2026-10-14 until a hand merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where a dirty PR's conflict evidence comes from; high because it admits the bounded merge-conflict worker to write a run branch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: #11604 (W1-T7651) dirty from 07:38Z to ~11:56Z with no conflict evidence captured; the strike ladder held at 09:23Z on 'refresh did not take: conflict'; cleared only by a hand merge of main"
+  plan_refs: [W1-T4914, W1-T5908, W1-T984, W1-T2536, W1-T5733, W1-T7651, W1-T100]
+  files:
+    - src/lib/merge-probe.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 7f7f0ea6b. Symbols, not lines.
+    WHERE CONFLICT EVIDENCE COMES FROM. OpenPrView.mergeConflict is filled only by
+    hydrateMergeConflictEvidenceSteps (src/lib/open-prs-rest.ts, W1-T984): two GitHub compare calls per PR already
+    read dirty, intersected by path. Its header says "Nothing in the sweep path shells to git". A throw skips the
+    PR silently ("best-effort: this PR keeps the pre-existing undefined mergeConflict").
+    WHAT THE SWEEP DOES WITHOUT IT. In src/lib/sweep.ts the `wait` row with blocker `conflict` (W1-T5908) holds a
+    dirty PR with no captured evidence while mergeabilityReadUnknown (mergeable_state `unknown`) for fewer than
+    MERGEABILITY_UNKNOWN_WAIT_BACKSTOP (6) passes on the head, counted by mergeabilityUnknownWaitsFromLedger.
+    After that the PR falls to `blocked-ambiguous`, "files: none captured — escalating", and the bounded
+    merge-conflict worker (the `conflicted` row) never runs. The strike ladder's refresh calls updateBranch, gets
+    `conflict`, and records sweep.strike_ladder.held "refresh did not take: conflict": GitHub has just said the
+    head conflicts, yet nothing turns that into evidence.
+    THE EVIDENCE ALREADY EXISTS IN THE SAME PASS. src/run-task.ts calls probeOpenPrMerges (src/lib/merge-probe.ts,
+    W1-T4914) right before runSweep. It fetches main and refs/pull/<n>/head into the sweep clone and runs
+    `git merge-tree --write-tree --name-only --no-messages <head> <main>`, off the event loop, and ledgers
+    sweep.merge_probe with verdict and conflict_paths. W1-T4914's design made that row "observation" with "No
+    disposition changes", and nothing reads conflict_paths today (git grep finds no consumer outside
+    merge-probe.ts). Its target order also puts a PR first only when `mergeableState === "dirty"` (dirtyFirst),
+    so a PR whose mergeable_state reads `unknown`, the exact one waiting on evidence, gets no priority.
+    OBSERVED 2026-10-14 (operator session): #11604 (W1-T7651) was dirty from 07:38Z to about 11:56Z, about 4.3 h.
+    The sweep reported mergeability-unknown with no conflicting-file evidence; the strike ladder held at 09:23Z on
+    "refresh did not take: conflict"; the conflict worker never ran; it cleared when the operator merged main by
+    hand. The per-pass sweep.merge_probe and sweep.disposed rows for #11604 were not re-read for this filing.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for MERGEABILITY_UNKNOWN_WAIT_BACKSTOP, mergeability-unknown,
+    probeOpenPrMerges, sweep.merge_probe, hydrateMergeConflictEvidence and "none captured" (main 8: W1-T984,
+    W1-T2384, W1-T2536, W1-T4914, W1-T5733, W1-T5908, W1-T8620 merged and one feedback record; none feeds the probe's
+    paths into a disposition), and the plan/ trees of all 369 readable origin heads (no head adds one).
+    lint-plan's duplicate-surface check pairs this with W1-T100 (tasks.yaml, status queued, files src/lib/sweep.ts and
+    src/run-task.ts): that task routes blocked_ci to the ci-log fix path, a different concern. This task adds
+    src/lib/merge-probe.ts and touches only the conflict-evidence path of those two files.
+  design: |
+    No new wait bound. A dirty PR's evidence comes from the probe the pass already runs.
+    1. PROBE THE PR THAT IS WAITING. probeOpenPrMerges puts first a PR whose mergeState is dirty or whose
+       mergeable_state is `unknown` (today only `mergeableState === "dirty"`), and a PR in the conflict wait is
+       re-probed when its head or main moved, as today.
+    2. THE PROBE RETURNS EVIDENCE, NOT ONLY A ROW. For a `conflict` verdict, build MergeConflictEvidence for the
+       conflicting paths from the same clone: per path, the deletions on each side from `git diff --numstat` of the
+       merge base (`git merge-base <head> <main>`) to the head and to main, and the ours/theirs logs as the compare
+       path builds them. probeOpenPrMerges returns it per PR; the row keeps its fields.
+    3. THE PASS USES IT. src/run-task.ts sets `mergeConflict` from the probe for any PR whose compare evidence is
+       absent, before runSweep, and the disposition row records which source supplied it. Compare evidence, when
+       present, wins; the probe is the fallback, so no PR that dispositions today changes. With evidence captured,
+       the PR reaches the existing `conflicted` row and its bounded worker, or the existing refusal causes
+       (conflictRefusalCause), never the evidence-missing escalation.
+    4. UNREADABLE STAYS UNREADABLE. A probe that is `unreadable` supplies nothing, and the W1-T5908 wait and its
+       escalation behave as today.
+    5. src/run-task.ts is near its comment-load ceiling: keep the wiring to a call, with no new comment prose there.
+    Tests go in the new file, `test(` titles verbatim as in the proofs below. Drive probeOpenPrMerges against a real
+    throwaway repo (gitRepo()) where main and the head both edit one line of one file.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts"
+    - claim: "a dirty PR whose mergeable_state reads unknown and has no compare evidence is dispositioned conflicted from the probe's evidence, not wait or blocked-ambiguous"
+      proof: 'grep: test("W1-T9454: a dirty PR with unknown mergeability is dispositioned from the merge probe" in test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts'
+    - claim: "the probe returns per-path conflict evidence for a real conflicting merge"
+      proof: 'grep: test("W1-T9454: the merge probe returns per-path conflict evidence" in test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts'
+    - claim: "an unknown-mergeability PR is probed before PRs that only changed since the last main"
+      proof: 'grep: test("W1-T9454: a PR waiting on unknown mergeability takes a probe slot first" in test/a-dirty-pr-takes-its-conflict-evidence-from-the-local-merge-probe.test.ts'
+  falsifier: |
+    Against main, a dirty PR with mergeable_state `unknown`, no compare evidence and a probe verdict of conflict
+    dispositions `wait` for six passes and then `blocked-ambiguous` "files: none captured", so the first test fails.
+    Feed the probe's evidence but let it override compare evidence, and a PR that dispositions today changes, which
+    the same test also checks. Keep dirtyFirst on mergeableState === "dirty" only, and the slot test fails.

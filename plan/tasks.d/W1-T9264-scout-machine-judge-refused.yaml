@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.27
-  status: queued
+  status: blocked
+  retirement: retired  # superseded by #11678: the refused-release loop that wrote these machine_judge.refused rows is fixed at its cause (an operator release the linter refuses is not re-rendered every pass); proposal machine-judge:W1-T9264 declined; operator 2026-10-14
   attempts: 0
   author_class: machine
   origin: "scout:machine_judge.refused"
