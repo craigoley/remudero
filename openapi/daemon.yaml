@@ -505,6 +505,8 @@ components:
             state:
               type: string
               enum: [running, stalled, unreadable]
+        fleetRuntimeHealth:
+          $ref: "#/components/schemas/FleetRuntimeHealth"
         needsYou:
           description: >
             W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's
@@ -513,6 +515,54 @@ components:
           $ref: "#/components/schemas/HumanGateCountSummary"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+
+    FleetRuntimeHealth:
+      type: object
+      description: >
+        W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from
+        shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`)
+        is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading.
+        Carries destinations and reason codes only: no host paths, credential or config contents.
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [healthy, drift, unknown]
+        reason:
+          type: string
+        observedAt:
+          type: string
+        ageMs:
+          type: number
+        container:
+          type: string
+        checked:
+          type: integer
+        drift:
+          type: array
+          items:
+            type: object
+            required: [destination, reason]
+            properties:
+              destination:
+                type: string
+              reason:
+                type: string
+                enum: [missing, wrong_source, read_only, read_write]
+        alert:
+          type: object
+          description: Present only on `drift`. `remedy` is a NAME for the operator; no action is attached.
+          required: [severity, title, detail, remedy]
+          properties:
+            severity:
+              type: string
+              enum: [critical]
+            title:
+              type: string
+            detail:
+              type: string
+            remedy:
+              type: string
 
     StatusCounts:
       type: object

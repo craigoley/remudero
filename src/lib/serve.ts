@@ -105,6 +105,7 @@ import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./re
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
+import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
@@ -448,6 +449,8 @@ export interface ServeDeps {
   /** W1-T3718: the repair ladder's fleet state, spliced into `/v1/status` and
    *  `/v1/daemon-health`. The real reader is rooted at `fleetControlRoot`; a test injects one. */
   repairLadder?: { read?: (root: string, nowMs: number) => RepairLadderState };
+  /** W1-T2858: the heartbeat's runtime-contract snapshot reader (shared state only); injectable for tests. */
+  fleetRuntimeHealth?: { read?: (root: string, nowMs: number) => FleetRuntimeHealth };
   /** Server-owned provider browser-auth profiles and session store. Credential homes remain on the
    * daemon; the browser receives only provider-auth-v1 projections. */
   providerAuth?: {
@@ -847,7 +850,7 @@ function fallbackBodyForCachedRead(path: string, deps: ServeDeps, staleness: Con
   const repairLadder = (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
   switch (path) {
     case "/v1/status":
-      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder };
+      return { ...(projectConsoleStatusResponse(fallbackStatusSnapshot(deps.board, nowMs, staleness), modelApprovals, nowMs) as object), repairLadder, fleetRuntimeHealth: (deps.fleetRuntimeHealth?.read ?? readFleetRuntimeHealth)(deps.fleetControlRoot, nowMs) };
     case "/v1/recent":
       return { entries: [], staleness };
     case "/v1/inbox":
@@ -888,6 +891,14 @@ export function withRepairLadder(route: Route, read: (nowMs: number) => RepairLa
  * shared consumer -- the same number the badge, the composite and each instance's now view report. No
  * composite (no read model, or none composed yet) is a named lower bound, never a zero.
  */
+/**
+ * W1-T2858: `GET /v1/status` gains `fleetRuntimeHealth`, the host heartbeat's runtime-contract verdict
+ * (`healthy` | `drift` | `unknown`) read from shared state. One local file read: no Docker socket, no GitHub.
+ */
+export function withFleetRuntimeHealth(route: Route, read: (nowMs: number) => FleetRuntimeHealth): Route {
+  return spliceJsonField(route, "fleetRuntimeHealth", read);
+}
+
 export function withStatusNeedsYou(route: Route, read: () => HumanGateProjection | undefined): Route {
   return spliceJsonField(route, "needsYou", () => {
     const projection = read();
@@ -2854,6 +2865,9 @@ function assembleServeRoutes(
     for (const event of outcome.events) appendLedger(deps.ledgerPath, ciIncidentEventLedgerLine(event, nowMs));
   };
   const readLadder = (nowMs: number): RepairLadderState => (deps.repairLadder?.read ?? readRepairLadderState)(deps.fleetControlRoot, nowMs);
+  const reportRuntimeHealth = fleetRuntimeHealthTelemetry();
+  const readRuntimeHealth = (nowMs: number): FleetRuntimeHealth =>
+    reportRuntimeHealth((deps.fleetRuntimeHealth?.read ?? readFleetRuntimeHealth)(deps.fleetControlRoot, nowMs));
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
@@ -2870,7 +2884,7 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
-    withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),
+    withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),

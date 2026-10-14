@@ -197,9 +197,30 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      fleetRuntimeHealth?: FleetRuntimeHealth;
       /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
       needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
+    };
+    /** W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`) is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading. Carries destinations and reason codes only: no host paths, credential or config contents. */
+    FleetRuntimeHealth: {
+      state: "healthy" | "drift" | "unknown";
+      reason?: string;
+      observedAt?: string;
+      ageMs?: number;
+      container?: string;
+      checked?: number;
+      drift?: ({
+        destination: string;
+        reason: "missing" | "wrong_source" | "read_only" | "read_write";
+      })[];
+      /** Present only on `drift`. `remedy` is a NAME for the operator; no action is attached. */
+      alert?: {
+        severity: "critical";
+        title: string;
+        detail: string;
+        remedy: string;
+      };
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
     StatusCounts: {
