@@ -550,10 +550,6 @@
     - "scripts/coverage-ratchet.mjs"
     - "scripts/coverage-baseline.json"
     - "scripts/diff-coverage.mjs"
-    - "src/run-task.ts"
-    - "src/lib/policy.ts"
-    - "src/lib/dep-review.ts"
-    - "test/**"
   fact: >-
     The coverage-ratchet gate refused 13 pull requests in one window (#6062 to #6156), and each was repaired after
     the refusal. The gate is an aggregate: it sums lines and branches across the whole lcov run and refuses when the
