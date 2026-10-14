@@ -573,7 +573,6 @@
     - "scripts/comment-load-baseline.json"
     - "scripts/source-size-baseline.json"
     - "scripts/test-tier-manifest.json"
-    - "src/run-task.ts"
     - "src/lib/policy.ts"
     - "src/lib/dep-review.ts"
     - "plan/tasks.d/**"
