@@ -252,17 +252,17 @@ test("W1-T4407: the production ports read gh, spawn a tool-less judge and post t
   assert.ok(ledger.out.some((row) => row.step === "ci_judge.spend"));
   await ports.post({ number: 5, headSha: "h5" }, "ci-judge {}");
   assert.deepEqual(calls.at(-1), ["api", "-X", "POST", "repos/o/r/statuses/h5", "-f", `context=${CI_JUDGE_CONTEXT}`, "-f", "state=success", "-f", "description=ci-judge {}"]);
-  const suites = ports.suiteIds();
+  const suites = await ports.suiteIds();
   assert.ok(suites.includes("test/authority-table.test.ts"));
   assert.ok(suites.every((id) => /^test\/.*\.test\.ts$/.test(id)));
-  const floor = ports.floor(["test/authority-table.test.ts"]);
+  const floor = await ports.floor(["test/authority-table.test.ts"]);
   assert.ok(floor.fullRun || floor.suites.includes("test/authority-table.test.ts"));
 
   const bad = productionCiJudgePorts({ owner: "o", repo: "r", repoRoot: REPO_ROOT, stateDir: "/nonexistent", log: ledger.log, ghJson: async () => ({ message: "rate limited" }) });
   await assert.rejects(bad.openPrs(), /not an array/);
 });
 
-test("W1-T4407: the production suite list refuses a substituted git pointer", (t) => {
+test("W1-T4407: the production suite list refuses a substituted git pointer", async (t) => {
   const root = tmp(t);
   const foreign = gitRepo({ kind: "ci-judge-foreign" });
   t.after(() => foreign.cleanup());
@@ -274,7 +274,7 @@ test("W1-T4407: the production suite list refuses a substituted git pointer", (t
   assert.equal(foreign.git("diff", "--cached", "--name-only", "--", "test"), "test/foreign.test.ts");
   writeFileSync(join(root, ".git"), `gitdir: ${join(foreign.dir, ".git")}\n`);
   const ports = productionCiJudgePorts({ owner: "o", repo: "r", repoRoot: root, stateDir: root, log: rows().log });
-  assert.throws(() => ports.suiteIds(), WorktreePointerRefusedError);
+  await assert.rejects(async () => ports.suiteIds(), WorktreePointerRefusedError);
 });
 
 test("W1-T4407: the daemon kicks the judge after its sweep and posts a status for the PR head", async () => {
