@@ -21,7 +21,6 @@ test("typed judgment prompt example round-trips through the real parser", () => 
     assert(example, "the prompt must contain one physical-line example");
     const result = parseTypedJudgmentResponse(example, options);
     assert.equal(result.kind, "distribution", JSON.stringify({ options, result }));
-    if (result.kind !== "distribution") throw new Error(result.reason);
     assert.deepEqual(Object.keys(result.distribution), options);
     for (const option of options) assert.equal(result.distribution[option], 1 / options.length);
   }
@@ -32,7 +31,6 @@ test("typed judgment preserves special option names as own distribution properti
   const example = 'TYPED_JUDGMENT: {"__proto__": 0.5, "constructor": 0.3, "toString": 0.2}';
   const result = parseTypedJudgmentResponse(example, options);
   assert.equal(result.kind, "distribution");
-  if (result.kind !== "distribution") throw new Error(result.reason);
   assert.deepEqual(Object.keys(result.distribution), options);
   assert.equal(Object.getPrototypeOf(result.distribution), Object.prototype);
   assert.equal(result.distribution.__proto__, 0.5);
