@@ -3456,6 +3456,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
   // W1-T9508, memory tier 2: the read model's worker (its views lanes, slow lane and oracle with it) and the board
   // projection exit while a memory-deferred handoff waits; serve answers from the bodies it holds, each with its as-of.
+  // `pause` (read-model-worker.ts) is `stop` without blocking the loop, and a dead worker's pending respawn pauses too.
   // Each thread's heap is read BEFORE it exits, the threads it spawned included, so the reply sizes what was shed.
   const shedWorkers = async (): Promise<WorkerShedOutcome> => {
     const before = liveThreads();
