@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: serve memory investigation (operator approved filing the serve, allocator and worker-typecheck memory tasks)"
   plan_refs: [W1-T5355, W1-T5480, W1-T9357, W1-T9370]
   files: [src/lib/worker-heaps.ts, src/lib/board-projection.ts, src/lib/now-view.ts, src/lib/read-model-worker.ts, test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts]
-  status: queued
+  status: merged
   priority: 1.5  # measured: the heavy lane is 23-33% of serve's rss in every sample, and the next remedy cannot be chosen without this split
   attempts: 0
   rationale: |

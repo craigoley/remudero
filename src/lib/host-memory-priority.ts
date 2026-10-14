@@ -51,7 +51,7 @@ export const HOST_MEMORY_PRIORITY_PROPOSAL: HostMemoryPriorityPolicy = {
   // A review, a proof check or a push gate finishes work already admitted; a garden is maintenance that can wait. A test
   // run is found inside a running tree, never a start that waits, so its weight only completes the table.
   classWeight: {
-    review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3, test: 1,
+    review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3, test: 1, "run-child-probe": 0.5,
   },
   agingPerMinute: 0.05,
   demandRefreshBoundMs: 5 * 60_000,

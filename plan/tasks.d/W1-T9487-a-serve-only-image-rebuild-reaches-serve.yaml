@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: the approved serve rebuild+recycle for W1-T9421 (#11665) built (ACR ba5c02fd4, 13:31:54Z) and never reached serve"
   plan_refs: [W1-T9094, W1-T6125, W1-T8311, W1-T4267, W1-T9421]
   files: [src/lib/serve-policy-convergence.ts, test/a-serve-only-image-rebuild-reaches-serve.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

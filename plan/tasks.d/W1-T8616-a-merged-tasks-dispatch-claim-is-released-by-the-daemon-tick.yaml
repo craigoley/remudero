@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-12 (\"Go ahead with the filing\")"
   plan_refs: [W1-T1268, W1-T2446, W1-T2784, W1-T5047, W1-T5024, W1-T8176, W1-T396, W1-T147]
   files: [src/lib/daemon.ts, src/lib/dispatch-claim.ts, src/run-task.ts, test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
