@@ -1071,8 +1071,10 @@ export interface LedgerRotationMemoPass {
   /** Rotations this pass found unmemoized and read as EMPTY; hand them to `load`, then read again. */
   missing: () => LedgerCorpusEntry[];
   /** True when no rotation was missing — the pass's rows are the union's — and prunes every memoized
-   *  rotation this pass did not touch. False means this pass's rows must be discarded. */
-  complete: () => boolean;
+   *  rotation this pass did not touch, except one still listed in `retain`. False means this pass's rows
+   *  must be discarded. A read that stopped early (`satisfied`) passes its listing as `retain`: the
+   *  rotations it never reached are still on disk, and the next deeper read would otherwise reload them all. */
+  complete: (retain?: readonly string[]) => boolean;
 }
 
 /** A rotation memo: `pass` answers one union read from it, and `load` fills what a pass found missing. */
@@ -1446,8 +1448,14 @@ export function createLedgerRotationMemo(
       return {
         rotationRecords,
         missing: () => [...missing],
-        complete: () => {
-          if (missing.length === 0) memo = touched;
+        complete: (retain) => {
+          if (missing.length === 0) {
+            if (retain !== undefined) {
+              const listed = new Set(retain);
+              for (const [path, entry] of memo) if (!touched.has(path) && listed.has(path)) touched.set(path, entry);
+            }
+            memo = touched;
+          }
           return missing.length === 0;
         },
       };
@@ -1661,12 +1669,21 @@ export async function readLedgerUnionRecordsMemoized(
   opts: LedgerUnionRecordReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): Promise<LedgerUnionRecordRead> {
+  // An early stop never reaches the older rotations, so it must not prune them: on 2026-10-14 the credit
+  // scan stopped on the live file at 11:37:33Z and emptied its memo, so the next pass reloaded all 393
+  // rotations, inside the 12:04-12:34Z core loop freeze.
+  let stoppedEarly = false;
+  const satisfied = opts.satisfied && ((stepsSeen: ReadonlySet<string>) => (stoppedEarly = opts.satisfied!(stepsSeen)));
+  const readPass = (pass: LedgerRotationMemoPass): LedgerUnionRecordRead => {
+    stoppedEarly = false;
+    return readLedgerUnionRecordsSync(stateDir, { ...opts, satisfied, rotationRecords: pass.rotationRecords }, fsDeps);
+  };
   let pass = memo.pass();
-  let read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
-  while (!pass.complete()) {
+  let read = readPass(pass);
+  while (!pass.complete(stoppedEarly ? read.archiveFiles : undefined)) {
     await memo.load(pass.missing());
     pass = memo.pass();
-    read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+    read = readPass(pass);
   }
   memo.reportRetention(stateDir);
   return read;

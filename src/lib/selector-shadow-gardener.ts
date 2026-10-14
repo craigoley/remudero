@@ -9,7 +9,7 @@ import { callerReachableSuites } from "./ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
-import type { GardenCheckout, GardenCheckoutAsync, GardenerDeps } from "./gardener.js";
+import { prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
@@ -1146,7 +1146,7 @@ export async function selectorShadowPlanTasksAsync(repoRoot: string): Promise<Se
 
 export type SelectorShadowTaskIdMinter = ((filingBranch: string) => string | Promise<string>) & {
   async?: (filingBranch: string) => Promise<string>;
-};
+} & GardenTaskIdRelease;
 
 export function selectorShadowMissKey(miss: SelectorShadowMiss): string {
   return `selector-shadow:${miss.headSha}:${miss.selection}:${miss.file}`;
@@ -1456,9 +1456,10 @@ export async function runSelectorShadowGardener(
   /** Land one plan-task file for a miss, returning the PR url and the id minted for it. */
   const land = async (miss: SelectorShadowMiss, build: (taskId: string) => { contents: string; title: string; body: (relativePath: string) => string }) => {
     const workspace = await deps.openWorkspace();
+    let unfiled = "the filing ended before its PR opened";
     try {
       if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
-      const taskId = await (mintTaskId.async ?? mintTaskId)(workspace.branch);
+      const [taskId] = await prepareGardenTaskIds(workspace, 1, mintTaskId as GardenTaskIdMinter, true) as string[];
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
       const made = build(taskId);
@@ -1467,8 +1468,12 @@ export async function runSelectorShadowGardener(
       if (refused !== undefined) throw new Error(`selector shadow: missed-edge task failed lint-plan's machine-filing admission: ${refused}`);
       const prUrl = await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
-      return { taskId, prUrl };
+      return { taskId: taskId!, prUrl };
+    } catch (e) {
+      unfiled = String((e as Error)?.message ?? e);
+      throw e;
     } finally {
+      await releaseGardenTaskIds(workspace, `selector-shadow gardener: ${unfiled}`, true);
       await workspace.dispose();
     }
   };

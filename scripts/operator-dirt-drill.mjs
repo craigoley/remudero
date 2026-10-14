@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync,
   readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,17 +35,34 @@ function fixturePath(root, path) {
   return path;
 }
 
-// Include .git, empty directories, modes and symlink targets; never follow a link into another tree.
+// Fixture-only observation, not an atomic namespace walk. Open before inspecting: byte reads
+// retain that descriptor even if the final pathname changes. Symlinks contribute metadata only.
 export function snapshotTree(root, prefix = "") {
+  assert.ok(Number.isInteger(constants.O_NOFOLLOW) && constants.O_NOFOLLOW !== 0 &&
+    Number.isInteger(constants.O_NONBLOCK) && constants.O_NONBLOCK !== 0,
+  "safe fixture snapshot flags are unavailable on this platform");
   return readdirSync(join(root, prefix)).sort().flatMap((name) => {
     const path = prefix ? `${prefix}/${name}` : name;
     const absolute = join(root, path);
-    const stat = lstatSync(absolute);
-    const entry = { path, mode: stat.mode };
-    if (stat.isSymbolicLink()) return [{ ...entry, link: readlinkSync(absolute) }];
-    if (stat.isDirectory()) return [{ ...entry, directory: true }, ...snapshotTree(root, path)];
-    assert.ok(stat.isFile(), `unsupported fixture entry: ${path}`);
-    return [{ ...entry, bytes: readFileSync(absolute).toString("base64") }];
+    let fd;
+    try {
+      // NONBLOCK also prevents a concurrently substituted FIFO from hanging before fstat.
+      fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if (error?.code !== "ELOOP") throw error;
+      const stat = lstatSync(absolute);
+      assert.ok(stat.isSymbolicLink(), "fixture entry changed during symlink observation");
+      return [{ path, mode: stat.mode, link: readlinkSync(absolute) }];
+    }
+    try {
+      const stat = fstatSync(fd);
+      const entry = { path, mode: stat.mode };
+      if (stat.isDirectory()) return [{ ...entry, directory: true }, ...snapshotTree(root, path)];
+      assert.ok(stat.isFile(), `unsupported fixture entry: ${path}`);
+      return [{ ...entry, bytes: readFileSync(fd).toString("base64") }];
+    } finally {
+      closeSync(fd);
+    }
   });
 }
 

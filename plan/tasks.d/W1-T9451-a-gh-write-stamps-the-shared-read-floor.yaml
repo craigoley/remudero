@@ -1,0 +1,70 @@
+- id: W1-T9451
+  title: "A gh WRITE NEVER STAMPS THE SHARED READ FLOOR — deny-floor.sh skips its whole pacing block for a write-shaped call and github-transport.ts passes no stamp path for one, so a read 10-20 s after `gh pr create` passes the floor and gh-gap.sh says ready, though GitHub's secondary limit counts writes in the same rate; five or more agents reported it on 2026-10-14"
+  repo: remudero
+  depends_on: [W1-T9281]  # W1-T9281 (queued, itself after W1-T5670 and W1-T9238) rewrites invokes_gh in the same hook
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — what stamps the shared gh floor; high because the floor sits in front of every session and worker
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: 5+ agents reported a gh read passing the floor seconds after their own gh pr create"
+  plan_refs: [W1-T3275, W1-T3297, W1-T3976, W1-T4085, W1-T9281, W1-T7957]
+  files:
+    - hooks/deny-floor.sh
+    - src/lib/github-transport.ts
+    - test/a-gh-write-stamps-the-shared-read-floor.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 5fa4c003e. Symbols, not lines.
+    THE HOOK. hooks/deny-floor.sh rule 7 (W1-T3275) sets gh_is_write for `--method/-X POST|PATCH|PUT|DELETE`,
+    `gh pr|issue create|merge|edit|close|reopen|comment|review|ready|lock|unlock` and the run/workflow/release/
+    label/secret writes, and enters the pacing block only when `gh_is_write -eq 0` and the call is not exempt. The
+    only stamp, `: > "$gh_stamp"` ("Stamped only on an ALLOWED read"), is inside that block. A write is allowed and
+    leaves the stamp where the last read put it.
+    THE TRANSPORT. src/lib/github-transport.ts passes `coordinatedStampPath: isWrite || isExempt ? undefined :
+    stampPath`, and the cadence decision returns `{ allow: true, paced: false }` for `opts.isWrite`, so an
+    in-process write does not stamp either.
+    THE EFFECT. ~/Remudero-notes/tools/gh-gap.sh and every session's hook read the mtime of the same
+    gh-last-read stamp. After `gh pr create` the stamp still shows the read before it, so a read seconds later is
+    judged against an old read and allowed. GitHub's secondary limit is a rate limit across requests, writes
+    included, and content-creating writes are the costliest part of it, so the burst the floor exists to stop is
+    write-then-read. Reported by five or more agents in the 2026-10-14 operator session; agent briefs now warn about it in
+    prose, which is prose doing a gate's job.
+    WHY THIS IS NOT W1-T3275's EXCLUSION. W1-T3275's design (i) "PACE READS, NEVER WRITES" refuses no write,
+    because the create/review/arm burst is the productive path. Stamping a write keeps that: no write is refused or
+    delayed. It changes only what the NEXT read is measured against.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for gh-last-read, ghReadCadence, stampGhRead and "write
+    cadence" (main 5: W1-T3976, W1-T3984 merged; W1-T6372 reports where the window is not host-wide; W1-T7957
+    makes next-task-id wait for the floor; W1-T9281 moves the gh-word match to program position; none stamps a
+    write), and the plan/ trees of all 369 readable origin heads (no head adds one). Heads touching
+    hooks/deny-floor.sh are three run-W1-T5670-* branches (heredoc bodies), no write stamping. Positive control: the
+    same sweep finds `^- id: W1-T9436$` on head plan-file-1791981352331 only.
+  design: |
+    1. A WRITE STAMPS, NEVER WAITS. In hooks/deny-floor.sh, an allowed write-shaped gh call stamps the same bucket a
+       read would (the shared gh-last-read, or the -app bucket for an inline GH_TOKEN), under the same mkdir lock,
+       and is never refused or delayed. Exempt calls (gh api rate_limit, gh auth status) still stamp nothing.
+    2. THE TRANSPORT MATCHES THE HOOK. src/lib/github-transport.ts stamps the coordinated path after a write as it
+       does after a read, and its cadence decision still allows every write unpaced.
+    3. One write cadence, not a second window: a read after a write waits out the same RMD_GH_COOLDOWN_S floor a
+       read after a read does. No new constant.
+    4. The refusal text names what stamped the floor ("the last gh call, a write, ..."), so an agent refused after
+       its own create knows why.
+    Tests go in the new file, `test(` titles verbatim as in the proofs below. Drive the hook as
+    test/gh-read-cadence-floor.test.ts does (PreToolUse JSON on stdin, RMD_GH_CACHE_HOME in a scratch dir), and the
+    transport with an injected clock and stamp path.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-gh-write-stamps-the-shared-read-floor.test.ts"
+    - claim: "a read-shaped gh call seconds after an allowed gh pr create is refused by the floor, and the create itself was allowed"
+      proof: 'grep: test("W1-T9451: a read just after a gh pr create is refused and the create was allowed" in test/a-gh-write-stamps-the-shared-read-floor.test.ts'
+    - claim: "the in-process transport stamps the coordinated floor after a write and never paces the write"
+      proof: 'grep: test("W1-T9451: the transport stamps the floor after a write without pacing it" in test/a-gh-write-stamps-the-shared-read-floor.test.ts'
+    - claim: "an exempt call still stamps nothing"
+      proof: 'grep: test("W1-T9451: an exempt gh call leaves the floor stamp unchanged" in test/a-gh-write-stamps-the-shared-read-floor.test.ts'
+  falsifier: |
+    Against main, run `gh pr create --fill` through the hook with a stamp 200 s old, then `gh pr view 1`: both exit 0
+    and the stamp's mtime is the old one, so the first test fails. Refuse the write instead of stamping it and the
+    same test fails on the create.

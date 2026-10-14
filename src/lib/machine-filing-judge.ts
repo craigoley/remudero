@@ -468,6 +468,11 @@ interface MachineJudgeState {
    *  not re-rendered while the daemon's lagging checkout still reads it as due (W1-T5359, 2026-10-02:
    *  W1-T5309's merged ruling was re-landed 38 times, each an empty commit that stalled the loop). */
   settled?: Record<string, string>;
+  /** An operator release whose `verify: auto` rewrite the linter refuses (a ruling-shaped record, which
+   *  ruling-verify keeps at `verify: human`), by the pin it was refused at. A release skips `declined`, so
+   *  without this an unchanged record was re-rendered every pass: W1-T5717, 515 identical refusals
+   *  2026-10-13 12:03Z to 10-14 12:00Z, each opening and disposing a landing worktree. Kept while the pin holds. */
+  refusedReleases?: Record<string, string>;
   /** W1-T8830: for each parked escalation, keyed by the pin it is parked at, the inputs it was last asked
    *  on, when that was, and how many answers in a row came back unchanged. Only a schedule: the ruling
    *  itself lives on the record. */
@@ -674,6 +679,19 @@ async function reaskParkedEscalations(c: {
   return pending;
 }
 
+/** An operator release the judge cannot pin on the record: the operator is told why once, rather than the
+ *  judge re-rendering it every pass. The ledger's release row is untouched; only the durable pin is refused. */
+export function refusedReleaseProposal(task: Task, reason: string): Proposal {
+  return {
+    id: `machine-judge-release:${task.id}`,
+    summary:
+      `Your release of ${task.id} (\`rmd approve ${task.id}\`) cannot be pinned on the record, which keeps verify: human:\n  ${reason}\n\n` +
+      `${task.title}\n\nOnly the ledger's release row carries it now. Edit the record so it clears that check and the ` +
+      "judge will pin the release; an unchanged record is not retried.",
+    evidenceAnchors: [],
+  };
+}
+
 /** One pass: rule on every unjudged or stale machine record, then land or write the rewrites. */
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
@@ -723,7 +741,9 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
     (t) =>
       needsMachineJudgement(t, released) &&
       state.settled?.[t.id] !== taskRulingPin(t) &&
-      (released.has(t.id) || (!excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t))),
+      (released.has(t.id)
+        ? state.refusedReleases?.[t.id] !== taskRulingPin(t)
+        : !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
   const dueIds = new Set(due.map((t) => t.id));
@@ -733,6 +753,12 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   // Kept only while the plan still reads the record at the pin it was settled at.
   state.settled = Object.fromEntries(
     Object.entries(state.settled ?? {}).filter(([id, pin]) => {
+      const t = plan.byId.get(id);
+      return t !== undefined && pin === taskRulingPin(t);
+    }),
+  );
+  state.refusedReleases = Object.fromEntries(
+    Object.entries(state.refusedReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
       return t !== undefined && pin === taskRulingPin(t);
     }),
@@ -811,10 +837,14 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           }
         }
         if ("refused" in out) {
-          // Settled by the record's pin, so an unchanged record is not re-judged every pass.
-          (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
+          // Settled by the record's pin, so an unchanged record is not re-judged every pass. A release
+          // bypasses `declined`, so it is settled in its own map and told to the operator once.
+          if (r.byOperator) {
+            (state.refusedReleases ??= {})[r.task.id] = taskRulingPin(r.task);
+            ports.stageProposal(refusedReleaseProposal(r.task, out.refused));
+          } else (state.declined ??= {})[r.task.id] = taskRulingPin(r.task);
           report.refused.push(r.task.id);
-          ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
+          ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused, ...(r.byOperator ? { operator_release: true } : {}) });
           continue;
         }
         const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
