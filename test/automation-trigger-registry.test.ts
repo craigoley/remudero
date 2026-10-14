@@ -12,10 +12,11 @@ import { createService } from "../src/lib/service.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import type { Clock } from "../src/lib/clock.js";
 import {
+  AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE,
   AUTOMATION_TRIGGER_VERSION,
   automationTriggerLedgerJournal,
   createAutomationTriggerRegistry,
-  isKnownTimezone,
+  timezoneProblem,
   readAutomationTriggerHistory,
   registerAutomationFlow,
   registerAutomationTrigger,
@@ -168,9 +169,11 @@ test("W1-T3956 criterion 1: a named trigger records immutable activation mode, s
   assert.equal((changed as { code: string }).code, "trigger-immutable");
 
   // A schedule trigger without a real timezone or DST policy never registers.
-  assert.equal(isKnownTimezone("Mars/Olympus_Mons"), false);
+  assert.match(timezoneProblem("Mars/Olympus_Mons") ?? "", /time ?zone/i, "an unknown zone names the runtime's own reason");
+  assert.equal(timezoneProblem("Europe/London"), undefined);
   const badZone = registerAutomationTrigger(registry, scheduleTrigger({ triggerId: "t:zone", activation: { mode: "schedule", scheduleId: "c", timezone: "Mars/Olympus_Mons", dst: "skip-gap" } }));
   assert.equal((badZone as { code: string }).code, "invalid-timezone");
+  assert.match((badZone as { reason: string }).reason, /Mars\/Olympus_Mons/);
   const badDst = registerAutomationTrigger(registry, scheduleTrigger({ triggerId: "t:dst", activation: { mode: "schedule", scheduleId: "c", timezone: "UTC", dst: "whenever" } }));
   assert.equal((badDst as { code: string }).code, "invalid-timezone");
   for (const [field, overrides] of [
@@ -197,6 +200,13 @@ test("W1-T3956 criterion 2: schedule, authenticated webhook, and manual starts e
     assert.equal(submission.run!.version, "automation-trigger-v1");
     assert.equal(submission.run!.source, source);
   }
+
+  // The authority-shaped key names refused on top of automation-action-v1's prompt/credential list.
+  assert.equal(AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE.test("command"), true);
+  assert.equal(AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE.test("systemPrompt"), true);
+  assert.equal(AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE.test("modelInstructions"), true);
+  assert.equal(AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE.test("idempotencyKey"), false);
+  assert.equal(AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE.test("triggerId"), false);
 
   const base = { version: "automation-trigger-v1", triggerId: "trigger:on-check-run", source: "manual", idempotencyKey: "k", requestedBy: "operator", requestedAt: NOW };
   const refusedCode = (body: unknown): string => {

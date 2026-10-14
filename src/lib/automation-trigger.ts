@@ -320,13 +320,14 @@ function authorityViolation(value: Record<string, unknown>, allowed: readonly st
   return undefined;
 }
 
-/** Whether `timezone` names an IANA zone this runtime can resolve. */
-export function isKnownTimezone(timezone: string): boolean {
+/** Why `timezone` is not an IANA zone this runtime can resolve, or `undefined` when it is. The
+ *  runtime's own RangeError message is the reason; any other error is not a verdict and rethrows. */
+export function timezoneProblem(timezone: string): string | undefined {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-    return true;
+    return undefined;
   } catch (error) {
-    if (error instanceof RangeError) return false;
+    if (error instanceof RangeError) return error.message;
     throw error;
   }
 }
@@ -335,11 +336,10 @@ function validateActivation(value: unknown): AutomationTriggerActivation | Autom
   if (!isPlainObject(value)) return refusal("invalid-activation", "activation must be an object naming a mode", "activation");
   if (value.mode === "schedule") {
     if (!boundedId(value.scheduleId)) return refusal("invalid-activation", "a schedule activation names the cadence entry it runs on (scheduleId)", "activation.scheduleId");
-    if (typeof value.timezone !== "string" || !isKnownTimezone(value.timezone)) {
-      return refusal("invalid-timezone", "a schedule activation needs an IANA timezone", "activation.timezone");
-    }
+    const zoneProblem = typeof value.timezone === "string" ? timezoneProblem(value.timezone) : "timezone is not a string";
+    if (zoneProblem !== undefined) return refusal("invalid-timezone", `a schedule activation needs an IANA timezone: ${zoneProblem}`, "activation.timezone");
     if (value.dst !== "skip-gap" && value.dst !== "shift-gap") return refusal("invalid-timezone", "a schedule activation needs a dst policy: skip-gap or shift-gap", "activation.dst");
-    return { mode: "schedule", scheduleId: value.scheduleId.trim(), timezone: value.timezone, dst: value.dst };
+    return { mode: "schedule", scheduleId: value.scheduleId.trim(), timezone: value.timezone as string, dst: value.dst };
   }
   if (value.mode === "webhook") {
     if (!boundedId(value.event)) return refusal("invalid-activation", "a webhook activation names the event it accepts", "activation.event");
@@ -463,7 +463,8 @@ function journalFirst(registry: AutomationTriggerRegistry, entry: AutomationTrig
     registry.journal(entry);
     return undefined;
   } catch (error) {
-    return refusal("journal-unavailable", `the trigger journal could not be written: ${String((error as Error)?.message ?? error)}`);
+    const reason = `the trigger journal could not be written: ${String((error as Error)?.message ?? error)}`;
+    return refusal("journal-unavailable", reason);
   }
 }
 
