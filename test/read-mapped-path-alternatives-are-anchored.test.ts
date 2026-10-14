@@ -1,3 +1,4 @@
+// @source-text-subject: #344 concerns regex precedence in source; runtime fallback checks accompany the syntactic regression control.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
