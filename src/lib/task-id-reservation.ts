@@ -382,6 +382,7 @@ export interface RemoteRefReserver {
    * double may omit it entirely, exactly like {@link reservedFloor}.
    */
   recordFilingBranch?(taskId: string, branch: string): boolean;
+  wonAnchor?(taskId: string): string | undefined;
 }
 
 /** Classifies the reservation push's actual evidence. Unknown errors remain fail-closed, but are
@@ -644,6 +645,47 @@ function remoteHolderBranchPresence(
   return { presence: "unreadable", reason: result.stderr || `holder branch read exited ${result.status}` };
 }
 
+/** W1-T8915: why an anchor may not reach `<anchor>:<ref>` (empty = ref DELETE, `+` = force,
+ *  `-` = option), else `undefined`. Syntactic only: the push itself resolves the name. */
+export function reservationAnchorProblem(anchor: unknown): string | undefined {
+  if (typeof anchor !== "string") return `anchor is ${typeof anchor}, not an object name`;
+  if (anchor.trim() === "") return "anchor is empty, and `:<ref>` is git's ref-DELETE syntax";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(anchor)) return `anchor ${JSON.stringify(anchor.slice(0, 80))} is not one object name`;
+  return undefined;
+}
+
+const ANCHOR_REFUSAL = "invalid reservation anchor";
+
+function anchorGitFailure(step: string, res: { status: number; stderr: string }): string {
+  const said = String(res.stderr ?? "").trim() || "(no stderr was emitted)";
+  const cause = /insufficient permission|unable to create temporary file|permission denied|read-only file system/i.test(said)
+    ? "the local object database is not writable"
+    : /author identity unknown|empty ident|auto-detect|tell me who you are|no email was given/i.test(said)
+      ? "no git identity is configured"
+      : step === "hash-object" ? "the empty tree could not be hashed" : "the anchor commit could not be written";
+  return `git ${step} exited ${res.status}: ${cause}. git said:\n${said}`;
+}
+
+/** W1-T8915: the anchor commit, BOTH git statuses and outputs checked; never a network diagnosis. */
+function commitReservationAnchor(
+  run: RemoteReserveDeps["run"],
+  message: () => string,
+  parent?: string,
+): { sha: string } | { reason: string } {
+  const tree = run(["hash-object", "-t", "tree", "/dev/null"]);
+  if (tree.status !== 0) return { reason: anchorGitFailure("hash-object", tree) };
+  const treeSha = String(tree.stdout ?? "").trim();
+  const treeProblem = reservationAnchorProblem(treeSha);
+  if (treeProblem) return { reason: `git hash-object exited 0 but printed no usable tree id (${treeProblem})` };
+  const msg = message();
+  const commit = run(parent ? ["commit-tree", treeSha, "-p", parent, "-m", msg] : ["commit-tree", treeSha, "-m", msg]);
+  if (commit.status !== 0) return { reason: anchorGitFailure("commit-tree", commit) };
+  const sha = String(commit.stdout ?? "").trim();
+  const shaProblem = reservationAnchorProblem(sha);
+  if (shaProblem) return { reason: `git commit-tree exited 0 but printed no usable commit id (${shaProblem})` };
+  return { sha };
+}
+
 /** The real reserver: an orphan commit over the empty tree, pushed to the id's own ref. `commit-tree`
  *  with NO `-p` is what makes the payload unrelated to every other writer's (see the module-level
  *  note above); the message carries pid+host+time plus a parseable holder line, so an operator can
@@ -672,19 +714,31 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       return floor;
     },
     mintAnchor() {
-      if (deps.anchor) return deps.anchor();
-      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const startedAt = reservationNowIso();
-      const msg = formatReservationAnchorMessage({
-        branch: filingBranch(),
-        pid: process.pid,
-        host: hostname(),
-        startedAt,
-        source: "automatic",
-      });
-      return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
+      const made = deps.anchor
+        ? { sha: deps.anchor() }
+        : commitReservationAnchor(deps.run, () => formatReservationAnchorMessage({
+          branch: filingBranch(),
+          pid: process.pid,
+          host: hostname(),
+          startedAt: reservationNowIso(),
+          source: "automatic",
+        }));
+      const reason = "reason" in made ? made.reason : reservationAnchorProblem(made.sha);
+      if (reason !== undefined || "reason" in made) {
+        throw new TaskIdReservationError(
+          `cannot create a reservation anchor locally — ${reason}\n` +
+            "Refused before any push: nothing was claimed and no remote ref was touched.",
+          { outcome: "local" },
+        );
+      }
+      return made.sha;
     },
     attempt(taskId, anchor) {
+      const problem = reservationAnchorProblem(anchor);
+      if (problem) {
+        lastStderr = `${ANCHOR_REFUSAL}: ${problem}; refused before any push`;
+        return "local";
+      }
       assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
       const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
       if (res.status === 0) {
@@ -733,16 +787,20 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
         return "taken";
       }
       const takenOverFrom = parsed.status === "known" ? parsed.holder.branch : "unknown";
-      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const message = formatReservationAnchorMessage({
+      const made = commitReservationAnchor(deps.run, () => formatReservationAnchorMessage({
         branch,
         pid: process.pid,
         host: hostname(),
         startedAt: reservationNowIso(),
         source: "reclaimed",
         takenOverFrom,
-      });
-      const amended = deps.run(["commit-tree", tree, "-p", "FETCH_HEAD", "-m", message]).stdout.trim();
+      }), "FETCH_HEAD");
+      // W1-T8915: an empty amend here would DELETE the foreign holder's ref, not take it over.
+      if ("reason" in made) {
+        lastStderr = `${ANCHOR_REFUSAL}: ${made.reason}`;
+        return "local";
+      }
+      const amended = made.sha;
       assertClaimRefPushAllowed(deps.run, ref);
       const pushed = deps.run(["push", "origin", `${amended}:${ref}`]);
       if (pushed.status !== 0) {
@@ -761,13 +819,20 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     takeoverOf(taskId) {
       return takeovers.get(taskId);
     },
+    wonAnchor(taskId) {
+      return wonAnchors.get(taskId);
+    },
     recordFilingBranch(taskId, branch) {
       if (!branch || branch === "unknown") return false;
       const previousAnchor = wonAnchors.get(taskId);
       if (!previousAnchor) return false;
-      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
-      const msg = formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" });
-      const amended = deps.run(["commit-tree", tree, "-p", previousAnchor, "-m", msg]).stdout.trim();
+      const msg = () => formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" });
+      const made = commitReservationAnchor(deps.run, msg, previousAnchor);
+      if ("reason" in made) {
+        lastStderr = `${ANCHOR_REFUSAL}: ${made.reason}`;
+        return false;
+      }
+      const amended = made.sha;
       assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
       const res = deps.run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]);
       if (res.status !== 0) {
@@ -855,9 +920,9 @@ export function withIdReservationLogging<T>(
  * Reserve the first id at or above `startId` no other writer holds ON THE REMOTE. Same policy as
  * {@link reserveTaskIdFrom}: contention advances rather than refusing. An unreachable remote
  * refuses to mint rather than reconciling optimistically later, which is what took `origin/main`
- * down twice before this existed. Nothing ever releases a reservation, either: a hole in the
- * sequence is cheap and normal here, cheaper than the distributed-state problem release-on-merge
- * would trade it for. A hole is not a defect; a collision is.
+ * down twice before this existed. Only a filer refused before any push releases its OWN claim,
+ * leased on its sha (task-id-release.ts); nothing releases on merge or another writer's claim.
+ * A hole is not a defect; a collision is.
  * Why: docs/forensics/task-id-reservation.md#reservetaskidremote.
  */
 export function reserveTaskIdRemote(
@@ -889,6 +954,13 @@ export function reserveTaskIdRemote(
     );
   }
   const anchor = reserver.mintAnchor();
+  const anchorProblem = reservationAnchorProblem(anchor);
+  if (anchorProblem) {
+    throw new TaskIdReservationError(
+      `${ANCHOR_REFUSAL} (${anchorProblem}) — refusing before any push; nothing was claimed`,
+      { outcome: "local" },
+    );
+  }
   let attempts = 0;
   const last = Math.min(MAX_ALLOCATABLE_TASK_ID, from + maxScan - 1);
   for (let n = from; n <= last; n++) {
@@ -908,8 +980,9 @@ export function reserveTaskIdRemote(
     }
     if (outcome === "local") {
       const stderr = reserver.lastAttemptStderr?.() ?? "pre-push REFUSED.";
+      const refuser = stderr.startsWith(ANCHOR_REFUSAL) ? "a local reservation-anchor check" : "local pre-push gate";
       throw new TaskIdReservationError(
-        `local pre-push gate refused reservation of ${idFor(n)} — refusing to mint. git said:\n${stderr}`,
+        `${refuser} refused reservation of ${idFor(n)} — refusing to mint. git said:\n${stderr}`,
         { taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), outcome: "local" },
       );
     }
@@ -941,8 +1014,8 @@ export function reserveTaskIdRemote(
 }
 
 /** A block of ids reserved on the remote, one ref each — the remote twin of
- *  {@link TaskIdReservationBlock}, with no `releaseAll`: nothing releases a remote reservation,
- *  deliberately (see {@link reserveTaskIdRemote}'s own doc). */
+ *  {@link TaskIdReservationBlock}, with no `releaseAll`: only task-id-release.ts gives back a
+ *  refused filer's own claim (see {@link reserveTaskIdRemote}'s own doc). */
 export interface RemoteReservationBlock {
   /** The reserved ids, ascending — mirrors {@link TaskIdReservationBlock.ids}. */
   readonly ids: number[];

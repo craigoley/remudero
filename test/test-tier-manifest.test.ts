@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -368,9 +369,9 @@ test("W1-T4430: --run fast INCLUDES an untiered test file, rather than refusing 
 
   let capturedArgs: string[] | undefined;
   const code = main(["--root", root, "--run", "fast"], {
-    spawn: (_cmd: string, args: string[]) => {
+    spawn: (_cmd: string, args: string[], spawnOpts?: unknown) => {
       capturedArgs = args;
-      return { status: 0 };
+      return finishJudgedRun(args, spawnOpts);
     },
   });
   assert.equal(code, 0);
@@ -433,9 +434,9 @@ test("--run fast --shard runs only its duration-balanced shard", () => {
   });
   let capturedArgs: string[] = [];
   const code = main(["--root", root, "--run", "fast", "--shard", "2/2"], {
-    spawn: (_cmd: string, args: string[]) => {
+    spawn: (_cmd: string, args: string[], spawnOpts?: unknown) => {
       capturedArgs = args;
-      return { status: 0 };
+      return finishJudgedRun(args, spawnOpts);
     },
   });
   assert.equal(code, 0);
@@ -501,9 +502,9 @@ test("--run adds a second event reporter only when a duration output is requeste
   let capturedArgs: string[] = [];
   const code = main(["--root", root, "--run", "fast"], {
     env: { RMD_TEST_DURATION_OUTPUT: output },
-    spawn: (_cmd: string, args: string[]) => {
+    spawn: (_cmd: string, args: string[], spawnOpts?: unknown) => {
       capturedArgs = args;
-      return { status: 0 };
+      return finishJudgedRun(args, spawnOpts);
     },
   });
   assert.equal(code, 0);

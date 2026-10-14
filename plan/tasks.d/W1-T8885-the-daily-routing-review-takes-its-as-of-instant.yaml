@@ -1,0 +1,37 @@
+- id: W1-T8885
+  title: "A SHIFTED-CLOCK RUN FAILS ci-refresh-prevention BECAUSE ITS SPAWNED CLI READS THE REAL CLOCK — the test stamps a receipt from the shifted parent clock and spawns scripts/private-routing-daily-review.mjs without the clock shim, so the CLI's asOf (the real clock) treats the row as future and the guard count reads null at +7 days (clock-sweep #11029): the daily review CLI takes --as-of and the test pins both clocks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the daily review's as-of instant is an explicit input, so its test is clock-independent
+  band_meaning: span
+  origin: "operator session 2026-10-12: follow-up 3 (clock-sweep #11029)"
+  plan_refs: []
+  files: [scripts/private-routing-daily-review.mjs, test/ci-refresh-prevention.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8.
+    OBSERVED:
+    - scripts/clock-sweep.mjs reruns suites under scripts/clock-shift.mjs. That shim shifts only no-arg Date.now/new Date
+      in the PARENT process.
+    - In test/ci-refresh-prevention.test.ts, tests 1-4 pin `NOW = Date.parse("2026-10-08T12:00:00.000Z")` and are immune.
+    - The last test ("the actual daily CLI retains CI guard decisions in its existing bounded source and reports no causal
+      savings") stamps its receipt with the shifted parent `Date.now()`. It then spawns the CLI with
+      `process.execPath --import tsx`, without the shim.
+    - `dailyRoutingReview` defaults `asOf = systemClock.iso()` (real) and treats rows more than 5 min after asOf as future,
+      so `uniqueDeferredHeads` reads null instead of 1.
+    - In production the rows and asOf share one clock, so this is a test-harness artefact, not a production expiry.
+  design: |
+    Add an `as-of` option to the CLI's parseArgs and pass it to `dailyRoutingReview({ asOf })`, which already accepts it.
+    In the test, stamp the receipt from the fixed NOW and pass `--as-of` with the same instant. No other behavior changes.
+  acceptance:
+    - claim: "the daily routing review CLI honours --as-of and the ci-refresh-prevention suite passes under FK_SHIFT_DAYS=7"
+      proof: 'grep: as-of in scripts/private-routing-daily-review.mjs'
+  falsifier: |
+    Delete the --as-of pass-through: `FK_SHIFT_DAYS=7 node --test --import tsx --import scripts/clock-shift.mjs
+    test/ci-refresh-prevention.test.ts` fails again on the daily CLI case.

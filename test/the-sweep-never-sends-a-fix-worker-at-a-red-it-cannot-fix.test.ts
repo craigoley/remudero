@@ -33,6 +33,7 @@ function redPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "red",
     unmetCriteria: [],
     priorStrikes: 0,
+    createdAt: new Date(NOW - 90 * 60_000).toISOString(),
     lastActivityAt: new Date(NOW - 60_000).toISOString(),
     headSha: "a".repeat(40),
     headRefName: "run-W1-T4351-1",
@@ -61,6 +62,9 @@ function mainObserved(sha: string, state: string, failing: unknown = []): Record
 }
 
 async function sweep(prs: OpenPrView[], ledger: Record<string, unknown>[], over: Partial<SweepDeps> = {}) {
+  // These cases exercise complete history; skipped rows on another PR cover each reader's live span.
+  const history = ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+    .map(step => ({ step, ts: new Date(NOW - 120 * 60_000).toISOString(), pr_number: 1, outcome: "skipped" }));
   const dispatched: number[] = [];
   const escalated: Array<{ pr: number; reason: string }> = [];
   const updated: number[] = [];
@@ -82,7 +86,7 @@ async function sweep(prs: OpenPrView[], ledger: Record<string, unknown>[], over:
       },
       ledgerPath: "/dev/null/w1-t4351.ndjson",
       runId: "W1-T4351-test",
-      readLedger: () => ledger,
+      readLedger: () => [...history, ...ledger],
       // Shared with `readLedger`, so a later pass folds what an earlier one wrote.
       appendLine: (_path, line) => {
         ledger.push(line);

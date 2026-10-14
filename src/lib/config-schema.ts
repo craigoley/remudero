@@ -96,6 +96,8 @@ export interface Config {
   };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
+  /** Explicit private host-local READY store, captured at startup; absent keeps reservation admission disabled. */
+  heavyReadyDirectory?: string;
   workerProviders?: {
     enabled?: WorkerProviderId[];
     /** Operator consent for OUTBOUND WEB ACCESS on behalf of cash workers (W1-T3558). Default false,
@@ -280,6 +282,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
   configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
     kind: "object", fields: [
       configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("disposition", '"shadow"', true, undefined, "config.json", "Opt-in durable shadow disposition; no remote writes.", { kind: "enum", values: ["shadow"] }),
       configField("repositoryId", "number", false, undefined, "config.json", "Authenticated target repository id.", numberShape),
       configField("policy", "AdmissionPolicy", false, undefined, "config.json", "Explicit numeric identity policy.", { kind: "object", fields: [
         configField("version", "string", false, undefined, "config.json", "Policy revision.", stringShape),
@@ -288,7 +291,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
         configField("maxEvidenceAgeMs", "number", false, undefined, "config.json", "Evidence freshness ceiling.", numberShape),
         configField("services", "ServiceGrant[]", false, undefined, "config.json", "Action-scoped bot ids.", { kind: "array", element: { kind: "object", fields: [
           configField("id", "number", false, undefined, "config.json", "Bot id.", numberShape),
-          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback"] } }),
+          configField("actions", "AdmissionAction[]", false, undefined, "config.json", "Scoped actions.", { kind: "array", element: { kind: "enum", values: ["review", "repair", "auto-merge", "feedback", "disposition"] } }),
         ] } }),
       ] }),
       configField("organizations", "OrganizationNamespace[]", false, undefined, "config.json", "REST namespaces verified against numeric organization ids.", { kind: "array", element: { kind: "object", fields: [
@@ -373,6 +376,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
     kind: "object",
     fields: [configField("enabled", "boolean", true, true, "config.json", "Whether headroom dispatch gating is enabled.", booleanShape)],
   }),
+  configField("heavyReadyDirectory", "string", true, undefined, "config.json", "Explicit private local heavy READY directory. Startup-only; governs NEW implement admissions, never active work, reviews or serving.", stringShape),
   configField("workerProviders", "object", true, { enabled: ["claude"] }, "config.json", "Worker provider routing settings.", workerProvidersShape),
   configField("learningsHomes", "object", true, undefined, "config.json", "Shared-knowledge home overrides.", {
     kind: "object",
@@ -390,9 +394,12 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
+  envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
+  envEntry("RMD_HEAVY_READY_DEADLINE_SERVICE", "Default OFF. Exact 1 separately enables the independent READY deadline worker at natural startup, with an explicit private READY directory. Unavailable service refuses only NEW builds; no eval dispatch or runtime activation authority.", ["src/lib/heavy-ready-startup.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
   envEntry("REMUDERO_DAEMON_PID", "The daemon main process's pid, inherited by its children so they can read the daemon's memory growth.", ["src/lib/ledger.ts", "src/lib/host-memory-shadow.ts"]),
   envEntry("REMUDERO_DAEMON_PROCESS", "Marks this process as the daemon actor for ledger attribution.", ["src/lib/ledger.ts"]),
+  envEntry("REMUDERO_GARDENER_ORIGIN", "Bounded parent-pass correlation for garden descendants; not authorization, pricing, or outcome evidence.", ["src/lib/worker-containment.ts", "src/lib/garden-registry.ts"]),
   envEntry("REMUDERO_DAILY_COST_CEILING_SHARE_USD", "Sets this instance's share of the daily cost ceiling.", ["src/lib/policy.ts", "src/run-task.ts"]),
   envEntry("REMUDERO_INSTANCE_LABEL", "Labels the instance associated with a configured daily cost ceiling share.", ["src/lib/policy.ts"]),
   envEntry("REMUDERO_PROCESS_ACTOR", "Identifies daemon, service, or host automation processes for ledger attribution and replay containment.", ["src/lib/ledger.ts", "src/lib/replay-harness.ts"]),
@@ -410,6 +417,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TEST_SLOT_DIR", "The directory holding the host-wide test-run slots, shared by every container and the host; default /mnt/scratch/rmd/test-slots on the host, else /tmp/rmd-test-slots.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_SLOTS", "How many test-suite runs may hold a host-wide slot at once; default one per four cores.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
+  envEntry("RMD_BUNDLED_WORKERS", "W1-T9370: \"0\" starts every worker a tsx parent spawns from its .ts source instead of a current worker bundle; read once per module at its first start.", ["src/lib/child-entry-argv.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_CENSUS_SNAPSHOT", "Names the harness git snapshot a fix round's census precheck reads instead of running git (W1-T7182).", ["src/run-task.ts", "src/lib/prompt-render.ts"]),
@@ -424,6 +432,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts"]),
   envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
@@ -436,6 +445,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_RESOURCE_POLICY_CONTAINER", "Selects the container checked for deployed resource policy and mount drift.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESOURCE_POLICY_ROLE", "Selects the serve or build resource policy for deployment checks.", ["src/lib/deployer.ts"]),
+  envEntry("RMD_RUN_CHILD_DIR", "Marks a run child so credential readers never fall back to the daemon's socket.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
+  envEntry("RMD_RUN_CHILD_GIT_SOCKET", "Carries the run child's own git credential socket to its worker spawns.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),

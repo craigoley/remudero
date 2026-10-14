@@ -5,7 +5,7 @@ import { backlogCitedSteps } from "./backlog-gardener.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { CI_FRICTION_LEDGER_STEPS } from "./ci-friction-gardener.js";
 import { slug } from "./feedback-docket.js";
-import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
@@ -106,7 +106,7 @@ export interface ScoutSources {
   pricedSteps: () => ReadonlySet<string>;
   fileExists: (path: string) => boolean;
   /** THE RESERVATION PATH (`ciLearningTaskIdMinter`, run-task.ts), never `max(id)+1`. */
-  mintTaskId: (filingBranch?: string) => string;
+  mintTaskId: GardenTaskIdMinter;
 }
 
 const iso = (ms: number): string => clockFromMillisFn(() => ms).iso();
@@ -314,10 +314,13 @@ export function scoutGardenSpec(
       merge_budget: i.budget, open: i.openQueue, unprioritized_share: Math.round(i.unprioritizedShare * 1000) / 1000, blocked: i.blocked,
       survival: i.tracked,
     }),
-    apply: (ws, plan) => {
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions.length, full.mintTaskId, async),
+    apply: (ws, plan, _scorecard, heldIds) => {
       if (plan.actions.length === 0) return undefined;
       if (!ws.branch) throw new Error("scout gardener: filing workspace has no branch for task-id reservation");
-      const filings = scoutFilings(plan.actions.map((a) => a.symptom), () => full.mintTaskId(ws.branch));
+      const ids = heldIds ?? prepareGardenTaskIds(ws, plan.actions.length, full.mintTaskId) as string[];
+      let index = 0;
+      const filings = scoutFilings(plan.actions.map((a) => a.symptom), () => ids[index++]!);
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const written: Array<{ rel: string; step: string; origin: string }> = [];
       for (const f of filings) {

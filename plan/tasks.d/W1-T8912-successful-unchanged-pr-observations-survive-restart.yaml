@@ -1,0 +1,72 @@
+- id: W1-T8912
+  title: Successful unchanged PR observations survive restart without rewriting history
+  repo: remudero
+  depends_on: [W1-T8684]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1.3
+  budget_usd: 15
+  risk: high
+  band_meaning: blast-radius
+  origin: operator#2026-10-12-console-flow-followups
+  plan_refs: [W1-T4480, W1-T8533, W1-T8707]
+  files: [src/lib/board-snapshot-cache.ts, src/lib/status.ts, test/board-snapshot-cache.test.ts, test/repository-flow.test.ts, test/repository-flow-cached-wiring.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W8684 correctly refuses a complete current zero from stale PR clocks. However the closed
+    cache advances its persisted observation only on data changes: sameVersions returns success
+    without persisting the real successful unchanged source read. A warm/cold graph can therefore
+    look stale even while the existing gateway keeps checking unchanged data. This is not proof
+    that no refresh ran. Fix that clock's persistence, not the conservative freshness predicate.
+    Incorrect certification affects decisions across connected repositories, so risk is high
+    for persisted-data blast radius; do not use the band to bypass source or coverage bounds.
+    Fresh main and every current open PR head were swept with positive plan/source controls;
+    W4480 is heartbeat rollup, not durable source observation, and W8707 owns quality history.
+  design: |
+    Successful unchanged observation survives restart without rewriting historical rows.
+    Reuse the existing successful complete or proven-complete-delta Board refresh and cache
+    writer. Persist bounded atomic observation metadata for the exact repository, channel and
+    snapshot generation/content identity. Do not add a GitHub walk, timer, browser collector,
+    request-time ledger scan, provider call, activation or permissions. Coalesce metadata writes
+    through the existing cadence; do not resave or rehash all closed history on every check.
+
+    Metadata certifies only its exact repository channel and snapshot identity.
+    Establish identity through the existing atomic data write and validate it on warm/cold read.
+    Old snapshots remain readable but uncertified until a real successful source validation can
+    establish association. A replaced snapshot cannot inherit an old sidecar's certification.
+    Missing, torn, foreign, incompatible, oversized, future or stale metadata stays explicitly
+    unknown/refused. Materialization time, file mtime and an attempted fetch are not observation.
+
+    Failed partial or mismatched reads never advance the successful source clock.
+    Preserve last-success evidence on failure. A page-specific ETag or 304 is not evidence for
+    all other pages; reuse only the collector's actual complete-corpus/delta invariant. A genuinely
+    fresh complete empty source may certify zero; unavailable/incomplete data never becomes zero.
+    Keep W8684's current freshness/censoring/public budgets and independent Analytics availability.
+    The existing repository-flow collector already consumes closedObservedAt from the shared
+    reader; preserve that interface instead of redeclaring or rebuilding the upstream module.
+
+    Real default gateway cache worker and HTTP paths exercise the persisted watermark.
+    Tests must preserve data bytes/mtime across successful unchanged refresh, prove cold restart
+    recovery, and independently vary repo, channel, generation and clock. Include failed/partial
+    fetches, legacy data, interruption before metadata rename, data replacement between reads,
+    clock rollback/future frames and real bounds. No fake-only folds or invented prior history.
+  acceptance:
+    - claim: Successful unchanged source observations persist without rewriting historical snapshot data
+      proof: 'unit test: W1-T8912: unchanged PR observations survive restart without rewriting history'
+    - claim: Observation metadata cannot certify another repository channel or snapshot generation
+      proof: 'unit test: W1-T8912: PR observation identity refuses foreign replaced and torn metadata'
+    - claim: Failed partial stale and future observations do not manufacture fresh zero counts
+      proof: 'unit test: W1-T8912: failed partial and invalid PR observations preserve honest coverage'
+    - claim: The real default gateway and cached worker HTTP path consume the persisted observation
+      proof: 'unit test: W1-T8912: default refresh persists PR observation for warm and cold cached reads'
+  falsifier: |
+    Delete unchanged-success persistence, then identity verification separately. Real physical
+    cases must fail, restored head pass. Require literal proof resolution, complete TAP, native
+    author/censuses, committed same-tree source-instrumented diff coverage, stored-body parsing,
+    governed current-head review and hosted gates. Source merge is not runtime/browser acceptance.
+  note: |
+    Research: https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api
+    recommends conditional requests and actual pagination links. A single unchanged representation
+    does not certify an unrelated page or unobserved complete historical corpus.

@@ -71,12 +71,32 @@ export function setupDirOwnerTag(): string {
   return `${process.pid}-${pidNamespaceId()}-`;
 }
 
+/**
+ * True when THIS process is a `node --test` runner that runs its test files in its own process
+ * (`--test-isolation=none`, the W1-T6085 pure-test pool), not in one child per file.
+ *
+ * Node sets NODE_TEST_CONTEXT only in the children it spawns, and this module loads before
+ * ./tmp-hygiene.ts fills in its `test-setup` default, so a pool runner read as "not a test" here and
+ * ran every pooled test with the caller's real GH_TOKEN, no GH_CONFIG_DIR and live push URLs. The
+ * pool's victim on 2026-10-11 was W1-T5624's own check that GH_CONFIG_DIR carries this pid.
+ */
+export function runsTestFilesInThisProcess(execArgv: readonly string[] = process.execArgv): boolean {
+  if (!execArgv.includes("--test")) return false;
+  return execArgv.some((arg, i) =>
+    /^--(?:experimental-)?test-isolation=none$/.test(arg) ||
+    (/^--(?:experimental-)?test-isolation$/.test(arg) && execArgv[i + 1] === "none"));
+}
+
 /** Apply the containment to `env`. Exported so a test can drive it against a scratch env.
  *  W1-T5624: a worker thread (`mainThread` false) re-runs this setup through the runner's execArgv,
  *  but its env copy already holds the parent's GH_CONFIG_DIR, so it mints no dir — one it made would
  *  outlive a `worker.terminate()`, which fires no `exit` in the worker. */
-export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env, mainThread = isMainThread): { ghConfigDir?: string } {
-  if (!isTestRunner(env)) return {};
+export function installNoLiveRemote(
+  env: NodeJS.ProcessEnv = process.env,
+  mainThread = isMainThread,
+  execArgv: readonly string[] = process.execArgv,
+): { ghConfigDir?: string } {
+  if (!isTestRunner(env) && !runsTestFilesInThisProcess(execArgv)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
   if (!mainThread) {
     // W1-T5744: a worker's env already holds the parent's containment, and under SHARE_ENV it IS the

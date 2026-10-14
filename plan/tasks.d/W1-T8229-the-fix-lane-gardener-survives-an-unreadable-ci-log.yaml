@@ -1,0 +1,70 @@
+- id: W1-T8229
+  title: "THE FIX-LANE GARDENER HAS NOT FINISHED A PASS SINCE 2026-10-10T18:10Z — one coverage check's job log answers 404 because the job id was taken from the check's external_id (a UUID), the throw fails the whole inventory 34 times running, and the one meter that counts operator interventions on fleet PRs has written nothing for a day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — an unreadable CI log is missing evidence for one head, never a failed pass; high (was medium) because the amended files: now also edit #10628's existing gardener test, which lint-plan counts as a second concern
+  origin: "operator ruling 2026-10-09 (a gardener watches the fix bots; operator interventions are the headline signal) + 2026-10-11 detection research: the watcher itself was dark all day"
+  plan_refs: [W1-T7421, W1-T7616, W1-T4802, W1-T7650]
+  files: [src/lib/fix-lane-gardener.ts, test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts, test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts]  # amended 2026-10-11: restart checkpoint refused this path at 22:54:56Z and 23:43:46Z
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, read-only, 2026-10-11:
+      - Core host state file state/fix-lane-gardener-inventory-failure.json: firstAt 2026-10-10T18:10:06.720Z,
+        lastAt 2026-10-11T20:30:24.518Z, count 34, reason "Command failed: gh api
+        repos/craigoley/remudero/actions/jobs/79bcd36e-1735-5d23-aa94-a1a9e0d4fef4/logs / gh: Not Found (HTTP 404)".
+      - Core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z (23 rotated archives + the live file): 29
+        `fix-lane.gardener_failed` rows, every one with that same reason, and ZERO `fixlane.report` rows.
+        The gardener's daily markdown report in the core state dir was last written 2026-10-10 17:36.
+      - The overseer (W1-T4802) wrote one `gardener_overseer.escalated` row for fix-lane at 2026-10-10T20:16:47Z and,
+        by design, nothing after it.
+    So on the day an operator session hand-handled about twelve fleet failure classes, the gardener that W1-T7421
+    built to watch the fix bots and price operator interventions (pushes and closes on fleet PRs) produced no
+    report, no intervention count and no remedy.
+    CURRENT CODE, origin/main 25067fc89, src/lib/fix-lane-gardener.ts `readFixLaneEvidence`:
+      - :255 takes the job id as `/\/jobs\/(\d+)/` on `details_url`, else `check.external_id`, else `check.id`. The
+        failing id is a UUID, so it came from `external_id`, which is not an Actions job id.
+      - :256 calls `ghTextAsync([... /actions/jobs/<id>/logs])` with no catch. One unreadable log throws out of the
+        whole evidence read, so the pass records `fix-lane.gardener_failed` and inventories nothing.
+    AMENDED 2026-10-11 (operator-approved pattern, as W1-T7806): files: adds
+    test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts. Its test "the native evidence
+    reader uses the async transport at the exact recorded head" feeds a check run with `external_id: "46"` and
+    asserts the gardener reads actions/jobs/46/logs, which is the exact behaviour design 1 removes, so the build must
+    update that fixture. With the file undeclared, both runs' restart checkpoints were refused (verdict no_pr, reason
+    restart_checkpoint_failed, 22:54:56Z and 23:43:46Z), detail:
+      "restart checkpoint refused: test/the-fix-lane-gardener-prices-unseamed-catches-and-swapped-reds.test.ts"
+    and the work was lost (W1-T8008 owns keeping undeclared work).
+  design: |
+    No fixed threshold is involved. This is a read that must degrade instead of failing.
+    1. A NUMERIC JOB ID OR NONE. Take the Actions job id only from a numeric source: a `details_url` path segment
+       `/job/<digits>` or `/jobs/<digits>` (accept both spellings), or the check run's own numeric id when the check
+       run's app is GitHub Actions. Never use `external_id`. A check run with no derivable Actions job (for example
+       a gate the fleet posts itself) contributes no log.
+    2. AN UNREADABLE LOG IS MISSING EVIDENCE FOR ONE HEAD. A failed log read (404, 403, any throw) leaves that
+       head's coverage evidence unknown. The coverage-dependent classes then treat it the same way they treat a
+       head with no coverage row today. The pass continues and finishes. It ledgers one
+       `fix-lane.evidence_unreadable` {head_sha, check, reason} row per head per pass. It never ledgers
+       `fix-lane.gardener_failed` for a single log.
+    3. A pass that finishes clears the inventory-failure record. That is the existing path once nothing throws.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive `readFixLaneEvidence`
+    and the garden spec with an injected gh seam whose check-runs answer carries one check with a UUID
+    `external_id` and a details_url that names neither spelling, and one whose log read throws 404.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts"
+    - claim: "a job id is never taken from a check run's external_id"
+      proof: 'grep: test("W1-T8229: a job id is never taken from external_id" in test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts'
+    - claim: "a numeric job id is read from either details_url spelling"
+      proof: 'grep: test("W1-T8229: a numeric job id is read from either details_url spelling" in test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts'
+    - claim: "an unreadable coverage log leaves the pass completing with a report"
+      proof: 'grep: test("W1-T8229: an unreadable coverage log leaves the pass completing" in test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts'
+    - claim: "the unreadable head is ledgered once as missing evidence, not as a gardener failure"
+      proof: 'grep: test("W1-T8229: the unreadable head is recorded once as missing evidence" in test/the-fix-lane-gardener-survives-an-unreadable-ci-log.test.ts'
+  falsifier: |
+    Keep :255-256 as on main. The first test then requests actions/jobs/<uuid>/logs. The third test's pass throws
+    out of readFixLaneEvidence and writes `fix-lane.gardener_failed` with no `fixlane.report`.

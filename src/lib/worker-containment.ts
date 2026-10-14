@@ -1,9 +1,8 @@
 /**
  * lib/worker-containment.ts — W1-T117 worker process-tree containment.
  *
- * Agent SDK 0.3.217 ground truth: `Options.spawnClaudeCodeProcess` replaces
- * the default local spawn. The SDK reads the returned stdin/stdout but a
- * custom spawn must pipe stderr itself; `spawnDetachedGroup` preserves that.
+ * Agent SDK 0.3.217's `Options.spawnClaudeCodeProcess` replaces the default local spawn.
+ * The SDK reads stdin/stdout; `spawnDetachedGroup` preserves the custom spawn's stderr pipe.
  * POSIX `detached: true` makes the child a group/session leader, so a negative
  * pid signal reaches the background descendants that share its group.
  *
@@ -21,10 +20,41 @@ import type { SpawnedProcess as SdkSpawnedProcess } from "@anthropic-ai/claude-a
  * child process — inherited automatically by every descendant that does not
  * explicitly strip its env (the same propagation that let the incident's
  * `gh pr create` bomb survive: env flows downhill through `bash -c` by
- * default), which is exactly what makes them a reliable orphan-sweep marker. */
+ * default), so run/task/scope markers support orphan ownership; gardener context never does. */
 export const RUN_ID_ENV = "REMUDERO_RUN_ID";
 export const TASK_ID_ENV = "REMUDERO_TASK_ID";
 export const WORKER_SCOPE_ENV = "REMUDERO_WORKER_SCOPE";
+
+export const GARDENER_ORIGIN_ENV = "REMUDERO_GARDENER_ORIGIN";
+/** PRIMARY CONTROL: a carrier holds only the version, garden name, and UUID. */
+export const GARDENER_ORIGIN_MAX_BYTES = 256;
+export type GardenerOrigin =
+  | { state: "linked"; version: 1; name: string; passId: string }
+  | { state: "invalid"; reason: "malformed" };
+
+export function readGardenerOrigin(env: NodeJS.ProcessEnv = process.env): GardenerOrigin | undefined {
+  const text = env[GARDENER_ORIGIN_ENV];
+  if (text === undefined) return undefined;
+  if (Buffer.byteLength(text, "utf8") > GARDENER_ORIGIN_MAX_BYTES) return { state: "invalid", reason: "malformed" };
+  try {
+    const raw: unknown = JSON.parse(text);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { state: "invalid", reason: "malformed" };
+    const value = raw as Record<string, unknown>;
+    if (Object.keys(value).length !== 3 || value.version !== 1 ||
+        typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name) ||
+        typeof value.passId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value.passId)) {
+      return { state: "invalid", reason: "malformed" };
+    }
+    return { state: "linked", version: 1, name: value.name, passId: value.passId };
+  } catch {
+    return { state: "invalid", reason: "malformed" };
+  }
+}
+
+export function gardenerOriginEnv(name: string, passId: string | undefined): string | undefined {
+  if (passId === undefined) return undefined;
+  return JSON.stringify({ version: 1, name, passId });
+}
 
 /** Structural mirror of the SDK's own `SpawnOptions` (sdk.d.ts) — kept local
  *  (rather than imported) so this module's PUBLIC signature never depends on

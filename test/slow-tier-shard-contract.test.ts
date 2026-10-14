@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "yaml";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const tier = (await import(pathToFileURL(join(root, "scripts/test-tier-manifest.mjs")).href)) as {
@@ -12,7 +13,7 @@ const tier = (await import(pathToFileURL(join(root, "scripts/test-tier-manifest.
   loadManifest: (path: string) => { thresholdMs: number; files: Record<string, number> };
   tierFiles: (files: string[], manifest: { thresholdMs: number; files: Record<string, number> }) => { slow: string[] };
   main: (args: string[], opts: {
-    spawn: (file: string, args: string[]) => { status: number };
+    spawn: (file: string, args: string[], opts?: unknown) => { status: number };
     env: Record<string, string>;
   }) => number;
 };
@@ -42,9 +43,9 @@ test("W1-T4756 criterion 1: both balanced slow shards cover the slow tier exactl
   for (const index of shard.strategy?.matrix?.shard ?? []) {
     const calls: string[][] = [];
     const status = tier.main(["--root", root, "--run", "slow", "--shard", `${index}/2`], {
-      spawn: (_file: string, args: string[]) => {
+      spawn: (_file: string, args: string[], opts?: unknown) => {
         calls.push(args);
-        return { status: 0 };
+        return finishJudgedRun(args, opts);
       },
       env: {},
     });

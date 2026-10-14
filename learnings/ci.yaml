@@ -172,6 +172,29 @@
   src: "ci-learning:9979:ci-shard (7/8)"
   cited: "2026-10-09"
 
+- id: proof-discrimination-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts]
+  error_signatures: ["proof-discrimination", executed_stale]
+  fact: >-
+    When proof-discrimination refuses a PR, inspect its gate output and make each proof fail at the
+    merge base while passing on the changed head; a test added by the PR may also be copied into the
+    base proof worktree, so prove the changed behavior with a test of the modified surface. For
+    dispatcher or task-authoring changes, update the prompt or criteria writer in the lane that
+    produced the inert or stale proof, then verify with the gate's base comparison before pushing.
+  evidence: >-
+    The proof-discrimination gate refused PR #11139 and the recorded repair changed its broad diff,
+    which does not establish one shared cause. PR #11201's W1-T8921 record documents two
+    executed_stale proofs: the base proof worktree copied the added test, making both proofs pass at
+    base; the repair repointed them at changed behavior that differed between head and base.
+    Separate main-repair and alert-fix records W1-T8572 and W1-T8625 trace inert prose proofs to
+    dispatcher prompts that omitted the required proof dialect. Use the refusal's observed failure
+    and repair the proof-producing lane; the PR list alone does not establish that all refusals had
+    the same cause.
+  src: "ci-learning:11139:proof-discrimination"
+  cited: "2026-10-14"
+
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active
@@ -223,6 +246,27 @@
     in the window recorded as ci-learning:7204:commitlint.
   src: "ci-learning:7204:commitlint"
   cited: "2026-09-30"
+
+- id: mutation-ratchet-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/classify.ts, "test/**", stryker.conf.json, scripts/mutation-baseline.json, .github/workflows/ci.yml]
+  fact: >-
+    When a PR diff can move the mutation score for src/lib/classify.ts, the mutation-ratchet job
+    runs Stryker against its scoped tests and compares the result with the ratcheted baseline. Run
+    that gate on the proposed tree before pushing when changing the target or its tests. If it
+    blocks, use the surviving mutant report to add or repair a test that kills the mutant; do not
+    raise the baseline to make the refusal disappear. Changes outside the gate's trigger scope do
+    not run this mutation sample, so check the changed-file trigger before treating a skipped job
+    as evidence that the score passed.
+  evidence: >-
+    The mutation-ratchet gate refused PRs #10954 and #10988, and both were subsequently repaired.
+    The recorded #10954 repair touched src/lib/classify.ts and
+    test/the-daemon-reloads-its-plan-off-the-loop.test.ts. Individual refusal logs were
+    unavailable, so this entry routes workers to the gate's mutant report and does not assert a
+    more specific shared failure cause.
+  src: "ci-learning:10954:mutation-ratchet"
+  cited: "2026-10-12"
 
 - id: lint-plan-refuses-before-pr
   subsystem: ci
@@ -519,3 +563,87 @@
     the identity step a fix lane must take before pushing, not a verified per-PR cause.
   src: "ci-learning:10671:head-identity-gate"
   cited: "2026-10-11"
+
+- id: coverage-session-blanking-env-form
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "test/**/*.ts"
+    - "test/setup/**"
+    - "src/lib/tmp.ts"
+    - "scripts/coverage-session-blanking-check.mjs"
+  fact: >-
+    The coverage-session-blanking gate refused 4 pull requests in one window, and each was repaired after
+    the refusal. In a test that spawns a nested `node --test` runner or a child that strips NODE_TEST_CONTEXT,
+    blank NODE_V8_COVERAGE with `env.NODE_V8_COVERAGE = undefined` or `env.NODE_V8_COVERAGE = ""` (or the same
+    as an inline object-literal property). Never use `delete env.NODE_V8_COVERAGE`: node re-injects the variable
+    into every child, so the delete is a no-op and the gate reports it as a defect. Before pushing, run
+    `node scripts/coverage-session-blanking-check.mjs` over your own change.
+  evidence: >-
+    The refusals are recorded as ci-learning:10516:coverage-session-blanking (PRs 10516, 10779 (listed twice),
+    10815). Recon did not fetch each PR's failure log or diff, so this entry names the gate's accepted forms and
+    the pre-push check, not a verified per-PR trigger. Whether src/lib/tmp.ts and test/setup/tmp-hygiene.ts were
+    causal or incidental repairs is not established.
+  src: "ci-learning:10516:coverage-session-blanking"
+  cited: "2026-10-11"
+
+- id: coverage-ratchet-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/coverage-ratchet.mjs"
+    - "scripts/coverage-baseline.json"
+    - "scripts/diff-coverage.mjs"
+  fact: >-
+    The coverage-ratchet gate refused 13 pull requests in one window (#6062 to #6156), and each was repaired after
+    the refusal. The gate is an aggregate: it sums lines and branches across the whole lcov run and refuses when the
+    total falls below scripts/coverage-baseline.json, so a change that adds source lines with no test lowers the total
+    even when the lines it touched are covered. Before pushing, build the lcov from your committed tree with
+    `rmd preflight --coverage` (its shards run one at a time) and compare it to the baseline with
+    `node scripts/coverage-ratchet.mjs --lcov <path>`. Do not lower the baseline to clear a refusal; add a test that
+    drives the new lines.
+  evidence: >-
+    The refusals are recorded as ci-learning:6062:coverage-ratchet (PRs 6062, 6077 (listed twice), 6088, 6092, 6096,
+    6098, 6099, 6113, 6135, 6138, 6154, 6156). The repairs touched a wide, unrelated file set, so the shared surface
+    is the aggregate total, not any one lane. Recon did not fetch each PR's failure log, so this entry names the gate's
+    mechanism and the pre-push check, not a verified per-PR trigger.
+  src: "ci-learning:6062:coverage-ratchet"
+  cited: "2026-10-14"
+
+- id: scan-gate-refusals-repaired-by-hand
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "scripts/comment-load-baseline.json"
+    - "scripts/source-size-baseline.json"
+    - "scripts/test-tier-manifest.json"
+    - "src/lib/policy.ts"
+    - "src/lib/dep-review.ts"
+    - "plan/tasks.d/**"
+    - "test/**"
+  fact: >-
+    The Scan gate refused 11 pull requests in one window, and each was repaired after the refusal.
+    Before the first push, a worker runs the two cheap ratchets over its own change,
+    `npm run --silent comment-load-signal` and `npm run --silent source-size-ratchet`, and records any
+    BLOCKED baseline line they print. A worker on a change that touches plan/ also runs
+    `npm run --silent rule15-precheck`, and a change that touches src/run-task.ts, src/lib/policy.ts,
+    src/lib/dep-review.ts, or a new test/ file runs `rmd census-membership` and the suites it names.
+    Those are the steps a fix or implementation lane skips before its first push.
+  evidence: >-
+    The Scan refusals are recorded as ci-learning:10339:Scan (PRs 10339, 10350, 10374, 10392, 10470,
+    10474, 10479, 10482, 10484; 10474 and 10482 each appear twice in the source list). Recon did not
+    establish each PR's Scan failure reason, merge status, or affected lane, so this entry names the
+    shared pre-push steps, not a verified per-PR cause.
+  src: "ci-learning:10339:Scan"
+  cited: "2026-10-11"
+
+# ── docs-index-check refusal (ci-learning:11388:docs-index-check, PRs #11388 and #11524) ──
+- id: docs-index-stale-after-doc-edit
+  subsystem: ci
+  lifecycle: active
+  files: ["docs/**", "docs/docs-index.json", "docs/README.md", "scripts/generate-docs-index.mjs"]
+  fact: >-
+    Any edit under docs/**/*.md makes the committed docs/docs-index.json STALE, and the docs-index:check gate refuses the PR; before pushing a docs change run `npm run --silent docs-index`, commit the regenerated docs/docs-index.json, then confirm `npm run --silent docs-index:check` prints OK.
+  evidence: "ci-learning:11388:docs-index-check: the docs-index-check gate refused #11388 and #11524 because docs/docs-index.json did not match a fresh regeneration from docs/**/*.md (scripts/generate-docs-index.mjs --check exits 1 with 'is STALE'). The ci-learning note records the #11388 repair as regenerating docs/docs-index.json, editing docs/README.md, and touching three tests (a-refused-green-merge-records-why-and-reruns-a-stale-check, daemon-worktrees-pushes-and-arms-never-block-the-loop, run-task); that repair was NOT re-read from the PRs in this run. Also run `npm run --silent docs-index:check-paths` when a mermaid block cites a path."
+  src: "ci-learning:11388:docs-index-check"
+  cited: "2026-10-14"

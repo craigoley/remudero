@@ -1,0 +1,61 @@
+- id: W1-T9077
+  title: "A RUN CHILD RUNS FROM AN ENGINE TREE PINNED TO THE REVISION IT STARTED ON — deploy/entrypoint.sh's sync_tree moves the daemon's own checkout on every in-container restart, so a child that outlives the daemon must load its bundle, scripts and repo-relative files from a tree nothing moves under it"
+  repo: remudero
+  depends_on: [W1-T9070, W1-T8776]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — where a run child's code lives and how long it stays
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T7729, W1-T8775, W1-T8776, W1-T9070]
+  files: [src/lib/engine-tree.ts, src/lib/child-entry-argv.ts, src/run-task.ts, test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision A.1 and B.4.
+    READ on origin/main 5f8d3f178:
+    - deploy/entrypoint.sh's restart loop runs `sync_tree` (fetch and checkout of $TREE, the daemon's mounted
+      checkout) after every freshness, blocked or environmental exit, before relaunching. Today that is safe because
+      every run dies with the daemon. A run child that outlives the daemon would find its tree moved under it.
+    - ADR 0006's bundle resolves every module's `import.meta.url`, every script path and `node_modules` relative to
+      `<tree>/dist/child-entries/` (decision 2), so the tree a bundle sits in is the code a child reads at run time,
+      not only the bundle bytes it loaded at start.
+    - W1-T8776 (queued) builds a hash-addressed store once per main revision and materializes it into a tree with
+      CoW-or-copy, never hardlinks. W1-T8775 (queued) creates `childEntryArgv` in src/lib/child-entry-argv.ts.
+    - Memory note: a mixed-code checkout already produced "flakes" once (local test runs self-synced their checkout,
+      #10521).
+  design: |
+    1. New src/lib/engine-tree.ts. `ensureEngineTree(stateRoot, sha, sourceHash)` builds `<state>/engines/<sourceHash>/`:
+       a detached worktree of the managed checkout at `sha` (through the hardened git leaf), `node_modules` linked to
+       the install whose lockfile hash matches (the existing install root; never `npm ci` here), and W1-T8776's
+       stored bundle materialized into its dist/child-entries/. It builds into a temporary sibling and renames into
+       place, so a half-built engine is never visible. Ledger `engine.built` {sha, source_hash, ms} or
+       `engine.build_failed` {sha, reason}.
+    2. The daemon calls it off the loop after `refreshManagedCheckout`'s fast-forward (src/run-task.ts), beside
+       W1-T8776's store build. A failure changes nothing: the previous engine stays the newest.
+    3. `newestCurrentEngine(stateRoot, mainSha)`: the newest engine whose bundle `childEntryIsCurrent` accepts, for a sha
+       that is main or an ancestor of it. When that is not main's tip it ledgers `engine.lag` {engine_sha, main_sha,
+       commits_behind}.
+    4. Retention: an engine tree is removed only when no run directory's non-terminal status (W1-T9070's
+       classifyRunDir) names it and it is not the newest. Never by count or age alone (operator rule: no fixed
+       thresholds).
+    5. `childEntryArgv` (W1-T8775) gains an engine root: a run child's argv names
+       `<engine>/dist/child-entries/<name>.mjs` with cwd at the engine root; the fallback is tsx from the engine tree,
+       never from the daemon's checkout, and the returned kind and reason say which.
+  acceptance:
+    - claim: "a run child's argv names a bundle inside its engine tree, never the daemon's own checkout"
+      proof: 'grep: test("W1-T9077: a run child argv names a bundle inside its engine tree" in test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts'
+    - claim: "an engine tree a live run status names is never removed, and an older unnamed one is"
+      proof: 'grep: test("W1-T9077: an engine a live run names is kept and an unnamed old one is removed" in test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts'
+    - claim: "a managed-checkout fast-forward builds the new engine off the loop and ledgers it"
+      proof: 'grep: test("W1-T9077: a fast-forward builds the new engine off the loop" in test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts'
+    - claim: "with no current bundle the child falls back to tsx from the engine tree and says so"
+      proof: 'grep: test("W1-T9077: with no current bundle the fallback is tsx from the engine tree" in test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts'
+    - claim: "the daemon builds the engine tree after the managed-checkout fast-forward"
+      proof: 'grep: ensureEngineTree( in src/run-task.ts'
+  falsifier: |
+    Resolve the child from the daemon's checkout (process.argv[1]'s tree): after the test checks out a newer sha in
+    that checkout, the first test's child reads the moved file.

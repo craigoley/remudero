@@ -1,0 +1,78 @@
+- id: W1-T8164
+  title: "THE LIFETIME SENSOR COUNTS EACH WORKER ATTEMPT ONCE — it charges a run the harness ended on its own restart checkpoint, every archived start whatever its verdict, and each live start twice, so W1-T7837 was judged needs_operator three times on 2026-10-11 with not one worker failure among its runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the lifetime-pressure count charges only worker attempts, each once
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with your recommendations\"): spurious lifetime-pressure judgements"
+  plan_refs: [W1-T4025, W1-T7742, W1-T3523, W1-T3758, W1-T5109, W1-T271]
+  files: [src/lib/status.ts, src/run-task.ts, test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11, core daemon ledger archives on the fleet host (read-only, bounded greps):
+      - W1-T7837's runs before today's judgements were W1-T7837-1791691978673 (verdict no_pr, reason
+        restart_checkpoint_failed, 04:51:27Z), W1-T7837-1791700996261 (handed_off, freshness_yield, 06:57:07Z) and
+        W1-T7837-1791707730822 (handed_off, freshness_yield, 09:02:27Z). None is a worker failure.
+      - `verify_human.judged` wrote needs_operator for W1-T7837 at 06:33:56Z, 08:26:41Z and 09:04:45Z. On the same
+        day it also wrote needs_operator for W1-T5902 (twice), W1-T6146 and W1-T7998. All four are verify: auto,
+        so these came from the lifetime-pressure route, not the verify: human backlog. Each one is an inbox proposal.
+    The sensor holds nothing (W1-T4025 made it a signal, src/lib/drain.ts:672 in `isDispatchEligible`), but each
+    signal asks the judge and can stage a proposal. READ on origin/main 233304449:
+      - THE CHECKPOINT REASONS ARE MISSED. `taskAttributableLifetimeDispatches` (src/lib/status.ts:1738) excludes a
+        run whose verdict matches `lifetimeInfrastructureRefusal` (:1749). That set has no `no_pr` reasons. The
+        shared set from #10916, `streakRefusal` (src/lib/non-worker-verdict.ts), also excludes `no_pr` with reason
+        restart_checkpoint_failed or restart_checkpoint_restore_failed, the harness failing its own checkpoint.
+        The breaker and the cost-of-delay stride read `streakRefusal`, so only this sensor charges those runs.
+        `routeAdaptiveLifetimePressure` (src/run-task.ts:51402) also builds the judge's "attributable terminal-verdict
+        history" with `lifetimeInfrastructureRefusal`, so the judge is shown those runs as attributable too.
+      - EVERY ARCHIVED START IS CHARGED. `auditedLifetimeTalliesFromArchives` (src/run-task.ts:35030) scans only
+        `run.start` and `daemon.spawn_infra_blocked`. `recordLifetimeTally` (:34945) adds 1 per start. No verdict
+        is read, so a yield, a claim race or an infrastructure refusal in an archive counts like a worker failure.
+      - EACH LIVE START IS COUNTED TWICE. `lifetimeCapExceededFor` (src/run-task.ts:35150) adds `archived`, from
+        `auditedLifetimeHistory.tallyFor`, to `attributableLive`. But `tallyFor` (`lifetimeHistory`, :34966) already
+        includes a live overlay: it reads the live ledger itself and counts each new `run.start` in it. Then
+        `attributableLive` (`taskAttributableLifetimeDispatches` over the same live rows) counts those starts again.
+        Capacity receipts are subtracted twice the same way: `attributableLive` already nets them out, and the sum
+        nets `liveTally.capacityBlocked` again.
+    So one ordinary restart yield in the live window counts 2, and `> 1` reports pressure.
+  design: |
+    1. ONE EXCLUSION SET. `taskAttributableLifetimeDispatches` and the history in `routeAdaptiveLifetimePressure`
+       read `streakRefusal` in place of `lifetimeInfrastructureRefusal`, so all three readers (breaker, stride,
+       lifetime sensor) charge the same runs. `lifetimeInfrastructureRefusal` keeps its other callers.
+    2. ARCHIVED STARTS ARE PAIRED WITH THEIR VERDICTS. The archive projection also reads `verdict` rows and does
+       not charge a start whose run's terminal verdict matches `streakRefusal`. It stays bounded like today: the
+       per-run state lives only until its verdict is read, and it is capped by the same start-identity ceiling.
+       Hitting that ceiling keeps today's fail-closed answer (history unavailable). A start with no verdict in the
+       corpus stays charged ("unknown stays counted", W1-T3523).
+    3. EACH START IS COUNTED ONCE. Keep one live contribution. It must still count a start that rotates out of the
+       live file after boot, which is why the overlay in `lifetimeHistory` exists. It applies the same exclusions as
+       the archive: non-worker verdicts, and proven orphans via `orphanedRunIds` over the live rows.
+       `lifetimeCapExceededFor` stops adding a second live count on top of it, and capacity receipts are subtracted
+       once.
+    The pressure stays a signal. Nothing here adds a refusal, a cap or a constant.
+    Tests go in the new file test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts, with `test(` titles
+    exactly as in the proofs below. test/w1-t4025-adaptive-lifetime-dispatch-flow.test.ts,
+    test/dispatch-lifetime-breaker.test.ts and test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts must
+    stay green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts"
+    - claim: "a run that ended no_pr restart_checkpoint_failed or restart_checkpoint_restore_failed is not charged as lifetime pressure"
+      proof: 'grep: test("W1-T8164: a failed restart checkpoint is not a lifetime attempt" in test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts'
+    - claim: "an archived start whose verdict is a non-worker verdict is not charged"
+      proof: 'grep: test("W1-T8164: an archived yield or refusal is not a lifetime attempt" in test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts'
+    - claim: "one live worker attempt counts once, so a single live attempt reports no pressure"
+      proof: 'grep: test("W1-T8164: a live start is counted once, not twice" in test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts'
+    - claim: "W1-T7837's three 2026-10-11 runs (one restart_checkpoint_failed, two handed_off) report no lifetime pressure"
+      proof: 'grep: test("W1-T8164: the W1-T7837 runs report no lifetime pressure" in test/the-lifetime-sensor-counts-each-worker-attempt-once.test.ts'
+  falsifier: |
+    Keep `lifetimeInfrastructureRefusal` in `taskAttributableLifetimeDispatches`: the restart_checkpoint_failed run
+    is charged and the first and fourth tests fail. Keep the archive projection blind to verdicts: the archived yield
+    is charged and the second test fails. Keep adding `attributableLive` to a `tallyFor` that already holds the live
+    overlay: one live start counts 2, `> 1` reports pressure, and the third test fails.

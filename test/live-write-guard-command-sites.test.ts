@@ -19,6 +19,9 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
+/** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
+const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
+
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
 // `spawnWorker` call in functions that took no deps, so no offline test could reach them
@@ -95,6 +98,8 @@ function makeOrigin(feedbackId?: string): string {
   // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
   mkdirSync(join(seed, "src", "lib"), { recursive: true });
   writeFileSync(join(seed, "src", "lib", ".gitkeep"), "");
+  // W1-T9039: the push floor's call-site check reads the worktree, so the modules the drafts edit exist.
+  for (const module of ["plan.ts", "ledger.ts", "relint.ts"]) writeFileSync(join(seed, "src", "lib", module), "");
   if (feedbackId) {
     writeFileSync(
       join(seed, "plan", "feedback", `${feedbackId}.yaml`),
@@ -450,7 +455,7 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
         "P-GUARD": {
           proposalId: "P-GUARD",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
           stampLine: "- P-GUARD (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -535,7 +540,7 @@ test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and t
         "P-FULL": {
           proposalId: "P-FULL",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
           stampLine: "- P-FULL (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -608,8 +613,8 @@ test("W1-T968: rmd approve batch reports a standing prior arm as armed although 
     // Two genuinely DIFFERENT drafts: near-identical ones are refused as duplicates of each other
     // (the second is skipped), which would drive a batch of one and prove nothing about batching.
     const shapes = [
-      { id: "P-BATCH-A", title: "rotate stale widget ledgers weekly", file: "src/lib/widget-rotation.ts" },
-      { id: "P-BATCH-B", title: "index gadget registry by owner", file: "src/lib/gadget-index.ts" },
+      { id: "P-BATCH-A", title: "rotate stale widget ledgers weekly", file: "src/lib/ledger.ts" },
+      { id: "P-BATCH-B", title: "index gadget registry by owner", file: "src/lib/relint.ts" },
     ];
     const drafts: Record<string, unknown> = {};
     const proposals = shapes.map(({ id, title, file }, i) => {
@@ -721,7 +726,7 @@ test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch d
         "P-RESUME": {
           proposalId: "P-RESUME",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
           stampLine: "- P-RESUME (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -806,7 +811,7 @@ async function withApproveFullHarness(
         [proposalId]: {
           proposalId,
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
           stampLine: `- ${proposalId} (plan) — RATIFIED -> NEW-1.`,
           anchorFingerprint: "",
         },
@@ -905,7 +910,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
         "P-DEGRADE": {
           proposalId: "P-DEGRADE",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n",
           stampLine: "- P-DEGRADE (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -1174,7 +1179,7 @@ test("arm merge: the head ref is absent after a merge with no local delete", () 
     );
     process.env.PATH = `${shimDir}:${savedPath}`;
 
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1052", CLEAN_GUARD));
 
     const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
     assert.equal(
@@ -1331,7 +1336,7 @@ test("arm merge: both immediate call sites drop the local branch delete", () => 
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     withLiveWritesAllowed(() => realArmDeps().mergeDirect("https://github.com/acme/sandboxrepo/pull/1055"));
-    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056"));
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/1056", CLEAN_GUARD));
 
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     assert.equal(lines.length, 2, `expected exactly two gh invocations, got ${JSON.stringify(lines)}`);

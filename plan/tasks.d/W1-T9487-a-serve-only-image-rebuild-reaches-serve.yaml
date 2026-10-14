@@ -1,0 +1,47 @@
+- id: W1-T9487
+  title: "A SERVE-ONLY IMAGE REBUILD NEVER REACHES SERVE: W1-T9094 stopped the build daemon recycling for serve-supervisor source, but serve's convergence still takes its expected image from the core daemon container, so after such a rebuild neither container ever moves; serve's image drift is judged against the newest image built for serve's own baked inputs, and a replace that lands serve on it is a success"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — which image serve's convergence calls current
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: the approved serve rebuild+recycle for W1-T9421 (#11665) built (ACR ba5c02fd4, 13:31:54Z) and never reached serve"
+  plan_refs: [W1-T9094, W1-T6125, W1-T8311, W1-T4267, W1-T9421]
+  files: [src/lib/serve-policy-convergence.ts, test/a-serve-only-image-rebuild-reaches-serve.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (ledger, task DEPLOY, and docker inspect):
+    - #11665 (W1-T9421) changed src/lib/serve-slots.ts and src/lib/serve-supervisor-main.ts, both in
+      BAKED_RUNTIME_SOURCE_PATHS. acr-build.yml built ba5c02fd4 successfully at 13:31:54Z.
+    - From then on, every deploy tick logs `deploy.image_drift_scoped {role: build, behind_all: 3, behind_role: 0}`
+      naming those files, and the core daemon is never recycled (W1-T9094, by design).
+    - remudero-serve and remudero-daemon both stay on sha256:30967fc6de13 (created 12:16:05Z and 10:56:47Z). No
+      serve-role deploy cycle runs: today's DEPLOY rows have role `build` only.
+    READ at origin/main:
+    - serve-policy-convergence.ts `serveImageDrift`: expected = `docker inspect imageShaContainerFor(...)` = the core
+      daemon container's image; actual = remudero-serve's. Equal means no drift.
+    - after a replace, `imageAfter` still off the daemon is an error: recordServePolicyFailure (an hour's back-off)
+      and a needs-human escalation. `replaceServe` runs deploy/serve-container.sh --replace with no TAG, i.e. :latest.
+    - deploy-judge.ts `imageBakedPathsForRole`: `build` ignores BAKED_RUNTIME_SOURCE_PATHS; `serve` keeps the full
+      list. W1-T9094's title says such a rebuild "recycles only serve", but nothing serve-side acts on it.
+    So a serve-only rebuild ships to no container, and a hand replace of serve onto :latest would be read as drift,
+    replaced again and escalated every hour while the daemon stays put.
+  design: |
+    1. Serve's expected image is the newest image built for serve's own baked inputs, not the daemon container's: the
+       :latest image serve-container.sh would run, once its build sha (/etc/rmd-build-sha, as checkImageDrift reads)
+       includes the newest origin/main commit touching imageBakedPathsForRole("serve"). Until such an image is
+       published, expected stays the daemon's image (today's behaviour, never an unpublished one).
+    2. A serve on that image is converged, whatever the daemon runs; a replace that lands serve on it is a success.
+    3. An unreadable build sha or image id stays `unknown`, which is never drift (today's rule).
+    4. Every hold (STOP/PAUSE, handoff in flight, health, back-off, host-memory admission) is unchanged.
+  acceptance:
+    - claim: "after a serve-only image rebuild, serve's convergence reads drift against the newly published image and a replace onto it succeeds while the daemon keeps its older image"
+      proof: 'grep: test("W1-T9487: a serve-only image rebuild reaches serve" in test/a-serve-only-image-rebuild-reaches-serve.test.ts'
+  falsifier: |
+    Take the expected image from the daemon container again: the fixture's serve-only rebuild reads no drift, nothing
+    is replaced, and the test fails.

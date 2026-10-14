@@ -1,0 +1,55 @@
+- id: W1-T9308
+  title: "THE REVALIDATION JUDGE NEVER SEES THE COMMIT THAT FIXED A HAND-FILED ISSUE, SO IT ARGUES FROM ABSENCE — #8429's diagnostic shipped in #11264, whose subject names (#8429), but the evidence pack holds only source greps and ledger counts, so the judge cited 'serve.cold_start_failed: 0 row(s)' and the absence guard rightly kept it; two other hand-filed issues (#9587, #8446) were called resolved from a name that 'does not appear' while their conditions still hold: the pack lists the main commits whose subject names the issue since it opened, so a resolved verdict on a hand-filed issue can cite something present"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — what present evidence the revalidation judge is shown for an open issue
+  band_meaning: span
+  origin: "operator session 2026-10-13: spot-check of the revalidation garden's fixed-code shadow verdicts (passes 18:00Z-20:27Z); operator approved building the gap fix"
+  plan_refs: [W1-T8864, W1-T9181]
+  files: [src/lib/issue-revalidation-garden.ts, test/the-revalidation-judge-sees-the-commits-that-name-an-issue.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-13 at origin/main, the ledger archives and issues #9587, #8446, #8429, #11464 (read-only).
+    OBSERVED, four shadow passes on W1-T9181's code (18:00Z, 19:13Z, 20:06Z, 20:27Z): 0 would-be closes. Six
+    `resolved` verdicts were spot-checked:
+    - Right, each citing a merged PR: #11404 (#11255), #11461 (#11444), #11464 (#11455).
+    - #8429 (serve cold start stalls at an opaque board_computed=false): resolved, citing "ledger step
+      serve.cold_start_failed: 0 row(s) in the last 48 h". The conclusion is right but the evidence is not:
+      10d1b5ce1 "fix(serve): say why board_computed is false in standby readiness (#8429) (#11264)" shipped the fix.
+    - #9587: resolved, citing "src/lib/now-view.ts:nowTask does not appear on origin/main". WRONG: nowTask is
+      defined in now-view.ts and still drops workerTelemetry beyond the two model fields.
+    - #8446: resolved, citing a templated `/v1/views/inbox?section=...&cursor=...` that "does not appear". WRONG
+      (INFERRED): inbox-view.ts still pages by section, and no shared snapshot token exists.
+    PATTERN: every wrong `resolved` argues from absence, and every merged-PR citation is right. A merged-PR fact
+    exists only for referent issues (referentVerdicts). For a hand-filed issue the pack is source greps plus ledger
+    counts, so the one present fact that decides #8429 (a main commit naming it) is never shown, and the judge
+    reaches for an absence that W1-T9181's guard then correctly refuses.
+    OWNERSHIP: W1-T8864 (merged #11322) built the pack; W1-T9181 (merged #11399) added the absence guard; nothing
+    open touches the evidence port.
+  design: |
+    1. The production evidence port reads main's commit subjects ONCE per pass (`git log origin/main --since=<the
+       oldest listed issue's createdAt> --format=<sha> <committer date> <subject>`), cached beside the ledger rows.
+    2. For each issue it lists up to 5 commits committed after the issue opened whose SUBJECT names `#<number>` (not
+       followed by another digit), newest first, as present facts: "commit <short sha> on origin/main names
+       #<number>: <subject>". Plan-filing commits (`chore(plan):`) are left out: filing work is not fixing it.
+    3. No match is told as absence: "no origin/main commit since the issue opened names #<number> in its subject —
+       absence only", and the absence-only test recognises that wording. An unreadable log is told as unread.
+    4. The prompt says a commit naming the issue shows work against it, not a fix: cite it for resolved only when
+       its subject says the condition was removed.
+    The guards are unchanged: a commit citation is present evidence, so act mode may close on it unless another
+    guard keeps the issue.
+  acceptance:
+    - claim: "a main commit whose subject names the issue reaches the judge as a present fact, filings and other numbers excluded, and no match reads as absence only"
+      proof: 'grep: test("W1-T9308: the revalidation judge sees the commits that name an issue" in test/the-revalidation-judge-sees-the-commits-that-name-an-issue.test.ts'
+    - claim: "the evidence port names the commits that name an issue"
+      proof: 'grep: names #\${issue\.number}: in src/lib/issue-revalidation-garden.ts'
+  falsifier: |
+    Drop the commit facts: the #8429 fixture's evidence has no "commit 10d1b5c on origin/main names #8429" line and
+    the test fails. Drop the `chore(plan):` filter: a filing commit naming the issue appears and the test fails. Drop
+    the trailing-digit check: a subject naming #84290 is listed for #8429 and the test fails.

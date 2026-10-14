@@ -1,0 +1,64 @@
+- id: W1-T9237
+  title: "RMD CHECK-ACCEPTANCE REFUSES WHAT ACCEPTANCE-AUTHOR-GATE REFUSES, BEFORE THE PR OPENS — on a local body whose grep proof names a test file absent at head (a filing that copied its task's build proofs, #11353 on 2026-10-13) it prints OK and exits 0, and the gate refuses the same body as grep-proof-target-missing a CI round later"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # one concern: the author-time command runs the gate's own body-proof predicates on the local head; src/run-task.ts (checkAcceptanceCommand) and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11353, a plan-only filing, went red at acceptance-author-gate because its body copied W1-T9113's build proofs; check-acceptance had passed the body"
+  plan_refs: [W1-T3675, W1-T1097, W1-T2251, W1-T952, W1-T3730]
+  files:
+    - src/run-task.ts
+    - test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts
+  status: queued
+  priority: 2  # every hand filing; each miss costs a red required check and a body edit after the push
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 on origin/main 6732a7690. A body file with one criterion,
+    `proof: grep: test("a follow-up restated by a later round" in test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts`
+    (the path #11353's criterion 1 named; absent at head), run through `./bin/rmd check-acceptance <file>` from a clean
+    worktree: "criteria source: the body Acceptance: block ... OK — the parser resolves exactly what was written, and
+    every proof is non-empty", exit 0.
+    The CI gate on #11353 (job 115327895646, 13:39:25Z): `REFUSED (grep-proof-target-missing) — criterion 1's grep proof
+    names test/a-follow-up-restated-by-a-later-round-is-one-finding.test.ts, which does not exist at this head`.
+    WHY, READ on origin/main (symbols, not lines):
+      - `checkAcceptanceCommand` (src/run-task.ts) sources its untrailered verdict from `acceptanceAuthorTimeCheck`
+        (W1-T1097). The gate (scripts/acceptance-author-gate.mjs `evaluateGate`) runs that predicate and then
+        `authorTimeProofShapeRefusal`, which runs `bodyProofTargetMissing` (W1-T3675) and the wrapped-pattern and
+        unexecutable-proof checks. check-acceptance runs none of those, so it passes a body the gate refuses.
+      - The pre-push hook cannot see a body (the PR does not exist yet), and `proof-resolve-precheck` SKIPs a plan-only
+        filing by design ("its proofs are the build PR's"). So `rmd check-acceptance <body-file>`, run before
+        `gh pr create`, is the only author-time point where this body can be judged, and today it says OK.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for bodyProofTargetMissing (main 1,
+    W1-T3675, the gate side; no head more) and for plan-only + acceptance-author-gate + absent (11 shards on main, none
+    about check-acceptance). The open-PR re-check filed beside this task judges a STORED body at a later push; this one
+    judges the local body before the PR exists. Control: `acceptance-author-gate` reads 93 shards on main and every head.
+  design: |
+    1. ONE PREDICATE, NEVER TWO. On the untrailered arm (criteria from the body block), `checkAcceptanceCommand` calls the
+       gate's own `authorTimeProofShapeRefusal` path (export it, or a thin exported wrapper, from
+       scripts/acceptance-author-gate.mjs) with the current checkout as `root`, after `acceptanceAuthorTimeCheck` passes.
+       A refusal prints the gate's own defect name and message and exits 1, as the gate would. No second copy of the
+       target-missing or proof-shape rules.
+    2. NAME THE FILING CASE. When the checkout's diff against origin/main is plan-only (`isPlanOnlyDiff` over the same
+       three-dot range the command already reads) and a refused grep target, or a `unit test:` title, is one of the
+       `files:` a shard in that diff declares, the message adds: this is that task's BUILD proof; a filing PR proves the
+       filing, e.g. `grep: ^- id: <task id>$ in plan/tasks.d/<shard>` or a distinctive design phrase in the shard.
+    3. THE TRAILERED ARM IS UNCHANGED (review reads the shard there, not the body), and so is the `--base` arm.
+    Tests go in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts, driving
+    `checkAcceptanceCommand` over a git fixture (gitRepo(), with a local user.email/name) whose head adds one shard.
+  acceptance:
+    - claim: "a body whose grep proof names a path absent at head is refused with the gate's grep-proof-target-missing defect and exit 1"
+      proof: 'grep: test("W1-T9237: a body grep proof naming an absent path is refused before the PR opens" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
+    - claim: "on a plan-only diff, a refused proof naming a file the filed shard declares is called that task's build proof, with the filing-proof remedy"
+      proof: 'grep: test("W1-T9237: a filing body that copies its task build proof is named as such" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
+    - claim: "a filing body whose grep proofs name the filed shard still passes"
+      proof: 'grep: test("W1-T9237: a filing body proving its shard still passes" in test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/check-acceptance-refuses-what-the-gate-refuses-before-the-pr-opens.test.ts"
+  falsifier: |
+    Remove the call to the gate's body-proof checks: the first test reads OK and exit 0. Refuse every proof on a plan-only
+    diff: the third test fails. Drop the filing-case message: the second test finds the generic target-missing text
+    without the build-proof remedy.

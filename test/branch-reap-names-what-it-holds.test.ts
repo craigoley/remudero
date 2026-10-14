@@ -23,7 +23,7 @@ function runReaper() {
       throw new Error("not an ancestor");
     }
     if (args[0] === "rev-parse") return "deadbeef\n";
-    if (args[0] === "grep" && args.includes("-F")) throw Object.assign(new Error("no source match"), { status: 1 });
+    if (args[0] === "grep" && (args.includes("-F") || args.includes("-P"))) throw Object.assign(new Error("no source match"), { status: 1 });
     if (args[0] === "grep" && args.includes("-o")) {
       return DECLARED_BRANCH_GUARDS.map((name) => `src/run-task.ts:1:${name}`).join("\n");
     }

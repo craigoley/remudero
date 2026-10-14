@@ -20,6 +20,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { createGardenerRuntimeWriter } from "../src/lib/gardener-runtime.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const READ = "one-gateway-read-token";
@@ -133,6 +134,44 @@ function taskIds(body: Record<string, unknown>): string[] {
 function recentIds(body: Record<string, unknown>): string[] {
   return [...new Set(((body.entries ?? []) as Array<{ taskId: string }>).map((e) => e.taskId))].sort();
 }
+
+test("cached host approvals capture loaded startup configuration through the real HTTP route", async (t) => {
+  const { deps } = fleet(t);
+  const approvedAt = "2026-01-01T00:00:00.000Z";
+  const rows = [{ model: "host-model", approvedBy: "operator", approvedAt, privateNote: "private-sentinel" }];
+  deps.modelApprovals = rows;
+  await withServer(deps, async (url) => {
+    const first = await get(url, "/v1/views/analytics");
+    assert.equal(first.status, 200);
+    const data = first.body.data as { modelApprovals: { state: string; capturedAt: string; approvals: unknown[]; scope: string } };
+    assert.equal(data.modelApprovals.state, "reported");
+    assert.equal(data.modelApprovals.scope, "serving-host");
+    assert.ok(Number.isFinite(Date.parse(data.modelApprovals.capturedAt)));
+    assert.deepEqual(data.modelApprovals.approvals, [{ model: "host-model", approvedBy: "operator", approvedAt }]);
+    assert.equal(JSON.stringify(first.body).includes("private-sentinel"), false);
+    rows[0]!.model = "changed-after-startup";
+    const second = await get(url, "/v1/views/analytics");
+    assert.deepEqual((second.body.data as Record<string, unknown>).modelApprovals, data.modelApprovals,
+      "reads retain the same immutable startup source, not a request-time configuration reread");
+    assert.equal((await fetch(`${url}/v1/views/analytics`)).status, 401);
+  });
+});
+
+test("cached host approvals distinguish an absent startup source from an optional empty loaded list", async (t) => {
+  const { deps } = fleet(t);
+  await withServer(deps, async (url) => {
+    const read = await get(url, "/v1/views/analytics");
+    assert.equal(read.status, 200);
+    assert.equal(Object.hasOwn(read.body.data as object, "modelApprovals"), false);
+  });
+  await withServer({ ...deps, modelApprovals: undefined }, async (url) => {
+    const read = await get(url, "/v1/views/analytics");
+    assert.equal(read.status, 200);
+    const evidence = (read.body.data as Record<string, unknown>).modelApprovals as { state: string; approvals: unknown[] };
+    assert.equal(evidence.state, "reported");
+    assert.deepEqual(evidence.approvals, [], "the CLI supplied the optional list after a successful config load");
+  });
+});
 
 test("each registered instance is served under its own prefix from its own state", async (t) => {
   const { deps } = fleet(t);
@@ -354,4 +393,69 @@ test("the shared gateway launch mounts each registered instance's state read-onl
   assert.ok(!out.includes(`${DEFAULT_INSTANCE_STATE_BASE}/old`), "a retired instance is not served");
   assert.ok(!out.includes(`${DEFAULT_INSTANCE_STATE_BASE}/console:`), "an absent state root is not mounted");
   assert.match(String(result.stderr), /instance console's state .* is absent here/);
+});
+
+async function saveGatewayGardenerEvidence(stateDir: string, repository: string) {
+  const at = new Date().toISOString();
+  const writer = createGardenerRuntimeWriter({ stateDir, repository, daemonRunId: "gateway-gardener-test",
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  await writer.flush();
+  writeFileSync(join(stateDir, "opportunity-outcomes.json"), JSON.stringify([{
+    candidate: { repo: repository, key: "gateway-evidence", observedAt: at }, key: `${repository}/gateway-evidence`,
+    proposalId: "gateway-proposal", sourceIds: ["gateway-source"], at, state: "pending", reason: "private source detail",
+  }]));
+}
+
+test("core gardener routes bind saved evidence to the serving repository at both root and instance URLs", async (t) => {
+  const { deps, stateBase } = fleet(t);
+  deps.assistantRepository = "craigoley/remudero";
+  await saveGatewayGardenerEvidence(dirname(deps.ledgerPath), "craigoley/remudero");
+  await saveGatewayGardenerEvidence(join(stateBase, "site", "state"), "craigoley/remudero-site");
+  await withServer(deps, async (url) => {
+    for (const [path, repository] of [["/v1/gardeners", "craigoley/remudero"], ["/v1/i/core/gardeners", "craigoley/remudero"],
+      ["/v1/i/site/gardeners", "craigoley/remudero-site"]]) {
+      const result = await get(url, path!);
+      assert.equal(result.status, 200);
+      assert.equal(result.body.repository, repository);
+      const evidence = result.body.opportunityEvidence as { state: string; repository: string; total: number; counts: { pending: number } };
+      assert.equal(evidence.state, "reported", path);
+      assert.equal(evidence.repository, repository);
+      assert.equal(evidence.total, 1);
+      assert.equal(evidence.counts.pending, 1);
+      assert.equal(result.body.spend, null);
+      assert.equal(result.body.outcomeAssessment, "not_collected");
+      assert.ok(!JSON.stringify(result.body).includes("private source detail"));
+      assert.equal((await fetch(`${url}${path}`)).status, 401, "a scoped read still needs the read credential");
+    }
+  });
+});
+
+test("core gardener routes refuse another repository runtime rather than trusting its saved identity", async (t) => {
+  const { deps } = fleet(t);
+  deps.assistantRepository = "craigoley/remudero";
+  await saveGatewayGardenerEvidence(dirname(deps.ledgerPath), "craigoley/remudero-site");
+  await withServer(deps, async (url) => {
+    for (const path of ["/v1/gardeners", "/v1/i/core/gardeners"]) {
+      const result = await get(url, path);
+      assert.equal(result.status, 503, path);
+      assert.equal(result.body.reason, "repository_mismatch");
+      assert.equal(result.body.opportunityEvidence, undefined);
+    }
+  });
+});
+
+test("core gardener routes without authoritative checkout scope preserve runtime but never certify saved totals", async (t) => {
+  const { deps } = fleet(t);
+  await saveGatewayGardenerEvidence(dirname(deps.ledgerPath), "craigoley/remudero");
+  await withServer(deps, async (url) => {
+    for (const path of ["/v1/gardeners", "/v1/i/core/gardeners"]) {
+      const result = await get(url, path);
+      assert.equal(result.status, 200);
+      assert.equal((result.body.gardens as unknown[]).length, 1);
+      const evidence = result.body.opportunityEvidence as { state: string; reason: string; total?: number };
+      assert.equal(evidence.state, "unavailable");
+      assert.equal(evidence.reason, "scope_unavailable");
+      assert.equal(evidence.total, undefined);
+    }
+  });
 });

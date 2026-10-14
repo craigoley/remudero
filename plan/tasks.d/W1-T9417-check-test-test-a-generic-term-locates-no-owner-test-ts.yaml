@@ -1,0 +1,48 @@
+- id: W1-T9417
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-generic-term-locates-no-owner.test.ts cost 43.7 PR minute(s) across 12 round(s) on 12 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.17
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-generic-term-locates-no-owner.test.ts"
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/check-test-test-a-generic-term-locates-no-owner-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-generic-term-locates-no-owner.test.ts"
+      proof: "grep: test(\"W1-T9417: check:test:test/a-generic-term-locates-no-owner.test.ts is prevented, not retried\" in test/check-test-test-a-generic-term-locates-no-owner-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-generic-term-locates-no-owner.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-generic-term-locates-no-owner.test.ts cost 43.7 PR minute(s) (seven-day half-life) across 12 fix round(s) on 12 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-friction-gardener.ts: test/a-generic-term-locates-no-owner.test.ts imports it
+    - test/a-generic-term-locates-no-owner.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-generic-term-locates-no-owner.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #11456 at 2026-10-13T19:04:38Z: hand fix PR #11456: src/lib/ci-friction-gardener.ts; minutes are the pass median proxy (6.31005), not measured repair time
+    - PR #11228 at 2026-10-13T03:23:38Z: hand fix PR #11228: src/lib/ci-friction-gardener.ts, src/lib/gate-fire-rate.ts; minutes are the pass median proxy (6.31005), not measured repair time
+    - PR #11214 at 2026-10-13T02:43:11Z: hand fix PR #11214: src/lib/ci-friction-gardener.ts, src/lib/flow-remedy-gardener.ts; minutes are the pass median proxy (6.31005), not measured repair time
+    - PR #10698 at 2026-10-10T17:09:50Z: hand fix PR #10698: src/lib/checkout-head.ts, src/lib/ci-friction-gardener.ts, src/lib/flow-remedy-gardener.ts, src/lib/gate-gardener.ts, src/lib/hot-file-gardener.ts; minutes are the pass median prox
+    - PR #10502 at 2026-10-09T23:46:33Z: hand fix PR #10502: src/lib/ci-friction-gardener.ts; minutes are the pass median proxy (6.31005), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description and files list show a narrow remedy. It touches src/lib/ci-friction-gardener.ts and adds one test file. Nothing in either points to secrets, auth, permissions, deletions, or merge, deploy, or review policy."
+      - "The acceptance criterion is a grep-verifiable test in the declared new test file. The task is therefore verifiable from what is shown, and no operator-only decision is requested."
+      - "The family track record is mixed (24 merged, 40 declined, Beta mean 0.61). That calls for normal scrutiny but is not a gates-state concern. The change still goes through CI and review."
+      - "No bounded change view was supplied, so I cannot confirm the actual change matches the declared files."
+    judged_at: "2026-10-14T10:02:44.753Z"
+    pin: "129281edd0b72cd3c712b295844158adb3825827b5028a53da3f05d37bcb7982"

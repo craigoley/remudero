@@ -920,8 +920,8 @@ function coverageShardSelectionArgs(repoRoot: string, shard: number, base: strin
   ];
 }
 
-function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number): string[] {
-  return testRunArgv([
+function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly string[], concurrency: number, judge: TestJudge, judgedArgs: readonly string[]): string[] {
+  return testRunArgv(judge.judgedNodeTestArgs([
     "--enable-source-maps",
     "--experimental-test-coverage",
     "--test-coverage-exclude=test/**",
@@ -937,7 +937,22 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
     "--import",
     TMP_HYGIENE_IMPORT,
     ...testFiles,
-  ], concurrency);
+  ], judgedArgs), concurrency);
+}
+
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
+interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
+interface TestJudge {
+  prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  closeJudgedRun(judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }):
+    { verdict: { complete: boolean }; line: string };
+}
+
+// Loaded when a coverage leaf runs, never at import: a sandbox that copies only src/ (the mutation
+// detectors in test/ledger-rotation.test.ts) still imports this module. A plain .mjs, so no types.
+function loadTestJudge(): TestJudge {
+  return require("../../scripts/pure-test-pool.mjs") as TestJudge;
 }
 
 function coverageRawDirHasArtifact(rawDir: string): boolean {
@@ -1006,15 +1021,24 @@ function testWithCoverageShards(
     }
     // Low priority, bounded concurrency, and a heartbeat on the host-wide slot at every shard (W1 test-slot).
     slot.refresh();
-    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency), testSlot.binaryExists);
+    // Judged (scripts/pure-test-pool.mjs): node reports a file whose own child exits 0 part-way as
+    // `ok`, so a shard passes only when every file it was given reached its own summary.
+    // Its files live in this run's own scratch, not os.tmpdir(): the shard's TMPDIR is scratchDir too.
+    const judge = loadTestJudge();
+    const judged = judge.prepareJudgedRun({ makeDir: () => mkdtempSync(join(scratchDir, "rmd-pool-run-")) });
+    const child = lowPriorityCommand(process.execPath, coverageShardArgs(shardRoot, shard, testFiles, slot.concurrency, judge, judged.args), testSlot.binaryExists);
     const res = spawn(child.file, child.args, {
       cwd: repoRoot,
-      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir },
+      env: { TMPDIR: scratchDir, NODE_V8_COVERAGE: rawDir, ...judged.env },
+    });
+    const verdict = judge.closeJudgedRun(judged, testFiles, {
+      status: res.status ?? 1, root: repoRoot, role: `coverage shard ${shard}/${CI_COVERAGE_SHARD_COUNT}`, prefix: "coverage-ratchet", log: () => {},
     });
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}\n${verdict.line}` };
+    if (!verdict.verdict.complete) return { ok: false, detail: `FAIL — ${label}\n${verdict.line}` };
     if (!coverageOutputHasTestSummary(output)) {
       return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
     }
@@ -2048,6 +2072,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "a scheduled future-clock drill with issue delivery; its multi-minute simulated-time run is not a pre-push parity leaf",
   },
   {
+    workflow: "clock-sweep.yml",
+    job: "clock-sweep-report",
+    mirrored: false,
+    reason: "W1-T5102: merges the clock-sweep shard jobs' uploaded results and delivers issues; before those hosted shards run it has no input to merge",
+  },
+  {
     workflow: "codeql.yml",
     job: "analyze",
     mirrored: false,
@@ -2761,6 +2791,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "`test/*.test.ts`, the TEST corpus, so it is not a src-population walk. Its gate rides the " +
       "`comment-load-ratchet` job as a step rather than a projected fast-gate census entry",
   ),
+  refusedForPredicate(
+    "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    "a",
+    "W1-T7812's shifted-run regression. Its `ls-files` responses are injected single-file fixture listings; " +
+      "the real runner executes named tests in private fixture roots, never walks the tracked src/ population. " +
+      "The src/ text the recognizer sees is its imports of gate-gardener.js and tmp.js",
+  ),
   // W1-T2916's suite. The recognizer matches it on `src/` text that is its import of
   // src/lib/settings.js plus prose ("src runtime package uses are dependencies"), but the
   // population it actually enumerates is package.json's own dependency maps read against
@@ -2799,6 +2836,23 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "reason it sits here, and admission is the defensible alternative. It was NOT taken: admission changes FAST_GATE_STEPS " +
       "composition, which the entry above records as a decision a build pass must not make unilaterally. If an operator " +
       "judges (a) satisfied, this row becomes an ADMITTED entry with `script: \"census:env-var-registry\"` and that measured ms.",
+  ),
+  // W1-T7853: both rows are here because `censusPopulationDrift` refuses an undisclosed census-shaped file. One
+  // refusal row each, no behaviour.
+  refusedForPredicate(
+    "test/ci-filed-fold-debt-reaches-the-daemon.test.ts",
+    "a",
+    "W1-T7853's own suite. Its `git ls-files --others` is the ci.yml collect step's body, which it executes inside " +
+      "throwaway fixture repositories, and its readdirSync lists those fixtures' plan/feedback and a runner temp dir. " +
+      "It walks no tracked src/, test/ or scripts/ population and asserts no per-file property; the `src/` strings are " +
+      "its own import paths.",
+  ),
+  refusedForPredicate(
+    "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts",
+    "a",
+    "W1-T5522's light-gates fixture. The `ls-files` the recognizer sees is the pinned argv of the fold-debt collect " +
+      "step (W1-T7853), which it runs against stub tools in a temp dir; it walks no tracked population and asserts no " +
+      "per-file property. The `src/` strings are its own import paths.",
   ),
 ];
 
@@ -3555,6 +3609,29 @@ function fastGateScriptNames(repoRoot: string, packageJsonText?: string): Set<st
   return new Set(Object.keys(pkg.scripts ?? {}));
 }
 
+/** The `package.json` "name" of the repository {@link FAST_GATE_STEPS} describes. */
+export const HARNESS_PACKAGE_NAME = "remudero";
+
+/** The repo-relative runner file each `runner:` step executes. */
+const FAST_GATE_RUNNER_FILES: Readonly<Record<NonNullable<FastGateStep["runner"]>, string>> = {
+  "rule-checks": "scripts/list-rule-suites.mjs",
+  "census-precheck": "scripts/census-precheck.mjs",
+};
+
+/**
+ * W1-T8920 — is `repoRoot` a repository OTHER than the harness's own? The marker is the
+ * `package.json` "name": a string that is not {@link HARNESS_PACKAGE_NAME}, in a tree that also lacks
+ * `scripts/list-rule-suites.mjs`. A nameless package is treated as the harness (the
+ * step table's strict reading, unchanged), so only a repo that positively names itself something
+ * else gets the consumer treatment.
+ */
+function isConsumerRepo(repoRoot: string, packageJsonText?: string): boolean {
+  // Unparseable text never reaches here: {@link fastGateScriptNames} has already thrown on it.
+  const { name } = JSON.parse(packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8")) as { name?: unknown };
+  if (typeof name !== "string" || name === HARNESS_PACKAGE_NAME) return false;
+  return !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES["rule-checks"]));
+}
+
 export interface PreflightFastDeps {
   spawn?: PreflightSpawn;
   /** Test seam — production reads the repo's real package.json. */
@@ -3626,6 +3703,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
+  const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
   const timedCensus = (script: string) => {
     const startedAt = now();
     const result = withoutNodeTestContext(() =>
@@ -3641,6 +3720,12 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
     runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
+      }
+      if (consumer && runner !== undefined && !existsSync(join(repoRoot, FAST_GATE_RUNNER_FILES[runner]))) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${FAST_GATE_RUNNER_FILES[runner]}" is core's runner and this repo does not hold it` };
+      }
+      if (consumer && runner === undefined && !scriptNames.has(script)) {
+        return { ok: true, detail: `SKIPPED — ${job}: "${script}" is core's step and this repo does not define it` };
       }
       if (runner === "rule-checks") {
         return withoutNodeTestContext(() =>

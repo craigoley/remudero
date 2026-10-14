@@ -1,0 +1,69 @@
+- id: W1-T8043
+  title: "A RUN-UNFILED PR'S NEEDS_SCOPE IS A SILENT DEAD END — requestScopeAmendment refuses no-task-trailer because no plan record exists, the round is refused, and nothing escalates; on 2026-10-11 PR #10852's fix round 1 asked for scripts/pure-test-pool.mjs and scripts/test-tier-manifest.mjs at 12:57Z and the request went nowhere"
+  repo: remudero
+  depends_on: [W1-T8038, W1-T7748]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where a scope need goes when the PR has no task record
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834)"
+  plan_refs: [W1-T6465, W1-T5534, W1-T5866, W1-T7748, W1-T8038]
+  files: [src/run-task.ts, test/a-run-unfiled-scope-need-is-routed-not-dropped.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host), PR #10852
+    (head ref run-unfiled-1791718425961, task_id PR-10852), head 28a3134dab0e:
+      - 12:57:22Z fix.scope_amendment {outcome: refused, reason: no-task-trailer, detail: "the implementation PR
+        must carry the matching task trailer or run-<taskId>-<epochMs> head", paths:
+        [scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs]}.
+      - 12:57:22Z fix.commit_refused {reason: "non-test paths need scope", fix_outcome: NEEDS_SCOPE}.
+      - No escalation and no pr.stuck row for #10852 followed. The next actions on it were job re-runs (13:47Z)
+        and a base refresh.
+    #10852's own diff (merge base to 28a3134) touches scripts/lib/native-author-runtime.mjs and two test
+    files. It does not touch the two paths requested. Those paths are the W1-T6085 pool's, from main (#10834).
+    READ on origin/main 90034ae2d:
+      - src/lib/proof-amendment.ts requestScopeAmendment: identity is the `Remudero-Task:` trailer or a
+        run-<taskId>-<epochMs> head (W1-T6465). A run-unfiled PR has neither, so it is refused
+        "no-task-trailer". That is correct: an amendment edits a plan record, and an unfiled PR has none.
+      - src/run-task.ts, the fix rung's `fixAction.kind === "scope-needed"` arm: on a refused amendment it logs
+        fix.commit_refused and returns `stood_down` "non-test paths need scope". For a task PR, W1-T6465's
+        amendment is the route forward. For an unfiled PR the route does not exist, so the refusal is
+        terminal and silent.
+    DEPENDS ON W1-T7748 (in flight). It edits the same scope-needed arm in src/run-task.ts (its testPaths
+    branch). Also on W1-T8038, which edits src/run-task.ts's ci-failure fetch.
+  design: |
+    In the scope-needed arm, when the PR has no task identity (the PR-<n> / unfiled shape, W1-T5866), do not
+    call requestScopeAmendment. Instead, route by where the requested paths stand:
+    1. OWNED. Every requested path is already in the PR's own diff vs its merge base. An unfiled PR's scope is
+       its own diff, so no amendment is needed. Admit the worker's saved edits to those paths, and commit and
+       push them in this round through the existing commit path. Ledger fix.scope_amendment with outcome
+       "unfiled-own-diff".
+    2. NOT OWNED. At least one requested path is outside the PR's diff, which was #10852's case. Escalate
+       ONCE per (PR, head, path set), visibly, to the PR owner. Use the existing escalate/tryEscalate path
+       that tags the operator. Name the exact paths, the round id, the worker's NEEDS_SCOPE reason and the
+       failing check signature. Ledger fix.scope_amendment with outcome "unfiled-escalated", and stand the
+       fix lane down at that head with that reason. A repeat at the same head and path set adds no second
+       escalation.
+    3. When the requested paths are the files a main-inherited signature names (W1-T8042's main-repair
+       handoff), the escalation names that signature, so the owner sees the PR is not the cause. This is
+       advisory text only: no dependency on W1-T8042 being merged.
+    Tests go in a new file, test/a-run-unfiled-scope-need-is-routed-not-dropped.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive the fix rung with an unfiled PR fixture (head
+    run-unfiled-<epoch>, no trailer) whose worker reports NEEDS_SCOPE. Cover both a path inside the PR's diff
+    and the #10852 shape: paths outside it.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-run-unfiled-scope-need-is-routed-not-dropped.test.ts"
+    - claim: "an unfiled PR's scope need for paths outside its own diff escalates once, naming the paths"
+      proof: 'grep: test("W1-T8043: an unfiled PR scope need outside its diff escalates once with the exact paths" in test/a-run-unfiled-scope-need-is-routed-not-dropped.test.ts'
+    - claim: "an unfiled PR's scope need for paths its own diff already owns is admitted without an amendment"
+      proof: 'grep: test("W1-T8043: an unfiled PR scope need inside its own diff is admitted" in test/a-run-unfiled-scope-need-is-routed-not-dropped.test.ts'
+  falsifier: |
+    Leave the arm calling requestScopeAmendment for an unfiled PR. The fixture then logs refused
+    no-task-trailer with no escalation, which is the 12:57Z row, and the first test fails. Admit every
+    requested path, and the outside-diff fixture commits scripts/pure-test-pool.mjs into an unrelated PR, so
+    the first test fails on the commit.

@@ -153,6 +153,28 @@ impossible for a running worker to trigger or race an update of the
 binary it and every sibling worker are executing; the operator can still
 update the CLI deliberately outside a run.
 
+## CLAUDE_CODE_DISABLE_AUTO_MEMORY
+
+### Why
+
+Grant CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 (unless the caller set one via
+`extra`). The Agent SDK's "What settingSources does not control" table
+(code.claude.com/docs/en/agent-sdk/claude-code-features, read 2026-10-13)
+lists auto memory at `~/.claude/projects/<project>/memory/` as "Loaded into
+the system prompt at session start" whatever `settingSources` says, and
+names `autoMemoryEnabled: false` or this variable as the ways to turn it
+off; its multi-tenant warning prescribes `settingSources: []` plus this
+variable. The memory page (code.claude.com/docs/en/memory) derives
+`<project>` from the git repository, so every worktree of one repo shares
+one directory. A worker's `.claude` resolves to the shared grant
+(`~/.claude-fleet`, worker-home.ts, W1-T505) and the confinement floor
+permits writes to its own `~/.claude/projects/<project>` dir
+(settings/worker.json `$comment`), so without this grant every worker on a
+repo could read and write one MEMORY.md — knowledge that bypasses the
+learnings budget, the gardener, and every wipe-test arm (a learnings-masked
+arm would still load it). Like DISABLE_AUTOUPDATER it is an explicit ADD,
+never copied from the parent.
+
 ## BootAssertion
 
 ### Base lines 228-247 — True iff the DAEMON'S OWN…

@@ -15,7 +15,7 @@ function redPr(overrides: Partial<OpenPrView> = {}): OpenPrView {
   return {
     prNumber: PR, prUrl: `https://github.com/acme/remudero/pull/${PR}`, taskId: "W1-T6433",
     headSha: HEAD, headRefName: "run-W1-T6433-1", reviewState: "pending", checksState: "red",
-    unmetCriteria: [], priorStrikes: 0, lastActivityAt: ago(1), autoMergeArmed: false,
+    unmetCriteria: [], priorStrikes: 0, createdAt: ago(90), lastActivityAt: ago(1), autoMergeArmed: false,
     ciFailures: [{ name: "ci", logTail: `not ok 1 - ${FILE}` }], ...overrides,
   };
 }
@@ -32,6 +32,9 @@ function passing(file: string): BaseProbeFile {
 
 function harness(history: Row[] = [stalled()], overrides: Partial<SweepDeps> = {}) {
   const rows = [...history];
+  // W1-T8533: unrelated PR history covers this PR's entire lifetime for every refresh reader.
+  rows.unshift(...["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"]
+    .map(step => ({ step, ts: new Date(NOW - 120 * 60_000).toISOString(), pr_number: 1, outcome: "skipped" })));
   const probes: { pr: number; files: readonly string[]; sha: string }[] = [];
   const refreshed: number[] = [];
   const fixes: number[] = [];
@@ -66,8 +69,9 @@ test("W1-T6433: a stalled PR with no cached probe probes main itself and refresh
   assert.equal(probe.main_sha, MAIN);
   assert.equal(probe.verdict, "clear");
   assert.deepEqual(probe.files, [passing(FILE)]);
-  const refresh = h.rows.find(row => row.step === "sweep.base_fixed.refresh");
+  const refresh = h.rows.find(row => row.step === "sweep.base_fixed.refresh" && row.pr_number === PR);
   assert.ok(refresh);
+  assert.equal(h.rows.find(row => row.step === "refresh.clearance" && row.pr_number === PR)?.history, "live");
   assert.equal(refresh.main_sha, MAIN);
   assert.equal(refresh.outcome, "updated");
   assert.deepEqual(refresh.test_files, [FILE]);

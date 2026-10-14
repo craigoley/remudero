@@ -572,7 +572,7 @@ test("W1-T5544: the repair round stages only test files and pushes only discrimi
 });
 
 test("W1-T5544: the worktree gate runs check-proof against the merge base, and the body cure reads the plan at head", () => {
-  // A real child process per proof: the stub run-task answers 5 (stale at base) for a proof named `stale`, 0 otherwise. The
+  // A real child process per proof: the stub check-proof entry answers 5 (stale at base) for a proof named `stale`, 0 otherwise. The
   // scratch repo gets this checkout's node_modules linked in AFTER its commits, so `--import tsx` resolves the loader the
   // real child uses without the link ever entering a commit.
   const fixture = gitRepo({ seedCommit: false, kind: "proof-repair-gate" });
@@ -581,7 +581,7 @@ test("W1-T5544: the worktree gate runs check-proof against the merge base, and t
     const git = fixture.git;
     mkdirSync(join(repo, "src"));
     mkdirSync(join(repo, "test"));
-    writeFileSync(join(repo, "src", "run-task.ts"), "process.exit(String(process.argv[3]).includes('stale') ? 5 : 0);\n");
+    writeFileSync(join(repo, "src", "check-proof-main.ts"), "process.exit(String(process.argv[2]).includes('stale') ? 5 : 0);\n");
     writeFileSync(join(repo, "test", "views.test.ts"), "// base\n");
     git("add", "-A");
     git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "base");
@@ -591,7 +591,7 @@ test("W1-T5544: the worktree gate runs check-proof against the merge base, and t
     git("add", "-A");
     git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "rename");
     symlinkSync(join(process.cwd(), "node_modules"), join(repo, "node_modules"));
-    const input = { worktreePath: repo, roundStartSha: start, stageable: ["test/views.test.ts"] };
+    const input = { worktreePath: repo, roundStartSha: start, stageable: ["test/views.test.ts"], childRoot: repo };
     assert.equal(proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates"] }), undefined);
     const stale = proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates", "unit test: stale one"] });
     assert.match(stale!.reason, /unit test: stale one` still passes at the merge base/);

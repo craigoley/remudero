@@ -1,0 +1,110 @@
+- id: W1-T9436
+  title: "SERVE'S HEAVY VIEW LANE KEEPS ONE BOARD ENTRY PER FACT ROW IT EVER INGESTED — 12 minutes after a fresh replace (serve.memory 2026-10-14T12:26:41Z, W1-T9403's holds) the heavy views thread reads 1,143 MB committed / 908 MB USED, and board:core alone keeps 663,486 entries / 370,574,655 kept bytes (console 103,596 / 51.5 MB, site 44,965 / 17.3 MB), yet every now-view reader needs only the newest row per task, PR, PR head or run, a UTC-day or ISO-week window, or one task's own rows while it is re-derived: the projection keeps only the rows a declared per-step retention rule holds, and a re-derived task reads its own rows from the fact store"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — what the board projection holds in heap; high because every now-view section reads through it
+  band_meaning: span
+  origin: "operator session 2026-10-14: serve memory investigation, follow-up to W1-T9403's first live holds reading"
+  plan_refs: [W1-T9357, W1-T9403, W1-T6369, W1-T6467, W1-T6253, W1-T6015, W1-T5064]
+  files:
+    - src/lib/board-projection.ts
+    - src/lib/ledger-projector.ts
+    - src/lib/status.ts
+    - src/lib/now-view.ts
+    - src/lib/board.ts
+    - test/the-board-projection-holds-per-key-state-not-history.test.ts
+  status: merged
+  priority: 1.5  # measured: serve is back at 3.63 GB rss 12 min after a replace, the host's largest standing memory consumer, and board:core is the largest single holder in it
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main c3753e8f8 (after W1-T9403 #11646 and W1-T9357 #11554), with the live serve.memory
+    row of 12:26:41Z the operator session supplied.
+    OBSERVED, serve.memory 2026-10-14T12:26:41Z, serve rss 3.63 GB 12 min after a fresh replace (committed/used MB):
+    - worker-heap read-model-worker:spawnHeavyViews 1,143 / 908. Its holds: board:core 663,486 entries / 370,574,655
+      kept bytes; board:console 103,596 / 51,503,551; board:site 44,965 / 17,279,677.
+    - the other threads 302/142, 293/169, 231/122, 496/331, 82/77, 17/14.
+    So the heavy lane's heap is mostly LIVE (908 of 1,143 MB), not GC slack, and its largest holder is board:core.
+    WHY IT GROWS WITH HISTORY (createBoardProjection, board-projection.ts): `rows` holds every ingested fact row (less
+    BOARD_UNREAD_STEPS and, since W1-T9357, without BOARD_ROW_UNREAD_FIELDS) plus one run_activity and one run_worker
+    stand-in per run (106,874 and 553 on 2026-10-07, W1-T6369), for the life of the thread; activityRows, workerRows and
+    newestFactMs hold an entry per run too. Nothing is ever dropped but a superseded stand-in.
+    WHAT THE READERS NEED: a census of every reader of `rows()` on main (two read-only passes, symbols cited):
+    (a) INSIDE THE DERIVE — projectPlan/deriveStatus read a task's own `byTask` bucket (task_id, and `task` where it
+        differs: independentFailureLatch, refusal-amendment.ts activeCategorizedRefusal/categorizedRefusalRejoin) plus
+        five narrow cross-task lookups: plan-only pr.opened urls and plan-only review.posted/review.plan_only_reviewed
+        heads (isPlanOnlyFilingPr, hasPlanOnlyReviewForPr), daemon.boot (environmentChangedSince), the first merge
+        verdict after a time (firstMergeAfter), the first clean recon.done/implement.done/implement.continued/fix.done
+        after a time (firstCleanWorkerResultAfter); and escalation.issue_opened ids for task-less escalations
+        (taskIdsWithEscalationLines). A reused task reads nothing. latestTsMs is not read by deriveStatus.
+    (b) THE NOW VIEW's snapshot, decisions and assemble stages walk the whole array every build, but each reader is a
+        step-filtered newest-per-key read or a reader-defined window:
+        - newest row per task_id of any step, sweep repeats excluded: changedActivityByTask (now-view.ts), and
+          lastActivityByTask (board.ts) whose answer readTaskActivity then overwrites;
+        - sweep.disposed newest per pr_number (rawBlockedPrCandidates, status-board.ts), per (pr_number, head_sha)
+          for open heads (derivePrQueue, board.ts), and the newest disposition change per PR (nowActions sweepRepeat);
+        - automerge.hold_engaged/hold_released last qualifying event per PR plus fleet-scoped ones
+          (deriveMergeHeld, automergeHoldFromLedger review.ts, latestHoldTaskId);
+        - each in-flight task's current run since its newest run.start (liveRunSpendByTask, status-stream-publisher.ts);
+        - escalation.issue_opened, verify_human.judged, triage.grill_opened, dep-review.decided newest per key;
+          ratify.approved released verify-human by task; triage.start per feedback_id (decisionsOf, projectFeedbackGates,
+          nowDependencyVerificationGates, escalationClasses);
+        - the current UTC day and ISO week, one row per run_id (windowCostRows via computeGlanceSpend, dayCostRows);
+          today's merge verdicts and pr.opened newest per run_id (mergedTodayCount); the recent feed's newest
+          RECENT_ACTIVITY_HISTORY_CAP entries (computeRecentActivity).
+        None counts over full history. The legacy GET board (board-worker.ts) reads the live file, not these rows.
+    WHY NOT A WINDOW: W1-T6369's replay showed no history window is exact (credit, merged state, gate rulings and
+    latest dispositions reach past 30 days), and named the route this task takes: the full-history readers get exact
+    per-key state first, the derive reads the store. Its warning that dropping data "fails silently" is answered here by
+    a fail-closed census test, not by trust.
+    COVERAGE, checked 2026-10-14 12:31Z with a positive control (34 plan shards on origin/main name the board
+    projection; every open PR head counted against main): no shard or open PR head retains board rows by key or
+    reads a task's rows from the store. W1-T9357 (merged) dropped blob fields, W1-T6467 (merged) interns strings,
+    W1-T9403 (merged) is the reading; W1-T5064 (queued, held) retires the legacy board, a separate heap; W1-T9370 and
+    W1-T9421 are code-load cost. W1-T6015 (queued, P4) maintains lastActivity and liveSpend in ingest for CPU: two of the
+    folds below, so this task subsumes that part of it.
+  design: |
+    1. A RE-DERIVED TASK READS ITS ROWS FROM THE STORE. `project()` hands projectPlan a ledger index whose task and
+       step buckets are answered on demand from the read model and released at the end of the update (the 10-minute
+       no-reuse oracle reads task by task), with the same `get` surface deriveStatus's helpers use today
+       (indexedTaskRows/indexedStepRows; widen LedgerIndex in status.ts to a read interface if it must be a Map):
+       - a task's bucket: its `fact` rows by the fact_task index, plus the rows whose `task` alias names it from a new
+         `fact_alias(task, seq)` table the projector writes for a fact row whose `task` differs from its `task_id`
+         (backfilled once from fact bodies when the table is created, never by re-reading the ledger), plus its
+         run_activity and run_worker stand-ins built exactly as ingest builds them now, in the order `rows` holds them
+         today (by ts_ms, a late row placed by its time, a stand-in after the rows of its instant);
+       - the cross-task lookups in (a) above through a new `fact_step(step, ts_ms)` index.
+       The per-run maps (activityRows, workerRows, newestFactMs) go; the per-task stamp maps stay.
+    2. THE ROWS THE NOW VIEW WALKS ARE THE ROWS A RULE KEEPS. BOARD_ROW_RETENTION declares, per step, the keys whose
+       newest row (or reader window) the now view's readers in (b) read; ingest keeps a row while some rule holds it
+       and drops it the moment every rule that held it is superseded. `rows()` returns the kept rows in today's order,
+       so every reader runs unchanged. A window rule (UTC day, ISO week) is the reader's own definition of "today's
+       spend", not a retention bound: no new time window, count cap or threshold. The recent feed takes each ingested
+       row once (or reads the existing recent projection), never a cursor into an array that now loses rows.
+    3. FAIL CLOSED. A census test runs the now view over every row with a recording proxy and fails when a reader
+       outside the derive reads a step BOARD_ROW_RETENTION names no rule for, so a later reader of a new step reddens
+       instead of reading nothing.
+    4. The intern table holds only kept rows' values (rebuilt from the kept rows after an update that dropped any).
+    5. An option keeps every row (today's behaviour), used only as the equality test's reference arm, as
+       `internStrings: false` is for W1-T6467. size() keeps W1-T9403's shape (rows kept, their source bytes): THE EFFECT
+       MEASURE is serve.memory's holds after deploy — board:core entries tracking distinct tasks, PRs, PR heads and
+       today's runs, flat across samples while those keys are, against 663,486 at 12:26:41Z; and the heavy lane's used
+       heap against 908 MB. Both are read, not asserted.
+  acceptance:
+    - claim: "the now view's body and every task projection built from the kept rows and store-read task buckets equal those built from every row, across cold, warm, appended, day-crossing, oracle-pass and restart builds"
+      proof: 'grep: test("W1-T9436: the now view built from kept rows equals the one built from every row" in test/the-board-projection-holds-per-key-state-not-history.test.ts'
+    - claim: "appending rows that supersede a kept row leaves the projection's kept rows unchanged in number: entries track keys, not history"
+      proof: 'grep: test("W1-T9436: superseding rows leave the board projection holding one entry per key" in test/the-board-projection-holds-per-key-state-not-history.test.ts'
+    - claim: "every step a now-view reader reads outside the derive has a retention rule"
+      proof: 'grep: test("W1-T9436: every step a now-view reader reads has a retention rule" in test/the-board-projection-holds-per-key-state-not-history.test.ts'
+    - claim: "the projection declares its retention rules"
+      proof: 'grep: export const BOARD_ROW_RETENTION in src/lib/board-projection.ts'
+    - claim: "the projector writes the task alias table a re-derived task reads"
+      proof: 'grep: fact_alias in src/lib/ledger-projector.ts'
+  falsifier: |
+    Keep every row: appending ten sweep.disposed rows for one PR head grows rows() by ten and the superseding-rows test
+    fails. Read a task's bucket by task_id only: the fixture's DAEMON-lane row naming the task in `task` drops out of its
+    derive and the equality test names the task. Delete one rule: the census test names the step it no longer keeps.

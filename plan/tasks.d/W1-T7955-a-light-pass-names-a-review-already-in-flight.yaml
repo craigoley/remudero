@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: file the recommended follow-ups (phantom light-pass deferrals were reviews already in flight)"
   plan_refs: [W1-T4732, W1-T2426, W1-T5931, W1-T5491, W1-T2345]
   files: [src/lib/sweep.ts, test/a-light-pass-names-a-review-already-in-flight.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

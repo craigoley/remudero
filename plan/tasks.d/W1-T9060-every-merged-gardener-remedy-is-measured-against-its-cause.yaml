@@ -1,0 +1,55 @@
+- id: W1-T9060
+  title: "EVERY MERGED GARDENER REMEDY IS MEASURED AGAINST ITS CAUSE, AND AN UNMEASURABLE ONE IS NEVER CALLED RESOLVED — only ci-friction feeds an effect back, flow-remedy and fix-lane mark an unmeasurable effect resolved, and flow, flake-incident and gate measure nothing after merge"
+  repo: remudero
+  depends_on: [W1-T9044]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the post-merge effect of a machine remedy; spans the gardeners that file remedies
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit (self-improvement loop)"
+  plan_refs: [W1-T4435, W1-T5538, W1-T7421, W1-T5114]
+  files: [src/lib/remedy-effect.ts, src/lib/ci-friction-remedy.ts, src/lib/flow-remedy-gardener.ts, src/lib/gardener-overseer.ts, test/every-merged-gardener-remedy-is-measured-against-its-cause.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main:
+    - `ciFrictionRemedyEffect` (ci-friction-remedy.ts) compares a cause's share of fix rounds in equal windows (one-sided
+      z test). A debit reopens one rung up, and the overseer folds credits into a Beta record (`effect:v2:`). An
+      `unmeasurable` effect sits in `measuring`, and the overseer drops it after `KEEP_MS` (30 days) silently.
+    - `ladderOf` (flow-remedy-gardener.ts, shared by fix-lane) maps `unmeasurable` to `resolved`: a remedy whose effect
+      cannot be read is closed as if it worked.
+    - flow (stage regressions), flake-incident and gate measure nothing after their remedies merge.
+    - Merge credit itself was broken until the squash-body fix: `%(trailers)` credited 38 of 1,541 body lines.
+    So the loop that should teach the gardeners which remedies work closes for almost nothing.
+  design: |
+    1. src/lib/remedy-effect.ts:
+       - `mergeCredit(id)`: the union of ledger credit, the squash-body `Remudero-Task:` line and a `run-<id>-<epoch>`
+         branch.
+       - `CauseMetric { family; parseOrigin; window(key, from, to) -> {k, n} | {unreadable} }`.
+       - `measureRemedy(task, metric, credit, now, prior)` returns `credit`, `debit`, `pending`, or
+         `unmeasurable{why: no-merge-credit | no-before-evidence | metric-unreadable | key-drift}`.
+    2. `unmeasurable` re-measures, widening the credit read and then the before-window. Once the after-window is full it
+       escalates "effect unverifiable". It never resolves and never credits.
+    3. Each gardener supplies its metric:
+       - ci-friction: RemedyRounds
+       - flow-blocker: sweep.disposed charges plus readOutcomes
+       - fix-lane: its STEPS episodes
+       - flake-incident: test.flake_retry PRs per file
+       - flow-regression: per-PR stage minutes (persist them)
+       - gate: fire rates
+    4. The overseer keys verdicts `effect:v3:<taskId>`, by the remedy task rather than the filing PR.
+  acceptance:
+    - claim: "an unmeasurable remedy effect is never resolved"
+      proof: "grep: test(\"W1-T9060: an unmeasurable remedy effect is never resolved\" in test/every-merged-gardener-remedy-is-measured-against-its-cause.test.ts"
+    - claim: "a flake-incident remedy is credited when its file stops failing unrelated PRs"
+      proof: "grep: test(\"W1-T9060: a flake-incident remedy is credited when its file stops failing unrelated PRs\" in test/every-merged-gardener-remedy-is-measured-against-its-cause.test.ts"
+    - claim: "the overseer records each remedy's verdict by its task id"
+      proof: "grep: test(\"W1-T9060: the overseer records each remedy's verdict by its task id\" in test/every-merged-gardener-remedy-is-measured-against-its-cause.test.ts"
+    - claim: "the ladder gardeners measure a merged remedy through the shared module"
+      proof: "grep: measureRemedy( in src/lib/flow-remedy-gardener.ts"
+  falsifier: |
+    Merge a flow-blocker remedy whose cause has no before-window episodes. At origin/main the ladder marks it `resolved`;
+    with the change it stays `unmeasurable`, re-measures, and escalates once the after-window is full.

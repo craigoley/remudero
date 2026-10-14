@@ -57,7 +57,9 @@ test("gardener runtime projects only known fields at persistence and the read bo
   const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock, read: async () => raw }));
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { ...expected, generatedAt: stamp, coverage: "registered-off-loop",
-    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
+    counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null,
+    opportunityEvidence: { version: 1, repository: null, readAt: stamp, coverage: "saved-opportunity-registry",
+      countSemantics: "reported_states_not_verified_outcomes", state: "unavailable", reason: "scope_unavailable" } });
   const extraInventory = inventory.map((garden) => ({ ...garden, internalNotes: "not-persisted" }));
   const projectedWriter = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
     gardens: extraInventory, log: () => {} });
@@ -360,7 +362,7 @@ test("W1-T5114: each garden keeps its own pacing, and a failed spawn is logged r
   assert.equal(gardenSchedule("overseer").intervalFor(60_000), Math.max(60_000, OVERSEER_MIN_INTERVAL_MS));
   assert.equal(gardenSchedule("plan").intervalFor(60_000), 60_000);
   assert.equal(isRegisteredGardenName("plan"), true);
-  assert.equal(isRegisteredGardenName("knowledge"), false);
+  assert.equal(isRegisteredGardenName("knowledge"), true);
 
   let now = 1_000_000;
   const clock = clockFromMillisFn(() => now);
@@ -448,6 +450,39 @@ test("W1-T5114: the daemon wiring and the garden CLI build each garden from the 
     assert.equal(typeof built, "function", `${name} builds a pass`);
   }
   assert.equal(await runRegisteredGardenPass("gate", [], ctx, { stopped: true }), 0, "a pass stopped before its garden loads never runs");
+});
+
+test("knowledge garden is explicitly covered by production wiring", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}knowledge-wiring-home-`));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = join(home, "Remudero"), planPath = join(home, "tasks.yaml");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  const names: string[] = [];
+  try {
+    await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      githubFactory: () => fakeGitHub(),
+      gardenPassSpawn: async (name) => { names.push(name); return 0; },
+      runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+        captured = d;
+        assert.equal(d.knowledgeGardener, undefined, "production cannot also start the legacy inline lane");
+        const started = (d.gardens ?? []).map((start) => start(60_000));
+        try { await wait(0); }
+        finally { for (const garden of started) garden.stop(); }
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+  assert.ok(captured);
+  assert.equal(names.filter((name) => name === "knowledge").length, 1, "knowledge reaches the same shared child spawn exactly once");
 });
 
 test("W1-T5114: every registered garden's pass records its own failure and never throws", async (t) => {

@@ -184,7 +184,7 @@ const READY_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -236,9 +236,11 @@ test("inbox approval ignores the read snapshot and resolves the target ref", asy
       "/v1/feedback/decision",
       "/v1/feedback/preview",
       "/v1/inbox/approve",
+      "/v1/inbox/archive",
       "/v1/inbox/decline",
       "/v1/inbox/reframe",
       "/v1/inbox/restore",
+      "/v1/inbox/snooze",
       "/v1/inbox/thread/read",
       "/v1/inbox/thread/reply",
       "/v1/policy/daily-cost-ceiling",

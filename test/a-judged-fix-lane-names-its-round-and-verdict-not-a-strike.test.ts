@@ -53,8 +53,8 @@ test("a judged review-failed lane names the judge's round after its unmet criter
 test("the sweep labels a PR from its newest fix.progress_judged ledger row", async () => {
   const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-judge-label-")), "ledger.ndjson");
   const rows = [
-    { ts: "2026-10-10T02:30:00Z", step: "fix.progress_judged", pr_number: 10516, round_count: 2, verdict: "continue", reason: "older ruling" },
-    { ts: "2026-10-10T02:55:00Z", step: "fix.progress_judged", pr_number: 10516, round_count: 3, verdict: "continue", reason: "each round changed the red set" },
+    { ts: "2026-10-10T02:30:00Z", step: "fix.progress_judged", pr_number: 10516, round_count: 2, verdict: "continue", red_class: "none", reason: "older ruling" },
+    { ts: "2026-10-10T02:55:00Z", step: "fix.progress_judged", pr_number: 10516, round_count: 3, verdict: "continue", red_class: "none", reason: "each round changed the red set" },
     { ts: "2026-10-10T02:56:00Z", step: "fix.progress_judged", pr_number: 9999, round_count: 7, verdict: "escalate", reason: "another PR" },
   ];
   writeFileSync(ledgerPath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");

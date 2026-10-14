@@ -18,6 +18,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
+import { systemClock, type Clock } from "./clock.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import type { Task } from "./plan.js";
 import {
@@ -412,7 +413,17 @@ export interface StageSkillDraftResult {
   backfilled?: boolean;
   /** The staged entry's Procedure named fewer behavioral steps, so this call replaced it. */
   refreshed?: boolean;
+  /** An unstamped legacy payload differed from the newly scanned draft and was replaced before stamping. */
+  legacyReplaced?: boolean;
+  /** The entry already carried its file but no staged-at stamp; this call stamped it and changed nothing else. */
+  stamped?: boolean;
   reason?: string;
+}
+
+/** A `skillFileStagedAt` stamp as epoch ms, or null: an absent or unparseable stamp is no stamp at all. */
+export function skillFileStagedAtMs(value: string | undefined): number | null {
+  const ms = Date.parse(value ?? "");
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
@@ -429,6 +440,12 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
  * writes under `.claude/skills/`: that write happens only once `rmd approve` ratifies the staged
  * proposal into a plan PR (design clause iii). Idempotent by `draft.candidateHash` — a re-run
  * staging the same candidate is reported `alreadyStaged`, never duplicated (W1-T470).
+ *
+ * THE HELD-OUT STAMP. Every write of `skillFile` (a new stage, a refresh, a backfill) sets
+ * `skillFileStagedAt` to `clock`'s now, and an entry carrying a file but no stamp is stamped. The
+ * drafter mines EVERY merged run in the retro window, not only the runs it cites, so no list of task
+ * ids can say what it saw; time can. `rmd skill-eval` holds out only tasks merged after this stamp.
+ * Stamping late is conservative: a later stamp excludes a superset of tasks.
  */
 export function stageSkillDraft(
   registryPath: string,
@@ -436,6 +453,7 @@ export function stageSkillDraft(
   allowlist: WorkerAllowlist,
   reachability: { reachable: boolean; reason: string },
   opts: UpdateProposalRegistryOpts = {},
+  clock: Pick<Clock, "iso"> = systemClock,
 ): StageSkillDraftResult {
   const scan = scanSkillDraft(draft, allowlist);
   if (!scan.ok) {
@@ -446,6 +464,8 @@ export function stageSkillDraft(
   let alreadyStaged = false;
   let backfilled = false;
   let refreshed = false;
+  let legacyReplaced = false;
+  let stamped = false;
   updateProposalRegistry(
     registryPath,
     (current) => {
@@ -453,8 +473,11 @@ export function stageSkillDraft(
       alreadyStaged = false;
       backfilled = false;
       refreshed = false;
+      legacyReplaced = false;
+      stamped = false;
       const existing = current.findIndex((p) => p.id === id);
       const skillFile = { name: draft.name, markdown: draft.markdown };
+      const skillFileStagedAt = clock.iso();
       if (existing >= 0) {
         alreadyStaged = true;
         const stored = current[existing].skillFile;
@@ -462,17 +485,24 @@ export function stageSkillDraft(
         // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
         // Compare behavioral steps: removed outcome-only bullets do not count as lost procedure.
         const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
-        if (stored && skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length) {
+        legacyReplaced = stored !== undefined && skillFileStagedAtMs(current[existing].skillFileStagedAt) === null &&
+          (stored.name !== skillFile.name || stored.markdown !== skillFile.markdown);
+        if (stored && (legacyReplaced || skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length)) {
           refreshed = true;
-          return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
+          return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
         }
-        if (stored) return null; // already staged with its file — never a duplicate write
+        if (stored && skillFileStagedAtMs(current[existing].skillFileStagedAt) !== null) return null; // already staged with its file — never a duplicate write
+        if (stored) {
+          // Identical to the scanned draft: stamp it now, the conservative (later) instant.
+          stamped = true;
+          return current.map((p, i) => (i === existing ? { ...p, skillFileStagedAt } : p));
+        }
         // Staged before W1-T4338: give it the file approval now writes, or it can only ever be declined.
         backfilled = true;
-        return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
+        return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile, skillFileStagedAt } : p));
       }
       staged = true;
-      return [...current, { id, summary: skillDraftSummary(draft, reachability), evidenceAnchors: [], skillFile }];
+      return [...current, { id, summary: skillDraftSummary(draft, reachability), evidenceAnchors: [], skillFile, skillFileStagedAt }];
     },
     opts,
   );
@@ -482,13 +512,19 @@ export function stageSkillDraft(
     alreadyStaged,
     ...(backfilled ? { backfilled: true } : {}),
     ...(refreshed ? { refreshed: true } : {}),
+    ...(legacyReplaced ? { legacyReplaced: true } : {}),
+    ...(stamped ? { stamped: true } : {}),
     reason: backfilled
       ? "already staged; skill file backfilled"
+      : legacyReplaced
+        ? "already staged; legacy text replaced with scanned draft before stamping"
       : refreshed
         ? "already staged; procedure refreshed with more steps"
-        : alreadyStaged
-          ? "already staged"
-          : undefined,
+        : stamped
+          ? "already staged; staged-at stamp added"
+          : alreadyStaged
+            ? "already staged"
+            : undefined,
   };
 }
 
@@ -654,6 +690,8 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   budget_omitted_names: string[];
   budget_chars: number;
   zero_selection: boolean;
+  /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
+  withheld_names?: string[];
 }
 
 export interface ObservedSkillSelection {
@@ -661,19 +699,33 @@ export interface ObservedSkillSelection {
   observation: SkillSelectionObservation;
 }
 
+/** Predeclared share of eligible runs on which each approved skill is withheld. Without it a skill
+ *  that fits the budget is selected on every eligible run and the report's control cohort is empty. */
+export const SKILL_WITHHOLDING_SHARE = 0.25;
+
+/** Seeded per-(run, skill) assignment, independent across skills and recomputable from the ledger. */
+export function skillWithheldForRun(runId: string, skillName: string, share: number = SKILL_WITHHOLDING_SHARE): boolean {
+  const digest = createHash("sha256").update(`${runId}\0${skillName}`).digest();
+  return digest.readUInt32BE(0) / 0x1_0000_0000 < share;
+}
+
 export function observeSkillSelection(
   skills: readonly InjectableSkill[],
   taskType: string,
   budgetChars: number,
   taskFiles?: readonly string[],
+  withhold?: (skillName: string) => boolean,
 ): ObservedSkillSelection {
   const want = taskType.toLowerCase();
   const taskTypeEligible = skills.filter((s) => s.appliesTo.includes(want));
   const pathFiltered = taskTypeEligible.filter((s) => !skillMatchesTaskFiles(s, taskFiles));
   const eligible = taskTypeEligible.filter((s) => !pathFiltered.includes(s));
+  // A withheld skill is neither rendered nor charged to the budget, so it frees room for the rest.
+  const withheld = withhold ? eligible.filter((s) => withhold(s.name)) : [];
+  const assigned = eligible.filter((s) => !withheld.includes(s));
   const selected: InjectableSkill[] = [];
   let spent = 0;
-  for (const s of eligible) {
+  for (const s of assigned) {
     const cost = s.body.length;
     if (spent + cost > budgetChars) continue;
     selected.push(s);
@@ -688,9 +740,10 @@ export function observeSkillSelection(
       approved_eligible_names: eligible.map((s) => s.name),
       path_filtered_names: pathFiltered.map((s) => s.name),
       selected_names: selectedNames,
-      budget_omitted_names: eligible.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
+      budget_omitted_names: assigned.filter((s) => !selectedNameSet.has(s.name)).map((s) => s.name),
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
+      ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
     },
   };
 }
@@ -721,8 +774,10 @@ export function skillsInjectedEvent(
   };
 }
 
-/** W1-T3379's deliberately small pilot measures only the existing implement-task path. */
+/** W1-T3379's pilot lane, and still the report's default: every existing caller reads implement rows. */
 export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
+/** The fix rung's task class: `applies-to: fix` makes a skill eligible there, and its report reads these rows. */
+export const SKILL_FIX_TASK_TYPE = "fix";
 /** Predeclared before observing any result, so the report cannot lower it after the fact. */
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
 /** A terminal worker failure is the named harm signal for this descriptive pilot. */
@@ -731,6 +786,8 @@ export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
 export interface SkillEffectivenessCohort {
   observed_eligible_runs: number;
   terminal_runs: number;
+  /** Worker-terminal rows whose shipment can still resolve; never treat these as observed non-merges. */
+  pending_merge_runs: number;
   merged_runs: number;
   harmful_terminal_runs: number;
   outcomes: Record<string, number>;
@@ -740,13 +797,16 @@ export type SkillEffectivenessStatus = "INSUFFICIENT EVIDENCE" | "RETIRE-CANDIDA
 
 export interface SkillEffectivenessReport {
   skill_name: string;
-  task_type: typeof SKILL_EFFECTIVENESS_TASK_TYPE;
+  task_type: string;
   horizon: number;
   status: SkillEffectivenessStatus;
-  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison";
+  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "not-better-than-control" | "favorable-comparison" | "pending-shipment";
   selected: SkillEffectivenessCohort;
   control: SkillEffectivenessCohort;
   harm_outcomes: readonly string[];
+  /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
+   *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
+  assignment: "randomized" | "observational";
 }
 
 type SkillLedgerRow = Record<string, unknown>;
@@ -757,22 +817,24 @@ const stringArray = (value: unknown): string[] =>
 const emptyCohort = (): SkillEffectivenessCohort => ({
   observed_eligible_runs: 0,
   terminal_runs: 0,
+  pending_merge_runs: 0,
   merged_runs: 0,
   harmful_terminal_runs: 0,
   outcomes: {},
 });
 
 /**
- * Deterministically joins the one `skills.selection` row emitted at prompt assembly to the
+ * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
  * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
  */
 export function buildSkillEffectivenessReport(
   rows: readonly SkillLedgerRow[],
   skillName: string,
+  taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
   const terminalOutcomeByRun = new Map<string, string>();
-  const selectionByRun = new Map<string, { selected: boolean }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
 
   for (const row of rows) {
     if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
@@ -781,24 +843,34 @@ export function buildSkillEffectivenessReport(
     }
     if (
       row.step !== "skills.selection" ||
-      row.task_type !== SKILL_EFFECTIVENESS_TASK_TYPE ||
+      row.task_type !== taskType ||
       typeof row.run_id !== "string"
     ) continue;
     const eligible = stringArray(row.approved_eligible_names);
     if (!eligible.includes(skillName)) continue;
-    selectionByRun.set(row.run_id, { selected: stringArray(row.selected_names).includes(skillName) });
+    selectionByRun.set(row.run_id, {
+      selected: stringArray(row.selected_names).includes(skillName),
+      ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
+    });
   }
+
+  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
+  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
+  const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
+  const inArm = (o: { selected: boolean; withheld?: boolean }, treated: boolean): boolean =>
+    randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated;
 
   const buildCohort = (selected: boolean): SkillEffectivenessCohort => {
     const cohort = emptyCohort();
     for (const [runId, observation] of selectionByRun) {
-      if (observation.selected !== selected) continue;
+      if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
       const outcome = terminalOutcomeByRun.get(runId);
       if (!outcome) continue;
       cohort.terminal_runs++;
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
       if (outcome === "merged") cohort.merged_runs++;
+      if (outcome === "handed_off" || outcome === "blocked_ci") cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
     }
     return cohort;
@@ -812,6 +884,9 @@ export function buildSkillEffectivenessReport(
     selected.terminal_runs < SKILL_EFFECTIVENESS_HORIZON || control.terminal_runs < SKILL_EFFECTIVENESS_HORIZON;
   const selectedMergeRate = selected.terminal_runs === 0 ? 0 : selected.merged_runs / selected.terminal_runs;
   const controlMergeRate = control.terminal_runs === 0 ? 0 : control.merged_runs / control.terminal_runs;
+  // Identification bounds, not confidence intervals: pending work can all merge or all remain unmerged.
+  const selectedMergeUpper = selected.terminal_runs === 0 ? 0 : (selected.merged_runs + selected.pending_merge_runs) / selected.terminal_runs;
+  const controlMergeUpper = control.terminal_runs === 0 ? 0 : (control.merged_runs + control.pending_merge_runs) / control.terminal_runs;
 
   let status: SkillEffectivenessStatus;
   let basis: SkillEffectivenessReport["basis"];
@@ -824,23 +899,27 @@ export function buildSkillEffectivenessReport(
   } else if (selected.harmful_terminal_runs > 0) {
     status = "RETIRE-CANDIDATE";
     basis = "named-harm-signal";
-  } else if (selectedMergeRate <= controlMergeRate) {
+  } else if (selectedMergeUpper <= controlMergeRate) {
     status = "RETIRE-CANDIDATE";
     basis = "not-better-than-control";
-  } else {
+  } else if (selectedMergeRate > controlMergeUpper) {
     status = "REVIEW-CANDIDATE";
     basis = "favorable-comparison";
+  } else {
+    status = "INSUFFICIENT EVIDENCE";
+    basis = "pending-shipment";
   }
 
   return {
     skill_name: skillName,
-    task_type: SKILL_EFFECTIVENESS_TASK_TYPE,
+    task_type: taskType,
     horizon: SKILL_EFFECTIVENESS_HORIZON,
     status,
     basis,
     selected,
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
+    assignment: randomized ? "randomized" : "observational",
   };
 }
 
@@ -854,6 +933,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
   const renderCohort = (name: string, cohort: SkillEffectivenessCohort): string =>
     `${name}: observed_eligible_runs=${cohort.observed_eligible_runs}; terminal_runs=${cohort.terminal_runs}; ` +
     `merged_runs=${cohort.merged_runs}; harmful_terminal_runs=${cohort.harmful_terminal_runs}; ` +
+    `pending_merge_runs=${cohort.pending_merge_runs}; ` +
     `outcomes=${renderOutcomes(cohort.outcomes)}`;
   return [
     `### rmd skill effectiveness — ${report.skill_name} (${report.task_type})`,
@@ -863,7 +943,14 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     renderCohort("selected", report.selected),
     renderCohort("control", report.control),
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
-    "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
+    "shipment comparison: best/worst-case bounds over handed_off and blocked_ci runs; overlapping possibilities are insufficient evidence. These are not confidence intervals or deployment/live-benefit claims.",
+    report.assignment === "randomized"
+      ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
+        "selected is every other eligible run (intent to treat)."
+      : "assignment: observational — control is eligible runs on which the budget omitted the skill.",
+    report.assignment === "randomized"
+      ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
+      : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
   ].join("\n");
 }
 
@@ -912,6 +999,9 @@ function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsD
     return `skill '${report.skill_name}' is not approved and opted in under ${approvedSkillsDir}`;
   }
   if (report.status === "INSUFFICIENT EVIDENCE") {
+    if (report.basis === "pending-shipment") {
+      return `pending shipment: selected=${report.selected.pending_merge_runs}, control=${report.control.pending_merge_runs}; merge-rate bounds overlap`;
+    }
     return (
       `below horizon: selected terminal_runs=${report.selected.terminal_runs}, ` +
       `control terminal_runs=${report.control.terminal_runs}, horizon=${report.horizon}`

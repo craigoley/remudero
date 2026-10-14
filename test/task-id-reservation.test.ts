@@ -21,6 +21,9 @@ import {
   classifyPushFailure,
   firstUnreservedAtOrAbove,
   gitRemoteRefReserver,
+  parseReservationHolderLine,
+  formatReservationAnchorMessage,
+  reservationAnchorProblem,
   reserveTaskIdRemote,
   reserveTaskIdBlockRemote,
   taskIdReservationRef,
@@ -37,6 +40,7 @@ import {
 } from "../src/lib/task-id-reservation.js";
 import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-repo.js";
 
 /**
  * The property this module exists for: a minted id is unusable by anyone else from the moment it
@@ -720,4 +724,226 @@ test("withIdReservationLogging passes any OTHER error through unlogged", () => {
 
   assert.equal(thrown, other, "it propagates unchanged");
   assert.deepEqual(rec.rows, [], "and is NOT ledgered as a reservation refusal");
+});
+
+// ── W1-T8915: an anchor that could not be made never reaches a push refspec ─────────────────────
+//
+// `<anchor>:<ref>` with an EMPTY anchor is git's ref-DELETE syntax. Before W1-T8915 the default
+// reserver discarded both git statuses and returned trimmed stdout, empty included. The fakes here
+// answer with syntactically real 40-hex object ids, never a token the guard waves through.
+
+type W8915Run = (args: string[]) => { status: number; stdout: string; stderr: string };
+
+const W8915_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const W8915_COMMIT = "8915a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7";
+
+const W8915_FIXTURE_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+  GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+};
+
+/** A real environment in which `commit-tree` cannot name an author: no config, no env identity. */
+function w8915NoIdentityEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "user.useConfigOnly",
+    GIT_CONFIG_VALUE_0: "true",
+  };
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) delete env[k];
+  return env;
+}
+
+/** The real git, in `cwd`, recording every argv it is handed. */
+function w8915RealGit(cwd: string, env: NodeJS.ProcessEnv = W8915_FIXTURE_ENV): W8915Run & { calls: string[][] } {
+  const calls: string[][] = [];
+  const run = (args: string[]) => {
+    calls.push(args);
+    const r = spawnSync("git", args, { cwd, encoding: "utf8", env });
+    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+  return Object.assign(run, { calls });
+}
+
+/** A bare origin plus a working clone of it — the disposable remote these tests may write. */
+function w8915Remote(kind: string): { origin: GitRepo; clone: () => GitRepo } {
+  const origin = gitRepo({ bare: true, kind: `w8915-${kind}-origin` });
+  return { origin, clone: () => gitRepo({ cloneFrom: origin.dir, kind: `w8915-${kind}-work` }) };
+}
+
+/** Plants a FOREIGN holder's reservation the way another host's reserver would have written it. */
+function w8915PlantForeign(origin: GitRepo, taskId: string, startedAt: string): string {
+  const foreign = gitRepo({ cloneFrom: origin.dir, kind: "w8915-foreign" });
+  const tree = foreign.git("hash-object", "-t", "tree", "/dev/null");
+  const message = formatReservationAnchorMessage({ branch: "run-foreign-holder-1", pid: 4242, host: "foreign-host", startedAt, source: "automatic" });
+  const sha = foreign.git("commit-tree", tree, "-m", message);
+  foreign.git("push", "--quiet", "origin", `${sha}:${taskIdReservationRef(taskId)}`);
+  return sha;
+}
+
+const w8915Pushes = (calls: string[][]) => calls.filter((c) => c[0] === "push");
+
+test("W1-T8915: failed reservation anchor creation refuses before any push", () => {
+  type Step = { status: number; stdout: string; stderr: string };
+  const okTree: Step = { status: 0, stdout: `${W8915_TREE}\n`, stderr: "" };
+  const okCommit: Step = { status: 0, stdout: `${W8915_COMMIT}\n`, stderr: "" };
+  const fakeRun = (hash: Step, commit: Step): W8915Run & { calls: string[][] } => {
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "hash-object") return hash;
+      if (args[0] === "commit-tree") return commit;
+      if (args[0] === "remote") return { status: 0, stdout: "/tmp/w8915-local-origin.git\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    return Object.assign(run, { calls });
+  };
+  // Each local failure keeps its own diagnosis — none of them may read as an unreachable origin.
+  const cases: Array<{ name: string; hash: Step; commit: Step; reason: RegExp }> = [
+    { name: "failed tree hash", hash: { status: 128, stdout: "", stderr: "fatal: could not hash /dev/null" }, commit: okCommit, reason: /git hash-object exited 128: the empty tree could not be hashed/ },
+    {
+      name: "unwritable object database",
+      hash: okTree,
+      commit: { status: 128, stdout: "", stderr: "error: insufficient permission for adding an object to repository database .git/objects\nfatal: git commit-tree: failed to write commit object" },
+      reason: /git commit-tree exited 128: the local object database is not writable/,
+    },
+    {
+      name: "missing identity",
+      hash: okTree,
+      commit: { status: 128, stdout: "", stderr: "Author identity unknown\n\n*** Please tell me who you are.\nfatal: no email was given and auto-detection is disabled" },
+      reason: /git commit-tree exited 128: no git identity is configured/,
+    },
+    { name: "empty tree id on success", hash: { status: 0, stdout: "\n", stderr: "" }, commit: okCommit, reason: /git hash-object exited 0 but printed no usable tree id/ },
+    { name: "empty commit id on success", hash: okTree, commit: { status: 0, stdout: "  \n", stderr: "" }, reason: /git commit-tree exited 0 but printed no usable commit id \(anchor is empty/ },
+    { name: "malformed success-shaped stdout", hash: okTree, commit: { status: 0, stdout: "warning: odd\n8915aa\n", stderr: "" }, reason: /git commit-tree exited 0 but printed no usable commit id \(anchor .* is not one object name/ },
+  ];
+  for (const c of cases) {
+    const run = fakeRun(c.hash, c.commit);
+    const reserver = gitRemoteRefReserver({ run, filingBranch: "run-W1-T8915-1" });
+    assert.throws(
+      () => reserveTaskIdRemote(8915, reserver),
+      (e: unknown) => {
+        assert.ok(e instanceof TaskIdReservationError, `${c.name}: a typed reservation refusal`);
+        assert.equal(e.outcome, "local", `${c.name}: classified as a LOCAL fault`);
+        assert.match(e.message, /cannot create a reservation anchor locally/, c.name);
+        assert.match(e.message, c.reason, `${c.name}: the distinct local cause is named`);
+        assert.match(e.message, /Refused before any push/, c.name);
+        assert.doesNotMatch(e.message, /unreachable/i, `${c.name}: never a network diagnosis`);
+        return true;
+      },
+    );
+    assert.deepEqual(w8915Pushes(run.calls), [], `${c.name}: NO push was attempted`);
+  }
+  // POSITIVE CONTROL: the same fake with both steps healthy reserves, pushing the real-shaped id.
+  const healthy = fakeRun(okTree, okCommit);
+  const held = reserveTaskIdRemote(8915, gitRemoteRefReserver({ run: healthy, filingBranch: "run-W1-T8915-1" }));
+  assert.equal(held.anchor, W8915_COMMIT);
+  assert.deepEqual(w8915Pushes(healthy.calls), [["push", "origin", `${W8915_COMMIT}:refs/rmd-id/W1-T8915`]]);
+
+  // THE REAL SHELL-OUT: actual git with no identity, against a disposable bare origin.
+  const remote = w8915Remote("mint");
+  const work = remote.clone();
+  const denied = w8915RealGit(work.dir, w8915NoIdentityEnv());
+  assert.throws(
+    () => reserveTaskIdRemote(8915, gitRemoteRefReserver({ run: denied, filingBranch: "run-W1-T8915-1" })),
+    (e: unknown) => e instanceof TaskIdReservationError && e.outcome === "local" && /no git identity is configured/.test(e.message),
+  );
+  assert.deepEqual(w8915Pushes(denied.calls), [], "real commit-tree failure: no push");
+  assert.equal(remote.origin.git("for-each-ref", "refs/rmd-id/"), "", "and nothing was created on origin");
+  // ...and the SAME clone with an identity really reserves (the refusal is the identity, not the fixture).
+  const allowed = w8915RealGit(work.dir);
+  const real = reserveTaskIdRemote(8915, gitRemoteRefReserver({ run: allowed, filingBranch: "run-W1-T8915-1" }));
+  assert.match(real.anchor, /^[0-9a-f]{40}$/);
+  assert.equal(remote.origin.git("rev-parse", real.ref), real.anchor);
+});
+
+test("W1-T8915: invalid reservation anchors preserve a real foreign remote ref", () => {
+  const remote = w8915Remote("foreign");
+  const target = "W1-T8916";
+  const ref = taskIdReservationRef(target);
+  // Stale and branch-less, so a takeover is legitimately on the table for the reclaim arm below.
+  const foreignSha = w8915PlantForeign(remote.origin, target, "2020-01-01T00:00:00.000Z");
+  const work = remote.clone();
+  const run = w8915RealGit(work.dir);
+
+  // CONTROL: this remote really does honour delete syntax, so preservation below is the guard's doing.
+  w8915PlantForeign(remote.origin, "W1-T8917", "2020-01-01T00:00:00.000Z");
+  assert.equal(run(["push", "origin", ":refs/rmd-id/W1-T8917"]).status, 0);
+  assert.equal(remote.origin.git("for-each-ref", "refs/rmd-id/W1-T8917"), "", "control: delete syntax deletes here");
+
+  for (const bad of ["", "   ", "\n", "+deadbeef", "-d", ":", "a:b", "two words", `${foreignSha}\n${foreignSha}`]) {
+    assert.ok(reservationAnchorProblem(bad), `${JSON.stringify(bad)} is refused by the predicate`);
+    const reserver = gitRemoteRefReserver({ run, filingBranch: "run-W1-T8915-1", anchor: () => bad });
+    // The attempt guard holds INDEPENDENTLY of the mint, for a caller that supplies its own anchor.
+    assert.equal(reserver.attempt(target, bad), "local", `${JSON.stringify(bad)}: attempt refuses`);
+    assert.match(reserver.lastAttemptStderr!() ?? "", /invalid reservation anchor/);
+    // The injected-anchor seam refuses at the mint, and the allocator refuses before its loop.
+    assert.throws(() => reserver.mintAnchor(), TaskIdReservationError);
+    assert.throws(
+      () => reserveTaskIdRemote(8916, { mintAnchor: () => bad, attempt: (id, a) => reserver.attempt(id, a) }),
+      (e: unknown) => e instanceof TaskIdReservationError && e.outcome === "local" && /invalid reservation anchor/.test(e.message),
+    );
+  }
+  assert.deepEqual(w8915Pushes(run.calls).slice(1), [], "no invalid anchor reached a push");
+
+  // The default mint, its commit-tree answering 0 with nothing: refused before any push.
+  const blanked = (args: string[]) => (args[0] === "commit-tree" ? { status: 0, stdout: "\n", stderr: "" } : run(args));
+  assert.throws(() => reserveTaskIdRemote(8916, gitRemoteRefReserver({ run: blanked, filingBranch: "run-W1-T8915-1" })), TaskIdReservationError);
+
+  // THE RECLAIM ARM: a real orphan collides natively, then the takeover's amend comes back empty.
+  const said: string[] = [];
+  const blankAmend = (args: string[]) => (args[0] === "commit-tree" && args.includes("-p") ? { status: 0, stdout: "", stderr: "" } : run(args));
+  const reclaimer = gitRemoteRefReserver({
+    run: blankAmend, filingBranch: "run-W1-T8915-2", say: (l) => void said.push(l), policyCurrency: () => ({ status: "current" }),
+  });
+  assert.equal(reclaimer.attempt(target, reclaimer.mintAnchor()), "taken", "a valid orphan is still rejected natively");
+  assert.equal(reclaimer.reclaim!(target), "local", "an empty amend refuses rather than pushing `:<ref>`");
+  assert.match(reclaimer.lastAttemptStderr!() ?? "", /invalid reservation anchor: git commit-tree exited 0 but printed no usable commit id/);
+  assert.deepEqual(said, [], "no takeover was announced");
+
+  const pushed = w8915Pushes(run.calls).slice(1);
+  assert.equal(pushed.length, 1, "only the one valid orphan was ever pushed");
+  for (const p of pushed) assert.match(p[2] ?? "", /^[0-9a-f]{40}:refs\/rmd-id\//, "never a delete- or force-shaped refspec");
+  assert.equal(remote.origin.git("rev-parse", ref), foreignSha, "the foreign holder's EXACT anchor survives");
+});
+
+test("W1-T8915: valid reservation creation collisions and holders remain governed", () => {
+  const remote = w8915Remote("valid");
+  const a = gitRemoteRefReserver({ run: w8915RealGit(remote.clone().dir), filingBranch: "run-W1-T8915-holder-a" });
+  const won = reserveTaskIdRemote(8920, a);
+  assert.equal(won.taskId, "W1-T8920");
+  assert.equal(won.attempts, 1);
+  assert.match(won.anchor, /^[0-9a-f]{40}$/, "a real object id, minted by real git");
+  assert.equal(remote.origin.git("rev-parse", won.ref), won.anchor);
+  const holderOf = (r: string) => parseReservationHolderLine(remote.origin.git("log", "-1", "--format=%B", r));
+  const heldA = holderOf(won.ref);
+  assert.equal(heldA.status, "known");
+  assert.equal(heldA.status === "known" ? heldA.holder.branch : "", "run-W1-T8915-holder-a", "holder attribution is native");
+
+  // A second writer collides on the SAME id: rejected natively, the fresh holder is not reclaimed.
+  const bRun = w8915RealGit(remote.clone().dir);
+  const b = gitRemoteRefReserver({ run: bRun, filingBranch: "run-W1-T8915-holder-b", say: () => {}, policyCurrency: () => ({ status: "current" }) });
+  assert.equal(b.attempt("W1-T8920", b.mintAnchor()), "taken");
+  assert.equal(b.reclaim!("W1-T8920"), "taken", "a fresh foreign holder stays held");
+  const next = reserveTaskIdRemote(8920, b, { idFor: (n) => `W1-T${n}` });
+  assert.equal(next.taskId, "W1-T8921", "contention advances");
+  assert.equal(next.attempts, 2);
+  assert.equal(remote.origin.git("rev-parse", won.ref), won.anchor, "the first holder's anchor is untouched");
+  const heldB = holderOf(next.ref);
+  assert.equal(heldB.status === "known" ? heldB.holder.branch : "", "run-W1-T8915-holder-b");
+  for (const p of w8915Pushes(bRun.calls)) assert.match(p[2] ?? "", /^[0-9a-f]{40}:refs\/rmd-id\/W1-T892[01]$/);
+  // A later amend failure never undoes a durable reservation.
+  const amendFails = gitRemoteRefReserver({
+    run: (args) => (args[0] === "commit-tree" && args.includes("-p") ? { status: 128, stdout: "", stderr: "fatal: failed to write commit object" } : bRun(args)),
+    filingBranch: "run-W1-T8915-holder-c",
+  });
+  const third = reserveTaskIdRemote(8922, amendFails, { idFor: (n) => `W1-T${n}` });
+  assert.equal(amendFails.recordFilingBranch!(third.taskId, "run-W1-T8915-holder-d"), false);
+  assert.match(amendFails.lastAttemptStderr!() ?? "", /commit-tree exited 128: the anchor commit could not be written/);
+  assert.equal(remote.origin.git("rev-parse", third.ref), third.anchor, "the won reservation stays exactly as minted");
 });

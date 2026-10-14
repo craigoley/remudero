@@ -9,15 +9,25 @@ import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency } from '../src/lib/test-slot.ts';
 import { listTestFiles, medianMeasuredDurationMs, weightedDurationMs } from './test-tier-manifest.mjs';
+import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
+import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
 /** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
 export const AUTHOR_MAX_WORKERS = 4;
+/** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
+export const AUTHOR_DOCS_PRECHECK_MAX_MS = 30_000;
+/** Only docs-index inputs and its executable contract; deletion/rename sides remain in the diff. */
+export function authorDocsIndexInputs(changedFiles) {
+  return changedFiles.filter(path => (path.startsWith('docs/') && (path.endsWith('.md') || path === 'docs/docs-index.json')) ||
+    path.startsWith('scripts/generate-docs-index') || path === '.github/workflows/docs-index-check.yml' || path === 'package.json');
+}
 /** The share of the author step runtime one affected-test run may spend: the wall time an author waits. */
 export const AUTHOR_WALL_SHARE = 1 / 16;
 /** A suite is never priced below this, so an unmeasured file in an empty manifest is not free. */
@@ -47,6 +57,22 @@ export function hostBudget({ cores, load1, headroomBytes }, { stepRuntimeMs = AU
       cpuWorkers, memoryWorkers: memoryWorkers ?? null, slotConcurrency: slotConcurrency ?? null } };
 }
 
+/** A validated native-profile run may spend its fixed remaining deadline, not a second
+ *  unrelated wall-share budget. This changes time only: CPU/memory/lease workers stay intact.
+ *  The caller uses this only AFTER readRuntimeProfile has validated closed current-tree evidence. */
+export function deadlineHostBudget(budget, { deadline, now = Date.now() } = {}) {
+  if (!Number.isFinite(deadline) || !Number.isFinite(now) ||
+      !Number.isSafeInteger(budget.workers) || budget.workers < 1 || budget.workers > AUTHOR_MAX_WORKERS ||
+      !Number.isSafeInteger(budget.inputs?.stepRuntimeMs) || budget.inputs.stepRuntimeMs <= 0) {
+    throw new Error('deadline host budget: invalid fixed deadline or admitted capacity');
+  }
+  const wallMs = Math.max(0, Math.floor(Math.min(budget.inputs.stepRuntimeMs,
+    deadline - now - AUTHOR_SHUTDOWN_RESERVE_MS)));
+  return { ...budget, wallMs, budgetMs: budget.workers * wallMs, wallShare: null,
+    source: 'validated-native-fixed-deadline',
+    inputs: { ...budget.inputs, deadline, pricedAtMs: now, shutdownReserveMs: AUTHOR_SHUTDOWN_RESERVE_MS } };
+}
+
 /** The priced cost of `suites` in suite-milliseconds: each at its manifest duration, an unknown file at the
  *  manifest median, never below {@link AUTHOR_MIN_SUITE_COST_MS}; times the author runtime safety factor. */
 export function priceSelection(suites, manifest) {
@@ -65,7 +91,8 @@ export function priceSelection(suites, manifest) {
 export function capacityVerdict(suites, manifest, budget) {
   const price = priceSelection(suites, manifest);
   return { fits: price.costMs <= budget.budgetMs, ...price, budgetMs: budget.budgetMs, workers: budget.workers,
-    wallMs: budget.wallMs, wallShare: budget.wallShare, inputs: budget.inputs };
+    wallMs: budget.wallMs, wallShare: budget.wallShare, inputs: budget.inputs,
+    budgetSource: budget.source ?? 'legacy-wall-share' };
 }
 
 /**
@@ -180,9 +207,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}) => {
-    const runtimeLimitMs = deadline === undefined ? AUTHOR_STEP_RUNTIME_MS :
-      Math.min(AUTHOR_STEP_RUNTIME_MS, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS) => {
+    const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
+      Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
@@ -210,6 +237,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       writeFileSync(logs.stderr, stderr, { mode: 0o600, flag: 'wx' });
     }
     receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
+      durationMs: result.durationMs ?? null, startedAt: result.startedAt ?? null, finishedAt: result.finishedAt ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
       ...(name.startsWith('affected-tests') ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
@@ -299,6 +327,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (receipt.suites.length === 0 && receipt.selection !== 'plan-only') throw new Error('no verified test files in the checkout');
     console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
+      const dependencyBefore=authorDependencyProvenance(root);
+      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       const census = runStep('census-precheck', [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
       const censusOk = census.status === 0 && !census.signal && !census.error;
       report('census-precheck', census, censusOk);
@@ -306,19 +337,35 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
+        const docsInputs = authorDocsIndexInputs(receipt.changedFiles);
+        receipt.docsIndexPrecheck = { required: docsInputs.length > 0, inputs: docsInputs };
+        if (docsInputs.length > 0) {
+          // Execute the SAME governed package commands as hosted docs-index-check,
+          // before claiming a heavyweight slot. Never fix generated output inside a gate.
+          for (const script of ['docs-index:check', 'docs-index:check-paths']) {
+            const name = `docs-index-precheck:${script}`, result = runStep(name, ['run', '--silent', script], 'npm', {}, AUTHOR_DOCS_PRECHECK_MAX_MS);
+            const ok = result.status === 0 && !result.signal && !result.error && result.outputComplete !== false;
+            report(name, result, ok, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
+            if (!ok) {
+              receipt.affectedTestsNotRunReason = `${name} did not succeed; no heavy slot/static/test phase was started`;
+              throw new Error(`changed docs inputs failed ${script}; regenerate/repair the index on a separate committed tree`);
+            }
+          }
+        }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
         const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           let runtimeProfile, runtimeManifest;
-          const admitRuntime = (stage, staticReserveMs, files = receipt.suites) => {
+          const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
+            workers = Math.min(AUTHOR_MAX_WORKERS, slot.concurrency)) => {
             if (deadline === undefined) return;
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
             const decision = runtimeDeadlineFit(files, runtimeManifest, runtimeProfile, {
-              workers: Math.min(4, slot.concurrency), deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
+              workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
             });
             receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
             progress({ name: 'runtime-admission', stage, fits: decision.fits });
@@ -342,11 +389,19 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             report('lint-plan-fast', lint, lintOk);
           }
           if (staticOk && lintOk) {
+            const dependencyAfterStatic=authorDependencyProvenance(root);
+            receipt.dependencyProvenance.afterStatic=dependencyAfterStatic;
+            if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfterStatic))throw new Error('installed dependency donor changed during static validation; tests not started');
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
             catch (error) { receipt.manifestUnavailable = error.message; }
-            const budget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: host ? undefined : slot.concurrency });
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
+            // A deadline without a validated native profile was refused before static work.
+            // Never expand workers or restart the deadline to admit a larger selection.
+            const budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
+            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
+            receipt.executionWorkers = executionWorkers;
             const verdict = capacityVerdict(receipt.suites, manifest, budget);
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;
@@ -372,7 +427,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               console.log('affected-tests: NOT RUN — the plan-only selection named no suite; lint-plan-fast is the check');
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
-            admitRuntime('before-tests', 0, ranSuites);
+            admitRuntime('before-tests', 0, ranSuites, executionWorkers);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
@@ -380,13 +435,20 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const durationArgs = !hasDurationReporter ? [] : ['--test-reporter-destination=stdout',
               `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
               `--test-reporter-destination=${join(diagnosticsRoot, 'durations.json')}`];
-            const child = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap', ...durationArgs,
-              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], Math.min(4, slot.concurrency)));
-            const tests = runStep(testsName, child.args, child.file);
-            report(testsName, tests, completeTestResult(tests));
+            // Judged (scripts/pure-test-pool.mjs): a suite whose own child exits 0 part-way is reported
+            // `ok` with a whole summary, so the step passes only when every suite reached its own summary.
+            const judged = prepareJudgedRun();
+            const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
+              '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
+            const tests = runStep(testsName, child.args, child.file, judged.env);
+            const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
+            const testsOk = completeTestResult(tests) && judge.verdict.complete;
+            report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
+              reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
+              exitSite: judge.verdict.exitSite } });
             receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
             if (hasDurationReporter) {
-              if (!completeTestResult(tests)) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
+              if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };
               else {
                 try {
                   receipt.runtimeEvidence = closedDurationEvidence(root, relative(root, join(diagnosticsRoot, 'durations.json')),
@@ -410,6 +472,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
         throw new Error('the author tree changed during verification; receipt refused');
       }
+      const dependencyAfter=authorDependencyProvenance(root);
+      receipt.dependencyProvenance.after=dependencyAfter;
+      if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfter))throw new Error('installed dependency donor changed during author validation; receipt refused');
     }
     // An over-capacity run is never green: its tests were skipped, or only the subset that fits ran.
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
@@ -420,6 +485,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     console.error(`author preflight REFUSED: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
+  receipt.phaseAccounting = accountAuthorPhases(receipt);
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
     if (diagnosticsRoot) {

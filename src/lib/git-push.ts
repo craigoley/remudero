@@ -14,7 +14,9 @@ import {
   hostWorktreeGit,
   hostWorktreeGitAsync,
   pinnedConfigValue,
+  pinnedConfigValueAsync,
   pinWorktreeGit,
+  type PinnedWorktreeGit,
 } from "./worktree-git.js";
 
 /**
@@ -161,6 +163,11 @@ export interface PushRunBranchOpts {
    *  {@link defaultGitCapture}. Consulted when `expectedHeadSha` is supplied, and by
    *  {@link leasedForcePushSteps} to derive the lease when `force` is set. */
   capture?: GitCapture;
+  destination?: string; // W1-T9161: HEAD lands on refs/heads/<destination> as a plain fast-forward, never forced
+}
+
+export function isNonFastForwardRejection(err: unknown): boolean { // W1-T9161: another writer moved the branch first
+  return err instanceof PushFailedError && /\[rejected\][^\n]*\((?:fetch first|non-fast-forward)\)/.test(err.stderrText);
 }
 
 export function gitPushRunBranch(worktreePath: string, opts: PushRunBranchOpts = {}): void {
@@ -202,7 +209,7 @@ interface PushIo {
 
 function* pushRunBranchSteps(
   worktreePath: string,
-  opts: Pick<PushRunBranchOpts, "expectedHeadSha" | "stdio" | "setUpstream" | "force">,
+  opts: Pick<PushRunBranchOpts, "expectedHeadSha" | "stdio" | "setUpstream" | "force" | "destination">,
   io: PushIo,
 ): Steps<void> {
   // THE GUARD, at the leaf. Every one of the nine former call sites is covered by this
@@ -228,13 +235,16 @@ function* pushRunBranchSteps(
     }
   }
   const stdio = opts.stdio ?? "inherit";
+  if (opts.force && opts.destination !== undefined) {
+    throw new TypeError(`gitPushRunBranch: a destination push (${opts.destination}) is a plain fast-forward and is never forced (W1-T9161)`);
+  }
   if (opts.force) {
     yield* leasedForcePushSteps(worktreePath, { ...io, stdio, setUpstream: opts.setUpstream === true });
     return;
   }
   const args = ["-C", worktreePath, "push"];
   if (opts.setUpstream) args.push("-u");
-  args.push("origin", "HEAD");
+  args.push("origin", opts.destination === undefined ? "HEAD" : `HEAD:refs/heads/${opts.destination}`);
   yield* step(() => io.exec("git", args, { stdio }));
 }
 
@@ -450,9 +460,10 @@ function* prePushGateSteps(
   worktreePath: string,
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
+  readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
 ): Steps<PrePushGate | undefined> {
   const pin = pinWorktreeGit(worktreePath);
-  const configured = pinnedConfigValue(pin, "core.hooksPath");
+  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
   if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
   const hook = join(harnessHooksDir(), "pre-push");
   if (!existsSync(hook)) return undefined;
@@ -588,7 +599,7 @@ const GATE_MAX_BUFFER = 64 * 1024 * 1024;
 export function worktreePushExec(worktreePath: string): PushExec {
   return (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a)));
+    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a), pinnedConfigValue));
     if (gate) {
       const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
         cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
@@ -609,7 +620,9 @@ export function worktreePushExec(worktreePath: string): PushExec {
 export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = prGates ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a))) : undefined;
+    const gate = prGates
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a), pinnedConfigValueAsync))
+      : undefined;
     if (gate) {
       try {
         const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {

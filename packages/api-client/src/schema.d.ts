@@ -197,9 +197,30 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      fleetRuntimeHealth?: FleetRuntimeHealth;
       /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
       needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
+    };
+    /** W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`) is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading. Carries destinations and reason codes only: no host paths, credential or config contents. */
+    FleetRuntimeHealth: {
+      state: "healthy" | "drift" | "unknown";
+      reason?: string;
+      observedAt?: string;
+      ageMs?: number;
+      container?: string;
+      checked?: number;
+      drift?: ({
+        destination: string;
+        reason: "missing" | "wrong_source" | "read_only" | "read_write";
+      })[];
+      /** Present only on `drift`. `remedy` is a NAME for the operator; no action is attached. */
+      alert?: {
+        severity: "critical";
+        title: string;
+        detail: string;
+        remedy: string;
+      };
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
     StatusCounts: {
@@ -505,6 +526,29 @@ export interface components {
       actionId: string;
       detail?: string;
     };
+    /** The verified actor's own admitted actions on this exact target that lack a verified completion receipt. Read-only evidence, never permission to retry. Only a cursor-less, complete answer with verifiedEmpty true certifies that nothing is pending; partial and unavailable answers never do. */
+    AssistantActionDiscovery: {
+      contract: "assistant-action-discovery-v1";
+      source: {
+        instance: string;
+        repository: string | null;
+        bootSha: string;
+      };
+      observedAt: string;
+      completeness: "complete" | "partial" | "unavailable";
+      limitations: ("legacy_claims_without_identity" | "unreadable_entries" | "oversized_entries" | "unsupported_entries" | "unverifiable_entries" | "corpus_changed" | "corpus_over_listing_bound" | "file_budget" | "byte_budget" | "time_budget" | "page_size" | "store_unavailable")[];
+      pending: ({
+        actionId: string;
+        action: "pause" | "resume" | "stop";
+        instance: string;
+        repository: string | null;
+        submittedAt: string;
+        status: "claimed_unknown" | "receipt_unverified";
+      })[];
+      /** Opaque, bound to the verified actor and exact target; discloses no store path. */
+      continuation: string | null;
+      verifiedEmpty: boolean;
+    };
     /** POST /v1/questions/answer's body -- an operator's answer to a QUESTION-contract entry (worker.ts's plan/questions.ndjson), addressed by the task it was raised on (v0 routing has no path params, src/lib/service.ts). */
     AnswerQuestionRequest: {
       taskId: string;
@@ -640,6 +684,10 @@ export interface components {
       notReady: number;
       declined: number;
       fleet: number;
+      /** W1-T8831 -- items the operator archived; counted here and in no other lane. */
+      archived?: number;
+      /** W1-T8831 -- items snoozed past the slow lane's last pass; counted here and in no other lane. */
+      snoozed?: number;
       needsYou: {
         ready: number;
         drafting: number;
@@ -655,6 +703,10 @@ export interface components {
       notReady?: (InboxNotReadyItem)[];
       declined?: (InboxDeclinedItem)[];
       fleet?: (InboxFleetItem)[];
+      /** W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`. */
+      archived?: (InboxViewItem)[];
+      /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
+      snoozed?: (InboxViewItem)[];
       needsYou?: InboxNeedsYou;
       counts: InboxCounts;
       page?: ReadPage;
@@ -1285,6 +1337,139 @@ export interface components {
       code?: string;
       reason: string;
       evidenceRef?: string;
+    };
+    /** An immutable automation-trigger-v1 definition (`validateAutomationTriggerDefinition`). Its activation mode never changes after registration; pause/resume is registry state. A definition, like every trigger request, is a closed whitelist: a command, credential, raw prompt or model instruction is refused by name, and any unnamed field is refused. */
+    AutomationTriggerDefinition: {
+      version: "automation-trigger-v1";
+      triggerId: string;
+      /** A registered flow whose automation-action-v1 contract and capability grant already exist. */
+      flowId: string;
+      activation: {
+        mode: "schedule" | "webhook" | "manual";
+        /** Schedule only -- the cadence entry (W1-T2923) this trigger runs on. */
+        scheduleId?: string;
+        /** Schedule only -- an IANA timezone. */
+        timezone?: string;
+        /** Schedule only. A non-existent (spring-forward) wall time is skipped or shifted; an ambiguous (fall-back) wall time fires once, at its first occurrence. */
+        dst?: "skip-gap" | "shift-gap";
+        /** Webhook only -- the authenticated event (W1-T2568) this trigger accepts. */
+        event?: string;
+      };
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      /** The environment/policy profile, resolved at execution time, never at registration. */
+      profileId: string;
+      limits: {
+        maxQueued: number;
+        maxInFlight: number;
+      };
+      expirySeconds: number;
+      staleAfterSeconds: number;
+      /** Runs sharing this key share one in-flight bound; defaults to the triggerId. */
+      concurrencyKey: string;
+    };
+    /** One append-only history entry. Nothing ever rewrites an earlier event. */
+    AutomationTriggerRunEvent: {
+      kind: "queued" | "refused" | "start-refused" | "started" | "heartbeat" | "success" | "failed" | "expired" | "cancelled";
+      at: string;
+      code?: string;
+      reason: string;
+      /** The linked automation-action-v1 completion receipt. */
+      receiptId?: string;
+      profile?: {
+        profileId: string;
+        revision: string;
+      };
+    };
+    /** One bounded run as read now. `stale` (in progress with no observation inside the trigger's staleAfterSeconds) and `unknown` (the latest observation is dated after this read) are derived at read time; every other state is the run's latest stored event. A manual replay is a NEW run linked by `replayOf`; the original is never modified. */
+    AutomationTriggerRun: {
+      version: "automation-trigger-v1";
+      runId: string;
+      triggerId: string;
+      flowId: string;
+      /** The flow's automation-action-v1 contract; executing it still passes that contract's preflight and approval gate. */
+      actionId: string;
+      approvalPolicy: "none" | "human";
+      activationMode: "schedule" | "webhook" | "manual";
+      source: "schedule" | "webhook" | "manual";
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      timezonePolicy?: {
+        timezone: string;
+        dst: "skip-gap" | "shift-gap";
+      };
+      profileId: string;
+      resolvedProfile?: {
+        profileId: string;
+        revision: string;
+      };
+      idempotencyKey: string;
+      deliveryId?: string;
+      scheduledFor?: string;
+      /** Manual only -- the verified request identity, never a body field. */
+      requestedBy?: string;
+      requestedAt: string;
+      expiresAt: string;
+      concurrencyKey: string;
+      replayOf?: string;
+      state: AutomationTriggerRunState;
+      code?: string;
+      reason: string;
+      observedAt: string;
+      freshness: {
+        ageSeconds: number;
+        status: "fresh" | "stale" | "unknown";
+      };
+      receiptId?: string;
+      events: (AutomationTriggerRunEvent)[];
+    };
+    /** The bounded run-history states of automation-trigger-v1. */
+    AutomationTriggerRunState: "refused" | "queued" | "in-progress" | "success" | "failed" | "expired" | "cancelled" | "stale" | "unknown";
+    AutomationTriggerHistory: {
+      version: "automation-trigger-v1";
+      generatedAt: string;
+      triggers: ({
+        trigger: AutomationTriggerDefinition;
+        state: "active" | "paused";
+        reason: string;
+        changedAt: string;
+        /** The trigger's external source as last observed; `unknown` when never observed, never a quiet success. */
+        source: {
+          status: "available" | "unavailable" | "unknown";
+          observedAt?: string;
+          reason: string;
+        };
+        queued: number;
+        /** In-progress and stale runs -- running work stays visible on a paused trigger. */
+        inFlight: number;
+      })[];
+      /** Newest first. */
+      runs: (AutomationTriggerRun)[];
+    };
+    /** `submitAutomationTrigger`'s answer. `queued` admitted a new run; `duplicate` returns the run a repeated idempotency key or delivery id already started; `refused` names its code (e.g. unregistered-trigger, source-not-permitted, trigger-paused, request-expired, queue-full, history-full, journal-unavailable) and, against a known trigger, the refused run recorded in history. */
+    AutomationTriggerSubmission: {
+      outcome: "queued" | "duplicate" | "refused";
+      run?: AutomationTriggerRun;
+      code?: string;
+      reason?: string;
+      field?: string;
+    };
+    AutomationTriggerRunRequest: {
+      triggerId: string;
+      idempotencyKey: string;
+    };
+    AutomationTriggerActivationRequest: {
+      triggerId: string;
+      state: "active" | "paused";
+      reason?: string;
+    };
+    AutomationTriggerReplayRequest: {
+      runId: string;
+      idempotencyKey: string;
     };
     OperatorAgentActionHistory: {
       action: AutomationAction;
@@ -2501,6 +2686,30 @@ export interface components {
       counterWindow: "daemon-run";
       outcomeAssessment: "not_collected";
       spend: null;
+      opportunityEvidence?: GardenerOpportunityEvidence;
+    };
+    /** Independent saved opportunity registry, not the registered off-loop gardener inventory. All counts are stored classifications, not newly verified PR/deployment/benefit evidence. No cost or causal improvement claim is made. Missing, mixed, invalid or oversized registries are unavailable, not zero. Empty arrays have no reconciliation timestamp. */
+    GardenerOpportunityEvidence: (GardenerOpportunityReport) | (GardenerOpportunityUnavailable);
+    GardenerOpportunityReport: {
+      version: 1;
+      repository: string;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "reported";
+      total: number;
+      counts: Record<string, number>;
+      oldestReconciledAt: string | null;
+      latestReconciledAt: string | null;
+    };
+    GardenerOpportunityUnavailable: {
+      version: 1;
+      repository: string | null;
+      readAt: string;
+      coverage: "saved-opportunity-registry";
+      countSemantics: "reported_states_not_verified_outcomes";
+      state: "unavailable";
+      reason: "scope_unavailable" | "not_collected" | "unreadable" | "malformed" | "oversized" | "repository_mismatch" | "clock_skew" | "corpus_changed";
     };
     GardenersUnavailable: {
       error: "gardeners_unavailable";
@@ -2861,6 +3070,126 @@ export interface components {
       value: number | null;
       notCollectedReason?: string;
     };
+    /** Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation. Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct from a complete total; absent correlation, prices or retained-corpus coverage stay unknown. Host and fleet gardeners contribute no repository cost. */
+    GardenerSpend: {
+      version: "gardener-spend-v1";
+      state: "not_collected" | "partial" | "complete";
+      reason: "missing_registry" | "invalid_registry" | "over_budget" | "missing_materialization" | "scope_mismatch" | "correlation_not_available" | "ledger_unavailable" | "incomplete_evidence" | "priced_receipts";
+      observedAt: string | null;
+      materializedAt: string | null;
+      totalUsd: number | null;
+      pricedSubtotalUsd: number | null;
+      counts: {
+        priced: number | null;
+        unpriced: number | null;
+        unlinked: number | null;
+      };
+      window: {
+        from: string;
+        through: string;
+      } | null;
+      coverage: {
+        retainedCorpus: "not_collected" | "partial" | "complete";
+        truncated: boolean | null;
+      };
+      gardens: ({
+        name: string;
+        enabled: boolean;
+        scope: "repository" | "host" | "fleet";
+        totalUsd: number | null;
+        pricedSubtotalUsd: number | null;
+      })[];
+    };
+    RepositoryFlowBucket: {
+      date: string;
+      opened: number | null;
+      merged: number | null;
+      deliveredTasks: number | null;
+      repairedPrs: number | null;
+      repairRounds: number | null;
+    };
+    /** Optional cached repository-flow-v1. PR events use GitHub clocks and native structured delivery credit, never worker verdicts. Repair counts are observed retained receipts, not verified historical absence or proof of recovery. Null is unknown, not zero. Source observation clocks are independent of materialization; absent on older producers. */
+    RepositoryFlow: {
+      version: "repository-flow-v1";
+      scope: "repository";
+      repository: string;
+      state: "reported" | "partial" | "not_collected";
+      reason: "missing_source" | "invalid_source" | "over_budget" | null | null;
+      materializedAt: string;
+      sources: {
+        openObservedAt: string | null;
+        closedObservedAt: string | null;
+        prCorpus: "complete" | "partial" | "unavailable";
+        prFreshness: "fresh" | "stale" | "unknown";
+        ledgerObservedAt: string | null;
+        ledgerCorpus: "observed" | "partial" | "unavailable";
+        earliestLedgerAt: string | null;
+        latestLedgerAt: string | null;
+        observedPrs: number | null;
+        observedRepairIdentities: number | null;
+      };
+      limits: {
+        prRows: 100000;
+        repairIdentities: 65536;
+        publicBytes: 65536;
+        evidencePerWindow: 64;
+      };
+      gaps: (string)[];
+      notCollected: {
+        firstPass: "initial-head and required-check policy evidence not collected";
+        repairLatency: "required-current-head recovery evidence not collected";
+        backlog: "historical daily backlog observations not collected";
+        efficiency: "delivered-work price and token attribution evidence not collected";
+      };
+      windows: ({
+        days: 7 | 30;
+        from: string;
+        through: string;
+        coverage: {
+          opened: "complete" | "observed" | "unknown";
+          merged: "complete" | "observed" | "unknown";
+          repairs: "observed" | "unknown";
+          partialCounts: "observed lower bounds; not complete historical totals";
+        };
+        buckets: (RepositoryFlowBucket)[];
+        summary: {
+          opened: number | null;
+          merged: number | null;
+          deliveredTasks: number | null;
+          repairedPrs: number | null;
+          repairRounds: number | null;
+          repairReasons: {
+            code: number | null;
+            flake: number | null;
+            infrastructure: number | null;
+            conflict: number | null;
+            unknown: number | null;
+          };
+          mergeLatency: {
+            unit: "ms";
+            samples: number;
+            p50Ms: number | null;
+            p90Ms: number | null;
+            missingCreatedAt: number;
+          };
+          openAge: {
+            unit: "ms";
+            censored: true;
+            asOf: string | null;
+            samples: number;
+            oldestMs: number | null;
+            missingCreatedAt: number;
+          };
+        };
+        evidence: ({
+          prNumber: number;
+          url: string;
+          kind: "opened" | "merged" | "repair";
+          at: string;
+        })[];
+        evidenceTruncated: boolean;
+      })[];
+    };
     /** GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot` rows the slow lane's analytics refresh commits per instance, so it answers from them after a restart. One `analytics:<instance>` source per instance: unavailable before its first refresh, stale with phase `failed` when its last refresh failed (the kept snapshot is still merged). */
     AnalyticsView: {
       view: "analytics";
@@ -2870,6 +3199,7 @@ export interface components {
       stale: boolean;
       sources: (ViewSource)[];
       data: {
+        modelApprovals?: HostModelApprovalsEvidence;
         /** The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's runs together; nothing is averaged. `instances` is how many instances had a value. */
         overview: ({
           key: "runs.completed" | "tokens.total" | "cache.reuse" | "cost.modeled.usd" | "duration.p50.ms" | "queue.pending";
@@ -2887,10 +3217,304 @@ export interface components {
         /** Each instance's own metrics, or a `reason` when it has no snapshot yet. */
         instances: ({
           instanceId: string;
+          /** Registry/config identity captured in the persisted snapshot; absent on older snapshots, never guessed from ledger rows. */
+          repository?: string;
           metrics?: (AnalyticsViewMetric)[];
+          gardenerSpend?: GardenerSpend;
+          repositoryFlow?: RepositoryFlow;
           reason?: string;
+          details?: AnalyticsStoredDetails;
         })[];
       };
+    };
+    /** Bounded immutable capture of the serving host's loaded model-approval configuration. capturedAt is the startup observation, not an analytics refresh, permission grant or worker adoption receipt. Expiry is retained for a separate console read-time evaluation. Absent on older producers; a missing or rejected corpus is never a measured empty approval list. */
+    HostModelApprovalsEvidence: ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string;
+      state: "reported";
+      approvals: ({
+        model: string;
+        approvedBy: string;
+        approvedAt: string;
+        expiresAt?: string;
+      })[];
+    }) | ({
+      version: "host-model-approvals-v1";
+      scope: "serving-host";
+      sourceKind: "loaded-config";
+      capturedAt: string | null;
+      state: "unavailable";
+      reason: "invalid_source" | "over_budget" | "clock_skew";
+    });
+    /** Additive analytics-details-v1 transport over matching committed signals and usage rows. Reported is not a freshness verdict; read analytics:<instance> for freshness. Consumers validate the carried projection schemas. Missing/mixed snapshots, unreadable or unsupported bodies and response-budget refusals stay explicitly unavailable, not empty healthy defaults. */
+    AnalyticsStoredDetails: ({
+      version: "analytics-details-v1";
+      state: "reported";
+      asOf: string;
+      payloadBytes: number;
+      signals: {
+        version: "console-signals-v1";
+        timeSeries: (AnalyticsStoredSeries)[];
+        spend: {
+          cash: AnalyticsStoredCashSpend;
+        };
+        routingTelemetry: AnalyticsStoredRouting;
+      };
+      /** null means usage was not collected; it is not a fabricated zero-cost reading. */
+      usage: (null) | (AnalyticsStoredUsage);
+    }) | ({
+      version: "analytics-details-v1";
+      state: "unavailable";
+      asOf: string | null;
+      reason: string;
+    });
+    AnalyticsStoredSeries: {
+      id: string;
+      name: string;
+      window: string;
+      bucketWidth: string;
+      aggregation: string;
+      coverage?: "observed" | "not-collected";
+      comment?: string;
+      points: ({
+        t: string;
+        value?: number | null;
+        gap?: boolean;
+        note?: string;
+        unpricedRows?: number;
+      })[];
+    };
+    AnalyticsStoredCashSpend: {
+      state: "observed" | "not-collected";
+      unit: "usd";
+      asOf: string | null;
+      coverage: string;
+      reason?: string;
+      windows: ({
+        name: "7d" | "30d";
+        days: number;
+        fromDay: string;
+        toDay: string;
+        usd: number;
+        rows: number;
+        unpricedRows?: number;
+        complete: boolean;
+        reason?: string;
+      })[];
+    };
+    AnalyticsStoredRouting: {
+      version: "routing-v1";
+      evidenceState: "observed" | "not-collected-in-retained-ledger";
+      assignmentsObserved: number;
+      terminalResultsObserved: number;
+      terminalResultsWithoutAssignment: number;
+      assignmentsWithoutTerminalResult: number;
+      buckets: ({
+        provider: string;
+        assignedModel: string;
+        taskType: string;
+        routingRule: string;
+        assignments: number;
+        terminalResults: number;
+        successes: number;
+        failures: number;
+        totalTokens: number;
+        totalDurationMs: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+        fallbackReasons: ({
+          reason: string;
+          count: number;
+        })[];
+      })[];
+      daily: ({
+        day: string;
+        terminalResults: number;
+        totalTokens: number;
+        totalCostUsd: number;
+        unpricedCostRows?: number;
+      })[];
+      stepUps: {
+        total: number;
+        byStep: ({
+          step: "implement.step_up" | "fix.step_up";
+          count: number;
+        })[];
+        byTargetModel: ({
+          model: string;
+          count: number;
+        })[];
+      };
+      preferenceOutcomes: ({
+        preferredProvider: string;
+        selectedProvider: string;
+        selectedModel: string;
+        outcome: "kept" | "bypassed";
+        reason?: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsage: {
+      version: "usage-v1" | "usage-v2";
+      asOf: string | null;
+      coverage: {
+        from: string | null;
+        to: string | null;
+        note: string;
+      };
+      subscriptions: ({
+        provider: string;
+        state: "observed" | "stale" | "not-collected";
+        windows: (AnalyticsStoredUsageWindow)[];
+      })[];
+      cash: {
+        unit: "usd";
+        state: "observed" | "not-collected";
+        coverage: string;
+        windows: ({
+          name: "1h" | "24h" | "today-utc" | "7d" | "30d";
+          usd: number;
+          rows: number;
+          unpricedRows?: number;
+          complete: boolean;
+          reason?: string;
+        })[];
+        byModel24h: ({
+          model: string;
+          usd: number;
+          unpricedRows: number;
+        })[];
+        series: ({
+          hour: string;
+          usd: number;
+          rows: number;
+          unpricedRows: number;
+        })[];
+      };
+      routing: {
+        state: "observed" | "not-collected";
+        assignmentsObserved: number;
+        decisionsObserved: number;
+        recent: (AnalyticsStoredUsageAssignment)[];
+        aggregates: {
+          last24h: AnalyticsStoredUsageAggregate;
+          last7d: AnalyticsStoredUsageAggregate;
+        };
+        experiments: (AnalyticsStoredUsageExperiment)[];
+      };
+    };
+    AnalyticsStoredUsageWindow: {
+      name: string;
+      kind: "5h" | "weekly" | "other";
+      durationMs: number | null;
+      usedPercent: number;
+      remainingPercent: number;
+      limitPercent: number | null;
+      resetsAt: string | null;
+      asOf: string;
+      source: "ledger" | "live-status";
+      state: "observed" | "stale";
+      burn: {
+        lastHourPercent: number | null;
+        last24hPercent: number | null;
+        ratePercentPerHour: number | null;
+      };
+      projectedExhaustionAt: string | null;
+      exhaustsBeforeReset: boolean | null;
+      series: ({
+        hour: string;
+        usedPercent: number;
+        maxUsedPercent: number;
+        samples: number;
+      })[];
+    };
+    AnalyticsStoredUsageAssignment: {
+      id: string;
+      ts: string;
+      runId: string | null;
+      taskId: string | null;
+      lane: string | null;
+      requested: {
+        model: string;
+        effort: string;
+      };
+      selected: {
+        provider: string;
+        model: string;
+        effort: string;
+      };
+      rule: string;
+      ruleSource: "decision" | "legacy-mode";
+      capability: string | null;
+      considered: ({
+        provider: string;
+        model?: string;
+        eligible: boolean;
+        selected: boolean;
+        reason?: string;
+      })[];
+      headroomPercent: Record<string, number | null>;
+      reservePercent: number | null;
+      cashWhileSubscriptionHadRoom: boolean;
+      assignmentsInRun: number;
+      markers: Record<string, string>;
+    };
+    AnalyticsStoredUsageAggregate: {
+      windowHours: number;
+      total: number;
+      cashWhileSubscriptionHadRoom: number;
+      byModel: ({
+        provider: string;
+        model: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byTier: ({
+        tier: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byRule: ({
+        rule: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      byProvider: ({
+        provider: string;
+        count: number;
+        sharePercent: number;
+      })[];
+      rows: ({
+        provider: string;
+        model: string;
+        tier: string;
+        rule: string;
+        count: number;
+      })[];
+    };
+    AnalyticsStoredUsageExperiment: {
+      trialId?: string;
+      trialArm?: string;
+      reason?: string;
+      reasonFull?: string;
+      reasonState?: "observed" | "not-collected" | "too-large";
+      reasonAsOf?: string;
+      marker: string;
+      value: string;
+      provider: string;
+      model: string;
+      runs: number;
+      assignments: number;
+      terminals: number;
+      successes: number;
+      successRatePercent: number | null;
+      meanAssignmentsPerRun: number;
+      meanDurationMs: number | null;
+      costUsd: number;
+      unpricedTerminals: number;
+      meanCostPerTerminalUsd: number | null;
     };
     /** GET /v1/views/read-model (docs/views.md): the Phase 1 read model's own status, one body per serve, materialized by the read-model worker (src/lib/read-model-worker.ts). Each instance's `ledger:<instance>` source is re-judged at request time, so a stalled projector reads stale. */
     ReadModelStatusView: {
@@ -2919,6 +3543,12 @@ export interface components {
     /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a day of continuous sampling since the last one: at least one sample per minute for every key the streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured traffic is higher (the rule of three). */
     ViewShadowReadiness: {
       view: string;
+      /** The current producer contract these counters qualify; older generations remain archived, not counted. */
+      qualificationGeneration?: string;
+      /** Samples refused because either matched producer or source was not ready. */
+      skipped?: number;
+      lastSkippedMs?: number;
+      lastSkipReason?: string;
       requests: number;
       firstRequestMs: number | null;
       samples: number;
@@ -3047,8 +3677,20 @@ export interface components {
         registryError?: string;
       };
     };
+    /** W1-T8825: who sent an inbox item - the producer id (a machine-judge item's filer family, else the proposal id's kind) and its fixed display name (src/lib/inbox-owner.ts). Never a proposal id. */
+    InboxSender: {
+      kind: string;
+      name: string;
+    };
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary?: string;
       plain?: PlainInboxMessage;
@@ -3074,6 +3716,10 @@ export interface components {
           proposalId: string;
         };
       };
+      /** W1-T8831 -- when the operator archived this item (RFC 3339 UTC); present while archived, in the `archived` section only. */
+      archivedAt?: string;
+      /** W1-T8831 -- when this item's snooze ends (RFC 3339 UTC); present while snoozed, in the `snoozed` section only. */
+      snoozedUntil?: string;
       /** A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340). */
       classification?: "ASK" | "RECORD";
     };
@@ -3095,7 +3741,7 @@ export interface components {
       /** `inbox-store:core`: when the slow lane last classified. */
       sources: (ViewSource)[];
       data: {
-        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet";
+        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed";
         items: (InboxViewItem)[];
         counts: InboxCounts;
         page: ViewPage;
@@ -3231,8 +3877,59 @@ export interface components {
         signal: string;
         confidence: number;
       })[];
-      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      recordVersion?: "operator-agent-records-v1";
+      /** W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are observations from the sole native ranking evaluation, never registered ledger history. Interpret detail freshness together with the envelope sources and stale flag. Unknown details stay explicit. */
+      records?: ({
+        proposalId: string;
+        detail: (AgentGeneratedRecommendation) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        durable: ({
+          state: "unregistered";
+        }) | ({
+          state: "registered";
+          source: "ledger";
+          createdAt: string;
+          status: "pending" | "accepted" | "rejected" | "expired";
+        });
+      })[];
+      /** Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0. Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine. */
+      coverage?: {
+        ranked: number;
+        published: number;
+        complete: number;
+        unavailable: number;
+        capped: number;
+      };
+      /** Why generation or publication was refused, including missing, malformed or over-budget sources. */
       reason?: string;
+    };
+    AgentGeneratedRecommendation: {
+      state: "reported";
+      kind: "generated-recommendation";
+      observationId: string;
+      repository: string;
+      instanceId: string;
+      proposalText: string;
+      reasoning: string;
+      observedAt: string;
+      /** The rank confidence is the existing heuristic, not a calibrated probability or an approval grant. */
+      scoreKind: "native-heuristic";
+      evidence: ({
+        key: string;
+        value: number;
+        unit: "count" | "tokens" | "tokens/run" | "ms" | "ratio";
+        source: string;
+        observedAt: string;
+        freshness: "fresh";
+        window: {
+          start: string;
+          end: string;
+        } | null;
+      })[];
+      /** Named unknowns, including source window, independent samples, causation, cost, savings and consent. */
+      unavailable: (string)[];
     };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
@@ -3788,10 +4485,22 @@ export interface components {
         status: RouteReadStream;
       };
     };
-    /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
+    /** An existing inbox write route, attached at serve time when valid for the item's lane. */
+    PlainOptionAction: {
+      method: "POST";
+      path: string;
+      /** Fixed string fields to include in the request body. */
+      fields: Record<string, string>;
+      /** The free-text field the console must collect before posting. */
+      input?: "reason" | "feedback" | "text";
+    };
+    /** One served inbox choice (src/lib/inbox-plain.ts's `ServedPlainOption`). */
     PlainOption: {
       label: string;
       consequence: string;
+      /** Untagged stored options are served as reply suggestions without an action. */
+      intent: "approve" | "decline" | "reframe" | "reply" | "keep";
+      action?: PlainOptionAction;
     };
     /** W1-T4087: an inbox item's plain-language message (src/lib/inbox-plain.ts's `PlainInboxMessage`) -- the model writer's text when it passed the plain-message check, otherwise the item kind's template. The raw proposal summary is never promoted to it. */
     PlainInboxMessage: {
@@ -3806,6 +4515,8 @@ export interface components {
       options: (PlainOption)[];
       /** Who wrote it -- the model writer or the per-kind template. */
       source: "writer" | "template";
+      /** Optional cache provenance, not verification of the writer's factual claims. */
+      sourceFingerprint?: string;
     };
     /** One task a READY proposal's drafted fragment would file (src/lib/panel-graph.ts's `InboxDraftedTask`). */
     InboxDraftedTask: {
@@ -3819,6 +4530,13 @@ export interface components {
     };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -3831,6 +4549,13 @@ export interface components {
     };
     /** One proposal an Architect worker is drafting right now (src/lib/panel-graph.ts's `InboxDraftingItem`). */
     InboxDraftingItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -3841,6 +4566,13 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -3864,6 +4596,13 @@ export interface components {
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       /** Present on needsYou lane items only. */
       classification?: "ASK" | "RECORD";
       proposalId: string;
@@ -3881,6 +4620,13 @@ export interface components {
     };
     /** W1-T4086/W1-T4089: one fleet-owned proposal with the lane it sits in and the fleet lane's latest decision, when it has made one (src/lib/panel-graph.ts's `InboxFleetItem`). */
     InboxFleetItem: {
+      from?: InboxSender;
+      /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
+      receivedAt?: string | null;
+      /** The latest stored instant among receivedAt, the item's reframe/decline/restore rows and its thread's newest message (RFC 3339 UTC, never earlier than receivedAt). */
+      lastActivityAt?: string | null;
+      /** The key a console groups a sender's items into one thread by (equal to from.kind). */
+      groupKey?: string;
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
@@ -3899,6 +4645,10 @@ export interface components {
       declined?: (InboxDeclinedItem)[];
       needsYou?: InboxNeedsYou;
       fleet?: (InboxFleetItem)[];
+      /** W1-T8831 -- items the operator archived (POST /v1/inbox/archive); each carries `archivedAt`. */
+      archived?: (InboxViewItem)[];
+      /** W1-T8831 -- items snoozed until later (POST /v1/inbox/snooze); each carries `snoozedUntil`. */
+      snoozed?: (InboxViewItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
       /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
@@ -3990,9 +4740,80 @@ export interface components {
       whyMe: string;
       sourceFacts: (InboxAttentionCensusFact)[];
       retiredReason?: string;
+      judgment?: InboxAttentionJudgment;
+    };
+    /** Current task-verification evidence; unclassified is never an operator ruling. */
+    InboxAttentionJudgment: {
+      state: "judged" | "unclassified";
+      reason: string;
+      decision?: "needs_operator" | "automate" | "backlog";
+      at?: string | null;
+    };
+    /** Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed. */
+    InboxDismissalAudit: {
+      contract: "inbox-dismissal-audit-v1";
+      state: "measured" | "unmeasurable";
+      scope: {
+        instance: string | null;
+        repository: string | null;
+      };
+      window: {
+        from: string;
+        to: string;
+      };
+      coverage: {
+        receipts: "observed" | "partial" | "unavailable";
+        outcomes: "observed" | "partial" | "unavailable";
+        plan: "observed" | "partial" | "unavailable";
+        registry: "observed" | "partial" | "unavailable";
+      };
+      controls: {
+        heldSecurity: {
+          observed: boolean;
+          passed: boolean;
+          taskId: "W1-T216";
+        };
+        terminalMechanical: {
+          observed: boolean;
+          passed: boolean;
+        };
+      };
+      /** Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped. */
+      denominator: {
+        eligible: number;
+        sampled: number;
+        returned: number;
+        unqualified: number;
+        foreign: number;
+        duplicates: number;
+        conflicting: number;
+      };
+      /** Observed lower bounds, never a certified zero without coverage. */
+      observed: {
+        falseDismissals: number;
+        terminalConfirmed: number;
+        restored: number;
+        unresolved: number;
+      };
+      measurement: {
+        falseDismissals: number | null;
+        falseDismissalRate: number | null;
+      };
+      items: ({
+        receiptId: string;
+        proposalId: string;
+        taskId: string | null;
+        snapshotKey: string;
+        retiredAt: string;
+        outcome: "false_dismissal" | "terminal_confirmed" | "unresolved";
+        restored: boolean;
+        evidence: (string)[];
+      })[];
+      truncated: boolean;
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";
@@ -4019,6 +4840,8 @@ export interface components {
       decisionReadiness: {
         ready: number;
         needsPreparation: number;
+        /** Human-verification asks with unclassified judgement evidence. */
+        needsTriage: number;
         unknown: number;
       };
       /** Conservative lower bounds; zero when any needed source is partial. */
@@ -4093,11 +4916,67 @@ export interface components {
       /** A proposal id from the active registry; must be non-blank. */
       proposalId: string;
     };
+    InstanceInboxProposal: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      summary: string;
+      /** Identity of this active proposal. Reframe must echo it; a changed proposal is refused. */
+      snapshotKey: string;
+      actions: ({
+        action: "reframe";
+        tier: "low";
+        path: string;
+      })[];
+    };
+    InstanceInboxReframeRequest: unknown;
+    InstanceInboxReframeResult: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      ok: true;
+      delivery: "delivered";
+      draftInvalidated: true;
+      replayed?: boolean;
+      receipt: {
+        intentId: string;
+        key: string;
+        status: "settled" | "unknown";
+        action: "reframe";
+        threadId: string;
+      };
+    };
     /** POST /v1/inbox/reframe's body (src/lib/panel-graph.ts's `validateReframeProposal`). */
     InboxReframeRequest: {
       proposalId: string;
       /** The operator's feedback, captured verbatim; must be non-blank. */
       feedback: string;
+    };
+    /** POST /v1/inbox/archive's body (src/lib/panel-graph.ts's `validateArchiveProposal`). */
+    InboxArchiveRequest: {
+      proposalId: string;
+      /** true sets the item aside; false brings it back. */
+      archived: boolean;
+    };
+    /** POST /v1/inbox/archive's 200 body. */
+    InboxArchiveResult: {
+      ok: boolean;
+      proposalId: string;
+      archived: boolean;
+      /** Present while archived; the first archive's instant */
+      archivedAt?: string;
+    };
+    /** POST /v1/inbox/snooze's body (src/lib/panel-graph.ts's `validateSnoozeProposal`). */
+    InboxSnoozeRequest: {
+      proposalId: string;
+      /** RFC 3339 UTC time in the future when the item returns; null wakes it now. */
+      until: string | null;
+    };
+    /** POST /v1/inbox/snooze's 200 body. */
+    InboxSnoozeResult: {
+      ok: boolean;
+      proposalId: string;
+      snoozedUntil: string | null;
     };
     /** POST /v1/inbox/decline's and POST /v1/inbox/restore's body (src/lib/panel-graph.ts's `validateDeclineProposal`, shared by both). `reason` is required on restore too. */
     InboxVerdictRequest: {
@@ -4612,6 +5491,17 @@ export interface paths {
         };
     };
   };
+  "/v1/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
+        };
+    };
+  };
   "/v1/questions/answer": {
     post: {
       responses: {
@@ -4840,6 +5730,17 @@ export interface paths {
           "404": AssistantControlLookup;
           "409": AssistantControlLookup;
           "503": AssistantControlLookup;
+        };
+    };
+  };
+  "/v1/i/{instance}/control/assistant-action/discovery": {
+    get: {
+      responses: {
+          "200": AssistantActionDiscovery;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": AssistantActionDiscovery;
         };
     };
   };
@@ -5247,6 +6148,55 @@ export interface paths {
           "403": HighTierRefusal;
           "409": OperatorAgentDelegationHandoffRefusal;
           "423": EmergencyStopAdmissionRefusal;
+        };
+    };
+  };
+  "/v1/automation/triggers": {
+    get: {
+      responses: {
+          "200": AutomationTriggerHistory;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/automation/triggers/run": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
+        };
+    };
+  };
+  "/v1/automation/triggers/activation": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/automation/triggers/replay": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
         };
     };
   };
@@ -5985,10 +6935,69 @@ export interface paths {
         };
     };
   };
+  "/v1/i/{instance}/inbox": {
+    get: {
+      responses: {
+          "200": unknown;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/attention-census": {
+    get: {
+      responses: {
+          "200": unknown;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/proposal": {
+    get: {
+      responses: {
+          "200": InstanceInboxProposal;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/reframe": {
+    post: {
+      responses: {
+          "200": InstanceInboxReframeResult;
+          "400": undefined;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
   "/v1/inbox/reframe": {
     post: {
       responses: {
           "200": InboxProposalStartedResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/archive": {
+    post: {
+      responses: {
+          "200": InboxArchiveResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": InboxRefusal;
+        };
+    };
+  };
+  "/v1/inbox/snooze": {
+    post: {
+      responses: {
+          "200": InboxSnoozeResult;
           "400": Error;
           "401": Error;
           "403": Error;

@@ -12,20 +12,31 @@
  * the container are read again; a failure records the back-off and opens a needs-human issue.
  * W1-T6125: binds also apply only at create, so W1-T6110's mount-plan reading drifts serve the same
  * way, under the same holds; an UNKNOWN reading (no plan, scratch off, no inspect) is never drift.
+ * W1-T8311: those holds never read the HOST. The launcher stops and removes the old console, so the
+ * automatic replace passes it the host memory budget's thresholds and the launcher re-checks fresh
+ * host pressure before its first destructive step. Its named refusal (a returned ServeReplaceHold) is a
+ * HOLD: the old container stays, and no failure, back-off or escalation is recorded.
+ * W1-T9487: W1-T9094 stopped the build daemon recycling for serve-only image inputs, so the daemon's
+ * image stopped being serve's measure: serve is judged against the newest PUBLISHED image for its own
+ * inputs, read from its `/etc/rmd-build-sha`; only when that cannot be read does the daemon's decide.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 import {
+  IMAGE_BUILD_SHA_PATH,
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
+  bakedPathCommitsBehind,
   daemonInstanceRegistryPath,
   deployLedgerPath,
   githubSlugOf,
   imageShaContainerFor,
   isPrimaryDeployment,
   readMountPlanDrift,
+  playwrightCoreVersionCommitsBehind,
   readResourcePolicyDrift,
+  workerSdkCommitsBehind,
   type DeployDeps,
   type MountPlanDrift,
   type RealDeployOpts,
@@ -34,13 +45,17 @@ import {
 import { ghIssueGateway, tryEscalate, type Escalation, type IssueGateway } from "./escalate.js";
 import { isPaused } from "./fleet-control.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy } from "./host-memory-shadow.js";
 
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
 
-/** Supervisor rows that open a handoff, and rows after which none is in flight. */
-const HANDOFF_OPEN_STEPS = ["serve.handoff_requested", "serve.handoff_deferred", "serve.handoff_shed"];
+/** Supervisor rows that open a handoff, and rows after which none is in flight. W1-T9504: a deferral (W1-T8311's
+ *  `deferUpgrade`) forks no standby, holds no lock and keeps the active generation, so nothing is mid-swap after it;
+ *  counting it open held the replace for as long as a handoff that never fits kept deferring (2026-10-14). */
+const HANDOFF_OPEN_STEPS = ["serve.handoff_requested", "serve.handoff_shed"];
 const HANDOFF_CLOSED_STEPS = [
+  "serve.handoff_deferred",
   "serve.handoff_done",
   "serve.handoff_aborted",
   "serve.handoff_skipped",
@@ -50,7 +65,31 @@ const HANDOFF_CLOSED_STEPS = [
   "serve.supervisor_ready",
 ];
 
-export type ServeImageDrift = { expected: string; actual: string } | { kind: "unknown"; reason: string };
+/** deploy/serve-container.sh's exit when fresh host pressure refuses the replace; nothing was changed. */
+export const SERVE_REPLACE_HELD_EXIT = 75;
+
+/** The environment that makes the launcher admit the replace on fresh host pressure, from the budget's existing values. */
+export function serveReplaceAdmissionEnv(policy: HostMemoryBudgetPolicy): string[] {
+  return [
+    "RMD_SERVE_REPLACE_ADMISSION=required",
+    `RMD_SERVE_ADMIT_HOST_RESERVE_MIB=${policy.hostReserveMib}`,
+    `RMD_SERVE_ADMIT_SWAPIN_MAX=${policy.swapInPagesPerSecMax}`,
+    `RMD_SERVE_ADMIT_PSI_SOME_AVG10_MAX=${policy.psiSomeAvg10Max}`,
+    `RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX=${policy.psiFullAvg10Max}`,
+    // the measured serve cold-start peak: what the new console needs once the old one is stopped
+    `RMD_SERVE_ADMIT_CANDIDATE_MIB=${policy.serveColdStartReserveMib}`,
+  ];
+}
+
+/** `basis: "serve-inputs"` (W1-T9487): expected is the newest image-input commit, actual serve's build
+ *  sha. Without it, both are image ids and expected is the daemon's (W1-T6245). */
+export type ServeImageDrift = { expected: string; actual: string; basis?: "serve-inputs" } | { kind: "unknown"; reason: string };
+
+/** W1-T9487 — serve's build sha and how many of its own image-input commits origin/main has beyond it. */
+export interface ServeImageInputs {
+  buildSha: string;
+  behind: number;
+}
 
 export interface ServePolicyInputs {
   drift: ResourcePolicyDrift[] | undefined;
@@ -145,6 +184,25 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
   };
 }
 
+/**
+ * W1-T9487 — serve's image reading. Serve on every image input of its own is converged, whatever the
+ * daemon runs. Behind them, it drifts only once an image containing the newest input is published
+ * (the deploy cycle's own `imagePublished`); before that it waits for the build, which is never drift.
+ * An unreadable build sha leaves today's daemon comparison deciding.
+ */
+function readServeImage(deps: Parameters<typeof runServePolicyCycle>[0]): ServeImageDrift | undefined {
+  const inputs = deps.serveImageInputs?.();
+  if (inputs === undefined) return deps.serveImageDrift?.();
+  if (inputs.behind === 0) return undefined;
+  const newest = deps.newestBakedSha?.();
+  const published = newest === undefined ? undefined : deps.imagePublished?.(newest);
+  if (newest !== undefined && published === true) return { expected: newest, actual: inputs.buildSha, basis: "serve-inputs" };
+  const image = newest === undefined
+    ? "the newest image input is unknown"
+    : `an image containing ${newest.slice(0, 9)} is ${published === false ? "not published yet" : "of unknown publication"}`;
+  return { kind: "unknown", reason: `serve is ${inputs.behind} image-input commit(s) behind origin/main, but ${image} — waiting for the build` };
+}
+
 /** One serve convergence pass. A no-op unless the primary instance wired the serve seams. `escalate`
  *  rides beside the deployer's seams because deployer.ts cannot import escalate.ts (a cycle). */
 export function runServePolicyCycle(
@@ -152,6 +210,7 @@ export function runServePolicyCycle(
     escalate?: (e: Escalation) => void;
     serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
     serveImageDrift?: () => ServeImageDrift | undefined;
+    serveImageInputs?: () => ServeImageInputs | undefined;
   },
   opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
@@ -159,7 +218,7 @@ export function runServePolicyCycle(
   }
   const drift = deps.servePolicyDrift();
   const mountDrift = deps.serveMountPlanDrift?.();
-  const imageDrift = deps.serveImageDrift?.();
+  const imageDrift = readServeImage(deps);
   const nowMs = deps.now();
   const decision = decideServePolicyConvergence({
     drift,
@@ -182,18 +241,25 @@ export function runServePolicyCycle(
   deps.log("deploy.serve_policy_replace", { reason: decision.reason, ...rows });
   let error: string | undefined;
   try {
-    deps.replaceServe();
+    const held = deps.replaceServe();
+    if (held) {
+      // W1-T8311: an admission refusal changed nothing; the next tick asks again with a fresh reading
+      const reason = `${decision.reason}, but fresh host pressure refused it (${held.held}: ${held.detail}) — the old console was kept`;
+      deps.log("deploy.serve_policy_held", { reason, hold: held.held, ...rows });
+      return { replaced: false, reason, drift, mountDrift, imageDrift };
+    }
     // Only a reading known BEFORE the replace is re-checked: an unknown one never caused it.
     const after = drift === undefined ? [] : deps.servePolicyDrift();
     const mountsAfter = mountDrift === undefined ? [] : deps.serveMountPlanDrift?.();
-    const imageAfter = imageDrift && "expected" in imageDrift ? deps.serveImageDrift?.() : undefined;
+    const imageAfter = imageDrift && "expected" in imageDrift ? readServeImage(deps) : undefined;
     if (deps.serveHealthy?.() !== true) error = "serve is not running after the replace";
     else if (after === undefined || after.length > 0) error = `limits still off the policy after the replace (${after ? describeDrift(after) : "unreadable"})`;
     else if (mountsAfter === undefined || mountsAfter.length > 0) {
       error = `binds still off the scratch mount plan after the replace (${mountsAfter ? describeMountDrift(mountsAfter) : "unreadable"})`;
     }
     else if (imageAfter) {
-      error = `image still off the daemon after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
+      const measure = imageDrift && "basis" in imageDrift ? "behind its newest published input" : "off the daemon";
+      error = `image still ${measure} after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
   } catch (err) {
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
@@ -215,6 +281,7 @@ export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
   exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
+  budget: () => HostMemoryBudgetPolicy = () => loadHostMemoryBudgetPolicy(),
 ): Partial<Parameters<typeof runServePolicyCycle>[0]> {
   let registryText: string;
   try {
@@ -225,6 +292,7 @@ export function realServePolicyDeps(
   if (isPrimaryDeployment(registryText, o.stateRoot) !== true) return {};
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
+  const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
   return {
     servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
@@ -240,6 +308,19 @@ export function realServePolicyDeps(
       } catch (err) {
         return { kind: "unknown", reason: err instanceof Error ? err.message : String(err) };
       }
+    },
+    serveImageInputs: () => {
+      let buildSha: string;
+      try {
+        buildSha = exec("docker", ["exec", SERVE_POLICY_CONTAINER, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+      } catch {
+        return undefined; // serve down or no docker — the daemon comparison decides, as before
+      }
+      if (!/^[0-9a-f]{40}$/i.test(buildSha)) return undefined; // built without RMD_BUILD_SHA reads "unknown"
+      // serve executes every baked input, and the deploy cycle's lockfile image inputs too
+      const baked = bakedPathCommitsBehind(buildSha, git, "serve");
+      if (baked === undefined) return undefined;
+      return { buildSha, behind: baked + (playwrightCoreVersionCommitsBehind(buildSha, git) ?? 0) + (workerSdkCommitsBehind(buildSha, git) ?? 0) };
     },
     pausePresent: () => isPaused(o.stateRoot),
     serveHandoffInProgress: () => {
@@ -257,7 +338,23 @@ export function realServePolicyDeps(
       }
     },
     replaceServe: () => {
-      exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
+      let admission: string[];
+      try {
+        admission = serveReplaceAdmissionEnv(budget());
+      } catch (err) {
+        // no thresholds, no launch: a named hold, never an unguarded replace
+        return { held: "policy_unread", detail: err instanceof Error ? err.message : String(err) };
+      }
+      try {
+        exec("env", [`RMD_STATE_DIR=${o.stateRoot}`, ...admission, "bash", join(o.installPath, "deploy", "serve-container.sh"), "--replace"]);
+      } catch (err) {
+        const status = (err as { status?: unknown }).status;
+        if (status !== SERVE_REPLACE_HELD_EXIT) throw err;
+        const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+        const held = /HELD \(([a-z_]+)\) — (.*)/.exec(stderr);
+        return { held: held?.[1] ?? "held", detail: held?.[2] ?? (err instanceof Error ? err.message : String(err)) };
+      }
+      return undefined;
     },
     servePolicyLastFailedAtMs: () => {
       try {
@@ -280,7 +377,7 @@ export function realServePolicyDeps(
     escalate: (e) => {
       const slug = (() => {
         try {
-          return githubSlugOf(exec("git", ["-C", o.installPath, "remote", "get-url", "origin"]).trim());
+          return githubSlugOf(git(["remote", "get-url", "origin"]).trim());
         } catch {
           return undefined; // no origin — the failure row and back-off file still record it
         }

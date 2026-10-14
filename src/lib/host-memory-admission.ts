@@ -14,17 +14,24 @@
  * PRIORITY: waiting starts in one process are evaluated one at a time, highest class weight times aged wait first
  *   (host-memory-priority.ts `rankDemand`), so an older build eventually outranks a newer review and nothing starves.
  * FAIL-OPEN AND NAMED: an error admits the start and writes memory_budget.enforce_error; it never holds work hostage.
+ *
+ * PER CLASS (operator 2026-10-14): `sweep.hostMemoryBudget.classModes` overrides `mode` for one worker class, so garden
+ * children enforce while builds, fixes and reviews stay in shadow until W1-T8472 lands. A caller that runs again on its
+ * own schedule (a garden pass) asks `onShortfall: "defer"`: where an enforced start would wait out a shortfall, it is
+ * instead DEFERRED, named in one memory_budget.enforce_defer row, and the caller's next pass asks again. Nothing is
+ * dropped: the deferred pass records no pacing, so it stays due.
  */
 
 import { join } from "node:path";
 
-import { daemonOwnedProcess } from "./host-memory-learning.js";
-import type { WorkerClass } from "./host-memory-ledger.js";
+import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
+import { MEMORY_ADMISSION_LOCK_BUSY, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand } from "./host-memory-priority.js";
 import {
   defaultShadowMemoryPorts,
   evaluateShadowMemory,
   gatherShadowInputs,
+  hostMemoryBudgetModeFor,
   type ShadowInputs,
   type ShadowMemoryPorts,
   type ShadowVerdict,
@@ -34,6 +41,8 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 export const ENFORCE_WAIT_STEP = "memory_budget.enforce_wait";
 export const ENFORCE_ADMIT_STEP = "memory_budget.enforce_admit";
 export const ENFORCE_ERROR_STEP = "memory_budget.enforce_error";
+/** A start that asked to be deferred rather than wait was deferred to its caller's next pass. */
+export const ENFORCE_DEFER_STEP = "memory_budget.enforce_defer";
 
 /** PROPOSALS for the back-off schedule: the first re-read after 5 s, doubling to one re-read a minute. */
 export const ADMISSION_BACKOFF = { baseMs: 5_000, maxMs: 60_000, jitter: 0.2 } as const;
@@ -63,18 +72,26 @@ export interface AdmissionRequest {
   root: string | (() => string);
   runId?: string;
   taskId?: string;
+  /** A caller with an existing reservation seam supplies it here; the same handle goes to its spawn. */
+  reserve?: () => LearnedReservation | undefined;
+  /** What an enforced start does about a shortfall it could wait out: "wait" (default) backs off in place; "defer"
+   *  returns `deferred` at once, for a caller whose next scheduled pass asks again. */
+  onShortfall?: "wait" | "defer";
 }
 
 export type AdmissionOutcome =
   | { kind: "not-enforced"; why: string }
-  | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for"; waitedMs: number; attempts: number }
-  | { kind: "error"; reason: string };
+  | { kind: "deferred"; reasons: ShadowVerdict["reasons"] }
+  | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for"; waitedMs: number; attempts: number; reservation?: LearnedReservation }
+  | { kind: "error"; reason: string; reservation?: LearnedReservation; reservationAttempted?: true };
 
 export interface AdmissionPorts extends ShadowMemoryPorts {
   sleep: (ms: number) => Promise<void>;
   random: () => number;
   /** Only the daemon and the processes it starts share the ledger the budget reads; anything else is never held. */
   enforceHere: () => boolean;
+  withLock: <T>(action: () => T) => T;
+  openReservation: (input: { workerClass: WorkerClass; root: string }) => LearnedReservation | undefined;
 }
 
 interface Waiter {
@@ -100,6 +117,8 @@ function defaultAdmissionPorts(): AdmissionPorts {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     random: Math.random,
     enforceHere: () => daemonOwnedProcess(),
+    withLock: withMemoryAdmissionLock,
+    openReservation: openLearnedReservation,
   };
 }
 
@@ -127,9 +146,12 @@ export async function awaitMemoryAdmission(
     }
   };
   let waiter: Waiter | undefined;
+  let reservation: LearnedReservation | undefined;
+  let reservationAttempted = false;
   try {
     const policy = ports.policy();
-    if (policy.mode !== "enforce") return { kind: "not-enforced", why: `mode ${policy.mode}` };
+    const mode = hostMemoryBudgetModeFor(policy, request.workerClass);
+    if (mode !== "enforce") return { kind: "not-enforced", why: `mode ${mode}` };
     if (!ports.enforceHere()) return { kind: "not-enforced", why: "not a daemon-owned process" };
     const root = typeof request.root === "string" ? request.root : request.root();
     ledgerPath = join(root, "state", LEDGER_FILENAME);
@@ -143,26 +165,54 @@ export async function awaitMemoryAdmission(
       const now = clock.now();
       const head = rankDemand(waiting, ports.priorityPolicy(), now)[0];
       if (head === waiter) {
-        const inputs = gatherShadowInputs({ ...request, root }, ports, policy);
-        const verdict = evaluateShadowMemory(inputs, policy);
-        const tier = admissionTier(verdict);
-        const admitAs = tier === "fits" ? "fits"
-          : tier === "uncertain" && attempt > 0 ? "uncertain"
-            : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
-              : undefined;
-        if (admitAs !== undefined) {
-          const waitedMs = now - startedAt;
-          if (noted || admitAs !== "fits") {
-            write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: admitAs, waited_ms: waitedMs,
-              attempts: attempt, reasons: verdict.reasons, numbers: verdict.numbers });
+        try {
+          const { inputs, verdict, tier, admitAs } = ports.withLock(() => {
+            const inputs = gatherShadowInputs({ ...request, root }, ports, policy);
+            const verdict = evaluateShadowMemory(inputs, policy);
+            const tier = admissionTier(verdict);
+            const admitAs: AdmissionTier | "nothing-to-wait-for" | undefined = tier === "fits" ? "fits"
+              : tier === "uncertain" && attempt > 0 ? "uncertain"
+                : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
+                  : undefined;
+            if (admitAs !== undefined) {
+              if (admitAs === "fits" && inputs.ledger.state !== "present") throw new Error(`admission-ledger-${inputs.ledger.state}`);
+              reservationAttempted = true;
+              reservation = request.reserve ? request.reserve() : ports.openReservation({ workerClass: request.workerClass, root });
+              if (reservation === undefined || reservation.id === undefined) throw new Error("admission-reservation-unavailable");
+              if (reservation.published !== true) throw new Error("admission-reservation-unpublished");
+              if (reservation.estimateMib !== inputs.start.estimateMib) throw new Error("admission-estimate-changed");
+              const visible = ports.readLedger(root);
+              if (visible?.state !== "present") throw new Error(`admission-ledger-${visible?.state ?? "unreadable"}`);
+              if (!visible.entries.some(entry => entry.id === reservation!.id)) throw new Error("admission-reservation-not-visible");
+            }
+            return { inputs, verdict, tier, admitAs };
+          });
+          if (admitAs !== undefined) {
+            const waitedMs = now - startedAt;
+            if (noted || admitAs !== "fits") {
+              write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: admitAs, waited_ms: waitedMs,
+                attempts: attempt, reasons: verdict.reasons, numbers: verdict.numbers });
+            }
+            return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}) };
           }
-          return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt };
-        }
-        if (!noted) {
-          noted = true;
-          write({ step: ENFORCE_WAIT_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
-            uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario,
-            waiting: waiting.length });
+          if (tier === "shortfall" && request.onShortfall === "defer") {
+            write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
+              uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
+              waited_ms: now - startedAt });
+            return { kind: "deferred", reasons: verdict.reasons };
+          }
+          if (!noted) {
+            noted = true;
+            write({ step: ENFORCE_WAIT_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
+              uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario,
+              waiting: waiting.length });
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== MEMORY_ADMISSION_LOCK_BUSY) throw error;
+          if (!noted) {
+            noted = true;
+            write({ step: ENFORCE_WAIT_STEP, worker_class: request.workerClass, tier: "uncertain", reasons: ["admission-lock-held"], waiting: waiting.length });
+          }
         }
       }
       await ports.sleep(backoffMs(attempt, ports.random()));
@@ -171,7 +221,7 @@ export async function awaitMemoryAdmission(
   } catch (error) {
     const reason = reasonOf(error);
     write({ step: ENFORCE_ERROR_STEP, worker_class: request.workerClass, reason, admitted: true });
-    return { kind: "error", reason };
+    return { kind: "error", reason, ...(reservation ? { reservation } : reservationAttempted ? { reservationAttempted: true as const } : {}) };
   } finally {
     if (waiter) waiting.splice(waiting.indexOf(waiter), 1);
   }

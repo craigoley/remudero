@@ -242,8 +242,10 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     const old = MARKER.exec(text);
     const oldBand = old ? Number(old[1]) : undefined;
     // W1-T6307: any numeric value is a declared priority — the machine-filing judge writes `2.5`.
+    const priorities = text.match(/^ {2}(?:priority|["']priority["'])[ \t]*:[^\r\n]*$/gm) ?? [];
     const declared = DECLARED_PRIORITY.exec(text);
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
+    if (priorities.length && (priorities.length !== 1 || !declared)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand) && action.evidence.satisfiedByMain === undefined) continue;
     let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
     if (action.disposition.kind === "band") {

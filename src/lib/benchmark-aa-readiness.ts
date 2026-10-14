@@ -38,11 +38,12 @@ import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, parseInstanceRegistry } from "./in
 import type { PairedAttemptDispatch, PairedGrader } from "./paired-trial.js";
 import type { AcceptanceCriterion } from "./plan.js";
 import { parseWhitelistedProof } from "./review.js";
+import { READINESS_FOLLOW_UPS_FILE, type ReadinessGap } from "./benchmark-readiness-intake.js";
 
 export const BENCHMARK_AA_READINESS_VERSION = "benchmark-aa-readiness-v1" as const;
 export const READINESS_POPULATION_VERSION = "benchmark-aa-readiness-population-v1" as const;
 export const READINESS_ORDER_METHOD = "sha256(benchmark-aa-readiness-order-v1, allocationReceiptHash, taskId)" as const;
-export const READINESS_FOLLOW_UPS_FILE = "benchmark-aa-readiness.follow-ups.ndjson";
+export { READINESS_FOLLOW_UPS_FILE };
 const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"] as const;
 type RevisionField = typeof REVISION_FIELDS[number];
 
@@ -275,12 +276,14 @@ function cashOf(rows: readonly Row[]) {
     billingUnknownAttempts: of(null).length };
 }
 
-export interface ReadinessGap { kind: string; machineRepairable: boolean; detail: string }
+export type { ReadinessGap };
 
 export interface BenchmarkAaReadinessInput<T extends ReadinessTask = ReadinessTask> {
   /** The local instance's state dir: where a new registration goes and where follow-ups are filed. */
   stateDir: string;
   trialId: string;
+  /** The GitHub identity (owner/name) of the checkout this process runs in; stamped on each recorded gap so intake never reads a foreign one. */
+  repo?: string;
   /** Every opted-in instance root to reconcile, as the operator named them. */
   instanceRoots?: readonly InstanceRoot[];
   /** The roots when the operator named none (production: the fleet registry); absent, the local root alone. */
@@ -316,7 +319,7 @@ export interface BenchmarkAaReadinessResult {
   report: { state: BenchmarkAaReport["state"]; verdict: BenchmarkAaReport["verdict"]; reportHash: string } | null;
   receipt: { state: "emitted"; path: string; reportHash: string } | { state: "withheld"; gaps: ReadinessGap[] };
   nextGap: ReadinessGap | null;
-  followUp: { key: string; state: "filed" | "already-filed" } | null;
+  followUp: { key: string; state: "recorded" | "already-recorded" } | null;
   /** The driver runs beside ordinary work: it pauses, holds and routes nothing, and never touches the paid pilot. */
   holds: { dispatch: false; pr: false; daemon: false };
   paidPilot: "not-activated";
@@ -328,16 +331,20 @@ function gapOf(reason: string): ReadinessGap {
   return { kind, machineRepairable: repairable, detail: reason };
 }
 
-/** Files one follow-up per trial and gap kind; a second run that finds the same gap does not file it twice. */
-function fileFollowUp(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string): BenchmarkAaReadinessResult["followUp"] {
+/**
+ * Records one gap per trial and gap kind in the local sidecar; a second run that finds the same gap does not record it twice.
+ * Recording is NOT filing: a task exists only once the opportunity intake's triage has produced one (benchmark-readiness-intake.ts).
+ * `repo` is the GitHub identity of the checkout that observed the gap; the reader refuses a record that lacks it or names another.
+ */
+export function recordReadinessGap(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string, repo?: string): BenchmarkAaReadinessResult["followUp"] {
   const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
   const key = `${trialId}:${gap.kind}`;
   const fd = openSync(path, "a+");
   try {
-    const filed = readFileSync(fd, "utf8").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
-    if (filed) return { key, state: "already-filed" };
-    appendFileSync(fd, `${JSON.stringify({ ts: nowIso, key, trialId, gap })}\n`);
-    return { key, state: "filed" };
+    const recorded = readFileSync(fd, "utf8").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
+    if (recorded) return { key, state: "already-recorded" };
+    appendFileSync(fd, `${JSON.stringify({ ts: nowIso, key, trialId, gap, ...(repo === undefined ? {} : { repo }) })}\n`);
+    return { key, state: "recorded" };
   } finally { closeSync(fd); }
 }
 
@@ -404,7 +411,7 @@ export async function runBenchmarkAaReadiness<T extends ReadinessTask>(input: Be
     const gap = gapOf(refusals[0] ?? "trial-not-registered");
     return { ...base, state: "refused", identity: owner?.identity ?? null, sources, refusals, billing, run: emptyRun,
       receipt: { state: "withheld", gaps: refusals.map(gapOf) }, nextGap: gap,
-      followUp: fileFollowUp(input.stateDir, input.trialId, refusals.map(gapOf).find((entry) => entry.machineRepairable) ?? gap, nowIso) };
+      followUp: recordReadinessGap(input.stateDir, input.trialId, refusals.map(gapOf).find((entry) => entry.machineRepairable) ?? gap, nowIso, input.repo) };
   }
   const population = frozen.population;
   const eligible = population.eligible.map((entry) => entry.taskId);
@@ -446,14 +453,14 @@ export async function runBenchmarkAaReadiness<T extends ReadinessTask>(input: Be
     result = { ...common, state: "receipt-emitted", receipt: { state: "emitted", path, reportHash: report.receipt.reportHash }, nextGap: null, followUp: null };
   } else {
     const nextGap = gaps.find((gap) => gap.machineRepairable) ?? gaps[0]!;
-    result = { ...common, state: "withheld", receipt: { state: "withheld", gaps }, nextGap, followUp: fileFollowUp(input.stateDir, input.trialId, nextGap, nowIso) };
+    result = { ...common, state: "withheld", receipt: { state: "withheld", gaps }, nextGap, followUp: recordReadinessGap(input.stateDir, input.trialId, nextGap, nowIso, input.repo) };
   }
   writeFileSync(join(prospectiveAaDir(owner.stateDir, input.trialId), "readiness.json"), `${JSON.stringify(result, null, 2)}\n`);
   return result;
 }
 
 /** What the operator verb hands the driver; run-task adds the plan, the sealed dispatcher and the runtime pins. */
-export type BenchmarkAaReadinessRequest = Pick<BenchmarkAaReadinessInput, "stateDir" | "trialId" | "instanceRoots" | "manifest" | "maxPairs" | "out" | "clock">;
+export type BenchmarkAaReadinessRequest = Pick<BenchmarkAaReadinessInput, "stateDir" | "trialId" | "repo" | "instanceRoots" | "manifest" | "maxPairs" | "out" | "clock">;
 
 const USAGE = "usage: rmd benchmark-aa readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... "
   + "[--max-pairs <n>] [--out <receipt.json>] [--state-dir <dir>] [--json]";
@@ -496,7 +503,7 @@ export async function benchmarkAaReadinessCommand(rest: string[], run: (request:
     print(`  pairs ${result.run.dispatchedPairs} run now, ${result.run.completedBefore} completed before${result.run.stoppedBy ? `; stopped: ${result.run.stoppedBy}` : ""}`);
     for (const refusal of result.refusals) print(`  refused: ${refusal}`);
     if (result.receipt.state === "emitted") print(`  receipt ${result.receipt.reportHash.slice(0, 16)} written to ${result.receipt.path}`);
-    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (follow-up ${result.followUp.state})` : ""}`);
+    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (gap ${result.followUp.state}; recorded, not a filed task)` : ""}`);
   }
   return result.state === "receipt-emitted" ? 0 : 1;
 }

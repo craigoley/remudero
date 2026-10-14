@@ -271,6 +271,7 @@ function emptyPlanPath(): string {
 async function captureDrainDeps(config: Config, planPath: string): Promise<DrainDeps> {
   let captured: DrainDeps | undefined;
   const code = await drainCommand([], {
+    readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
     config,
     planPath,
     skipGitSync: true,
@@ -302,6 +303,7 @@ function daemonFixtureHome(): { home: string; root: string; planPath: string } {
 async function captureDaemonDeps(planPath: string): Promise<DaemonDeps> {
   let captured: DaemonDeps | undefined;
   const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
     runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
       captured = deps;
       return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
@@ -431,6 +433,7 @@ async function captureDrainDepsWithLiveProjection(config: Config, planPath: stri
   appendGitConfigEnv("remote.origin.url", "https://github.com/fixture/remudero.git");
   try {
     const code = await drainCommand([], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       config,
       planPath,
       skipGitSync: true,
@@ -578,6 +581,7 @@ test("W1-T321: daemonCommand's WIRED checkQueueGovernor reads the REAL open-PR c
     const planPath = planWithOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       githubFactory: () => OPEN_GITHUB,
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
@@ -622,6 +626,7 @@ test("W1-T3144: daemon WIP admission counts every open board PR even when curren
     const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       githubFactory: () => github,
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
@@ -796,6 +801,7 @@ test("the wired drain gate ledgers admission above the base limit when its owned
     writeFileSync(planPath, "[]\n");
     let gate: DrainDeps["checkQueueGovernor"];
     const code = await drainCommand([], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       config: { claudeBin: "/bin/true", root } as Config,
       planPath,
       skipGitSync: true,

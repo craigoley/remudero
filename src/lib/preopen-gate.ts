@@ -13,11 +13,16 @@
  * minutes per build and already run under CI; the fast gate is the set a build can satisfy alone.
  */
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
 import { preflightSummaryPath } from "./ci-parity.js";
 import { systemClock, type Clock } from "./clock.js";
+import { loadConfig } from "./config.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
 
@@ -34,11 +39,56 @@ export interface PreopenGateOptions {
   runGate?: (cwd: string) => Promise<{ exitCode: number | null; error?: string }>;
   readFile?: (path: string) => string;
   clock?: Clock;
+  /** W1-T8778: where `child_entry.spawned` goes. Default: the host ledger, best effort. Only the default `runGate` writes it. */
+  log?: GateLog;
 }
 
-function defaultRunGate(cwd: string): Promise<{ exitCode: number | null; error?: string }> {
+export type GateLog = (step: string, extra?: Record<string, unknown>) => void;
+
+/** The default `child_entry.spawned` writer: one ledger row, and a failure to write it is noted, never the gate's failure. */
+export const ledgerGateLog: GateLog = (step, extra = {}) => {
+  try {
+    appendLedger(ledgerPathFor(loadConfig()), { run_id: `PREOPEN-GATE-${process.pid}`, task_id: "HARNESS", step, lane: "harness", ...extra });
+  } catch (error) {
+    process.stderr.write(`preopen gate: could not ledger ${step}: ${String((error as Error)?.message ?? error).slice(0, 120)}\n`);
+  }
+};
+
+/** The harness's own `bin/rmd` (the checkout this module runs from) — what gates a worktree with no `bin/rmd` of its own. */
+export const HARNESS_RMD = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+
+/**
+ * W1-T8920 — the command that runs the fast gate for `cwd`. A worktree holding its own `bin/rmd` (the
+ * harness's repo) spawns it, as always; a consumer worktree has none, so the harness's rmd is run with
+ * `--repo-root <cwd>` instead of the spawn failing ENOENT and the build going unmeasured.
+ */
+export function preopenGateCommand(cwd: string, harnessRmd: string = HARNESS_RMD): { file: string; args: string[] } {
+  const own = join(cwd, "bin", "rmd");
+  if (existsSync(own)) return { file: own, args: ["preflight", "--fast"] };
+  return { file: harnessRmd, args: ["preflight", "--fast", "--repo-root", cwd] };
+}
+
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+/**
+ * W1-T8778 — the command that runs the fast gate: the precompiled run-task entry under plain node when
+ * childEntryArgv finds one current (the worktree's own for a harness-repo build, the harness's for a consumer
+ * worktree, which keeps its `--repo-root`), else {@link preopenGateCommand}'s `bin/rmd`, which starts tsx.
+ * `child_entry.spawned` records which ran and why.
+ */
+export function preopenGateLaunch(cwd: string, log: GateLog = ledgerGateLog, harnessRmd: string = HARNESS_RMD, harnessRoot: string = HARNESS_ROOT): { file: string; args: string[] } {
+  const own = existsSync(join(cwd, "bin", "rmd"));
+  const root = own ? cwd : harnessRoot;
+  const launch = childEntryArgv(root, "run-task", "src/run-task.ts", own ? ["preflight", "--fast"] : ["preflight", "--fast", "--repo-root", cwd], undefined, { log });
+  log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "preflight --fast", launch));
+  return launch.kind === "bundle" ? { file: process.execPath, args: launch.argv } : preopenGateCommand(cwd, harnessRmd);
+}
+
+/** `harnessRmd` given means the caller chose the launcher (tests): it is run as given and no bundle is considered. */
+export function defaultRunGate(cwd: string, harnessRmd?: string, log?: GateLog): Promise<{ exitCode: number | null; error?: string }> {
+  const { file, args } = harnessRmd === undefined ? preopenGateLaunch(cwd, log) : preopenGateCommand(cwd, harnessRmd);
   return new Promise((resolve) => {
-    execFile(join(cwd, "bin", "rmd"), ["preflight", "--fast"], { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS, maxBuffer: 64 * 1024 * 1024 },
+    execFile(file, args, { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS, maxBuffer: 64 * 1024 * 1024 },
       (error, _stdout, _stderr) => {
         if (!error) return resolve({ exitCode: 0 });
         const code = typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : null;
@@ -73,7 +123,7 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const clock = deps.clock ?? systemClock;
   const now = () => clock.now();
   const startedAt = now();
-  const run = await (deps.runGate ?? defaultRunGate)(worktreePath);
+  const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log)))(worktreePath);
   const durationMs = now() - startedAt;
   if (run.error !== undefined) return { kind: "unmeasured", reason: run.error, durationMs };
   const read = readGateSummary(worktreePath, startedAt, deps.readFile);

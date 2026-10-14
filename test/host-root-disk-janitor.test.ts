@@ -16,18 +16,68 @@ import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
-test("janitor refuses cleanup thresholds below six hours", () => {
-  const fx = fixture();
-  const overrides: [Record<string, string>, RegExp][] = [
-    [{ IDLE_MINUTES: "359" }, /idle retention must be at least 360 minutes/],
-    [{ RMD_CLEANUP_SCRATCH_IDLE_MINUTES: "359" }, /idle retention must be at least 360 minutes/],
-    [{ RMD_CLEANUP_TSX_MAX_AGE_HOURS: "5" }, /RMD_CLEANUP_TSX_MAX_AGE_HOURS must be at least 6/],
+test("a janitor override under six hours is clamped and logged, and the pass still reclaims", () => {
+  const cases: [Record<string, string>, RegExp][] = [
+    [{ IDLE_MINUTES: "120" }, /CLAMP IDLE_MINUTES=120 min: under the six-hour floor; using 6 h/],
+    [{ RMD_CLEANUP_SCRATCH_IDLE_MINUTES: "59" }, /CLAMP RMD_CLEANUP_SCRATCH_IDLE_MINUTES=59 min: under the six-hour floor; using 6 h/],
+    [{ RMD_CLEANUP_TSX_MAX_AGE_HOURS: "1" }, /CLAMP RMD_CLEANUP_TSX_MAX_AGE_HOURS=1 h: under the six-hour floor; using 6 h/],
   ];
-  for (const [env, expected] of overrides) {
+  for (const [env, clamp] of cases) {
+    const fx = fixture();
+    const idle = scratchDir(fx, "rmd-thirteen-hours", true);
+    const fresh = scratchDir(fx, "rmd-two-hours", false);
+    age(fresh, 2);
     const r = run(fx, env);
-    assert.equal(r.status, 2, r.stderr + r.stdout);
-    assert.match(r.stderr, expected);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, clamp);
+    assert.equal(existsSync(idle), false, `the clamped pass still reclaims: ${r.stdout}`);
+    assert.equal(existsSync(fresh), true, `nothing under six hours goes, whatever the override: ${r.stdout}`);
   }
+});
+
+test("the idle window is six hours at every disk-pressure tier, and the pass still names the tightest watched filesystem", () => {
+  // W1-T8863 (operator ruling 2026-10-12): anything idle six hours goes, whatever the disk pressure.
+  const hours = [30, 18, 8, 5];
+  for (const pct of [50, 65, 70, 78, 82, 97]) {
+    const fx = fixture();
+    const dirs = hours.map((h) => {
+      const d = scratchDir(fx, `rmd-aged-${h}h`, false);
+      age(d, h);
+      return [h, d] as const;
+    });
+    const r = run(fx, { IDLE_MINUTES: "", FAKE_DF_PCT: String(pct) });
+    assert.equal(r.status, pct >= 85 ? 1 : 0, r.stderr + r.stdout);
+    assert.match(r.stdout, new RegExp(`retention idle 6 h, scratch 6 h, tsx 6 h \\(tiered: tightest is ${fx.rootfs} ${pct}% used, mark 85%\\)`));
+    for (const [h, d] of dirs) {
+      assert.equal(existsSync(d), h < 6, `${pct}% used: ${h} h old dir\n${r.stdout}`);
+    }
+  }
+});
+
+test("a fuller watched scratch disk, or one under its minimum free space, is named as the tightest while the window stays six hours", () => {
+  const fx = fixture();
+  const disk = join(fx.root, "scratch-disk");
+  mkdirSync(disk);
+  // root at 50%; the scratch disk reports DISK_PCT used with DISK_AVAIL KB free
+  const df = join(fx.root, "df-two");
+  writeFileSync(df, [
+    "#!/usr/bin/env bash",
+    "echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'",
+    `case "$1" in ${disk}*) echo "/dev/disk2 100000000 0 \${DISK_AVAIL} \${DISK_PCT}% ${disk}" ;; *) echo "/dev/fake 1000000 500000 500000 50% /" ;; esac`,
+  ].join("\n") + "\n", { mode: 0o755 });
+  const pass = (pct: number, availKb: number) =>
+    run(fx, { IDLE_MINUTES: "", RMD_CLEANUP_DF: df, RMD_CLEANUP_WATCH_FS: `${disk}:90/40G`, DISK_PCT: String(pct), DISK_AVAIL: String(availKb) });
+
+  const roomy = pass(40, 60 * 1048576);
+  assert.match(roomy.stdout, /retention idle 6 h, .*tiered: tightest is .* 50% used, mark 85%/, roomy.stdout);
+  const fuller = pass(76, 60 * 1048576);
+  assert.match(fuller.stdout, new RegExp(`retention idle 6 h, .*tiered: tightest is ${disk} 76% used, mark 90%/40G`), fuller.stdout);
+  const short = pass(40, 10 * 1048576);
+  assert.match(short.stdout, new RegExp(`retention idle 6 h, .*tiered: tightest is ${disk} 40% used, mark 90%/40G`), short.stdout);
+  assert.equal(short.status, 1, "under its minimum free space is still an alarm");
+
+  const blind = run(fx, { IDLE_MINUTES: "", RMD_CLEANUP_DF: "false" });
+  assert.match(blind.stdout, /retention idle 6 h, scratch 6 h, tsx 6 h \(tiered: tightest is no watched filesystem readable\)/, blind.stdout);
 });
 
 test("scratch cleanup uses the six-hour default and preserves anything fresher", () => {
@@ -362,10 +412,14 @@ test("the hourly temp sweep wrapper runs the janitor in temp-only mode and refus
     spawnSync("bash", ["deploy/rmd-tmp-sweep.sh"], { encoding: "utf8", env: { ...process.env, ...fx.env, ...extra } });
 
   // the wrapper's coverage default names the REAL home and /tmp caches; keep the run in the fixture
-  const ok = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT), IDLE_MINUTES: "", RMD_CLEANUP_COVERAGE_PATHS: join(fx.root, "no-coverage") });
+  // W1-T8863: the window is six hours at every tier, so even with room to spare the wrapper's pass
+  // sweeps a 13-hour-old dir
+  const janitor = { RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT), IDLE_MINUTES: "", RMD_CLEANUP_COVERAGE_PATHS: join(fx.root, "no-coverage") };
+  const ok = wrapper({ ...janitor, FAKE_DF_PCT: "50" });
   assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.match(ok.stdout, /retention idle 6 h/);
   assert.match(ok.stdout, /temporary-roots-only mode/);
-  assert.equal(existsSync(idle), false, "the wrapper's six-hour default sweeps a 13-hour-old dir");
+  assert.equal(existsSync(idle), false, "with room to spare the six-hour window still sweeps a 13-hour-old dir");
 
   const capture = join(fx.root, "capture-cleanup-env.sh");
   writeFileSync(capture, '#!/usr/bin/env bash\nprintf "%s\\n%s\\n" "$RMD_CLEANUP_TMP_ROOTS" "$RMD_CLEANUP_TMP_GLOBS"\n');

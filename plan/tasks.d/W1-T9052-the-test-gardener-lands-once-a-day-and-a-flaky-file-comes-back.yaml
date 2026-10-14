@@ -1,0 +1,50 @@
+- id: W1-T9052
+  title: "THE TEST GARDENER LANDS MANIFEST CHANGES ONCE A DAY AND A FLAKY FILE COMES BACK — 55 test-gardener PRs merged in a week because the 24h cadence reads the daemon's lagging checkout, an urgent row drags every settled drift row with it, retier ignores the cadence, counts flake rows forever and never un-retiers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: low
+  origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
+  plan_refs: [W1-T8350, W1-T7703]
+  files: [src/lib/test-gardener.ts, test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts]
+  status: merged
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06..12 on main: 34 "adopt-durations" and 21 "retier-flaker" test-gardener PRs merged. 22 manifest
+    commits landed on 2026-10-12 alone; #11168, drift only, landed 55 minutes after #11160. A manifest change classifies
+    as SOURCE (scripts/diff-class.mjs), so each runs the full suite. #10934 (1,229 rows) and #10959 (144 rows) are two of
+    the slowest PRs behind W1-T8350 (gardener PR ci_wall_clock p50 18.5 min against an 8.5 min baseline).
+    VERIFIED (src/lib/test-gardener.ts):
+    - `DURATION_ADOPTION_CADENCE_MS` is 24h, but `recent` comes from `manifestLastCommitMs(repoRoot)`, the daemon
+      checkout's own history, which lags main.
+    - The urgent bypass (`full && saved > bandLog`) lands ALL settled rows, not just the urgent ones.
+    - `retierFlakerCandidates` ignores `recent`, counts raw `test.flake_retry` rows over the whole ledger with no decay
+      (`RETIER_THRESHOLD` = 3), and counts `retry_outcome: also_failed` rows, which are real failures.
+    - `settleDurationRows` skips `from === threshold`, so a retiered row pinned at 5000 ms is never measured again. 88
+      rows sit at exactly 5000.
+    - No flake-incident filing is tied to a retier.
+  design: |
+    1. Read the cadence from main's manifest history (origin/main), not the checkout HEAD. Put retier behind the same
+       cadence.
+    2. An urgent PR carries only tier and first-value rows, and only when the saving is at least max(bandLog, an absolute
+       floor such as 60 s). Drift rows wait for the daily PR.
+    3. Retier counts DISTINCT recovered `ci_run_id`s inside `FLAKE_INCIDENT_POLICY.windowMs`, never `also_failed` rows.
+    4. A retiered file returns to measurement after one quiet window.
+    5. A retier names the flake-incident task for its file, or leaves the file eligible for one.
+  acceptance:
+    - claim: "a retier waits behind the daily manifest cadence like an adoption"
+      proof: "grep: test(\"W1-T9052: a retier waits behind the daily manifest cadence like an adoption\" in test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts"
+    - claim: "the cadence reads main's manifest history, not its own checkout"
+      proof: "grep: test(\"W1-T9052: the cadence reads main's manifest history, not its own checkout\" in test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts"
+    - claim: "an urgent adoption carries only its urgent rows"
+      proof: "grep: test(\"W1-T9052: an urgent adoption carries only its urgent rows\" in test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts"
+    - claim: "a retiered file returns to measurement after a quiet window, and retier counts distinct recovered runs in the flake window"
+      proof: "grep: test(\"W1-T9052: a retiered file returns to measurement after a quiet window\" in test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts"
+  falsifier: |
+    Give the gardener a checkout whose manifest commit is 30h old while main's is 1h old, plus one urgent tier row and 40
+    settled drift rows. At origin/main it lands all 41 rows now; with the change it lands only the urgent row and waits
+    for the cadence for the rest.

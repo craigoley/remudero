@@ -16,7 +16,7 @@ export interface RestContributionOrigin {
   base?: { repo?: { id?: number; full_name?: string } | null };
   author_association?: string;
 }
-export type AdmissionAction = "review" | "repair" | "auto-merge" | "feedback";
+export type AdmissionAction = "review" | "repair" | "auto-merge" | "feedback" | "disposition";
 export interface AdmissionPolicy {
   version: string;
   ownerIds: readonly number[];
@@ -163,13 +163,20 @@ export interface AdmissionSettings {
   repositoryId: number;
   policy: AdmissionPolicy;
   organizations: readonly { id: number; login: string }[];
+  disposition?: "shadow";
 }
 export interface AdmissionTarget { owner: string; repo: string; prNumber: number; headSha?: string }
 export interface AdmissionResponse { status: number; body: unknown }
 export type AdmissionRead = (path: string) => AdmissionResponse | Promise<AdmissionResponse>;
 export type AdmissionObserver = (target: AdmissionTarget, action: AdmissionAction) => Promise<void>;
 export type AdmissionRecord = (step: string, fields: Record<string, unknown>) => void;
-type AdmissionSteps = Generator<() => unknown, void, unknown>;
+export interface AdmissionAssessment {
+  decision: AdmissionDecision;
+  subject: AdmissionSubject;
+  memberships: readonly MembershipEvidence[];
+  currentPull?: Record<string, unknown>;
+}
+type AdmissionSteps = Generator<() => unknown, AdmissionAssessment | undefined, unknown>;
 
 // Positive membership only, policy-scoped and bounded. PR origins and negative/unknown reads
 // are NEVER cached; each action re-reads the PR, including after a membership round trip.
@@ -230,33 +237,35 @@ export function* contributorAdmissionSteps(
   let subject: AdmissionSubject = { repositoryId: settings.repositoryId, prNumber: target.prNumber,
     headSha: target.headSha ?? "", observedAtMs: started };
   const memberships: MembershipEvidence[] = [];
-  const finish = (overrideReason?: string): void => {
+  let currentPull: Record<string, unknown> | undefined;
+  const finish = (overrideReason?: string): AdmissionAssessment => {
     const decision = overrideReason === undefined ? classify(subject, action, settings.policy, memberships, now()) : {
-      outcome: "unknown", reason: overrideReason,
+      outcome: "unknown" as const, reason: overrideReason,
       receiptKey: createHash("sha256").update(JSON.stringify([subject, action, snapshot, overrideReason])).digest("hex"),
     };
     log("contributor_admission.shadow", { ...decision, mode: "shadow", action, pr_number: target.prNumber,
       repository_id: settings.repositoryId, head_sha: subject.headSha, policy_version: settings.policy.version });
+    return { decision, subject, memberships, currentPull };
   };
   if (settings.mode !== "shadow" || !/^[A-Za-z0-9_.-]+$/.test(target.owner) || !/^[A-Za-z0-9_.-]+$/.test(target.repo)
     || !validId(target.prNumber) || settings.organizations.length > 8
     || settings.organizations.some((o) => !validId(o.id) || !/^[A-Za-z0-9-]+$/.test(o.login))) {
-    finish("invalid-action-config"); return;
+    return finish("invalid-action-config");
   }
   const path = `repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`;
   let response: AdmissionResponse;
   try { response = yield* admissionReadStep(read, path); }
   catch {
     // This PR's origin read failed; shadow observation records unknown and does not refuse effects.
-    finish("origin-unreadable"); return;
+    return finish("origin-unreadable");
   }
-  if (response.status !== 200) { finish("origin-unreadable"); return; }
+  if (response.status !== 200) return finish("origin-unreadable");
   const pull = record(response.body);
   const head = record(pull.head);
   subject = { ...subject, headSha: typeof head.sha === "string" ? head.sha : "", observedAtMs: now(),
     origin: contributionOriginFromRest(pull as RestContributionOrigin) };
-  if (pull.number !== target.prNumber || pull.state !== "open") { finish("pr-context-changed"); return; }
-  if (target.headSha !== undefined && target.headSha !== subject.headSha) { finish("head-changed"); return; }
+  if (pull.number !== target.prNumber || pull.state !== "open") return finish("pr-context-changed");
+  if (target.headSha !== undefined && target.headSha !== subject.headSha) return finish("head-changed");
   const actor = subject.origin?.actor;
   const initial = classify(subject, action, settings.policy, [], now());
   if (initial.reason === "membership-unresolved" && actor != null && validId(actor.id) && actor.type === "User") {
@@ -265,18 +274,32 @@ export function* contributorAdmissionSteps(
   try { response = yield* admissionReadStep(read, path); }
   catch {
     // A failed recheck invalidates this observation, never a prior trusted result on another PR.
-    finish("origin-recheck-unreadable"); return;
+    return finish("origin-recheck-unreadable");
   }
   const current = record(response.body);
-  if (response.status !== 200) { finish("origin-recheck-unreadable"); return; }
-  if (record(current.head).sha !== subject.headSha) { finish("head-changed"); return; }
+  if (response.status !== 200) return finish("origin-recheck-unreadable");
+  if (record(current.head).sha !== subject.headSha) return finish("head-changed");
   if (current.number !== target.prNumber || current.state !== "open"
     || JSON.stringify(contributionOriginFromRest(current as RestContributionOrigin)) !== JSON.stringify(subject.origin)) {
-    finish("origin-changed"); return;
+    return finish("origin-changed");
   }
-  if (JSON.stringify(settings) !== snapshot) { finish("policy-changed"); return; }
-  if (!fresh(started, now(), settings.policy.maxEvidenceAgeMs)) { finish("stale-action-evidence"); return; }
-  finish();
+  if (JSON.stringify(settings) !== snapshot) return finish("policy-changed");
+  if (!fresh(started, now(), settings.policy.maxEvidenceAgeMs)) return finish("stale-action-evidence");
+  currentPull = structuredClone(current);
+  return finish();
+}
+
+export async function assessContribution(
+  settings: AdmissionSettings, target: AdmissionTarget, action: AdmissionAction,
+  read: AdmissionRead = readAdmissionRestAsync, clock: Pick<Clock, "now"> = systemClock,
+): Promise<AdmissionAssessment | undefined> {
+  const steps = contributorAdmissionSteps(settings, target, action, () => {}, read, clock);
+  let next = steps.next();
+  while (!next.done) {
+    try { next = steps.next(await next.value()); }
+    catch (error) { next = steps.throw(error); }
+  }
+  return next.value;
 }
 
 function* contributorMembershipSteps(

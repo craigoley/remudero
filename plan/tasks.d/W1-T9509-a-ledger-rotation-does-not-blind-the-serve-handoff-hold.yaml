@@ -1,0 +1,43 @@
+- id: W1-T9509
+  title: "A LEDGER ROTATION BLINDS SERVE'S HANDOFF HOLD: serve-policy convergence reads the handoff state from the live ledger.ndjson alone, so after a rotation an open handoff's rows sit in the archive and the replace proceeds through it; the handoff state is read across the newest rotation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which ledger rows the serve replace's handoff hold reads
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: serve's image replace ran at 17:02:56Z only because the ledger rotated at 17:00:22Z"
+  plan_refs: [W1-T9504, W1-T6245, W1-T8311, W1-T9508]
+  files: [src/lib/serve-policy-convergence.ts, test/a-ledger-rotation-does-not-blind-the-serve-handoff-hold.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (core ledger):
+    - From 16:03Z every serve-policy tick logged deploy.serve_policy_held "a serve handoff is in progress or
+      unreadable": the newest handoff rows were serve.handoff_requested/shed/deferred (16:59:28-16:59:48Z).
+    - The ledger rotated at 17:00:22Z (state/ledger.2026-10-14T17-00-22-760Z.ndjson.gz). At 17:02:56Z the tick
+      logged deploy.serve_policy_replace and replaced serve (replaced 17:03:34Z, cold start ready 17:03:43Z).
+    READ at origin/main:
+    - realServePolicyDeps' serveHandoffInProgress is serveHandoffOpen(readFileSync(deployLedgerPath(stateRoot))),
+      the live file alone. Right after a rotation it holds no handoff row, so it reads "not in progress".
+    - That replace was harmless (the handoff was only deferred, which W1-T9504 makes closed anyway). But a REAL
+      handoff (standby forked, mid-promote) opened before a rotation reads closed the same way, and the replace
+      would stop serve mid-swap.
+    - ledger-union.ts already reads the live file plus rotations (readLedgerUnionRawLinesSync, with a since window
+      and a step filter).
+    Doctrine: read-the-ledger-union.
+  design: |
+    1. serveHandoffInProgress reads serve handoff and supervisor rows through the ledger union (live plus
+       rotations), bounded to a recent window long enough to span a rotation (e.g. since the newest
+       serve.supervisor_start, or the last 2 h), and applies serveHandoffOpen to them in ts order.
+    2. An unreadable union stays undefined, which holds the replace (today's rule).
+    3. serveHandoffOpen and every other hold are unchanged.
+  acceptance:
+    - claim: "a handoff opened before a ledger rotation and still open after it holds the serve replace"
+      proof: 'grep: test("W1-T9509: a ledger rotation does not blind the serve handoff hold" in test/a-ledger-rotation-does-not-blind-the-serve-handoff-hold.test.ts'
+  falsifier: |
+    Read the live ledger.ndjson alone again: the fixture's open handoff, written before its rotation, reads closed,
+    the replace proceeds, and the test fails.

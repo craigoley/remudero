@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-06: test-cost research (research-coverage REPORT, ranked item 4)"
   plan_refs: [W1-T4112, W1-T5923, W1-T6030]
   files: [scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs, test/pure-test-files-share-one-process.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -23,7 +23,7 @@
  * `queryFn` seam; the live-spawn guard is asserted directly in its own test.
  */
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,20 @@ writeFileSync(join(SDK_CREDENTIAL_DIR, ".credentials.json"), JSON.stringify({
 }), { mode: 0o600 });
 const SDK_CONTEXT = { realHome: SDK_TEST_HOME, platform: "linux" as const };
 after(() => rmSync(SDK_TEST_HOME, { recursive: true, force: true }));
+
+const FILE_ONLY_USAGE_AUTH_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"];
+
+/** Only a file-credential fixture's precondition; production and owner/environment precedence are untouched. */
+export function fileOnlyUsageAuthentication(t: TestContext): void {
+  const saved = FILE_ONLY_USAGE_AUTH_KEYS.map(key => [key, process.env[key]] as const);
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  for (const key of FILE_ONLY_USAGE_AUTH_KEYS) delete process.env[key];
+}
 
 /** A full, healthy reading in the exact shape the pinned SDK declares. */
 const READING: SdkUsageReading = {
@@ -279,7 +293,8 @@ test("the usage control session observes the actual narrowed Linux worker creden
   }
 });
 
-test("capacity refuses real unusable credential stores before opening its SDK transport", async () => {
+test("capacity refuses real unusable credential stores before opening its SDK transport", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
@@ -324,7 +339,8 @@ test("capacity preserves unexpected opening failures rather than inventing a cre
   clearClaudeCapacityCache();
 });
 
-test("a credential lost during SDK initialization prevents the usage control and releases its session", async () => {
+test("a credential lost during SDK initialization prevents the usage control and releases its session", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
@@ -442,7 +458,8 @@ test("a synchronous usage transport refusal releases its retained input and pres
 });
 
 
-test("an ordinary usage caller waits for native credential rotation before immediately tearing down", async () => {
+test("an ordinary usage caller waits for native credential rotation before immediately tearing down", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-lifetime-"));
   const dir = join(root, ".claude-fleet");
   mkdirSync(dir);
@@ -472,7 +489,8 @@ test("an ordinary usage caller waits for native credential rotation before immed
   } finally { await session.return?.(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a native credential refresh timeout or lost store is unreadable and never reaches usage", async () => {
+test("a native credential refresh timeout or lost store is unreadable and never reaches usage", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-refusal-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
@@ -518,7 +536,8 @@ test("a healthy or unknown-expiry usage credential does not wait for a rotation"
 });
 
 
-test("the default usage refresh wait observes a real file replacement without sending a prompt", async () => {
+test("the default usage refresh wait observes a real file replacement without sending a prompt", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-default-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
@@ -540,7 +559,8 @@ test("the default usage refresh wait observes a real file replacement without se
 });
 
 
-test("the usage probe waits inside the pinned native CLI refresh margin while the token is still valid", async () => {
+test("the usage probe waits inside the pinned native CLI refresh margin while the token is still valid", async (t) => {
+  fileOnlyUsageAuthentication(t);
   const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-margin-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");

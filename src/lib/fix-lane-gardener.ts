@@ -30,6 +30,9 @@ import {
   type Charge, type Episode, type FlowAction, type Inventory, type LadderKind, type PrOutcome,
 } from "./flow-remedy-gardener.js";
 import type { LedgerRecord } from "./retro.js";
+import {
+  interventionFromLedgerRow, interventionKey, interventionLedgerFields, OPERATOR_INTERVENTION_STEP, prCauseClass, type OperatorInterventionRow,
+} from "./operator-interventions.js";
 
 /** The `fixlane.report` row: one per pass (class, count, hours, interventions, open remedy). */
 export const FIXLANE_REPORT_STEP = "fixlane.report";
@@ -57,8 +60,9 @@ export const FIX_LANE_LADDER: LadderKind = {
   fallbackFiles: FIX_LANE_CODE,
 };
 
-export type InterventionKind = "push" | "close" | "unfiled-pr";
-export interface OperatorIntervention { pr: number; at: string; kind: InterventionKind; actor: string; detail: string }
+export type InterventionKind = "push" | "close" | "unfiled-pr" | "update-branch" | "merge";
+/** `ref` is the commit or event the action was read from (W1-T8264: dedupes one finding by PR and commit/event). */
+export interface OperatorIntervention { pr: number; at: string; kind: InterventionKind; actor: string; detail: string; ref?: string }
 /** An unreadable source is UNKNOWN, never zero. */
 export type InterventionRead = { ok: true; interventions: readonly OperatorIntervention[] } | { ok: false; reason: string };
 
@@ -229,35 +233,63 @@ function unseamedCoverage(r: LedgerRecord, sources: FixLaneEvidence): string | u
   return `${r.head_sha}: ${evidence.join("; ")}`;
 }
 
-/** Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. */
+export interface CheckRunRef { id: number; name?: string; details_url?: string; app?: { slug?: string } | null }
+
+/**
+ * The Actions job id of a check run, from a numeric source only: a `details_url` `/job/<digits>` or `/jobs/<digits>`
+ * segment, or the check run's own id when GitHub Actions posted it. Never `external_id` (a UUID on some checks).
+ */
+export function actionsJobIdOf(check: CheckRunRef): string | undefined {
+  const fromUrl = /\/jobs?\/(\d+)(?:[/?#]|$)/.exec(check.details_url ?? "")?.[1];
+  if (fromUrl) return fromUrl;
+  if (check.app?.slug === "github-actions" && Number.isSafeInteger(check.id) && check.id > 0) return String(check.id);
+  return undefined;
+}
+
+/**
+ * Reads only the exact-head coverage evidence the ledger rows can consume, off the daemon loop. An unreadable log is
+ * missing evidence for that head (ledgered once as `fix-lane.evidence_unreadable`), never a failed pass.
+ */
 export async function readFixLaneEvidence(
   sources: Pick<FixLaneSources, "owner" | "repo" | "readHeadSource" | "readCoverageLog">,
   records: readonly LedgerRecord[],
+  log?: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<FixLaneEvidence> {
   const logCache = new Map<string, string | undefined>();
   const sourceCache = new Map<string, string | undefined>();
   const readCoverageLog = async (head: string): Promise<string | undefined> => {
     if (logCache.has(head)) return logCache.get(head);
     if (sources.readCoverageLog) {
-      const log = sources.readCoverageLog(head);
-      logCache.set(head, log);
-      return log;
+      const injected = sources.readCoverageLog(head);
+      logCache.set(head, injected);
+      return injected;
     }
     const pages = await ghJsonAsync([...checkRunsRestArgs(sources.owner, sources.repo, head), "--paginate", "--slurp"]) as Array<{
-      check_runs: Array<{ id: number; name: string; conclusion: string; details_url?: string; external_id?: string }>;
+      check_runs: Array<CheckRunRef & { name: string; conclusion: string }>;
     }>;
     const checks = pages.flatMap(page => page.check_runs);
     const latest = new Map<string, typeof checks[number]>();
     for (const check of checks) if (check.id > (latest.get(check.name)?.id ?? 0)) latest.set(check.name, check);
-    const logs: string[] = [];
+    const logs: string[] = [], unreadable: Array<{ check: string; reason: string }> = [];
     for (const check of latest.values()) {
       if (check.conclusion !== "failure" || !isCoverage({ check: check.name })) continue;
-      const job = /\/jobs\/(\d+)/.exec(check.details_url ?? "")?.[1] ?? check.external_id ?? String(check.id);
-      logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+      const job = actionsJobIdOf(check);
+      if (job === undefined) continue;
+      try {
+        logs.push(await ghTextAsync(["api", `repos/${sources.owner}/${sources.repo}/actions/jobs/${job}/logs`]));
+      } catch (error) {
+        unreadable.push({ check: check.name, reason: String((error as Error)?.message ?? error) });
+      }
     }
-    const log = logs.join("\n");
-    logCache.set(head, log);
-    return log;
+    if (unreadable.length) {
+      // Partial logs would price a partial uncovered set as if it were complete, so the head's evidence is unknown.
+      log?.("fix-lane.evidence_unreadable", { head_sha: head, check: unreadable.map(u => u.check).join(", "), reason: unreadable.map(u => u.reason).join("; ") });
+      logCache.set(head, undefined);
+      return undefined;
+    }
+    const joined = logs.join("\n");
+    logCache.set(head, joined);
+    return joined;
   };
   const readHeadSource = async (head: string, file: string): Promise<string | undefined> => {
     const key = `${head}:${file}`;
@@ -282,8 +314,8 @@ export async function readFixLaneEvidence(
     if (!failures.length) continue;
     const tails = failures.flatMap(f => typeof f.logTail === "string" ? [f.logTail] : []);
     if (tails.length !== failures.length) {
-      const log = await readCoverageLog(row.head_sha);
-      if (log !== undefined) tails.push(log);
+      const read = await readCoverageLog(row.head_sha);
+      if (read !== undefined) tails.push(read);
     }
     const parsed = diffCoverageTargets(tails.map(tail => tail.replace(/^\d{4}-\d\d-\d\dT\S+ ?/gm, "")));
     if (!parsed || parsed.unlisted > 0 || !parsed.targets.length) continue;
@@ -382,7 +414,7 @@ function endOfEvent(e: DefectEvent, rows: readonly LedgerRecord[], terminal: Rea
 }
 
 export interface FixLaneInventory extends Inventory {
-  interventions: { read: InterventionRead; byClass: Map<string, number>; total: number };
+  interventions: { read: InterventionRead; byClass: Map<string, number>; total: number; fresh: OperatorInterventionRow[] };
 }
 
 /** Builds the fix-lane episodes (one per defect event, plus the fix-lane-owned sweep blockers) and runs the shared ladder. */
@@ -405,8 +437,14 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
     const at = Date.parse(i.at);
     const cause = [...events].reverse().find(e => e.pr === i.pr && i.pr > 0 && e.at <= at);
     if (cause) { weight.set(cause, (weight.get(cause) ?? 0) + 1); byClass.set(cause.key, (byClass.get(cause.key) ?? 0) + 1); }
-    else { const key = `operator-intervention:${i.kind}`; standalone.push({ i, key }); byClass.set(key, (byClass.get(key) ?? 0) + 1); }
+    else { const key = prCauseClass(sweepRows, i.pr, at); standalone.push({ i, key }); byClass.set(key, (byClass.get(key) ?? 0) + 1); }
   }
+  // W1-T8264: one `operator.intervention` row per finding, classed by the PR's disposition at that moment, not by the action.
+  const recorded = new Set(records.flatMap(r => { const row = interventionFromLedgerRow(r); return row ? [interventionKey(row)] : []; }));
+  const fresh = list.map<OperatorInterventionRow>(i => ({
+    at: i.at, surface: "pr", action: i.kind, target: i.ref ? `pr#${i.pr}@${i.ref}` : `pr#${i.pr}`, actor: i.actor,
+    cause_class: prCauseClass(sweepRows, i.pr, Date.parse(i.at)), source: "github",
+  })).filter(row => !recorded.has(interventionKey(row)));
   for (const e of events) {
     const end = Math.min(Math.max(e.at, endOfEvent(e, sweepRows, terminal, outcomes, now)), now);
     const hours = (end - e.at) / HOUR + (weight.get(e) ?? 0) * OPERATOR_INTERVENTION_HOURS;
@@ -428,14 +466,14 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   const thresholds = markEligibility(blocked, now);
   episodes.push(...blocked.filter(e => e.eligible));
   const inventory = ladderOf(FIX_LANE_LADDER, episodes, records, tasks, now, thresholds);
-  return { ...inventory, interventions: { read: interventions, byClass, total: list.length } };
+  return { ...inventory, interventions: { read: interventions, byClass, total: list.length, fresh } };
 }
 
 /** One PR's operator interventions from a GraphQL node: a non-fleet push to, or close of, a fleet-authored PR. */
 export function interventionsFromPullRequest(pr: number, node: unknown, sinceMs: number): OperatorIntervention[] {
   const n = node as {
-    author?: { login?: string } | null; state?: string;
-    commits?: { nodes?: Array<{ commit?: { oid?: string; committedDate?: string; author?: { name?: string; user?: { login?: string } | null } | null } }> };
+    author?: { login?: string } | null; state?: string; mergedAt?: string | null; mergedBy?: { login?: string } | null;
+    commits?: { nodes?: Array<{ commit?: { oid?: string; committedDate?: string; message?: string; parents?: { totalCount?: number }; author?: { name?: string; user?: { login?: string } | null } | null } }> };
     timelineItems?: { nodes?: Array<{ createdAt?: string; actor?: { login?: string } | null }> };
   };
   // A null author is a deleted account (not the fleet); an author the answer does not carry at all is unreadable, not "someone else".
@@ -451,14 +489,25 @@ export function interventionsFromPullRequest(pr: number, node: unknown, sinceMs:
     const name = commit.author?.name;
     const who = login ?? name;
     if (who === undefined) throw new Error(`fix-lane PR #${pr} commit ${String(commit.oid)} author unreadable`);
-    if (!isFleetActor(login) && !isFleetActor(name)) out.push({ pr, at: commit.committedDate!, kind: "push", actor: who, detail: `commit ${String(commit.oid).slice(0, 9)} pushed to a fleet PR` });
+    if (isFleetActor(login) || isFleetActor(name)) continue;
+    const ref = String(commit.oid).slice(0, 9);
+    // A hand update-branch (or conflict merge) is a non-fleet merge commit of main into the head.
+    const merge = (commit.parents?.totalCount ?? 0) >= 2 && HAND_MAIN_MERGE.test(commit.message ?? "");
+    out.push({ pr, at: commit.committedDate!, kind: merge ? "update-branch" : "push", actor: who, ref,
+      detail: merge ? `commit ${ref} merged main into a fleet PR head` : `commit ${ref} pushed to a fleet PR` });
+  }
+  const mergedAt = Date.parse(n.mergedAt ?? "");
+  if (n.state === "MERGED" && n.mergedBy?.login && !isFleetActor(n.mergedBy.login) && Number.isFinite(mergedAt) && mergedAt >= sinceMs) {
+    out.push({ pr, at: n.mergedAt!, kind: "merge", actor: n.mergedBy.login, ref: "merge", detail: "a fleet PR was merged by a non-fleet actor" });
   }
   if (n.state === "CLOSED") for (const e of n.timelineItems?.nodes ?? []) {
     const at = Date.parse(e.createdAt ?? "");
-    if (Number.isFinite(at) && at >= sinceMs && e.actor?.login && !isFleetActor(e.actor.login)) out.push({ pr, at: e.createdAt!, kind: "close", actor: e.actor.login, detail: "a fleet PR was closed by a non-fleet actor" });
+    if (Number.isFinite(at) && at >= sinceMs && e.actor?.login && !isFleetActor(e.actor.login)) out.push({ pr, at: e.createdAt!, kind: "close", actor: e.actor.login, ref: e.createdAt, detail: "a fleet PR was closed by a non-fleet actor" });
   }
   return out;
 }
+
+const HAND_MAIN_MERGE = /^Merge (?:remote-tracking )?branch '(?:origin\/)?main'/;
 
 const FIX_LANE_PATHS = /^src\/(lib\/(sweep|fix-outcome|fix-progress-judge)\.ts|run-task\.ts)$|^src\/lib\/review.*accept/;
 
@@ -469,7 +518,7 @@ export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" 
     for (let offset = 0; offset < prs.length; offset += 25) {
       const batch = prs.slice(offset, offset + 25);
       const query = `query { repository(owner:${JSON.stringify(sources.owner)}, name:${JSON.stringify(sources.repo)}) { ${batch.map(pr =>
-        `p${pr}:pullRequest(number:${pr}) { author { login } state commits(last:100) { nodes { commit { oid committedDate author { name user { login } } } } } timelineItems(itemTypes:[CLOSED_EVENT], last:5) { nodes { ... on ClosedEvent { createdAt actor { login } } } } }`).join(" ")} } }`;
+        `p${pr}:pullRequest(number:${pr}) { author { login } state mergedAt mergedBy { login } commits(last:100) { nodes { commit { oid committedDate message parents { totalCount } author { name user { login } } } } } timelineItems(itemTypes:[CLOSED_EVENT], last:5) { nodes { ... on ClosedEvent { createdAt actor { login } } } } }`).join(" ")} } }`;
       const body = JSON.parse(ghExec(["api", "graphql", "-f", `query=${query}`], { encoding: "utf8" }));
       const repository = body.data === undefined || body.data === null ? undefined : body.data.repository;
       if (body.errors || repository === undefined || repository === null) throw new Error("fix-lane PR interventions unreadable: GraphQL errors or no repository");
@@ -549,7 +598,7 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
     },
     inventoryAsync: async () => {
       const { now, records, plan } = readInputs();
-      const evidence = await readFixLaneEvidence(sources, records);
+      const evidence = await readFixLaneEvidence(sources, records, deps.log);
       return inventoryOf(now, records, plan, evidence);
     },
     onScorecard: (inv, scorecard) => {
@@ -563,6 +612,7 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
           ...(read.ok ? {} : { interventions_unknown: read.reason }),
           open_remedy: rung && (rung.state === "in_progress" || rung.state === "measuring") ? rung.state : null, remedy_state: rung?.state ?? null });
       }
+      for (const row of full.interventions.fresh) deps.log(OPERATOR_INTERVENTION_STEP, interventionLedgerFields(row));
       deps.log(FIXLANE_REPORT_STEP, { class: null, classes: inv.priced.length, hours: scorecard.total_pr_hours, interventions: read.ok ? full.interventions.total : null,
         ...(read.ok ? {} : { interventions_unknown: read.reason }), next: scorecard.next });
       mkdirSync(deps.stateDir, { recursive: true });

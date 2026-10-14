@@ -338,6 +338,8 @@ test("the open snapshot refuses what it cannot keep and says why on read", (t) =
   writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x", rows: [{ number: 1 }] }));
   assert.match((readOpenBoardSnapshot(root, "o", "r") as { reason: string }).reason, /invalid row/);
   writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x" }));
+  assert.deepEqual(readOpenBoardSnapshot(root, "o", "r"), { ok: false, reason: "open snapshot is incomplete" }, "missing rows is not a complete empty page");
+  writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x", rows: [] }));
   assert.deepEqual(readOpenBoardSnapshot(root, "o", "r"), { ok: true, snapshot: { repository: "o/r", savedAt: "x", rows: [] } });
 });
 

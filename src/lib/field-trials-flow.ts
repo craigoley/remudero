@@ -17,6 +17,7 @@
  * checked per repository, salted pseudonyms, small cells withheld, and REFUSED if any private join
  * key appears. Falsifier: test/field-trials-flow.test.ts (merge-as-deployment reddens it).
  */
+import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -56,7 +57,7 @@ export const SAFE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 const DAY_MS = 86_400_000;
 const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", "verdict", "pr.opened", "review.posted", "review.reviewer", "review.finding",
-  "fix.dispatch", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
+  "fix.dispatch", "fix.remedy_path_execution", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
 const STAGES = ["eligible", "assigned", "worker", "pr", "review", "merge", "deployment", "verified"] as const;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -102,6 +103,7 @@ export interface FlowRow {
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
   importedModule?: ImportedModuleEvidence;
+  remedyExecution?: CiRemedyExecution;
   preventions?: PreventionSourceRegistration[];
   taskClass: string | null;
   risk: string | null;
@@ -158,6 +160,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
     importedModule: importedModuleOf(benchmark?.loadedModule),
+    remedyExecution: ciRemedyExecutionOf(row.prevention_execution),
     preventions: preventionRegistrationsOf(row.prevention_sources),
     notionalCostUsd: typeof row.notional_cost_usd === "number" && Number.isFinite(row.notional_cost_usd) && row.notional_cost_usd >= 0
       ? row.notional_cost_usd : null,
@@ -430,6 +433,7 @@ export interface FieldTrialsFlowSnapshot {
   causalClaims: "none";
   followUpWindowDays: number;
   /** Private assignment metadata coverage by source and selected model; absent revisions stay absent. */
+  preventionExecution?: { source: string; repo: string; evidence: ReturnType<typeof ciRemedyExecutionReport> }[];
   preventionAdoption?: { source: string; repo: string; evidence: ReturnType<typeof preventionAdoption> }[];
   servedTrialCohorts?: { source: string; repo: string; evidence: ReturnType<typeof servedTrialCohorts> }[];
   assignmentTelemetry: { source: string; selectedModel: string; assignments: number; taskClass: number; risk: number;
@@ -686,6 +690,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
     learning: [] as LearningUnit[] };
   const transitions: ModelTransition[] = [];
+  const preventionExecutions: NonNullable<FieldTrialsFlowSnapshot["preventionExecution"]> = [];
   const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
   const trialCohorts: NonNullable<FieldTrialsFlowSnapshot["servedTrialCohorts"]> = [];
   const reasons: string[] = [];
@@ -714,6 +719,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     privateKeys.add(source.repo);
     const pulls = Object.values(store?.pulls ?? {});
     preventionSources.push({ source: source.label, repo: source.repo, evidence: preventionAdoption(ledgerRows, input.asOf) });
+    preventionExecutions.push({ source: source.label, repo: source.repo, evidence: ciRemedyExecutionReport(ledgerRows, input.asOf) });
     trialCohorts.push({ source: source.label, repo: source.repo, evidence: servedTrialCohorts(ledgerRows, input.asOf, periodOf) });
     const ctx: SourceContext = { label: source.label, repo: source.repo, store, rows: ledgerRows, asOf: input.asOf,
       boots: ledgerRows.filter((row) => row.step === "daemon.boot"),
@@ -767,6 +773,8 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
+      if (row.remedyExecution?.state === "observed") for (const key of [row.remedyExecution.invocationId,
+        row.remedyExecution.processInstanceId, row.remedyExecution.callerRunId]) privateKeys.add(key);
       if (row.taskId !== null) {
         const taskRows = rowsByTask.get(row.taskId);
         if (taskRows) taskRows.push(row);
@@ -843,7 +851,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources, servedTrialCohorts: trialCohorts,
+    reviewFindingOutcomes, reviewFindingEvidence, preventionAdoption: preventionSources, preventionExecution: preventionExecutions, servedTrialCohorts: trialCohorts,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,

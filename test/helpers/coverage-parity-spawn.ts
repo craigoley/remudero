@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { unwrapLowPriority } from "../../src/lib/test-slot.js";
 import type { PreflightSpawn } from "../../src/lib/commit-message.js";
+import { finishJudgedRun } from "./judged-pool-run.js";
 
 /** Materialize the artifacts a parity fixture's fake spawn claims its coverage child produced. */
 export function coverageParitySpawnResult(
@@ -17,6 +18,8 @@ export function coverageParitySpawnResult(
     if (!rawDir) throw new Error("a fake coverage shard needs NODE_V8_COVERAGE");
     mkdirSync(rawDir, { recursive: true });
     writeFileSync(join(rawDir, "coverage-1-0000000000000-0.json"), "{}\n");
+    // The shard is judged by its summary (scripts/pure-test-pool.mjs): a finished fake leaves one.
+    finishJudgedRun(args, opts);
     return { status: 0, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
   }
   if (!args.some((arg) => arg.endsWith("coverage-merge-ratchet.mjs"))) return undefined;

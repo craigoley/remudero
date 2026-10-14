@@ -1,18 +1,39 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
+import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
+import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
+import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
+import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import {
   type IncidentEvidence,
   type RunbookPassResult,
 } from "./sre-runbooks.js";
 import { readLedgerLines } from "./status.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "./ledger-union.js";
+import {
+  CONTROL_INTERVENTION_STEPS,
+  deriveControlInterventions,
+  interventionFromLedgerRow,
+  interventionIncidentEvent,
+  interventionKey,
+  interventionLedgerLine,
+  OPERATOR_INTERVENTION_STEP,
+  type OperatorInterventionRow,
+} from "./operator-interventions.js";
 
 export type { IncidentEvidence } from "./sre-runbooks.js";
+
+/** Individual flow detectors register here when their own tasks land. */
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -23,7 +44,7 @@ export type { IncidentEvidence } from "./sre-runbooks.js";
  * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
- * INVARIANT: filing feedback is this lane's only write surface besides the allowlisted, reversible
+ * INVARIANT: flow incident rows and filing feedback are this lane's write surfaces besides the allowlisted, reversible
  * runbooks (sre-runbooks.ts, W1-T4386) each incident is handed to first; it never dispatches a build.
  *
  * PACING: never more filings a day than the fleet merged in the last day (mirrors fleet-lane.ts).
@@ -285,6 +306,9 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
   runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
+  detectors?: readonly FleetFlowDetector[];
+  readFlowRows?: FleetFlowInput["readRows"];
+  writeFlowEvent?: FleetFlowInput["writeEvent"];
 };
 
 export interface SreLanePass {
@@ -305,6 +329,16 @@ export interface SreLanePass {
 export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
+  const detectors = deps.detectors ?? SRE_LANE_DETECTORS;
+  const flowInput = { stateDir: deps.stateDir, nowMs: now, readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent };
+  // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
+  // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
+  const flowRows = [
+    ...await evaluateIdleCapacityDetectors({ ...flowInput, detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID) }),
+    ...await evaluateStrandedTaskDetectors({ ...flowInput, detectors }),
+    // W1-T8264: every hand action is a cause-classed intervention, routed as one incident per class.
+    ...await routeOperatorInterventions({ ...flowInput, detectors }),
+  ];
   const store = readSreLaneStore(deps.stateDir);
   const withinDay = (ts: string) => now - Date.parse(ts) < DAY_MS;
   const filedToday = Object.values(store).filter((d) => withinDay(d.ts)).length;
@@ -313,7 +347,14 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (room <= 0 && !runMatchingRunbook) return { room };
 
   const openOrigins = openIncidentFeedbackOrigins(deps.root);
-  const evidence = aggregateIncidents(deps.readEvents());
+  const events = [...deps.readEvents()];
+  // An injected or lagging incident reader may not yet see this pass's writes. Include each once.
+  for (const row of flowRows) {
+    if (events.some((e) => e.fingerprint === row.fingerprint && e.ts === now && e.message === row.message)) continue;
+    const event = incidentEventFromLedgerRow({ ...row, ts: fixedClock(now).iso() }, deps.root);
+    if (event) events.push(event);
+  }
+  const evidence = aggregateIncidents(events);
   const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
   if (!worst) return { room };
 
@@ -369,13 +410,19 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 export function daemonSreLaneInput(
   input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
 ): SreLaneInput {
+  const instance = resolveSreLaneInstance({
+    stateRoot: dirname(input.stateDir),
+    registryPath: process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(input.root),
+  });
+  const name = instance.resolved ? instance.name : "unknown";
   return {
     stateDir: input.stateDir,
     root: input.root,
+    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
-        .map((row) => incidentEventFromLedgerRow(row, input.repo))
+        .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
     hasOpenTask: () => false,
     framesFor: () => [],
@@ -384,4 +431,191 @@ export function daemonSreLaneInput(
     log: input.log,
     runbookPass: input.runbookPass,
   };
+}
+
+// ── which instance runs the lane (W1-T8232) ───────────────────────────────────────────────────
+
+/**
+ * W1-T8232 — the daemon's own registry row, as the lane's start decision reads it, or why it could
+ * not be resolved. MEASURED 2026-10-11: the lane started only on `RMD_SRE_LANE=1`, no container was
+ * given that variable, and 284 `incident.event` rows that day reached no reader. The registry's
+ * `primary: true` row (W1-T4527) is the selector the old opt-in was waiting for.
+ */
+export type SreLaneInstance =
+  | ({ resolved: true; resolvedBy?: SreLaneResolvedBy } & Pick<RegistryInstance, "name" | "live" | "primary">)
+  | { resolved: false; why: string; resolvedBy?: SreLaneResolvedBy };
+
+/**
+ * W1-T9500 — how the instance was looked up: `env` is the `RMD_INSTANCE_NAME` the container's
+ * creator passed, `state_root` is W1-T8232's match of the state root against the registry's
+ * `state_dir`. Absent only when the registry itself could not be read or parsed.
+ */
+export type SreLaneResolvedBy = "env" | "state_root";
+
+/** The env names the start decision reads — passed in, never read here, so the predicate is pure. */
+export interface SreLaneEnv {
+  RMD_SRE_LANE?: string;
+}
+
+export interface SreLaneStartInput {
+  instance: SreLaneInstance;
+  env: SreLaneEnv;
+}
+
+export type SreLaneDecision =
+  | { enabled: true; instance: string | null; enabledBy: "primary" | "env" }
+  | { enabled: false; instance: string | null; reason: string };
+
+/**
+ * W1-T8232 — whether this daemon runs the SRE lane, and why. `RMD_SRE_LANE=0` is an explicit off
+ * that wins everywhere; otherwise the registry's live `primary: true` row runs it with no opt-in;
+ * `RMD_SRE_LANE=1` still turns it on anywhere, for existing hand setups. An instance that cannot be
+ * resolved is OFF, and the reason says why — never "behave as if primary".
+ */
+export function sreLaneDecision({ instance, env }: SreLaneStartInput): SreLaneDecision {
+  const name = instance.resolved ? instance.name : null;
+  const flag = env.RMD_SRE_LANE?.trim();
+  if (flag === "0") return { enabled: false, instance: name, reason: "RMD_SRE_LANE=0 turns the lane off explicitly" };
+  if (instance.resolved && instance.live && instance.primary === true) return { enabled: true, instance: name, enabledBy: "primary" };
+  if (flag === "1") return { enabled: true, instance: name, enabledBy: "env" };
+  if (!instance.resolved) return { enabled: false, instance: null, reason: instance.why };
+  if (!instance.live) return { enabled: false, instance: name, reason: `instance '${instance.name}' is retired in the registry` };
+  return { enabled: false, instance: name, reason: `instance '${instance.name}' is not the registry's primary instance` };
+}
+
+/** W1-T8232 — the ONE predicate the daemon decides the lane with (src/run-task.ts). */
+export function sreLaneEnabled(input: SreLaneStartInput): boolean {
+  return sreLaneDecision(input).enabled;
+}
+
+/**
+ * W1-T8232 — the one ledger row a daemon start writes about the lane, so "is the SRE lane running"
+ * is a ledger read and not a container inspect: `sre_lane.started` {instance, enabled_by} or
+ * `sre_lane.disabled` {instance, reason}. W1-T9500: each also carries `resolved_by` (env or
+ * state_root) whenever the registry was read, so a disabled row says which lookup missed.
+ */
+export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.started" | "sre_lane.disabled"; fields: Record<string, unknown> } {
+  const decision = sreLaneDecision(input);
+  const by = input.instance.resolvedBy === undefined ? {} : { resolved_by: input.instance.resolvedBy };
+  return decision.enabled
+    ? { step: "sre_lane.started", fields: { instance: decision.instance, enabled_by: decision.enabledBy, ...by } }
+    : { step: "sre_lane.disabled", fields: { instance: decision.instance, reason: decision.reason, ...by } };
+}
+
+/**
+ * W1-T8232 — this daemon's registry row, or why it could not be resolved. An unreadable registry,
+ * a registry the parser refuses, and no or an ambiguous match each resolve to `{resolved: false}`
+ * naming the reason.
+ *
+ * W1-T9500 — THE CREATOR'S NAME FIRST. W1-T8232 matched the state root against each row's
+ * `state_dir` ({@link instanceForStateRoot}), but those are HOST paths and inside every container
+ * the root is /home/node/Remudero; mountinfo reads the filesystem-relative source (/state2), so the
+ * host path cannot be recovered in there either. MEASURED 2026-10-14: 63 `sre_lane.disabled` rows
+ * and 0 `sre_lane.started` on core. So `deploy/recycle-container.sh --instance` and the installed
+ * launcher pass `RMD_INSTANCE_NAME`, and a set name wins: it must name a parsed row (the parser
+ * refuses a name declared twice), and a name the registry does not hold resolves false naming it —
+ * never a fallback to the root match, which would hide a misconfigured creator. With no name (a
+ * host-side caller), the root match runs as before. `env` defaults to `process.env`: the daemon's callers (src/run-task.ts and
+ * {@link daemonSreLaneInput}) read it from the container's own environment.
+ */
+export function resolveSreLaneInstance(input: {
+  stateRoot: string;
+  registryPath: string;
+  readText?: (path: string) => string;
+  env?: { RMD_INSTANCE_NAME?: string };
+}): SreLaneInstance {
+  let text: string;
+  try {
+    text = (input.readText ?? ((path) => readFileSync(path, "utf8")))(input.registryPath);
+  } catch (error) {
+    return { resolved: false, why: `the instance registry ${input.registryPath} is unreadable: ${(error as Error).message}` };
+  }
+  const named = (input.env ?? process.env).RMD_INSTANCE_NAME?.trim() || undefined;
+  const resolvedBy: SreLaneResolvedBy = named === undefined ? "state_root" : "env";
+  const name = named ?? instanceForStateRoot(text, input.stateRoot);
+  if (name === undefined) {
+    return { resolved: false, resolvedBy, why: `state root ${input.stateRoot} is not exactly one instance's state_dir in ${input.registryPath}` };
+  }
+  let row: RegistryInstance | undefined;
+  try {
+    // The parser refuses a name declared twice (duplicate_instance), so a found row is the only one.
+    row = parseInstanceRegistry(text).instances.find((instance) => instance.name === name);
+  } catch (error) {
+    return { resolved: false, why: `the instance registry ${input.registryPath} is refused: ${(error as Error).message}` };
+  }
+  if (row === undefined && named !== undefined) return { resolved: false, resolvedBy, why: `RMD_INSTANCE_NAME '${name}' names no instance in ${input.registryPath}` };
+  if (row === undefined) return { resolved: false, resolvedBy, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
+  return { resolved: true, resolvedBy, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
+}
+
+// ── W1-T8264: hand actions as cause-classed interventions ─────────────────────────────────────
+
+/** Every ledger step the control-surface deriver and its cause lookup read. */
+const INTERVENTION_INPUTS: readonly string[] = [
+  ...CONTROL_INTERVENTION_STEPS, "cli.invoked", "dispatch.circuit_broken", "dispatch.circuit_broken.verified", OPERATOR_INTERVENTION_STEP,
+];
+const INTERVENTION_WINDOW_MS = 7 * DAY_MS;
+const interventionReaders = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+
+function interventionMemoryPath(stateDir: string): string {
+  return join(stateDir, "operator-interventions.json");
+}
+
+/**
+ * Derive the control-surface interventions from the ledger, write each new one as an `operator.intervention` row,
+ * and route every intervention (control and the PR-surface rows the fix-lane gardener wrote) as ONE
+ * `incident.event` of kind `intervention` named by its cause class. The dedupe memory lives beside the fleet-flow
+ * store, keyed by {@link interventionKey}: a re-read of the same window never routes a second event.
+ */
+export async function routeOperatorInterventions(input: FleetFlowInput): Promise<LedgerLine[]> {
+  const sinceMs = input.nowMs - INTERVENTION_WINDOW_MS;
+  let rows: readonly Record<string, unknown>[];
+  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs);
+  else {
+    const key = JSON.stringify([input.stateDir, INTERVENTION_INPUTS]);
+    let memo = interventionReaders.get(key);
+    if (!memo) {
+      const pattern = new RegExp(`"step"\\s*:\\s*"(?:${INTERVENTION_INPUTS.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})"`);
+      memo = createLedgerRotationMemo((records) => records.filter((r) => typeof r.step === "string" && INTERVENTION_INPUTS.includes(r.step)), { pattern });
+      interventionReaders.set(key, memo);
+    }
+    const result = await readLedgerUnionRecordsMemoized(input.stateDir, memo, {
+      since: fixedClock(sinceMs).iso(), rotationWindowMs: INTERVENTION_WINDOW_MS, step: [...INTERVENTION_INPUTS], refuseIncomplete: true,
+    });
+    if (!result.ok) throw new Error(`Operator-intervention ledger unreadable: ${result.unread.join(", ")}`);
+    rows = result.rows;
+  }
+  const write = (line: LedgerLine) => {
+    if (input.writeEvent) input.writeEvent(line);
+    else appendLedger(join(input.stateDir, LEDGER_FILENAME), line, { clock: fixedClock(input.nowMs) });
+  };
+  const all = new Map<string, OperatorInterventionRow>();
+  for (const row of rows) {
+    const read = interventionFromLedgerRow(row);
+    if (read) all.set(interventionKey(read), read);
+  }
+  const path = interventionMemoryPath(input.stateDir);
+  const memory = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { routed?: string[] }) : {};
+  if (memory.routed !== undefined && !Array.isArray(memory.routed)) throw new Error(`Invalid operator-intervention memory: ${path}`);
+  const routed = new Set(memory.routed ?? []);
+  // A row already in the ledger, or already routed, is never written a second time (a reader that lags the
+  // pass's own writes must not mint it again).
+  const recorded = new Set([...all.keys(), ...routed]);
+  for (const derived of deriveControlInterventions(rows.filter((r) => r.step !== OPERATOR_INTERVENTION_STEP))) {
+    const key = interventionKey(derived);
+    if (!recorded.has(key)) write(interventionLedgerLine(derived));
+    all.set(key, derived);
+  }
+  const events: LedgerLine[] = [];
+  for (const [key, row] of [...all].sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at))) {
+    if (routed.has(key) || !(Date.parse(row.at) <= input.nowMs)) continue;
+    const event = interventionIncidentEvent(row, input.nowMs);
+    write(event);
+    events.push(event);
+    routed.add(key);
+  }
+  // Keep only keys still inside the window: an older intervention is no longer re-read, so it cannot be re-routed.
+  const live = [...routed].filter((key) => Date.parse(key.slice(key.lastIndexOf("|") + 1)) > sinceMs);
+  writeAtomic(path, JSON.stringify({ routed: live }) + "\n");
+  return events;
 }

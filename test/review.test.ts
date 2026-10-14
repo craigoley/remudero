@@ -56,6 +56,7 @@ import {
   type ProofSpawner,
   type WhitelistedProof,
 } from "../src/lib/review.js";
+import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 
 // W1-T229: source text of run-task.ts, read once, so the plan-only carve-out
 // falsifier below can verify by STRUCTURE (call-site count) rather than by
@@ -2701,9 +2702,9 @@ test("resolveNameFilteredCandidates: grep LOOKED and no file contains the raw na
  * than infer it from a stopwatch. */
 function countingSpawner(stdout: string): { spawner: ProofSpawner; calls: { args: readonly string[] }[] } {
   const calls: { args: readonly string[] }[] = [];
-  const spawner: ProofSpawner = (_command, args) => {
+  const spawner: ProofSpawner = (_command, args, cwd) => {
     calls.push({ args });
-    return stdout;
+    return stdout + inlineJudgedTally(args, cwd);
   };
   return { spawner, calls };
 }

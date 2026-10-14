@@ -1,0 +1,67 @@
+- id: W1-T9071
+  title: "THE CODEX SESSIONS FILL THE ROOT DISK AND NOTHING CAN MOVE THEM SAFELY — the core, site and console containers all bind ~/.codex, whose sessions/ grows ~565 MB a day on the 29 GB root disk (4.8 GB on 2026-10-13), and the age reclaim that would bound it refuses while any container is live, which is always: a recycle runs its instance's pending, reviewed recycle actions in the window between docker rm and docker run, and the first one moves that instance's Codex sessions onto the persistent data disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — a recycle's stopped window runs reviewed one-shot actions; the first moves Codex sessions off root
+  band_meaning: span
+  origin: "operator ruling 2026-10-13: no VM resize; make the Codex sessions move happen automatically at the next recycle through optional injected recycle steps"
+  plan_refs: [W1-T3626, W1-T3676, W1-T6110, W1-T8861]
+  files: [deploy/recycle-actions.sh, deploy/recycle-actions/codex-sessions-to-data-disk.sh, deploy/codex-sessions-mount.sh, deploy/recycle-container.sh, deploy/host-update.sh, deploy/install-host-units.sh, test/a-recycle-runs-its-pending-actions-in-the-stopped-window.test.ts, test/recycle-container.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-13 at origin/main 06200788d, plus the host (read-only).
+    OBSERVED:
+    - remudero-daemon, remudero-site-daemon and remudero-console-daemon all bind /home/craigoleyagent/.codex at
+      /home/node/.codex (docker inspect; registry codex_dir is identical for all three).
+    - ~/.codex is 10.9 GB on the root disk: sessions/ is 4.8 GB, and 565 MB of it was written in the last 24 h.
+      thread_history_1.sqlite is 4.0 GB and state_5.sqlite 1.9 GB, each with 0 free pages, so compaction would
+      free nothing.
+    - host-update.sh section 4b (W1-T3626/W1-T3676) bounds agent history by age, but it refuses while any fleet
+      container is live, which on this always-up fleet is every run.
+    - /mnt/scratch is wiped by a deallocate (deploy/scratch-mounts.sh: "nothing authoritative moves"); /mnt/rmd is
+      the persistent data disk, with 53 GB free.
+    - Three launchers build the daemon's mounts: recycle-container.sh, host-update.sh --print-daemon-run and the
+      rmd-relaunch script install-host-units.sh renders. A bind added to only one regresses at the next reboot or
+      watchdog relaunch (W1-T6110).
+    - The auth state (auth.json) is shared by all three and rotates its refresh token, so ~/.codex as a whole cannot
+      move during one instance's recycle.
+    OWNERSHIP: none. W1-T8861 and W1-T8863 tend clones and worktrees, not agent history.
+  design: |
+    1. deploy/recycle-actions.sh. `recycle_actions_run <phase> <state-dir>` runs each action whose marker sits in
+       <state-dir>/recycle-actions/pending/<name> and whose reviewed script deploy/recycle-actions/<name>.sh declares
+       `# phase: <phase>` (stopped or post-start).
+       - Each run has a bound (RMD_RECYCLE_ACTION_TIMEOUT_S, default 900 s) and appends a line to
+         <state-dir>/recycle-actions/log.
+       - Success moves the marker to done/<name>.<utc>; a failure, a timeout or an unknown name moves it to
+         failed/<name>.<utc> with the reason.
+       - An action never fails the recycle: the recycle continues on the configuration it would have used.
+       - Only scripts in the repository run; a marker is a name, never code.
+    2. recycle-container.sh calls the stopped phase between `docker rm` and `docker run`, and the post-start phase
+       after its existing proofs.
+    3. deploy/recycle-actions/codex-sessions-to-data-disk.sh (phase: stopped):
+       - copies <codex_dir>/sessions additively into RMD_CODEX_SESSIONS_DIR (default /mnt/rmd/codex-sessions);
+       - refuses when the destination shares the source's filesystem or lacks 1.2x the source's size free;
+       - verifies nothing is left to transfer, then writes <state-dir>/codex-sessions.ready naming the destination.
+       - Only when no other live container still binds that codex_dir without the destination does it remove the
+         source files already identical in the destination.
+    4. deploy/codex-sessions-mount.sh. `codex_sessions_plan <state-dir>` sets CODEX_SESSIONS_ARGS
+       (-v <dest>:/home/node/.codex/sessions) only when this instance's ready file names an existing, writable
+       destination; otherwise it is empty and says why. All three launchers source it, so a reboot or watchdog
+       relaunch keeps the same bind, and the runtime-contract proof expects it.
+    5. Per-instance cutover: an instance binds the destination only after its own stopped-window copy succeeded, so a
+       relaunch can never hide sessions that instance still needs.
+  acceptance:
+    - claim: "a recycle runs each pending, reviewed action of its phase once in the stopped window, records done or failed, never fails the recycle on an action's failure, and the Codex sessions action copies sessions to the data disk and enables the bind only for its own instance"
+      proof: 'grep: test("W1-T9071: a recycle runs its pending actions in the stopped window" in test/a-recycle-runs-its-pending-actions-in-the-stopped-window.test.ts'
+    - claim: "the recycle calls the stopped-window actions"
+      proof: 'grep: recycle_actions_run stopped in deploy/recycle-container.sh'
+  falsifier: |
+    Run the stopped-phase actions before `docker stop`: the fixture's action sees the old container still live and
+    the test fails. Let a failing action exit the recycle: the fixture recycle with a failing action never reaches
+    docker run, and the test fails.

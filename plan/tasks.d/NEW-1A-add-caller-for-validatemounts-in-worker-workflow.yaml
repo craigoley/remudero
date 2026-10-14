@@ -1,0 +1,27 @@
+- id: NEW-1A
+  title: Add caller for validateMounts in worker workflow
+  repo: remudero
+  depends_on:
+    - W1-T5
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: blocked
+  retirement: retired
+  # plan gardener: retire NEW-1A — It depends on W1-T5, which will never be built.
+  attempts: 0
+  files:
+    - src/lib/worker.ts
+  acceptance:
+    - claim: validateMounts is invoked by at least one runtime path
+      proof: "grep: validateMounts( in src/lib/worker.ts"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-13 proposal on adoption:symbol-no-caller:src/lib/mounts.ts:validateMounts,
+    ratified via rmd approve:
+  
+    adoption-debt: "validateMounts" (symbol-no-caller) in src/lib/mounts.ts has shipped since
+    2026-07-14T19:06:21-04:00 with no adopter found — no reference to `validateMounts` outside its
+    own definition in src/lib/mounts.ts (rmd measurement-cadence's adoption report).

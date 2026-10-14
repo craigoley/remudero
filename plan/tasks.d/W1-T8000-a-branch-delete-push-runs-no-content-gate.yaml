@@ -1,0 +1,67 @@
+- id: W1-T8000
+  title: "THE PRE-PUSH HOOK GATES A BRANCH DELETION AS IF IT WERE CONTENT — `git push origin --delete <branch>` runs all nine content gates against whatever the checkout holds, and on 2026-10-11 proof-resolve-precheck REFUSED deleting run-W1-T7952-1791721932695 because a same-named local branch existed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — a ref deletion carries no content, so no content gate may judge or refuse it
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the follow-ups (pre-push hook refused a branch-delete push from the operator checkout)"
+  plan_refs: [W1-T3059, W1-T3222, W1-T4214, W1-T6120, W1-T3225]
+  files: [hooks/pre-push, test/a-branch-delete-push-runs-no-content-gate.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 ~12:4xZ (operator session). From the operator checkout, with a same-named local branch present,
+    `git push origin --delete run-W1-T7952-1791721932695` ran the rule15, census, head-identity and proof-resolve
+    prechecks against that local branch. It then REFUSED the deletion with "proof-resolve-precheck: remudero-review
+    WILL REFUSE ...".
+    READ on origin/main e076e2a85, hooks/pre-push (422 lines):
+      - git gives a pre-push hook one "<local ref> <local sha> <remote ref> <remote sha>" line per ref on stdin.
+        A deletion has local ref "(delete)" and local sha 0000000000000000000000000000000000000000.
+      - The first six gates (rule15-precheck, rule25-precheck, ci-control-plane-precheck, test-tier-manifest
+        --check, census-precheck, lint-plan-precheck, from :81) run BEFORE stdin is read at all. They judge the
+        checked-out tree against origin/main, whatever is being pushed.
+      - The stdin loop (:308-311) takes the first refs/heads/* line, including a deletion, and sets
+        head_sha to the zero sha. The zero sha is excluded only by the W1-T4214 transition check (:349).
+        head-identity-gate, worker-branch-shape (`--head-sha 0000…`) and proof-resolve-precheck
+        (`--head-ref <deleted branch>`) all then run against the deleted branch's name.
+    REPRODUCED OFFLINE on e076e2a85 with no push. With `node` shimmed on PATH to log argv and exit 0, this runs the
+    hook on one deletion line:
+    `printf '(delete) 0000…0000 refs/heads/run-W1-T<n>-1 1111…1111\n' | sh hooks/pre-push origin <url>`.
+    It invokes all nine gates: rule15-precheck, rule25-precheck, ci-control-plane-precheck, test-tier-manifest,
+    census-precheck, lint-plan-precheck, head-identity-gate --head-ref run-W1-T<n>-1, worker-branch-shape
+    --head-sha 0000000000000000000000000000000000000000, and proof-resolve-precheck --head-ref run-W1-T<n>-1.
+    WIDER REACH, NOT MEASURED. Production code also pushes deletions: src/lib/branch-reaper.ts
+    (`push origin --delete` per chunk) and src/run-task.ts (`push -q origin --delete`). The daemon's own checkout on
+    the host has core.hooksPath=hooks. Whether those deletions currently pay for or trip the gates is not measured
+    here. The fix below covers them either way.
+  design: |
+    1. Read stdin ONCE, at the top of the hook, right after the RMD_PREPUSH_GATES switch and before any gate runs.
+       Keep the lines. Treat a line as a deletion when its local sha is all zeros. If stdin is empty (run by hand,
+       or by this repo's tests), behave exactly as today.
+    2. If every line is a deletion, print one line naming the skip (e.g. "pre-push: deletion-only push of
+       <refs> — no content to gate, every check skipped") and exit 0. This is a named skip, not a pass.
+    3. In a mixed push, the head_ref/head_sha selection (the loop at :308) skips deletion lines and picks the
+       first non-deletion refs/heads/* line. The content gates run as today.
+    4. Do not touch the W1-T4214 transition check's semantics. It already excludes the zero sha.
+    Tests go in a new file, test/a-branch-delete-push-runs-no-content-gate.test.ts, with `test(` titles verbatim
+    as in the proofs below. Run the REAL hook as the tree's own hook (the ownHook pattern in
+    test/pre-push-identity-transition.test.ts). Give the fixture gate scripts that record their invocation and
+    exit 1 (a refusal). Assert on what they record and on the hook's exit status.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-branch-delete-push-runs-no-content-gate.test.ts"
+    - claim: "a push whose every stdin line is a deletion runs no gate and exits 0 with a named skip"
+      proof: 'grep: test("W1-T8000: a deletion-only push runs no content gate" in test/a-branch-delete-push-runs-no-content-gate.test.ts'
+    - claim: "a mixed push gates the non-deletion ref, never the deleted one"
+      proof: 'grep: test("W1-T8000: a mixed push judges the pushed ref, not the deleted one" in test/a-branch-delete-push-runs-no-content-gate.test.ts'
+    - claim: "an empty stdin still runs every gate as before"
+      proof: 'grep: test("W1-T8000: an empty stdin still runs every gate" in test/a-branch-delete-push-runs-no-content-gate.test.ts'
+  falsifier: |
+    Leave the hook as it is. A deletion-only line then runs every recording gate, which exits 1, so the hook exits 1
+    and the first test fails, as the 10-11 deletion did. Skip on "any line is a deletion" instead of "every line",
+    and the mixed push runs no gate, so the second test fails. Exit early on an empty stdin, and the third test fails.

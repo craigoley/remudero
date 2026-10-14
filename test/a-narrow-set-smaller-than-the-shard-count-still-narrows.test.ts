@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const script = fileURLToPath(new URL("../scripts/test-tier-manifest.mjs", import.meta.url));
 type Manifest = { thresholdMs: number; files: Record<string, number> };
@@ -14,7 +15,7 @@ const { selectPlanReadingShard, main } = await import(new URL("../scripts/test-t
     text: unknown, files: string[], manifest: Manifest, shard: { index: number; count: number },
   ) => { selection: string; candidates: string[]; files: string[]; predictedDurationMs: number };
   main: (args: string[], options?: {
-    spawn?: (command: string, args: string[]) => { status: number };
+    spawn?: (command: string, args: string[], opts?: unknown) => { status: number };
   }) => number;
 };
 const files = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"];
@@ -59,9 +60,9 @@ test("candidate execution spawns each selected suite once and passes five empty 
   for (let index = 1; index <= 8; index++) {
     const before = spawned.length;
     assert.equal(main(["--root", root, "--run-candidates", "candidates.txt", "--shard", `${index}/8`], {
-      spawn: (_command, args) => {
+      spawn: (_command, args, opts) => {
         spawned.push(args.filter((arg) => arg.endsWith(".test.ts")));
-        return { status: 0 };
+        return finishJudgedRun(args, opts);
       },
     }), 0);
     assert.equal(spawned.length - before, index <= 3 ? 1 : 0);

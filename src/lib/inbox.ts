@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
 // bindings off `node:fs` are non-configurable, so mocking them throws.
@@ -9,8 +10,8 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { parseTasksFromYaml, PlanError, TASK_TYPES, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask, promoteIntroducedPlanOnlyDiagnostics, type LintViolation } from "./task-linter.js";
+import { missingDeclaredPaths, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
+import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -21,10 +22,14 @@ import { isGhRateLimitError } from "./status.js";
 export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
+import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadStoreDeps } from "./inbox-thread.js";
+import { inboxKind } from "./inbox-owner.js";
+import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -98,6 +103,21 @@ export interface Proposal {
   /** W1-T4338: present only on a skill-workshop draft. Approval writes this file on its own branch instead of filing
    *  a task fragment, so the path and body come from the staged draft, never a re-parse of `summary`. */
   skillFile?: SkillFilePayload;
+  skillFileStagedAt?: string;
+  skillEval?: SkillEvalRecord;
+}
+
+export interface SkillEvalRecord {
+  draftSha256: string;
+  heldOutSetHash: string;
+  taskIds: string[];
+  verdict: "pass" | "refuse";
+  reason: string;
+  detail: string;
+  delta: number | null;
+  measurableTasks: number;
+  totalCostUsd: number;
+  evaluatedAt: string;
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
@@ -386,6 +406,7 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
 /** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the MASTER-PLAN.md ratification stamp line,
  *  cached STATE-SIDE (never committed — `<config.root>/state/inbox-drafts.json`, never a repo path). */
 export interface DraftedCandidate {
+  releaseTaskId?: string;
   proposalId: string;
   /** YAML text of the new task(s), parseable by {@link "./plan.js".loadPlanFromYaml}. */
   fragmentYaml: string;
@@ -734,6 +755,7 @@ export interface PredicateFailure {
 export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
+  releaseTaskId?: string;
   proposalId: string;
   state: InboxState;
   /** Empty iff state === "ready". Every failing AND-clause, named — never a bare "not ready". */
@@ -749,6 +771,7 @@ export interface InboxClassification {
   lifecycleAction?: SkillLifecycleAction;
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
   skillFile?: SkillFilePayload;
+  skillEval?: SkillEvalRecord;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -764,6 +787,7 @@ export interface InboxClassification {
 }
 
 export interface ReadinessContext {
+  clock?: Clock;
   /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into — resolves depends_on ids the
    *  fragment cites that already exist. */
   plan: Plan;
@@ -802,10 +826,13 @@ export interface ReadinessContext {
   /** W1-T4261: reuse of each draft's fragment parse and lint verdict across passes over the SAME plan object — see
    *  {@link FragmentMemo}. Optional; absent recomputes both, exactly as before. */
   fragmentMemo?: FragmentMemo;
+  /** W1-T9039: the checkout a draft is judged against; absent means the harness's own. */
+  draftRepoFacts?: DraftRepoFacts;
 }
 
-/** One drafted fragment's parse and (lazily) its blocking lint messages against one plan. */
+/** One drafted fragment as approve's repair leaves it, its parse and (lazily) its blocking lint messages. */
 interface FragmentVerdict {
+  judged: string;
   parsed: { plan: Plan } | { error: string };
   blocking?: string[];
 }
@@ -834,7 +861,12 @@ export function beginFragmentPass(memo: FragmentMemo): void {
 }
 
 function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYaml: string, proposalId: string): FragmentVerdict {
-  if (memo === undefined) return { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  const judge = (): FragmentVerdict => {
+    const repaired = repairRatificationFragment(fragmentYaml, proposalId);
+    const judged = repaired.ok ? repaired.fragmentYaml : fragmentYaml;
+    return { judged, parsed: safeParseFragment(judged, proposalId) };
+  };
+  if (memo === undefined) return judge();
   if (memo.plan !== plan) {
     memo.plan = plan;
     memo.previous = new Map();
@@ -842,7 +874,7 @@ function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYam
   }
   const key = `${proposalId}\u0000${fragmentYaml}`;
   let verdict = memo.current.get(key) ?? memo.previous.get(key);
-  if (verdict === undefined) verdict = { parsed: safeParseFragment(fragmentYaml, proposalId) };
+  if (verdict === undefined) verdict = judge();
   memo.current.set(key, verdict);
   return verdict;
 }
@@ -908,6 +940,105 @@ export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: 
     else if (l.step === "panel.proposal_restored") declined.delete(l.task_id);
   }
   return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
+}
+
+/** W1-T9252: one operator action or fleet outcome, ready for `appendThreadEvent`. */
+export interface ThreadEventDraft {
+  proposalId: string;
+  event: ThreadEvent;
+  text: string;
+  /** The source row's time (epoch ms), so the event sorts where it happened. */
+  ts: number;
+}
+
+/** The ledger steps {@link threadEventsForRow} reads: a boot backfill filters its union read on these. */
+export const THREAD_EVENT_STEPS: readonly string[] = [
+  "ratify.reframed", "panel.proposal_declined", "panel.proposal_restored", "ratify.approved",
+  "ratify.approve_refused", "approve.shards_written", "inbox.drafted",
+];
+
+/** The tasks a shards path names: `plan/tasks.d/W1-T123-slug.yaml` → `W1-T123`. */
+function taskIdsOfPaths(paths: unknown): string[] {
+  if (!Array.isArray(paths)) return [];
+  const ids = paths.flatMap((path) => (typeof path === "string" ? [/(W\d+-T[A-Za-z0-9]+)/.exec(basename(path))?.[1]] : []));
+  return [...new Set(ids.filter((id): id is string => id !== undefined))];
+}
+
+/**
+ * W1-T9252 — what a ledger row means on an item's thread. PURE: the verb that writes the row, the daemon's
+ * live tail and the boot backfill all read a row through here, so they cannot disagree about its key
+ * (`run_id|step|ts`) or its text. `proposals` bounds the answer to the proposals the registry holds; absent,
+ * a row's own proposal is taken as given and a release has no known targets.
+ *
+ * A decline or restore the daemon's responder took (`origin: inbox-responder`) is NOT mapped: the
+ * responder writes its own `did` message, and a second event would echo the same action.
+ */
+export function threadEventsForRow(
+  row: Record<string, unknown>,
+  proposals?: ReadonlyArray<Pick<Proposal, "id" | "reframeHistory">>,
+): ThreadEventDraft[] {
+  const step = typeof row.step === "string" ? row.step : "";
+  const ts = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  if (!Number.isFinite(ts)) return [];
+  const key = `${typeof row.run_id === "string" ? row.run_id : ""}|${step}|${row.ts as string}`;
+  const known = (id: string) => proposals === undefined || proposals.some((p) => p.id === id);
+  const draft = (proposalId: string, kind: ThreadEventKind, text: string, keySuffix = ""): ThreadEventDraft[] =>
+    known(proposalId) ? [{ proposalId, event: { kind, key: key + keySuffix }, text, ts }] : [];
+  const taskId = typeof row.task_id === "string" ? row.task_id : undefined;
+  const clip = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 500) : fallback);
+  switch (step) {
+    case "ratify.reframed":
+      return taskId ? draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft.")) : [];
+    case "panel.proposal_declined":
+      return taskId && row.origin !== "inbox-responder" ? draft(taskId, "declined", clip(row.reason, "Declined.")) : [];
+    case "panel.proposal_restored":
+      return taskId && row.origin !== "inbox-responder" ? draft(taskId, "restored", clip(row.reason, "Brought back.")) : [];
+    case "ratify.approved": {
+      if (!taskId) return [];
+      if (row.released !== "verify-human") return draft(taskId, "approved", "Approved. The fleet will file it.");
+      const targets = (proposals ?? []).map((p) => p.id).filter((id) => {
+        const kind = inboxKind(id);
+        return (kind === "verify-human" || kind === "machine-judge") && deriveTaskReferent(id) === taskId;
+      });
+      const machine = row.author_class === "machine";
+      return targets.flatMap((id) => [
+        ...(machine ? [] : draft(id, "released", `Released ${taskId}.`)),
+        ...draft(id, "released_to_fleet", machine ? `The judge cleared ${taskId} for the fleet.` : `${taskId} is released and the fleet can now work on it.`, ":fleet"),
+      ]);
+    }
+    case "ratify.approve_refused":
+      return taskId ? draft(taskId, "refused", `The fleet did not file this: ${clip(row.reason, "it is not ready")}`) : [];
+    case "approve.shards_written": {
+      const ids = [...(typeof row.proposal_id === "string" ? [row.proposal_id] : []), ...(Array.isArray(row.proposal_ids) ? row.proposal_ids.filter((id): id is string => typeof id === "string") : [])];
+      const filed = taskIdsOfPaths(row.paths);
+      return ids.flatMap((id) => draft(id, "task_filed", filed.length > 0 ? `Filed ${filed.join(", ")} for the fleet.` : "Filed the drafted task for the fleet."));
+    }
+    case "inbox.drafted": {
+      const id = typeof row.proposal_id === "string" ? row.proposal_id : undefined;
+      const reframed = proposals?.find((p) => p.id === id)?.reframeHistory?.length ?? 0;
+      return id && row.lint_clean !== false && reframed > 0 ? draft(id, "redrafted", "A new draft is ready, written with your feedback.") : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/** Write one row's thread events; a store failure is reported through `log`, never thrown — the ledger row stays the record. */
+export function recordRowThreadEvents(
+  row: Record<string, unknown>,
+  proposals: ReadonlyArray<Pick<Proposal, "id" | "reframeHistory">> | undefined,
+  store: ThreadStoreDeps,
+  log?: (step: string, extra: Record<string, unknown>) => void,
+): number {
+  let appended = 0;
+  for (const draft of threadEventsForRow(row, proposals)) {
+    try {
+      if (appendThreadEvent(draft.proposalId, draft.event, draft.text, store, draft.ts) === "appended") appended += 1;
+    } catch (error) {
+      log?.("inbox.thread_event_failed", { proposal_id: draft.proposalId, kind: draft.event.kind, error: String((error as Error)?.message ?? error) });
+    }
+  }
+  return appended;
 }
 
 /** An operator's decline, or its reversal — the two verdicts that record a row and file nothing. */
@@ -1003,15 +1134,29 @@ export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?:
  *  merged and been superseded by a fresh pass. Confirming the PR is STILL OPEN and not already
  *  queued to merge is the caller's job — a live GitHub read, never derivable from the ledger alone. */
 export function mostRecentApprovePr(
-  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown }[],
-): { branch: string; prUrl: string; prNumber?: number } | undefined {
-  let best: { branch: string; prUrl: string; prNumber?: number } | undefined;
+  ledgerLines: { step?: unknown; branch?: unknown; pr_url?: unknown; pr_number?: unknown; actor_pid?: unknown; host?: unknown }[],
+): ApprovePrCandidate | undefined {
+  let best: ApprovePrCandidate | undefined;
   for (const line of ledgerLines) {
     if (line.step !== "ratify.approved") continue;
     if (typeof line.branch !== "string" || typeof line.pr_url !== "string") continue;
-    best = { branch: line.branch, prUrl: line.pr_url, prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined };
+    best = {
+      branch: line.branch,
+      prUrl: line.pr_url,
+      prNumber: typeof line.pr_number === "number" ? line.pr_number : undefined,
+      ...(typeof line.actor_pid === "number" ? { actorPid: line.actor_pid } : {}), // W1-T9161: appendLedger's own stamps
+      ...(typeof line.host === "string" ? { host: line.host } : {}),
+    };
   }
   return best;
+}
+
+export interface ApprovePrCandidate { // W1-T9161: the PR, and the approve process whose row named it
+  branch: string;
+  prUrl: string;
+  prNumber?: number;
+  actorPid?: number;
+  host?: string;
 }
 
 /** Parse a fragment's tasks WITHOUT requiring every `depends_on` to resolve inside it — {@link unmetOutsideDeps}
@@ -1074,6 +1219,7 @@ export function blockingLintMessages(
   // narrow when asked. A previous fix in this repo narrowed a predicate correctly and left its one
   // caller still invoking the wide form (#5816); the saving lives entirely in the argument below.
   lint: typeof lintPlan = lintPlan,
+  facts?: DraftRepoFacts,
 ): string[] {
   const merged = mergedPlan(basePlan, fragmentPlan);
   // LINT ONLY WHAT IS READ BACK. The loop below reads `results` for the FRAGMENT's tasks and
@@ -1088,9 +1234,11 @@ export function blockingLintMessages(
   // and Analytics beside it: `boundConsoleReadRoute`'s 750ms budget is a `setTimeout` racing the
   // handler, and a `setTimeout` cannot fire while the event loop is blocked.
   const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
-  const results = lint(merged, () => ({}), fragmentIds);
+  const filingOpts = facts ? draftFilingLintOptions(facts) : {};
+  const results = lint(merged, () => filingOpts, fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
+    for (const v of draftMissingPathViolations(task, facts ?? HARNESS_FACTS)) out.push(`${task.id}: [${v.check}] ${v.message}`);
     const baseTask = basePlan.tasks.find((t) => t.id === task.id);
     const violations = filingBlockers(
       results.get(task.id)?.violations ?? [],
@@ -1117,13 +1265,33 @@ export function filingBlockers(
   return promoteIntroducedPlanOnlyDiagnostics(violations, base, newlyAdded).filter((v) => v.severity === "block");
 }
 
-/**
- * A ratification stamp names the proposal it ratifies and exactly the tasks it files. The stamp is
- * written into MASTER-PLAN.md verbatim, so a model-invented label becomes a permanent record: one
- * draft for proof-debt:W1-T4048 stamped "- P25 (MASTER-PLAN §7/P25) — RATIFIED" (#6791), and one
- * for proof-debt:W1-T3570 merged as "- P44 (…)" (#6789). Checked, not rewritten, because the
- * operator approves the stamp `rmd inbox` shows them.
- */
+/** W1-T8828: the model supplies a summary; the harness owns the stamp's identity, date and task list. */
+export function composeStampLine(
+  proposalId: string,
+  label: string,
+  fragmentIds: readonly string[],
+  clock: Clock = systemClock,
+): string {
+  const summary = (/\(([^()]*)\)/.exec(label)?.[1] ?? label)
+    .replace(/->[^\r\n]*/g, " ")
+    .replaceAll(proposalId, " ")
+    .replace(/\b[A-Za-z][A-Za-z0-9-]*:[A-Za-z0-9#_-]+\b/g, " ")
+    .replace(/\b(?:W\d+-T\d+[A-Za-z0-9-]*|NEW-\d+|P\d+)\b/gi, " ")
+    .replace(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/gi, " ")
+    .replace(/\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/g, " ")
+    .replace(/\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b/gi, " ")
+    .replace(/\b\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b/gi, " ")
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]m|Z|[+-]\d{2}:?\d{2})?/gi, " ")
+    .replace(/\bratified\b/gi, " ")
+    .replace(/[()\r\n\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,.;:/–—-]+|[\s,.;:/–—-]+$/g, "")
+    .slice(0, 120).trim();
+  const kind = proposalId.includes(":") ? proposalId.split(":")[0] : "proposal";
+  return `- ${proposalId} (${summary || kind}) — RATIFIED ${clock.date().toISOString().slice(0, 10)} -> ${fragmentIds.join(", ")}.`;
+}
+
+/** Guard the harness-composed stamp before the operator approves the line shown in the inbox. */
 export function stampLineViolations(proposalId: string, stampLine: string, fragmentIds: readonly string[]): DraftLintViolation[] {
   const out: DraftLintViolation[] = [];
   if (!stampLine.startsWith(`- ${proposalId} (`)) {
@@ -1254,10 +1422,10 @@ export function classifyProposal(
         `never deleted`,
     };
   }
-  // A release moves this parked task to the fleet BEFORE it merges. The old operator proposal
-  // is now history, not a second request for the same decision. Never apply this to a different
-  // proposal kind or to an id the current plan does not hold.
-  const releasedTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
   if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
@@ -1296,7 +1464,8 @@ export function classifyProposal(
   }
   // W1-T4338: a skill draft needs no Architect-drafted task — the staged SKILL.md IS the artifact approval writes.
   if (proposal.skillFile) {
-    return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile, ...referentUnverified };
+    return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile,
+      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}), ...referentUnverified };
   }
 
   const reasons: PredicateFailure[] = [];
@@ -1308,11 +1477,28 @@ export function classifyProposal(
 
   const draftStale = isDraftStale(draft, proposal.evidenceAnchors);
 
+  if (draft.releaseTaskId !== undefined) {
+    const task = ctx.plan.byId.get(draft.releaseTaskId);
+    const valid = parkedProposalTaskId(proposal.id) === draft.releaseTaskId && isReleasableTask(task);
+    if (!valid) reasons.push({ predicate: "lint_clean", detail: "draft-unclean: RELEASE must name this proposal's parked task" });
+    if (draftStale || proposal.evidenceAnchors.some((a) => !ctx.grepAnchorTrue(a))) {
+      reasons.push({ predicate: "evidence_anchors", detail: "evidence-drifted: release draft anchors are stale" });
+    }
+    if ((proposal.conflictsWith ?? []).some((id) => ctx.openProposalIds.has(id))) {
+      reasons.push({ predicate: "no_conflict", detail: "conflict: release proposal conflicts with another open proposal" });
+    }
+    return reasons.length > 0
+      ? { proposalId: proposal.id, state: "not_ready", reasons, draftStale, ...referentUnverified }
+      : { proposalId: proposal.id, state: "ready", reasons, releaseTaskId: draft.releaseTaskId, proposal, ...referentUnverified };
+  }
+
   const verdict = fragmentVerdict(ctx.fragmentMemo, ctx.plan, draft.fragmentYaml, proposal.id);
   const fragment = verdict.parsed;
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
+    const stampLine = composeStampLine(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id), ctx.clock);
+    draft = { ...draft, fragmentYaml: verdict.judged, stampLine };
     const { unmet, unobservable } = unmetOutsideDeps(ctx.plan, fragment.plan, ctx.isMerged, ctx.depsUnobservable);
     if (unmet.length > 0) {
       reasons.push({ predicate: "deps_merged", detail: `dep-unmet: ${unmet.join(", ")} not merged` });
@@ -1326,9 +1512,13 @@ export function classifyProposal(
         detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
       });
     }
-    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan);
+    const repoFacts = ctx.draftRepoFacts ?? HARNESS_FACTS;
+    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan, lintPlan, repoFacts)
+      .filter((message) => !message.includes("[draft-path-missing]"));
     const blocking = [
       ...verdict.blocking,
+      ...fragment.plan.tasks.flatMap((task) => draftMissingPathViolations(task, repoFacts)
+        .map((v) => `${task.id}: [${v.check}] ${v.message}`)),
       ...stampLineViolations(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id)).map((v) => `stamp: ${v.message}`),
     ];
     if (blocking.length > 0) {
@@ -1443,7 +1633,7 @@ export function inboxDraftExampleFragmentYaml(): string {
   const exampleType: (typeof TASK_TYPES)[number] = TASK_TYPES.includes("implement") ? "implement" : TASK_TYPES[0];
   return [
     "- id: NEW-1",
-    '  title: "Tighten the empty-input guard in parseWidget"',
+    '  title: "Tighten the empty-input guard in parseTasksFromYaml"',
     "  repo: remudero",
     "  depends_on: []",
     `  type: ${exampleType}`,
@@ -1452,15 +1642,16 @@ export function inboxDraftExampleFragmentYaml(): string {
     "  status: queued",
     "  attempts: 0",
     "  files:",
-    "    - src/lib/widget.ts",
+    "    - src/lib/plan.ts",
     "  acceptance:",
-    '    - claim: "parseWidget rejects an empty input instead of throwing a raw TypeError"',
-    '      proof: "unit test: parseWidget rejects an empty input instead of throwing a raw TypeError"',
+    '    - claim: "parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
+    '      proof: "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
     '  origin: "architect"',
   ].join("\n");
 }
 
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
+  const parked = parkedProposalTask(proposal.id, currentPlanText);
   // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
   // POSITIONAL against the FULL history, so "round N" always means the same round.
   const history = proposal.reframeHistory ?? [];
@@ -1486,13 +1677,17 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "You are the REMUDERO ARCHITECT drafting a RATIFICATION CANDIDATE for one open plan proposal",
     "(MASTER-PLAN §7/P25). You ride a HIGHER tier than implement workers (G-17). You have NO",
     "Write/Edit/Bash tools — you cannot touch a file or run git. Your job ends when you have",
-    "printed the fragment + stamp below; the harness caches it and never commits it on your say-so.",
+    "printed the fragment + summary below; the harness caches it and never commits it on your say-so.",
     "",
     "=== THE PROPOSAL ===",
     `id: ${proposal.id}`,
     proposal.summary,
     "",
     ...feedbackBlock,
+    ...(parked ? ["=== EXISTING PARKED SHARD ===", stringifyYaml({ title: parked.title, files: parked.files, acceptance: parked.acceptance }),
+      "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
+      `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
+      "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -1510,20 +1705,21 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "another proposal drafted in the same window. If a drafted task's depends_on points at ANOTHER",
     "task inside THIS SAME fragment, cite that task's placeholder (e.g. `depends_on: [NEW-1]`) —",
     "never a guessed real id. A depends_on on an EXISTING task already in plan/tasks.yaml above",
-    "stays that task's real W1-T id, unchanged. Use the SAME NEW-<n> placeholders in the stamp",
-    "line's task-id list below; `rmd approve` rewrites every placeholder to its real id together.",
+    "stays that task's real W1-T id, unchanged. The harness derives the stamp's task list from your fragment;",
+    "`rmd approve` rewrites every placeholder to its real id together.",
     "",
     "=== OUTPUT (exactly this shape, nothing else) ===",
     "Print ONE or more new tasks.yaml entries (schema v1 — id/title/repo/depends_on/type/verify/",
     "risk/status/attempts/acceptance/origin/files at minimum) between the two FRAGMENT markers below,",
     // W1-T509-adjacent, W1-T512: an absent or empty `files:` is fail-closed at dispatch — `overlappingPaths` reports
     // it as overlapping every candidate, so it can never batch.
-    "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
-    `exactly this shape: \`- ${proposal.id} (<one-line summary>) — RATIFIED <YYYY-MM-DD> -> <task ids>.\``,
-    `It opens with THIS proposal's id, ${proposal.id}, never another P-number, and its task-id list names`,
-    "every task in your fragment and nothing else, as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    "then STAMP: followed only by the one-line summary of the work, without dates, times or ids.",
+    "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
+    "A new file is either test/<task-title-slug>.test.ts or declared in design on its own CREATES: <path> line.",
+    "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
@@ -1544,7 +1740,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== EXAMPLE FRAGMENT START (illustrative only) ===",
     inboxDraftExampleFragmentYaml(),
     "=== EXAMPLE FRAGMENT END ===",
-    "STAMP: - EXAMPLE-P (illustrative example only) — RATIFIED 2026-01-01 -> NEW-1.",
+    "STAMP: illustrative example only",
     "",
     "Now draft YOUR OWN task(s) for THIS proposal, in that same shape, between the two REAL",
     "markers below:",
@@ -1552,15 +1748,24 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== FRAGMENT START ===",
     "<the new tasks.yaml entries as YAML — a list of task mappings>",
     "=== FRAGMENT END ===",
-    "STAMP: <the one-line ratification stamp>",
+    "STAMP: <the one-line summary>",
     "",
     `(run: ${runId})`,
   ].join("\n");
 }
 
 export interface ParsedDraft {
+  releaseTaskId?: string;
   fragmentYaml: string;
   stampLine: string;
+}
+
+function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
+  if (draft.releaseTaskId !== undefined) return draft;
+  const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
+  const fragment = safeParseFragment(fragmentYaml, proposalId);
+  const ids = "error" in fragment ? [] : fragment.plan.tasks.map((task) => task.id);
+  return { ...draft, fragmentYaml, stampLine: composeStampLine(proposalId, draft.stampLine, ids, clock) };
 }
 
 const FRAGMENT_RE = /=== FRAGMENT START ===\r?\n([\s\S]*?)\r?\n=== FRAGMENT END ===/g;
@@ -1642,10 +1847,31 @@ export function describeDraftParseFailure(text: string): DraftParseFailure {
   return { fragments, stamps, outputChars, ...(reason === undefined ? {} : { reason }) };
 }
 
-/** Extract the worker's FRAGMENT and STAMP off its concatenated output. LAST-marker-wins, like `parseTriageVerdict`.
- *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
- *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
-export function parseDraftedCandidate(text: string): ParsedDraft | null {
+function parkedProposalTaskId(proposalId: string): string | undefined {
+  return /^(?:machine-judge|verify-human|verify-human-automate):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposalId)?.[1];
+}
+
+function isReleasableTask(task: { verify?: unknown; status?: unknown; dispatch_hold?: unknown } | undefined): boolean {
+  return task?.verify === "human" && task.status === "queued" && task.dispatch_hold !== true;
+}
+
+function parkedProposalTask(proposalId: string, planText: string): Record<string, unknown> | undefined {
+  const id = parkedProposalTaskId(proposalId);
+  if (!id) return undefined;
+  const rows: unknown = parseYaml(planText);
+  if (!Array.isArray(rows)) return undefined;
+  const task = rows.find((row) => row?.id === id);
+  return isReleasableTask(task) ? task : undefined;
+}
+
+/** Parse a validated RELEASE or the last FRAGMENT/STAMP pair; malformed fences throw into the rung's isolation. */
+export function parseDraftedCandidate(text: string, proposal?: Proposal, currentPlanText?: string): ParsedDraft | null {
+  const releases = [...text.matchAll(/^RELEASE:[ \t]*([^\s]+)[ \t]*\r?$/gm)];
+  if (releases.length > 0) {
+    const task = proposal && currentPlanText ? parkedProposalTask(proposal.id, currentPlanText) : undefined;
+    if (releases.length !== 1 || task?.id !== releases[0][1] || /=== FRAGMENT(?: JSON)? START ===/.test(text)) return null;
+    return { releaseTaskId: releases[0][1], fragmentYaml: "", stampLine: "" };
+  }
   const stamps = [...text.matchAll(STAMP_RE)];
   // W1-T4864: a STRUCTURED fragment wins over a YAML one — its YAML is the harness's, so it cannot fail to parse.
   const structured = [...text.matchAll(new RegExp(FRAGMENT_JSON_RE, "g"))];
@@ -1779,6 +2005,8 @@ export interface DraftSpawnContext {
 }
 
 export interface DraftRungDeps {
+  repoFacts?: DraftRepoFacts;
+  clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
   escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
@@ -1834,9 +2062,10 @@ function draftPlaceholderViolations(
     }
   }
   const aimedElsewhere = task.repo !== undefined && task.repo !== "none" && task.repo !== "remudero"; // W1-T5890: top dir, this repo only
+  const creates = draftCreatedPaths(task);
   for (const path of aimedElsewhere ? [] : task.files ?? []) {
     const directory = path.includes("/") ? path.split("/")[0] : ".";
-    if (directory !== "." && directory !== "" && !directoryExists(directory)) {
+    if (directory !== "." && directory !== "" && !directoryExists(directory) && !creates.has(path)) {
       block("draft-missing-directory", `files entry ${JSON.stringify(path)} names a nonexistent directory ${JSON.stringify(directory)}`);
     }
   }
@@ -1874,26 +2103,110 @@ function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintV
   return out;
 }
 
-/** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
- *  violation, so it drives a redraft rather than being cached as NOT-READY. */
+export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
+  riskTransition: Object.freeze({ baseTask: undefined }),
+  proofSelfPath: "block",
+} as const);
+
+/** W1-T9039: what `lint-plan --base` reads off the checkout a task lands in. */
+export interface DraftRepoFacts {
+  pathIsDirectory?: (repoRelPath: string) => boolean;
+  pathExistsAtBase?: (repoRelPath: string) => boolean;
+  moduleExists: (repoRelPath: string) => boolean;
+  readGrepProofFile: (repoRelPath: string) => string | undefined;
+}
+
+export function checkoutRepoFacts(root: string): DraftRepoFacts {
+  return {
+    pathIsDirectory: (path) => fs.statSync(resolvePath(root, path), { throwIfNoEntry: false })?.isDirectory() === true,
+    pathExistsAtBase: (path) => fs.existsSync(resolvePath(root, ".git")) &&
+      hostWorktreeGit(root, ["ls-tree", "-z", "--name-only", "origin/main", "--", path])
+      .split("\0").includes(path),
+    moduleExists: (path) => fs.existsSync(resolvePath(root, path)),
+    readGrepProofFile: (path) => {
+      try {
+        return fs.readFileSync(resolvePath(root, path), "utf8");
+      } catch {
+        return undefined; // absent or unreadable: no opinion, as `lint-plan --base` reads it
+      }
+    },
+  };
+}
+
+const HARNESS_FACTS = checkoutRepoFacts(HARNESS_ROOT);
+
+function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
+  return new Set([...task.design?.matchAll(/^[ \t]*CREATES:[ \t]*(\S+)[ \t]*$/gm) ?? []].map((m) => m[1]));
+}
+
+function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
+  const slug = kebabSlug(task.title, SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+  const creates = draftCreatedPaths(task);
+  const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
+    (path) => path === `test/${slug}.test.ts` || creates.has(path));
+  return missing.map((path) => ({ check: "draft-path-missing", severity: "block",
+    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, a slug-named test, or a CREATES: declaration` }));
+}
+
+/** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
+export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
+  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
+    moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
+}
+
+/** W1-T9039: a drafted `status: blocked` with no legal retirement is the plan index copied, so the harness queues it. */
+export function queueDraftedBlockedTasks(fragmentYaml: string): string {
+  const document = parseDocument(fragmentYaml);
+  if (document.errors.length > 0 || !isSeq(document.contents)) return fragmentYaml;
+  const ranges: number[][] = [];
+  for (const node of document.contents.items) {
+    const status = isMap(node) ? node.get("status", true) : undefined;
+    const retired = isMap(node) && (RETIREMENT_REASONS as readonly unknown[]).includes(node.get("retirement"));
+    if (isScalar(status) && String(status.value) === "blocked" && status.range && !retired) ranges.push(status.range);
+  }
+  let queued = fragmentYaml;
+  for (const [start, end] of ranges.sort((a, b) => b[0] - a[0])) queued = `${queued.slice(0, start)}queued${queued.slice(end)}`;
+  return queued;
+}
+
+/** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link draftFilingLintOptions} (W1-T8714, W1-T9039), a
+ *  new task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
 export function lintDraftedFragment(
   fragmentYaml: string,
   proposalId: string,
   stampLine?: string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
-  directoryExists: (path: string) => boolean = (path) => fs.existsSync(resolvePath(HARNESS_ROOT, path)),
+  pathExists: (path: string) => boolean = HARNESS_FACTS.moduleExists,
+  readGrepProofFile: DraftRepoFacts["readGrepProofFile"] = HARNESS_FACTS.readGrepProofFile,
+  pathIsDirectory: (path: string) => boolean = (path) =>
+    fs.statSync(resolvePath(HARNESS_ROOT, path), { throwIfNoEntry: false })?.isDirectory() === true,
+  pathExistsAtBase: (path: string) => boolean = pathExists === HARNESS_FACTS.moduleExists
+    ? HARNESS_FACTS.pathExistsAtBase! : () => false,
 ): DraftLintViolation[] {
   let tasks;
   try {
-    tasks = parseTasksFromYaml(fragmentYaml, `inbox draft ${proposalId}`);
+    tasks = parseTasksFromYaml(queueDraftedBlockedTasks(fragmentYaml), `inbox draft ${proposalId}`);
   } catch (e) {
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
+  const opts = draftFilingLintOptions({ moduleExists: pathExists, readGrepProofFile }, knownRepos);
+  const directory = (path: string): boolean => path.endsWith("/") || pathIsDirectory(path);
+  const directoryGuidance = "; name the files the task changes, never a directory";
   for (const task of tasks) {
-    violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
-    violations.push(...draftPlaceholderViolations(task, directoryExists));
+    violations.push(...draftMissingPathViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
+    violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
+    violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
+    for (const path of task.files ?? []) {
+      if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
+        message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
+    for (const criterion of task.acceptance ?? []) {
+      const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
+      if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",
+        message: `${task.id} grep proof target ${JSON.stringify(path)} is a directory${directoryGuidance}` });
+    }
   }
   if (stampLine !== undefined) {
     violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
@@ -1909,7 +2222,7 @@ export function lintDraftedFragment(
  *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
 export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
   return [
-    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp between the SAME literal markers as before:`,
+    `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + one-line summary between the SAME literal markers as before:`,
     "",
     // W1-T4442: a redraft carries no copy of the original draft prompt, so the ONLY place it can
     // see the literal marker text it must reproduce is HERE. Naming "the FRAGMENT/STAMP marker
@@ -1918,7 +2231,8 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
     "=== FRAGMENT START ===",
     "<the corrected tasks.yaml entries as YAML — a list of task mappings>",
     "=== FRAGMENT END ===",
-    "STAMP: <the corrected one-line ratification stamp>",
+    "STAMP: <the corrected one-line summary>",
+    "The harness supplies the proposal id, UTC date and fragment task ids; the summary has no dates, times or ids.",
     "",
     ...relintGuidanceLines(violations),
     "",
@@ -1972,22 +2286,24 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           ...workerLedgerFields(worker),
         });
-        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), proposal, currentPlanText);
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
-        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
+        parsed = composeDraftStamp(proposal.id, parsed, deps.clock);
+        violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
+          undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
           const from = draftWorkerModel(worker);
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
           dirty = { from, violations: violations.map((v) => v.message) };
-          prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
+          prompt = `${inboxDraftPrompt(proposal, currentPlanText, runId)}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
         }
       }
       if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
         const reason = parsed ? "dirty-lint" : "fragment-contract";
         const escalationPrompt = parsed
-          ? inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)
+          ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
           const escalated = await deps.escalate(proposal, escalationPrompt);
@@ -2006,10 +2322,11 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               ...workerLedgerFields(escalated),
             });
-            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"));
+            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"), proposal, currentPlanText);
             if (candidate) {
-              parsed = candidate;
-              violations = lintDraftedFragment(candidate.fragmentYaml, proposal.id, candidate.stampLine);
+              parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
+              violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
+                undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
             }
           }
         } catch (error) {
@@ -2050,6 +2367,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         };
       }
       const candidate: DraftedCandidate = {
+        ...(parsed.releaseTaskId ? { releaseTaskId: parsed.releaseTaskId } : {}),
         proposalId: proposal.id,
         fragmentYaml: parsed.fragmentYaml,
         stampLine: parsed.stampLine,
@@ -2346,6 +2664,8 @@ export function renderInbox(classifications: InboxClassification[]): string {
     if (c.draft) {
       lines.push(`  stamp: ${c.draft.stampLine}`);
       lines.push(`  drafted tasks:\n${c.draft.fragmentYaml.replace(/^/gm, "    ")}`);
+    } else if (c.releaseTaskId) {
+      lines.push(`  release: ${c.releaseTaskId} (existing parked shard)`);
     } else {
       lines.push(`  draft: not cached`);
     }
@@ -2494,29 +2814,152 @@ function listProposalShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".json")).sort();
 }
 
-/** Parse every shard, keyed by each file's OWN declared `id`, never the filename. Two files declaring the SAME id is
- *  refused loud, mirroring plan.ts's duplicate-task-id guard. */
-function readProposalShards(shardDir: string): Map<string, { proposal: Proposal; path: string }> {
-  const out = new Map<string, { proposal: Proposal; path: string }>();
-  for (const file of listProposalShardFiles(shardDir)) {
-    const shardPath = join(shardDir, file);
-    let raw: unknown;
-    try {
-      raw = JSON.parse(fs.readFileSync(shardPath, "utf8"));
-    } catch (err) {
-      throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
-    }
-    const proposal = raw as Proposal;
-    if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
-      throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
-    }
-    const existing = out.get(proposal.id);
+/** Every shard, read synchronously (CLI callers); the daemon reads through {@link createProposalShardReader}. */
+function readProposalShards(shardDir: string): Map<string, ProposalShardEntry> {
+  return indexProposalShards(
+    listProposalShardFiles(shardDir).map((file) => {
+      const shardPath = join(shardDir, file);
+      let text: string;
+      try {
+        text = fs.readFileSync(shardPath, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+      }
+      return parseProposalShard(shardPath, text);
+    }),
+  );
+}
+
+/** One parsed shard; `text` lets a registry write skip an unchanged shard (W1-T9443). */
+export interface ProposalShardEntry {
+  proposal: Proposal;
+  path: string;
+  text: string;
+}
+
+function parseProposalShard(shardPath: string, text: string): ProposalShardEntry {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+  }
+  const proposal = raw as Proposal;
+  if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
+    throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
+  }
+  return { proposal, path: shardPath, text };
+}
+
+/** Key shards by each file's OWN `id`; two files with one id are refused, as plan.ts refuses duplicate task ids. */
+function indexProposalShards(entries: readonly ProposalShardEntry[]): Map<string, ProposalShardEntry> {
+  const out = new Map<string, ProposalShardEntry>();
+  for (const entry of entries) {
+    const existing = out.get(entry.proposal.id);
     if (existing) {
-      throw new Error(`duplicate proposal id '${proposal.id}' (shard ${shardPath} collides with ${existing.path})`);
+      throw new Error(`duplicate proposal id '${entry.proposal.id}' (shard ${entry.path} collides with ${existing.path})`);
     }
-    out.set(proposal.id, { proposal, path: shardPath });
+    out.set(entry.proposal.id, entry);
   }
   return out;
+}
+
+export interface ProposalShardReaderFs {
+  readdir(dir: string): Promise<string[]>;
+  stat(path: string): Promise<{ ino: bigint; size: bigint; mtimeNs: bigint }>;
+  readFile(path: string): Promise<string>;
+}
+
+const realProposalShardReaderFs: ProposalShardReaderFs = {
+  readdir: (dir) => fs.promises.readdir(dir),
+  stat: async (path) => {
+    const s = await fs.promises.stat(path, { bigint: true });
+    return { ino: s.ino, size: s.size, mtimeNs: s.mtimeNs };
+  },
+  readFile: (path) => fs.promises.readFile(path, "utf8"),
+};
+
+export interface ProposalShardRefreshCounts {
+  files: number;
+  read: number;
+  unchanged: number;
+  removed: number;
+  ms: number;
+}
+
+export interface ProposalShardReader {
+  refresh(): Promise<Map<string, ProposalShardEntry>>;
+}
+
+const isEnoent = (err: unknown): boolean => (err as NodeJS.ErrnoException)?.code === "ENOENT";
+
+/**
+ * W1-T9443: {@link readProposalShards}' population and refusals, held for a daemon's life: `refresh()` re-reads only a file whose
+ * (inode, size, mtime ns) moved. Writers land shards by rename, so a rewrite always moves the inode. A file unlinked
+ * mid-refresh is gone; a refused refresh keeps the last good memo.
+ */
+export function createProposalShardReader(
+  shardDir: string,
+  io: { fs?: ProposalShardReaderFs; log?: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock } = {},
+): ProposalShardReader {
+  const seam = io.fs ?? realProposalShardReaderFs;
+  const clock = io.clock ?? systemClock;
+  let memo = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+  const width = Math.max(1, Number(process.env.UV_THREADPOOL_SIZE) || 4);
+  return {
+    async refresh() {
+      const started = clock.now();
+      let names: string[];
+      try {
+        names = (await seam.readdir(shardDir)).filter((f) => f.endsWith(".json")).sort();
+      } catch (err) {
+        if (!isEnoent(err)) throw new Error(`cannot read proposal shard directory (${shardDir}): ${String(err)}`);
+        names = [];
+      }
+      const next = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+      const results: Array<{ digest: string; entry: ProposalShardEntry } | undefined> = new Array(names.length);
+      let read = 0;
+      let cursor = 0;
+      let failed = false;
+      const work = async (): Promise<void> => {
+        while (!failed && cursor < names.length) {
+          const i = cursor++;
+          const shardPath = join(shardDir, names[i]!);
+          try {
+            const s = await seam.stat(shardPath);
+            const digest = `${s.ino}:${s.size}:${s.mtimeNs}`;
+            const prior = memo.get(shardPath);
+            if (prior && prior.digest === digest) {
+              results[i] = prior;
+              continue;
+            }
+            let text: string;
+            try {
+              text = await seam.readFile(shardPath);
+            } catch (err) {
+              if (isEnoent(err)) throw err;
+              throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+            }
+            read++;
+            results[i] = { digest, entry: parseProposalShard(shardPath, text) };
+          } catch (err) {
+            if (!isEnoent(err)) {
+              failed = true;
+              throw err;
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(width, names.length) }, work));
+      for (const r of results) if (r) next.set(r.entry.path, r);
+      const population = indexProposalShards([...next.values()].map((r) => r.entry));
+      const removed = [...memo.keys()].filter((path) => !next.has(path)).length;
+      memo = next;
+      const counts: ProposalShardRefreshCounts = { files: next.size, read, unchanged: next.size - read, removed, ms: clock.now() - started };
+      io.log?.("proposal_shards.refreshed", { ...counts });
+      return population;
+    },
+  };
 }
 
 /** Load `registryPath` merged with the sibling `inbox-proposals.d/` shards as ONE population, with the same signature
@@ -2662,14 +3105,17 @@ export function updateProposalRegistry(
     // A `next` proposal that is NEW, or already had a shard mirror, gets its OWN file atomically — MIRRORED alongside
     // the blob write below, never instead of it, so every existing reader keeps seeing the same population. Promoting
     // an UNTOUCHED legacy entry is a migration, not a side effect of an unrelated write.
+    // W1-T9443: an unchanged shard is left alone, so the digest reader re-reads only what an update moved.
     for (const proposal of next) {
       const isNew = !currentIds.has(proposal.id);
-      const hadShard = shards.has(proposal.id);
-      if (isNew || hadShard) {
-        fs.mkdirSync(shardDir, { recursive: true });
+      const prior = shards.get(proposal.id);
+      if (isNew || prior) {
+        const text = JSON.stringify(proposal, null, 2);
         const shardPath = proposalShardPath(registryPath, proposal.id);
+        if (prior && prior.path === shardPath && prior.text === text) continue;
+        fs.mkdirSync(shardDir, { recursive: true });
         const tmpShardPath = `${shardPath}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmpShardPath, JSON.stringify(proposal, null, 2), "utf8");
+        fs.writeFileSync(tmpShardPath, text, "utf8");
         fs.renameSync(tmpShardPath, shardPath);
       }
     }
@@ -2732,6 +3178,94 @@ export function pruneOrphanedDrafts(draftsPath: string, registryPath: string): {
     return null; // the registry itself is never rewritten here
   });
   return result;
+}
+
+async function readFileIfExistsAsync(path: string): Promise<string | undefined> {
+  try {
+    return await fs.promises.readFile(path, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return undefined;
+    throw err;
+  }
+}
+
+/** {@link updateProposalRegistry}'s lock, awaiting between polls; resolves to its release. */
+async function acquireProposalRegistryLockAsync(registryPath: string, opts: UpdateProposalRegistryOpts = {}): Promise<() => Promise<void>> {
+  const lockPath = `${registryPath}.lock`;
+  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 20;
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  await fs.promises.mkdir(dirname(lockPath), { recursive: true });
+  const deadline = systemClock.now() + maxWaitMs;
+  for (;;) {
+    try {
+      const handle = await fs.promises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() }));
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseRegistryLockInfo,
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") {
+        if (systemClock.now() >= deadline) {
+          throw new Error(`pruneOrphanedDraftsAsync: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    }
+  }
+  return async () => {
+    try {
+      await fs.promises.unlink(lockPath);
+    } catch {
+      // already gone — idempotent
+    }
+  };
+}
+
+/** W1-T9443: {@link pruneOrphanedDrafts} with every read awaited. Only an orphan takes the lock, and it looks again
+ *  under it; `undefined` when it did not look. */
+export async function pruneOrphanedDraftsAsync(
+  draftsPath: string,
+  registryPath: string,
+  reader: ProposalShardReader,
+  opts: UpdateProposalRegistryOpts = {},
+): Promise<{ count: number; bytesBefore: number; bytesAfter: number } | undefined> {
+  const look = async (): Promise<{ raw: string; drafts: DraftCache; orphans: number } | undefined> => {
+    const blob = parseProposalRegistryResult(await readFileIfExistsAsync(registryPath));
+    if (blob.kind !== "ok") return undefined;
+    const raw = await readFileIfExistsAsync(draftsPath);
+    if (raw === undefined) return undefined;
+    const shards = await reader.refresh();
+    const live = new Set([...blob.proposals.map((p) => p.id), ...shards.keys()]);
+    const drafts = parseDraftCache(raw);
+    const orphans = Object.keys(drafts).filter((id) => !live.has(id)).length;
+    return { raw, drafts: Object.fromEntries(Object.entries(drafts).filter(([id]) => live.has(id))), orphans };
+  };
+  const first = await look();
+  if (!first || first.orphans === 0) {
+    return first && { count: 0, bytesBefore: Buffer.byteLength(first.raw), bytesAfter: Buffer.byteLength(first.raw) };
+  }
+  const release = await acquireProposalRegistryLockAsync(registryPath, opts);
+  try {
+    const held = await look();
+    if (!held) return undefined;
+    const bytesBefore = Buffer.byteLength(held.raw);
+    if (held.orphans === 0) return { count: 0, bytesBefore, bytesAfter: bytesBefore };
+    const text = JSON.stringify(held.drafts, null, 2);
+    await writeAtomicAsync(draftsPath, text);
+    return { count: held.orphans, bytesBefore, bytesAfter: Buffer.byteLength(text) };
+  } finally {
+    await release();
+  }
 }
 
 /** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON
@@ -2937,12 +3471,12 @@ export interface RatifyGateway {
    *  {@link createRatificationBranch}. */
   findJoinablePr?(): { branch: string; prUrl: string; prNumber?: number } | undefined;
 
-  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s)
-   *  plus its folded stamp as a NEW COMMIT on that already-pushed, still-open branch — never a new
-   *  branch, never a new PR. Returns the SAME branch name it was given. Each approval keeps its own
-   *  commit (design iii): this writes ONE more commit onto the shared branch, never squashes or amends
-   *  a prior approval's own. `prUrl` is that open PR, whose body W1-T4706 rebuilds over the whole branch. */
-  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string;
+  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s) plus its folded
+   *  stamp as ONE NEW COMMIT on that still-open branch, never squashing or amending a prior approval's (design iii).
+   *  Returns the branch it was given; W1-T9161: `undefined` when git refused the push as a non-fast-forward, and
+   *  {@link approveProposal} then opens this proposal's own PR, never retrying the join. `prUrl` is that open PR,
+   *  whose body W1-T4706 rebuilds over the whole branch. */
+  joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string | undefined;
 }
 
 export type ApproveResult =
@@ -3022,6 +3556,11 @@ export interface RatifyLedgerDeps {
   /** W1-T2455: already-filed task records to score this proposal's drafted slugs against, built by the caller.
    *  OMITTED or EMPTY means the check does not run — it never blocks on its own blindness. */
   duplicateCorpus?: readonly DuplicateCorpusEntry[];
+  /** W1-T9252: where to mirror an operator action onto the item's thread (the inbox thread store). Absent, the
+   *  verb writes its ledger row alone and the daemon's live tail mirrors it later. */
+  threadStorePath?: string;
+  /** Reports a thread-store write that failed; the verb never does. */
+  log?: (step: string, extra: Record<string, unknown>) => void;
 }
 
 /**
@@ -3053,7 +3592,9 @@ export function approveProposal(
       ? `${classification.proposalId} is a skill draft, and this gateway cannot write a skill file`
       : skillFile && !approvedSkillRelPath(skillFile.name)
         ? `${classification.proposalId}'s skill name ${JSON.stringify(skillFile.name)} is not a single safe path segment`
-        : undefined;
+        : skillFile
+          ? skillEvalApprovalRefusal(classification.proposalId, skillFile.markdown, classification.skillEval)
+          : undefined;
   if ((!skillFile && (classification.state !== "ready" || !classification.draft)) || skillRefusal) {
     const refusal = skillRefusal ?? refusalReason(classification);
     appendLedger(deps.ledgerPath, {
@@ -3099,29 +3640,27 @@ export function approveProposal(
   // of its OWN to resume, and never for a skill draft (which carries a file, not a plan fragment, and
   // opens its own `chore(skill):`-titled PR) — resuming/skill-writing above always wins.
   const joinable = resumeBranch === undefined && !skillFile ? gateway.findJoinablePr?.() : undefined;
-  const joined = joinable !== undefined && gateway.joinRatificationBranch !== undefined;
 
-  let branch: string;
+  let branch: string | undefined;
+  let joinedPr: typeof joinable;
   if (adopted) {
     branch = resumeBranch as string;
   } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
     branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
-  } else if (joined) {
-    branch = gateway.joinRatificationBranch!(joinable.branch, payload, joinable.prUrl);
-  } else if (skillFile && gateway.writeSkillFile) {
-    branch = gateway.writeSkillFile(classification.proposalId, skillFile);
-  } else {
-    branch = gateway.createRatificationBranch(payload);
+  } else if (joinable !== undefined && gateway.joinRatificationBranch !== undefined) {
+    branch = gateway.joinRatificationBranch(joinable.branch, payload, joinable.prUrl); // W1-T9161: undefined = lost the push
+    joinedPr = branch === undefined ? undefined : joinable;
   }
+  branch ??= skillFile && gateway.writeSkillFile ? gateway.writeSkillFile(classification.proposalId, skillFile) : gateway.createRatificationBranch(payload);
 
   let prUrl: string;
   let prNumber: number | undefined;
   if (adopted) {
     prUrl = adopted.prUrl;
     prNumber = adopted.prNumber;
-  } else if (joined) {
-    prUrl = joinable.prUrl;
-    prNumber = joinable.prNumber;
+  } else if (joinedPr) {
+    prUrl = joinedPr.prUrl;
+    prNumber = joinedPr.prNumber;
   } else {
     try {
       prUrl = gateway.openPlanPr(branch, classification.proposalId);
@@ -3139,7 +3678,7 @@ export function approveProposal(
     pr_number: prNumber,
     branch,
     ...(skillFile ? { skill_file: approvedSkillRelPath(skillFile.name) } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   });
   return {
     ok: true,
@@ -3149,8 +3688,12 @@ export function approveProposal(
     prNumber,
     payload,
     ...(adopted ? { adopted: true } : {}),
-    ...(joined ? { joined: true } : {}),
+    ...(joinedPr ? { joined: true } : {}),
   };
+}
+
+export function approvePrTitle(proposalId: string): string {
+  return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
 
 /** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`
@@ -3276,10 +3819,31 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
   return carried;
 }
 
-/** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
-export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
+/** Repair only mechanical filing failures (proofs, sizing, W1-T8714's undeclared band, W1-T9039's drafted status), then
+ *  lint as the push floor will. Ranges keep all other bytes. */
+export function relintRatificationFragment(fragmentYaml: string, proposalId: string, facts: DraftRepoFacts = HARNESS_FACTS):
   | { ok: true; fragmentYaml: string }
   | { ok: false; reason: string } {
+  const repaired = repairRatificationFragment(fragmentYaml, proposalId);
+  if (!repaired.ok) return repaired;
+  const violations: DraftLintViolation[] = [];
+  try {
+    for (const task of parseTasksFromYaml(repaired.fragmentYaml, `approve ${proposalId}`)) {
+      violations.push(...filingBlockers(lintTask(task, draftFilingLintOptions(facts)).violations, undefined, true));
+    }
+  } catch (error) {
+    return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
+  }
+  if (violations.length) {
+    return { ok: false, reason: violations.map((v) => `[${v.check}] ${v.message}`).join("; ") };
+  }
+  return repaired;
+}
+
+function repairRatificationFragment(draftYaml: string, proposalId: string):
+  | { ok: true; fragmentYaml: string }
+  | { ok: false; reason: string } {
+  const fragmentYaml = queueDraftedBlockedTasks(draftYaml);
   const document = parseDocument(fragmentYaml);
   const tasks = isSeq(document.contents) ? document.contents.items : [];
   const parsed = (() => {
@@ -3316,9 +3880,13 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
       }
     }
 
-    if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
-      const risk = fields.get("risk", true);
-      const band = fields.get("band_meaning", true);
+    const band = fields.get("band_meaning", true);
+    const risk = fields.get("risk", true);
+    if (task.risk === "high" && task.band_meaning === undefined && isScalar(risk) && risk.range) {
+      const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
+      const insertAt = endOfLine < 0 ? fragmentYaml.length : endOfLine + 1;
+      edits.push({ start: insertAt, end: insertAt, text: `${endOfLine < 0 ? "\n" : ""}  band_meaning: span\n` });
+    } else if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
       if (isScalar(risk) && risk.range) {
         edits.push({ start: risk.range[0], end: risk.range[1], text: "high" });
         if (isScalar(band) && band.range) {
@@ -3339,20 +3907,6 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
   let repaired = fragmentYaml;
   for (const edit of edits.sort((a, b) => b.start - a.start)) {
     repaired = repaired.slice(0, edit.start) + edit.text + repaired.slice(edit.end);
-  }
-  const violations: DraftLintViolation[] = [];
-  try {
-    for (const task of parseTasksFromYaml(repaired, `approve ${proposalId}`)) {
-      violations.push(...filingBlockers(lintTask(task, {
-        riskTransition: { baseTask: undefined },
-        proofSelfPath: "block",
-      }).violations, undefined, true));
-    }
-  } catch (error) {
-    return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
-  }
-  if (violations.length) {
-    return { ok: false, reason: violations.map((v) => `[${v.check}] ${v.message}`).join("; ") };
   }
   return { ok: true, fragmentYaml: repaired };
 }
@@ -3397,24 +3951,13 @@ export function assertRatificationDraftFileable(
   knownRepos: ReadonlySet<string> | undefined,
   worktreePath = process.cwd(),
 ): void {
-  const relinted = relintRatificationFragment(fragmentYaml, proposalId);
+  const facts = checkoutRepoFacts(worktreePath);
+  const relinted = relintRatificationFragment(fragmentYaml, proposalId, facts);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
-    (path) => fs.existsSync(resolvePath(worktreePath, path)));
+    facts.moduleExists, facts.readGrepProofFile,
+    (path) => fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true,
+    facts.pathExistsAtBase);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
-  const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
-  if ("plan" in parsed) {
-    const directory = (path: string): boolean => path.endsWith("/") ||
-      fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true;
-    for (const task of parsed.plan.tasks) {
-      for (const path of task.files ?? []) {
-        if (directory(path)) violations.push(`[draft-directory-files] ${task.id} files entry ${JSON.stringify(path)} is a directory`);
-      }
-      for (const criterion of task.acceptance ?? []) {
-        const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
-        if (path && directory(path)) violations.push(`[draft-directory-grep] ${task.id} grep proof target ${JSON.stringify(path)} is a directory`);
-      }
-    }
-  }
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
 }
@@ -3738,14 +4281,16 @@ export function approveBatchCommitMessage(payloads: readonly RatificationPayload
 }
 
 // ── Draft placeholder ids -> concrete ids AT APPROVE TIME (lib/task-id.ts is the derivation) ──
-//
-// {@link inboxDraftPrompt} hands the worker NO real id — it emits `NEW-<n>` placeholders, never W1-T shaped, so a
-// cached draft can never pin a concrete id. {@link materializeDraftTaskIds} mints and RESERVES the real ids and
-// rewrites every placeholder before anything is written.
+// {@link inboxDraftPrompt} hands the worker NO real id, only `NEW-…` placeholders; {@link materializeDraftTaskIds}
+// mints and RESERVES the real ids and rewrites every placeholder before anything is written.
 
-/** The placeholder shape drafting workers emit: `NEW-1`, `NEW-2`, … in fragment order. Deliberately never
- *  `W1-T`-shaped, so it can never be mistaken for or collide with a real filed id. */
-const DRAFT_PLACEHOLDER_DECL_RE = /^\s*(?:-\s*)?id:\s*["']?(NEW-\d+)/gm;
+/** A drafted placeholder, never `W1-T`-shaped: the WHOLE `NEW-<letters/digits>` token, case-sensitive (NEW-1 ≠ NEW-1A ≠
+ *  NEW-1a). Reading NEW-1 out of NEW-1A minted nothing for it and leaked two unminted ids (#11378, W1-T9292). */
+const DRAFT_PLACEHOLDER_TOKEN = "NEW-[A-Za-z0-9]+";
+const DRAFT_PLACEHOLDER_DECL_RE = new RegExp(`^\\s*(?:-\\s*)?id:\\s*["']?(${DRAFT_PLACEHOLDER_TOKEN})(?![A-Za-z0-9])`, "gm");
+export const DRAFT_PLACEHOLDER_IN_TEXT_RE = new RegExp(`\\b${DRAFT_PLACEHOLDER_TOKEN}(?![A-Za-z0-9])`);
+const placeholderTokensIn = (text: string): string[] =>
+  [...text.matchAll(new RegExp(DRAFT_PLACEHOLDER_IN_TEXT_RE.source, "g"))].map((m) => m[0]);
 
 /** A fragment's placeholder ids in first-DECLARATION order (the `- id:` key, never a stray `depends_on`). Empty means
  *  nothing to materialize, never an error. */
@@ -3761,14 +4306,38 @@ export function draftPlaceholderIds(fragmentYaml: string): string[] {
   return out;
 }
 
-/** Replace every mapped placeholder — a declaration or a reference — with its real id. Word-boundary-safe, so `NEW-1`
- *  never eats into `NEW-10`: a digit run has no `\b` before it. */
+/** Replace every mapped placeholder — a declaration or a reference — with its real id. WHOLE TOKENS ONLY: `NEW-1`
+ *  never eats into `NEW-10`, `NEW-1A` or `NEW-1a`, since a placeholder is never followed by a letter or digit. */
 export function substitutePlaceholderIds(text: string, mapping: ReadonlyMap<string, string>): string {
   let out = text;
   for (const [placeholder, real] of mapping) {
-    out = out.replace(new RegExp(`\\b${placeholder}\\b`, "g"), real);
+    out = out.replace(new RegExp(`\\b${placeholder}(?![A-Za-z0-9])`, "g"), real);
   }
   return out;
+}
+
+/** W1-T9292: what would land unminted — a declared id neither minted nor `pending`, an undeclared placeholder in a
+ *  depends_on or the stamp. Run before minting (a refusal reserves nothing) and again after substitution. */
+function unmintedDraftResidue(fragmentYaml: string, stampLine: string, pending: ReadonlySet<string>): string[] {
+  const out = new Set<string>();
+  let records: unknown;
+  try {
+    records = parseYaml(fragmentYaml);
+  } catch (e) {
+    // Unparseable: what it declares cannot be known, so it is refused, never read as an empty fragment.
+    return [`the fragment does not parse as YAML (${String((e as Error)?.message ?? e).split("\n")[0]})`];
+  }
+  if (records !== null && records !== undefined && !Array.isArray(records)) return ["the fragment is not a YAML list of tasks"];
+  for (const r of (records as unknown[] | null) ?? []) {
+    const { id, depends_on: deps } = (r !== null && typeof r === "object" ? r : {}) as { id?: unknown; depends_on?: unknown };
+    const declared = String(id ?? "");
+    if (!MINTED_TASK_ID_RE.test(declared) && !pending.has(declared)) out.add(`id ${JSON.stringify(declared)}`);
+    for (const dep of Array.isArray(deps) ? deps : deps === undefined || deps === null ? [] : [deps]) {
+      for (const ref of placeholderTokensIn(String(dep))) if (!pending.has(ref)) out.add(`depends_on ${ref}`);
+    }
+  }
+  for (const token of placeholderTokensIn(stampLine)) if (!pending.has(token)) out.add(`stamp ${token}`);
+  return [...out];
 }
 
 /** What {@link materializeDraftTaskIds} needs FROM its caller, I/O-injected so its decision logic stays pure — the
@@ -3786,15 +4355,18 @@ export type DraftTaskIdMaterialization =
   | { ok: true; fragmentYaml: string; stampLine: string; ids: string[] }
   | { ok: false; reason: string };
 
-/** Materialize `NEW-<n>` placeholders into concrete, RESERVED `W1-Tnnn` ids. DEGRADE HONESTLY, NEVER GUESS — a
- *  degraded mint, or a reservation failing for anything but contention, REFUSES rather than falling back to an
- *  unreserved id, and the caller must treat `{ ok: false }` as "write nothing, open no PR": a duplicate id on main
- *  breaks `loadPlan`. */
+/** Materialize `NEW-…` placeholders into concrete, RESERVED `W1-Tnnn` ids. DEGRADE HONESTLY, NEVER GUESS: a degraded
+ *  mint, a reservation failing for anything but contention, or an id that would land unminted (W1-T9292, #11402)
+ *  REFUSES, and the caller must treat `{ ok: false }` as "write nothing, open no PR" (it releases what was reserved). */
 export function materializeDraftTaskIds(
   payload: { fragmentYaml: string; stampLine: string },
   deps: DraftTaskIdMintDeps,
 ): DraftTaskIdMaterialization {
   const placeholders = draftPlaceholderIds(payload.fragmentYaml);
+  const unminted = unmintedDraftResidue(payload.fragmentYaml, payload.stampLine, new Set(placeholders));
+  if (unminted.length > 0) {
+    return { ok: false, reason: `the draft would land an unminted task id — refusing: ${unminted.join("; ")}` };
+  }
   if (placeholders.length === 0) {
     return { ok: true, fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine, ids: [] };
   }
@@ -3813,12 +4385,13 @@ export function materializeDraftTaskIds(
   }
 
   const mapping = new Map<string, string>(placeholders.map((placeholder, i) => [placeholder, `W1-T${block.ids[i]}`]));
-  return {
-    ok: true,
-    fragmentYaml: substitutePlaceholderIds(payload.fragmentYaml, mapping),
-    stampLine: substitutePlaceholderIds(payload.stampLine, mapping),
-    ids: [...mapping.values()],
-  };
+  const fragmentYaml = substitutePlaceholderIds(payload.fragmentYaml, mapping);
+  const stampLine = substitutePlaceholderIds(payload.stampLine, mapping);
+  const residue = unmintedDraftResidue(fragmentYaml, stampLine, new Set());
+  if (residue.length > 0) {
+    return { ok: false, reason: `an unminted task id survived materialization — refusing: ${residue.join("; ")}` };
+  }
+  return { ok: true, fragmentYaml, stampLine, ids: [...mapping.values()] };
 }
 
 // ── rmd reframe — feedback redrafts through the ledger (MASTER-PLAN P25 iii, W1-T111) ────
@@ -3880,13 +4453,16 @@ export function reframeProposal(
     ...proposal,
     reframeHistory: [...updatedHistory, { feedback }],
   };
-  appendLedger(deps.ledgerPath, {
+  const row = {
+    ts: systemClock.iso(),
     run_id: deps.runId,
     task_id: proposal.id,
     step: "ratify.reframed",
     feedback,
     ...(supersedes && supersedes.length > 0 ? { supersedes } : {}),
-  });
+  };
+  appendLedger(deps.ledgerPath, row);
+  if (deps.threadStorePath) recordRowThreadEvents(row, [reframedProposal], { threadStorePath: deps.threadStorePath }, deps.log);
   return { proposal: reframedProposal, drafts: invalidateDraft(drafts, proposal.id) };
 }
 

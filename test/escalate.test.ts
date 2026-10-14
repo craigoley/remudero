@@ -80,7 +80,8 @@ test("escalate opens a needs-human labeled issue and logs the ledger line", () =
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
   assert.match(issues.calls[0].title, /^\[BLOCKED\] W1-TX: two strikes exhausted$/);
 
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   assert.equal(lines.length, 1);
   assert.equal(lines[0].step, "escalation.issue_opened");
   assert.equal(lines[0].task_id, "W1-TX");
@@ -1458,11 +1459,12 @@ test("escalateWithSummary: a THROWING summarizer still opens the issue with the 
 
 // ── W1-T349: residual escalation judge — exemption + fail-open (acceptance 1) ───────────────
 
-test("isEscalationJudgeExempt: MANUAL and GRILL are exempt; BLOCKED and HARD_STOP are not", () => {
+test("isEscalationJudgeExempt: MANUAL, HARD_STOP and GRILL are exempt; BLOCKED is not", () => {
   assert.equal(isEscalationJudgeExempt(escalation({ class: "MANUAL" })), true);
   assert.equal(isEscalationJudgeExempt(escalation({ class: "GRILL" })), true);
   assert.equal(isEscalationJudgeExempt(escalation({ class: "BLOCKED" })), false);
-  assert.equal(isEscalationJudgeExempt(escalation({ class: "HARD_STOP" })), false);
+  // W1-T8868: a HARD_STOP is never demoted or digested — it is exempt from the judge like MANUAL.
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "HARD_STOP" })), true);
 });
 
 test("judgeEscalation: MANUAL is exempt — a judge stub that WOULD demote it is overridden, delivered anyway (the falsifier, direction 1)", async () => {
@@ -1681,6 +1683,8 @@ test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue wi
     ledgerPath: path,
     runId: "RUN-1",
     judge: async () => ({ decision: "demote", reason: "this class of storm always self-resolves" }),
+    // W1-T8868: triage ships in shadow (every outcome delivers); a demotion only lands in act mode.
+    triage: { mode: "act" },
   });
 
   assert.equal(url, "https://github.com/craigoley/remudero/issues/500");
@@ -1689,7 +1693,8 @@ test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue wi
   assert.equal(comments[0].url, url);
   assert.equal(comments[0].body, "this class of storm always self-resolves");
 
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   // W1-T3166 added a SECOND row ahead of this one: `escalation.judged`, written on BOTH arms so
   // "has the judge ever run, and what did it decide" is answerable with one grep. The demotion row
   // below is unchanged; only its index moved.
@@ -1713,7 +1718,8 @@ test("escalateWithJudge: a deliver verdict opens a needs-human-labelled issue ex
 
   assert.equal(issues.calls.length, 1);
   assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
-  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  // W1-T8868: the shadow triage row (`escalation.triaged`) rides beside these; its own test reads it.
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.step !== "escalation.triaged");
   // W1-T3166: the judged row precedes the delivery row. THE DELIVER ARM IS LEDGERED TOO — a judge
   // that only leaves a trace when it demotes cannot be calibrated against what it let through.
   assert.equal(lines[0].step, "escalation.judged");

@@ -728,6 +728,43 @@ const GIT_LEAF_CENSUS_PATHS = [
   "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts",
 ];
 
+/**
+ * #11677 (2026-10-14): a build adding a raw `git worktree add` site (src/lib/engine-tree.ts::buildEngine) was
+ * refused by test/worktree-creation-census.test.ts only in CI's rule-checks, costing a fix round. The census
+ * keys each raw site by its enclosing declaration, so the trigger reads the same key: the shape is
+ * src/lib/worktree-sites.ts's RAW_WORKTREE_ADD_RE and the two declaration patterns its enclosingSiteName scans
+ * upward for (test/the-precheck-asks-the-worktree-creation-census.test.ts holds both copies equal on the real tree).
+ */
+export const RAW_WORKTREE_ADD_SHAPE = /["']worktree["']\s*,\s*["']add["']/;
+const SITE_FUNCTION_RE = /^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/;
+const SITE_METHOD_RE = /^\s*(\w+)\s*:\s*\(/;
+const WORKTREE_CENSUS_PATHS = ["src/lib/worktree-sites.ts", "src/lib/worker.ts", "test/worktree-creation-census.test.ts"];
+
+/** The census key of each raw site in `text`: its enclosing declaration's name, sorted, comment lines skipped. */
+export function rawWorktreeAddSiteKeys(text) {
+  const lines = String(text ?? "").split("\n");
+  const keys = [];
+  lines.forEach((line, i) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
+    if (!RAW_WORKTREE_ADD_SHAPE.test(line)) return;
+    let site = "";
+    for (let j = i; j >= 0 && site === ""; j--) {
+      site = SITE_FUNCTION_RE.exec(lines[j])?.[1] ?? SITE_METHOD_RE.exec(lines[j])?.[1] ?? "";
+    }
+    keys.push(site);
+  });
+  return keys.sort();
+}
+
+/** True when the diff touches the registry, the canonical sites or the census, or moves a src/ raw site's key. */
+export function worktreeCreationTrigger({ changed, readHead, readBase }) {
+  if (changed.some((p) => WORKTREE_CENSUS_PATHS.includes(p))) return true;
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  return changed.filter((p) => CLOCK_SCOPE_RE.test(p)).some((p) =>
+    rawWorktreeAddSiteKeys(readHead(p)).join("\n") !== rawWorktreeAddSiteKeys(readBase(p)).join("\n"));
+}
+
 /** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
 export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
@@ -773,10 +810,20 @@ export const PRECHECK_TRIGGERED_SUITES = [
       input.changed.includes("test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts") ||
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
+  // W1-T7812: changes to the measured fixture-crossing runner or its proof rerun that proof before push.
+  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", script: "census:near-fixture-crossing",
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
+      "src/lib/ci-parity.ts", "scripts/census-precheck.mjs",
+      "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",
+    ].includes(p)),
+    remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
   { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
+  { testFile: "test/worktree-creation-census.test.ts", script: "census:worktree-creation", trigger: worktreeCreationTrigger,
+    remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
 /**
@@ -832,6 +879,9 @@ export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline
 export const PRECHECK_ADDITIONAL_RUNS = [
   // W1-T7719: listRuleSuites includes this rostered proof, so pre-push asks it directly as well.
   { testFile: "test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts", script: "test:fix-owner-recovery" },
+  // W1-T7853: the same for the two suites its disclosed census-shaped rows put in listRuleSuites.
+  { testFile: "test/ci-filed-fold-debt-reaches-the-daemon.test.ts", script: "test:fold-debt-pull" },
+  { testFile: "test/the-merge-queue-runs-the-recorded-literal-gates.test.ts", script: "test:merge-queue-gates" },
 ];
 
 /** Every census suite this script asks before the push, and how: `modeled` names the check that asks its
@@ -853,6 +903,7 @@ export const PRECHECK_PARITY = {
   // W1-T5693: the whole-tree structural suites join the same evaluateAdmittedCensusSuites, each in its own child.
   "test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/the-precheck-asks-the-worktree-creation-census.test.ts": { modeled: evaluateAdmittedCensusSuites },
   // W1-T5617: CENSUS_ADMITTED_MEMBERS, run through each one's own npm script's suite.
   "test/bound-kind-declared.test.ts": { run: "census:bound-kind" },
   "test/ledger-literal-census.test.ts": { run: "census:ledger-literal" },

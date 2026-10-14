@@ -1,0 +1,47 @@
+- id: W1-T5433
+  title: "Admit a calibration follow-up once under competing writers and preserve crash recovery"
+  repo: remudero
+  depends_on: [W1-T5341]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: medium
+  origin: "2026-10-03 approved benchmark follow-ups; measured competing append after merged readiness driver"
+  plan_refs: [W1-T5341, W1-T5432]
+  files: [src/lib/benchmark-aa-readiness.ts, test/benchmark-aa-readiness.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at a92ce44653eb9201ba6a1003c03c6e09a18a61bd: fileFollowUp at
+    src/lib/benchmark-aa-readiness.ts:325-334 reads then appends on one open descriptor.
+    Holding the descriptor fixes path replacement but does not serialize a duplicate-key
+    decision. Disposable pinned-runtime interleaving probes on the identical source blob
+    2460a6a05afc2fa02e2814700186775dedcc16eb produced two rows with one key after a competing
+    append. The sequential positive control produced one row and already-filed. These are
+    controlled interleavings, not observed production concurrency. #8852 is actually merged.
+  design: |
+    Add durable exclusive admission keyed by the current repository/instance, trial and gap,
+    using existing lock/holder protocols where they satisfy the mechanism. Two writers that
+    observe the same absent key must not both append or both claim ownership. Validate the
+    prior canonical record rather than substring-matching an arbitrary line. Preserve opened
+    descriptor/path replacement safety, historical rows and partial/corrupt evidence; unreadable
+    or pending ownership is an explicit outcome, not empty or already completed. Recover an
+    interrupted admission from durable evidence without suppressing an unrecorded gap, and
+    never delete contested ownership. W1-T5432 owns downstream task delivery and state naming;
+    recording is not proof of actual task filing. Use real competing processes or a deterministic
+    barrier against the production adapter plus sequential and restart positive controls.
+    No indefinite lock, new normal-PR block, paid activation or arbitrary sample floor.
+    Research: https://nodejs.org/docs/latest-v22.x/api/fs.html#file-system-flags
+  acceptance:
+    - claim: "two competing writers admit one canonical gap record"
+      proof: 'grep: competing calibration gap writers admit one record in test/benchmark-aa-readiness.test.ts'
+    - claim: "restart repairs interrupted admission without replaying or dropping the gap"
+      proof: 'grep: interrupted calibration gap admission resumes safely in test/benchmark-aa-readiness.test.ts'
+    - claim: "path replacement and corrupt prior data preserve explicit evidence"
+      proof: 'grep: calibration gap admission preserves replaced and corrupt evidence in test/benchmark-aa-readiness.test.ts'
+  falsifier: |
+    Remove exclusive admission while both writers cross the same pre-append barrier: two
+    canonical rows appear and the test fails. Leave an interrupted owner record without a
+    committed gap: the restart fixture must still admit exactly one real record, not zero.

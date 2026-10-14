@@ -9,6 +9,7 @@ import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_COVERAGE_SHARD_COUNT, coverageGateLockDir, coverageScratchDir, coverageShardConcurrency, runCiParity, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
 import { unwrapLowPriority } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { finishJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -40,7 +41,7 @@ function coverageFixtureRoot(): string {
   return root;
 }
 
-function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number; vanishingCompactShard?: number } = {}) {
+function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number; vanishingCompactShard?: number; cutShortShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
@@ -59,6 +60,8 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
         rmSync(rawDir, { recursive: true, force: true });
       }
       const stdout = shard === options.missingSummaryShard ? "ok 1 - shard without totals\n" : "# tests 1\n# pass 1\n# fail 0\n";
+      // A finished shard leaves the judge's tally (scripts/pure-test-pool.mjs); a cut-short one does not.
+      if (shard !== options.cutShortShard) finishJudgedRun(args, opts);
       return { status: 0, stdout, stderr: "" };
     }
     if (args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))) {
@@ -222,6 +225,26 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
     assert.equal(coverage.ok, false);
     assert.match(coverage.detail, /shard 8\/8 produced no # tests summary/);
     assert.equal(calls.some((c) => c.args.includes("--output")), false);
+  } finally {
+    cleanup();
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("coverage entry refuses a shard whose file process exited 0 before its own summary", () => {
+  const fixtureRoot = coverageFixtureRoot();
+  // Shard 5 exits 0 and prints a whole `# tests` summary, as node does when a file's own child ends
+  // part-way — but its file never reached its own summary, so the judge's tally never names it.
+  const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { cutShortShard: 5 });
+  try {
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
+    const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
+
+    assert.equal(coverage.ok, false);
+    assert.match(coverage.detail, /COVERAGE SHARD 5\/8 RUN INCOMPLETE — its exit 0 is counted as FAILED/);
+    assert.match(coverage.detail, /UNREPORTED FILE test\/coverage-shard-5\.test\.ts/);
+    assert.equal(calls.some((c) => shardNumber(c.args) === 6), false, "no later shard runs");
+    assert.equal(calls.some((c) => c.args.includes("--output")), false, "nothing is merged");
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });

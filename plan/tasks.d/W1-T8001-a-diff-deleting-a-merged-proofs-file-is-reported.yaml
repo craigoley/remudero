@@ -1,0 +1,79 @@
+- id: W1-T8001
+  title: "A PR THAT DELETES A FILE A MERGED TASK'S PROOF NAMES IS NEVER TOLD — PR #10787 (W1-T6087) merged on 2026-10-11 after deleting two census test files that 18 proofs of six merged tasks name, and no author-time check, gate or review re-reads a merged task's proof, so the breakage was found by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — a diff that removes a merged proof's target is reported at author time
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the follow-ups (merged tasks' grep proofs point at files PR #10787 deletes)"
+  plan_refs: [W1-T6087, W1-T6884, W1-T6885, W1-T7272, W1-T4921, W1-T5026, W1-T2477, W1-T2280]
+  files: [scripts/proof-resolve-precheck.mjs, test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11. PR #10787 (W1-T6087, merged 12:56:12Z as 4ada04ce2) deletes
+    test/the-census-admission-set-is-derived-not-enumerated.test.ts (-449) and
+    test/the-census-roster-is-named-not-numbered.test.ts (-324). It adds
+    test/the-gate-admission-population-is-checked-from-one-scan.test.ts (+610).
+    At 4ada04ce2, 18 proofs of six MERGED tasks name the deleted paths (`git grep` over plan/ for proof: lines):
+      - W1-T6884: `grep: W1-T6884 in test/the-census-roster-is-named-not-numbered.test.ts`
+      - W1-T6885: `grep: W1-T6885 in test/the-census-roster-is-named-not-numbered.test.ts`
+      - W1-T7272: `grep: test("W1-T7272 pins the cause of the intermittent failure" in
+        test/the-census-admission-set-is-derived-not-enumerated.test.ts`
+      - W1-T2643: six `unit test: test/the-census-admission-set-is-derived-not-enumerated.test.ts`
+      - W1-T2644: seven `unit test: test/the-census-roster-is-named-not-numbered.test.ts`
+      - W1-T3408: two `grep:` proofs in test/the-census-admission-set-is-derived-not-enumerated.test.ts
+    Every pattern moved into the added file. The filing that carries this task re-points the three proofs of
+    W1-T6884, W1-T6885 and W1-T7272 by hand. The other 15 (W1-T2643, W1-T2644, W1-T3408) are left for an operator
+    amendment: re-pointed, they trip the plan-only preflight (shared-proof, proof-grep-already-true), because a
+    merged proof that already passes reads as non-discriminating, and the clean fix is a `kind: guard` ruling.
+    NOTHING ON THE AUTHOR'S PATH LOOKS.
+      - proof-resolve-precheck (scripts/proof-resolve-precheck.mjs) resolves only the PUSHED task's criteria. It does
+        that through resolvePlanCriteriaAtHead for the run branch's or trailer's task.
+      - task-linter's merged-task checks (post-merge-proof-changed, post-merge-criterion-removed) fire only when a
+        diff edits a merged SHARD. #10787's diff edits only W1-T6087's shard.
+      - proof-queue-audit (W1-T2477) audits the OPEN queue. A merged task is out of its population.
+    A deleted proof target is cheap to see at author time: one `git diff --name-status` and one pass over the plan's
+    merged acceptance. A builder cannot fix the merged shards (Standing rule 15). But the report lets it name the
+    defect in its PR body, so the operator can file the amendment before merge rather than after.
+  design: |
+    1. A pure function, exported from scripts/proof-resolve-precheck.mjs beside proofResolveVerdict:
+       `mergedProofOrphans({ plan, removedPaths, addedFiles })`. `removedPaths` are paths the diff deletes or renames
+       away (`git diff --name-status -M <base>...HEAD`: every D, and the old path of every R). For each task whose
+       status is merged, and each acceptance criterion, take the path its proof names. A `unit test:` path, or a
+       `grep:` proof's path after `--`, parsed with review.ts's parseWhitelistedProof so it cannot disagree with the
+       reviewer. Report every criterion whose named path is removed.
+    2. A RE-POINT HINT. For a `grep:` proof, run its pattern against each file the diff ADDS. Use the executor's
+       real invocation (`grep -an -- <pattern> <file>`), never -F. Name each added file that matches as a candidate
+       new target. A `unit test:` proof is matched the reviewer's way against the added files' test titles. In
+       #10787's shape this names the new file for all three tasks.
+    3. proof-resolve-precheck runs this arm on EVERY push. That includes a plan-only filing and a head with no
+       resolvable task, which today SKIP before any check. It REPORTS and never blocks: deleting a test file is
+       legitimate. Each line names the merged task id, the criterion's claim, the removed path and any candidate,
+       and ends "a builder may not edit a merged criterion (Standing rule 15): name this in your PR body so the
+       operator files the amendment".
+       An unreadable diff or plan stays the script's existing exit 2.
+    Tests go in a new file, test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive the pure function with an in-memory plan. Drive the script against a
+    gitRepo() fixture whose diff deletes a file that a merged task's grep proof names and adds the file the pattern
+    moved to (#10787's shape).
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts"
+    - claim: "a merged task's proof naming a path the diff deletes or renames away is reported"
+      proof: 'grep: test("W1-T8001: a deleted file a merged proof names is reported" in test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts'
+    - claim: "an added file that carries the grep proof's pattern is named as the candidate new target"
+      proof: 'grep: test("W1-T8001: the added file carrying the pattern is named as the re-point candidate" in test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts'
+    - claim: "the report runs on a plan-only or task-less head and never blocks the push"
+      proof: 'grep: test("W1-T8001: the orphan report runs on every push and never blocks" in test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts'
+    - claim: "an unmerged task's proof naming a deleted path is not this report's concern"
+      proof: 'grep: test("W1-T8001: only merged tasks are reported" in test/a-diff-deleting-a-merged-proofs-file-is-reported.test.ts'
+  falsifier: |
+    Leave proof-resolve-precheck resolving only the pushed task. The #10787-shaped fixture then reports nothing and
+    the first test fails. Put the arm after the plan-only or no-task SKIP, and the third test reads no report. Exit 1
+    on an orphan, and the third test fails on the exit status. Drop the re-point hint, and the second test finds no
+    candidate named. Report every task's proofs instead of merged ones only, and the fourth test fails.

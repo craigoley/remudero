@@ -228,15 +228,17 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // W1-T5521 moves it 7 -> 8: the same preflight's async form, cut off the daemon loop for the sweep's rungs.
   // W1-T5533 moves it 8 -> 9: a hand build's worktree hard-links node_modules, which worktreeAdd's symlink forbids.
   // W1-T6258 moves it 9 -> 10: the node-pin sync commits on top of a Dependabot PR's own head, not origin/main.
+  // W1-T9077 moves it 10 -> 11: a run child's engine tree is cut DETACHED at the daemon's own pinned sha.
   assert.deepEqual(exempt, [
+    "src/lib/check-proof.ts::buildBaseProofDir",
     "src/lib/composition-root.ts::addWorktree",
+    "src/lib/engine-tree.ts::buildEngine",
     "src/lib/hand-worktree.ts::createHandWorktree",
     "src/lib/paired-trial.ts::cutSealedAttemptTree",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",
     "src/lib/serve-slots.ts::createSlotPreparer",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
-    "src/run-task.ts::buildBaseProofDir",
     "src/run-task.ts::createFixRungWorktree",
     "src/run-task.ts::defaultNodePinSyncIo",
   ]);
@@ -309,6 +311,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
     sites.sort(),
     [
       "src/lib/composition-root.ts::addWorktree",
+      "src/lib/engine-tree.ts::buildEngine", // W1-T9077: the pinned engine tree is cut DETACHED at the daemon's sha
       "src/lib/hand-worktree.ts::createHandWorktree",
       "src/lib/paired-trial.ts::cutSealedAttemptTree",
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
@@ -317,7 +320,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
       "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
       "src/lib/worker.ts::worktreeAdd",
       "src/lib/worker.ts::worktreeAddAsync",
-      "src/run-task.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
+      "src/lib/check-proof.ts::buildBaseProofDir", // R-11: the merge-base worktree the staleness check re-runs proofs in
       "src/run-task.ts::createFixRungWorktree",
       "src/run-task.ts::defaultNodePinSyncIo",
     ].sort(),

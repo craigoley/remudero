@@ -288,16 +288,16 @@ test("W1-T340 FALSIFIER: reading a live/reloaded binding instead of the batch's 
 
 // ── the reloader's own change detection ───────────────────────────────────────────────
 
-test("planReloader: returns null on the FIRST tick — the boot plan already came from that sha", () => {
+test("planReloader: returns null on the FIRST tick — the boot plan already came from that sha", async () => {
   const r = planReloader({ isSelf: true, planPath: "/x" }, false, () => {}, {
     treeSha: () => "sha-boot",
     load: () => ({ tasks: [] }) as unknown as Plan,
   });
   assert.ok(r, "a self-target gets a reloader");
-  assert.equal(r!(), null, "no reload is reported for the sha the boot already loaded");
+  assert.equal(await r(), null, "no reload is reported for the sha the boot already loaded");
 });
 
-test("planReloader: null while the tree sha is unchanged, a fresh plan when it moves", () => {
+test("planReloader: null while the tree sha is unchanged, a fresh plan when it moves", async () => {
   let sha = "sha-1";
   let loads = 0;
   const r = planReloader({ isSelf: true, planPath: "/x" }, false, () => {}, {
@@ -307,18 +307,18 @@ test("planReloader: null while the tree sha is unchanged, a fresh plan when it m
       return { tasks: [{ id: "NEW" }] } as unknown as Plan;
     },
   })!;
-  assert.equal(r(), null); // first tick records the sha
-  assert.equal(r(), null, "unchanged sha must not re-parse a ~1MB plan");
+  assert.equal(await r(), null); // first tick records the sha
+  assert.equal(await r(), null, "unchanged sha must not re-parse a ~1MB plan");
   assert.equal(loads, 0, "the common path costs no parse at all");
   sha = "sha-2";
-  const fresh = r();
+  const fresh = await r();
   assert.ok(fresh, "a moved tree sha yields a fresh plan");
   assert.equal(loads, 1);
-  assert.equal(r(), null, "and it settles again on the new sha");
+  assert.equal(await r(), null, "and it settles again on the new sha");
   assert.equal(loads, 1, "exactly one parse per genuine change");
 });
 
-test("planReloader: a NON-self target gets no reloader — frozen-at-boot is preserved", () => {
+test("planReloader: a NON-self target gets no reloader — frozen-at-boot is preserved", async () => {
   assert.equal(
     planReloader({ isSelf: false, planPath: "/x" }, false, () => {}, { treeSha: () => "s" }),
     undefined,
@@ -591,7 +591,7 @@ test("REACHABILITY: daemonCommand hands a reloadPlan to the loop (and NOT for an
 // every tick, and was caught and ledgered as a failure, so the re-read never once happened in
 // production. These drive the default with NO injection, against a real git repo.
 
-test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, not the cwd", () => {
+test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, not the cwd", async () => {
   const root = mkdtempSync(join(tmpdir(), "fz-realgit-"));
   const g = (...a: string[]) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" });
   const prevCwd = process.cwd();
@@ -611,15 +611,15 @@ test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, n
 
     const r = planReloader({ isSelf: true, planPath: join(root, "plan", "tasks.yaml") }, false, () => {})!;
     assert.ok(r, "a self target gets a reloader");
-    assert.equal(r(), null, "first tick records the boot sha without reporting a reload");
-    assert.equal(r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
+    assert.equal(await r(), null, "first tick records the boot sha without reporting a reload");
+    assert.equal(await r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
 
     // Move the plan on origin/main; the next call must return a freshly parsed plan.
     writeFileSync(join(root, "plan", "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n- id: B-NEW\n  title: b\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n");
     g("add", "-A"); g("commit", "-q", "-m", "filed");
     g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").trim());
 
-    const fresh = r();
+    const fresh = await r();
     assert.ok(fresh, "a moved plan tree yields a reload");
     assert.deepEqual(fresh!.tasks.map((t) => t.id), ["A", "B-NEW"], "and it is the NEW plan");
     rmSync(outside, { recursive: true, force: true });
@@ -635,25 +635,25 @@ test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, n
 // the next tick could observe a difference. But a zero could not be told apart from "never ran".
 // Failures were already visible; success was not. These pin the signal that closes that gap.
 
-test("recon-GM: the probe emits ONE liveness heartbeat per boot, carrying the plan tree sha", () => {
+test("recon-GM: the probe emits ONE liveness heartbeat per boot, carrying the plan tree sha", async () => {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
     (step, extra) => logged.push({ step, extra }),
     { treeSha: () => "abcdef1234567890", load: () => ({ tasks: [] }) as unknown as Plan })!;
 
-  assert.equal(r(), null, "first tick reloads nothing — the boot plan already came from this sha");
+  assert.equal(await r(), null, "first tick reloads nothing — the boot plan already came from this sha");
   const hb = logged.filter((l) => l.step === "daemon.plan_unchanged");
   assert.equal(hb.length, 1, "exactly one heartbeat on the first tick");
   assert.equal(hb[0].extra?.tree_sha, "abcdef123456", "it records WHICH plan the boot is pinned to");
 });
 
-test("recon-GM: the heartbeat is BOUNDED — repeated unchanged ticks do not re-emit", () => {
+test("recon-GM: the heartbeat is BOUNDED — repeated unchanged ticks do not re-emit", async () => {
   // ~1,440 rows/day of "nothing happened" is the noise that gets a signal ignored. One per boot.
   const logged: string[] = [];
   const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
     (step) => logged.push(step),
     { treeSha: () => "samesha0000", load: () => ({ tasks: [] }) as unknown as Plan })!;
-  for (let i = 0; i < 25; i++) assert.equal(r(), null);
+  for (let i = 0; i < 25; i++) assert.equal(await r(), null);
   assert.equal(
     logged.filter((s) => s === "daemon.plan_unchanged").length,
     1,
@@ -661,15 +661,15 @@ test("recon-GM: the heartbeat is BOUNDED — repeated unchanged ticks do not re-
   );
 });
 
-test("recon-GM: a real change still reports plan_changed, and does not re-emit the heartbeat", () => {
+test("recon-GM: a real change still reports plan_changed, and does not re-emit the heartbeat", async () => {
   const logged: string[] = [];
   let sha = "first000000";
   const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
     (step) => logged.push(step),
     { treeSha: () => sha, load: () => ({ tasks: [{ id: "NEW" }] }) as unknown as Plan })!;
-  assert.equal(r(), null);
+  assert.equal(await r(), null);
   sha = "second00000";
-  assert.ok(r(), "a moved tree sha still yields a reload");
+  assert.ok(await r(), "a moved tree sha still yields a reload");
   assert.deepEqual(logged, ["daemon.plan_unchanged", "daemon.plan_changed"],
     "heartbeat once at boot, then the real change — the heartbeat never repeats");
 });

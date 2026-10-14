@@ -1,0 +1,51 @@
+id: fb-1791856366584-6a18c9
+ts: 2026-10-13T01:52:46.587Z
+raw: >-
+  Found while inventorying remudero for the NanoClaw comparison, 2026-10-13. It
+  is an adjacent defect, not a NanoClaw idea.
+
+
+  OBSERVED at origin/main efd226b50:
+
+  - src/lib/repository-flow.ts (near line 147) credits merged PRs with the
+  trailer regex /^Remudero-Task:[
+  \t]*(W\d+-T\d+[A-Za-z]?|CONSOLE-T\d+|SITE-T\d+)[ \t]*$/gm.
+
+  - remudero-site's task prefix is PORTAL-T. The reservation code names
+  CONSOLE-T, PORTAL-T and W1-T together (src/lib/task-id-reservation.ts:989),
+  and PORTAL-T4 and PORTAL-T27 are cited at src/lib/escalate.ts:954 and
+  src/run-task.ts:29694.
+
+  - SITE-T appears nowhere else in src/: git grep -c SITE-T -- src reports only
+  repository-flow.ts.
+
+  - So a site PR credited only by a Remudero-Task: PORTAL-T<n> trailer is
+  under-credited in this flow. Branch-name credit (taskIdFromRunBranch) still
+  works.
+
+
+  ASK:
+
+  - Source the accepted prefixes from the one place the reservation code names
+  them, or from the instance registry, instead of a literal list. PORTAL-T then
+  matches and the stale SITE-T goes.
+
+  - Add a test with a PORTAL-T trailer-only merged PR.
+
+
+  FALSIFIER: revert to the literal list. The PORTAL-T trailer-only fixture is
+  not credited.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/portal-t-trailer-credit
+thread_id: null

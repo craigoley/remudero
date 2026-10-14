@@ -33,7 +33,12 @@ export interface GateFireRate {
   refusals: number;
   repaired: number;
   overridden: number;
+  /** Check-run wall time of EVERY run: what the gate costs to run at all. */
   minutes: number;
+  /** Wall time of the RED runs only, and the distinct pull requests they fell on: what the gate cost when it
+   *  fired. A report persisted before these existed carries neither, and ci-friction then prices nothing. */
+  redMinutes?: number;
+  redPrs?: number;
 }
 
 export interface GateFireRateReport {
@@ -57,10 +62,11 @@ const stateOf = (e: { state?: string; conclusion?: string; status?: string }) =>
 
 export function measureGateFireRates(input: CiFailureCorpusInput): GateFireRateReport {
   const prs = input.prs as GateWindowPr[];
-  const byGate = new Map<string, GateFireRate & { prSet: Set<number> }>();
+  const byGate = new Map<string, GateFireRate & { redMinutes: number; prSet: Set<number>; redPrSet: Set<number> }>();
   const rate = (gate: string) => {
     let r = byGate.get(gate);
-    if (!r) byGate.set(gate, (r = { gate, prs: 0, runs: 0, redRuns: 0, refusals: 0, repaired: 0, overridden: 0, minutes: 0, prSet: new Set() }));
+    if (!r) byGate.set(gate, (r = { gate, prs: 0, runs: 0, redRuns: 0, refusals: 0, repaired: 0, overridden: 0, minutes: 0, redMinutes: 0,
+      prSet: new Set(), redPrSet: new Set() }));
     return r;
   };
   let commits = 0;
@@ -77,10 +83,14 @@ export function measureGateFireRates(input: CiFailureCorpusInput): GateFireRateR
         const r = rate(gate);
         r.runs++;
         r.prSet.add(pr.number);
-        if (REQUIRED_CHECK_FAIL.has(state)) r.redRuns++;
+        const red = REQUIRED_CHECK_FAIL.has(state);
+        if (red) { r.redRuns++; r.redPrSet.add(pr.number); }
         if (entry.name && entry.startedAt && entry.completedAt) {
           const ms = Date.parse(entry.completedAt) - Date.parse(entry.startedAt);
-          if (Number.isFinite(ms) && ms > 0) r.minutes += ms / 60_000;
+          if (Number.isFinite(ms) && ms > 0) {
+            r.minutes += ms / 60_000;
+            if (red) r.redMinutes += ms / 60_000;
+          }
         }
       }
     }
@@ -93,7 +103,8 @@ export function measureGateFireRates(input: CiFailureCorpusInput): GateFireRateR
     else if (merged.has(pair.pr)) r.overridden++;
   }
   const gates = [...byGate.values()]
-    .map(({ prSet, ...r }) => ({ ...r, prs: prSet.size, minutes: Math.round(r.minutes * 10) / 10 }))
+    .map(({ prSet, redPrSet, ...r }) => ({ ...r, prs: prSet.size, minutes: Math.round(r.minutes * 10) / 10,
+      redMinutes: Math.round(r.redMinutes * 10) / 10, redPrs: redPrSet.size }))
     .sort((a, b) => a.gate.localeCompare(b.gate));
   const status = input.windowComplete === false || (input.unreadablePrs?.length ?? 0) > 0 ? "partial" : read > 0 ? "measured" : commits > 0 ? "unreadable" : "empty";
   const patterned = status === "measured" ? gates.filter((g) => g.prs >= PATTERN_PRS && g.runs > 0) : [];

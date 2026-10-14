@@ -1,0 +1,83 @@
+- id: W1-T9250
+  title: "AN OPERATOR PLAN PR RED ONLY BECAUSE MAIN IS RED WAITS FOR MAIN, NOT AN ESCALATION — the sweep's base-red wait for a plan filing runs only for fleet-App machine-lane heads, so #11407 (plan-file-*, cao825) was refused-escalate as a plan violation twice on 2026-10-13 while main was red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # one concern: the plan-only base-red wait reaches every plan filing; src/lib/sweep.ts (decidePlanRepair) and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11407 (plan-file-1791906392752) red on main's W1-T9153 tests was escalated, then hand-refreshed"
+  plan_refs: [W1-T5349, W1-T5543, W1-T4351, W1-T7730, W1-T6024]
+  files:
+    - src/lib/sweep.ts
+    - test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts
+  status: merged
+  priority: 1.5  # every operator filing opened while main is red files a needs-human escalation and waits for a hand refresh
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13: #11407 (branch plan-file-1791906392752, author cao825) went red on `ci-shard (8/8)`, failing
+    the two W1-T9153 tests "two concurrent approves on one path and neither loses its cwd" and "an approve whose add
+    threw removes nothing". Both were red on main from e30bac73c until the main repair #11410 (b292ee213). The sweep
+    wrote `sweep.disposed` with blocker plan-proof-unrunnable and disposition refused-escalate at 16:25:20Z and
+    16:30:01Z: "plan-only PR is red on ci-shard (8/8) — the code-fix lane cannot stage outside a plan filing, so no fix
+    is dispatched; the plan violation needs a plan repair". The operator pressed update-branch by hand; the PR then went
+    green and merged.
+    READ on origin/main ee05e3863 (symbols, not lines), src/lib/sweep.ts:
+      - `decidePlanRepair` returns `inheritedRedRefresh(...)` at once when
+        `!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)`. Its base-red WAIT
+        (`main?.state === "red" && names.every((n) => main.failingChecks.includes(n))` → `{ signature: "base-red",
+        action: "wait" }`) and the refresh after a recorded wait (`history.has(`${head}@base-red-wait`)`) sit below
+        that return, so only fleet machine-lane heads reach them.
+      - `inheritedRedRefresh` returns undefined unless `main?.state === "green"`, so while main is red an operator
+        filing gets no decision, `tryPlanRepair` returns `{ repaired: false, reason: "" }`, and the plan-only branch
+        (the "W1-T5543: fleet filings have their own plan surface" block) sets `disposition = "refused-escalate"`.
+      - The same block's own `decideBaseRed(pr, mainLatestRun, baseRedHistory)` and `baseRedStandDownPrs.add` run only
+        inside `if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
+        isMachineLanePlanHead(pr.headRefName))`.
+    REPRODUCED in-process on ee05e3863: a plan filing on head plan-file-1791906392752, author cao825, red on
+    ci-shard (8/8), against a main run red on ci-shard (8/8): `decidePlanRepair` → undefined, while
+    `decideBaseRed` on the same inputs → `{ kind: "wait", check: "ci-shard (8/8)" }`. The same PR on a fleet
+    plan-garden head → `{ signature: "base-red", action: "wait", cause: "main-red" }`.
+    HOW A STOOD-DOWN PLAN PR IS REFRESHED TODAY: a machine head's `sweep.plan_repair` wait row is folded by
+    `planRepairHistoryFromLedger` into `<pr>@<head>@base-red-wait`; once main is green `decidePlanRepair` returns
+    `action: "refresh"` and `tryPlanRepair` calls `deps.updateBranch`. An operator filing reaches only
+    `inheritedRedRefresh` (#10464, test/a-plan-pr-red-only-from-main-takes-main-not-a-plan-repair.test.ts): it
+    refreshes after main is green only when every failing check matches `inheritedPlanRedChecks` and the head is
+    behind main. A check outside that list that main also failed is never refreshed.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for decidePlanRepair, inheritedRedRefresh,
+    isMachineLanePlanHead and "plan-only PR is red": W1-T5348, W1-T5349, W1-T5537, W1-T5543, W1-T6024 (shipped, scope
+    fleet heads or code PRs), W1-T6048 (withdrawn), W1-T6057, W1-T7698 (task-id-existence), and W1-T7730 (queued, held:
+    its worker refused, saying a real fix needs "a new repair lane for non-machine-lane or non-fleet plan filings, in
+    `sweep.ts`, which is outside the declared files" — this task is that sweep.ts change). Swept the added lines of all
+    17 open PR heads: none touches this path (control: #11411's added lines hit "base red" twice).
+  design: |
+    Give every plan filing the base-red wait and its refresh; keep the branch-writing rungs fleet-only.
+    1. In `decidePlanRepair`, evaluate the base-red signature before the machine-lane/fleet-author return: while main is
+       red and every failing check is in `main.failingChecks`, return `{ signature: "base-red", action: "wait", cause:
+       "main-red" }` for any plan filing; once main is green and the head has a recorded `@base-red-wait`, return the
+       refresh. The held-id renumber and title-length retitle rungs stay behind the fleet gate (they push to the
+       lane's own branch). The stale-base and inherited refreshes keep their current conditions.
+    2. `tryPlanRepair` already ledgers the wait once per head, adds the PR to `baseRedStandDownPrs` (blocker
+       `base-red`, not plan-proof-unrunnable) and returns `repaired: true`, so the plan-only block reads `wait`. Check
+       that `readPlanRepairFacts` not running for a non-machine head (facts stay `{}`) leaves this reachable.
+    3. The refresh uses the existing one-press-per-pass `deps.updateBranch` route and its once-per-head history; add no
+       new count or cap.
+    Tests go in test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts, driving `runSweep` (or
+    `decidePlanRepair` plus one `runSweep` pass) with an operator plan-file-* head authored by a person.
+    test/a-plan-pr-red-only-from-main-takes-main-not-a-plan-repair.test.ts must stay green: it asserts no refresh onto
+    a red main, which a wait keeps true.
+  acceptance:
+    - claim: "an operator plan PR red on the same check as main's latest red run is disposed wait with blocker base-red, not refused-escalate"
+      proof: 'grep: test("W1-T9250: an operator plan PR red on a check main also fails waits for main" in test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts'
+    - claim: "once main is green, that stood-down operator plan PR is refreshed onto main"
+      proof: 'grep: test("W1-T9250: the waiting operator plan PR is refreshed once main is green" in test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts'
+    - claim: "an operator plan PR red on a check main passes still escalates as a plan violation"
+      proof: 'grep: test("W1-T9250: an operator plan PR red on its own check still escalates" in test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts"
+  falsifier: |
+    Restore the early `inheritedRedRefresh` return for non-machine heads: the first test reads refused-escalate and
+    blocker plan-proof-unrunnable, and the second sees no update-branch call. Make the wait unconditional: the third
+    test, red on a check main's run passed, reads wait instead of refused-escalate.

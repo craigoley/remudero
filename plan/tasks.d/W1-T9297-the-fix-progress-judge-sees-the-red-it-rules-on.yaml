@@ -1,0 +1,51 @@
+- id: W1-T9297
+  title: "THE FIX-PROGRESS JUDGE SEES THE RED IT RULES ON — on 2026-10-13 it escalated #11444 to a needs-human issue with zero rounds spent, reasoning that its checkout held no check output for the PR, after 55 minutes of continue verdicts the capacity gate never admitted"
+  repo: remudero
+  depends_on: [W1-T9057]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 7.00
+  risk: high  # the judge's input and prompt; src/lib/fix-progress-judge.ts, src/lib/sweep.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11444 (W1-T9057) escalated as issue #11461 with no fix round ever dispatched"
+  plan_refs: [W1-T7243, W1-T7762, W1-T9057]
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/lib/sweep.ts
+    - test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts
+  status: queued
+  priority: 2  # a round-0 escalation parks an own red behind a person; one occurrence cost #11444 its repair
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host ledger (read-only, niced; the 18-53 rotation plus the live file):
+      - #11444 (W1-T9057, head d0dd658) was red on coverage-shard (5/8). From 18:21Z to 19:13Z `fix.progress_judged`
+        ruled continue eight times at round_count 0, while every `sweep.disposed` stood down on "live host capacity
+        exhausted" (memory-pressure admission with review reservations; `sweep.fix_capacity` fix_admissions_available 0).
+      - The 19:04:01Z judgment named the failing test exactly. The 19:16:52Z one, same head, same red class, round_count
+        0, ruled escalate: "the checkout is at a different merge commit and provides no check output for PR #11444 ...
+        dispatching another round without its failure evidence would be speculative". 19:16:57Z
+        `escalation.issue_opened` #11461 (needs-human). On #11443 the 19:02:13Z judgment likewise reasoned "the cited PR
+        head is an ancestor of neither the current checkout nor its task branch".
+      - `buildFixProgressInput` (src/lib/fix-progress-judge.ts) hands the judge rounds, signals and the red's check
+        names only. `productionFixProgressJudge` (src/lib/sweep.ts) spawns it in the daemon's own worktree, not the PR
+        head. Whether it sees the failure depends on whether that spawn goes looking for it.
+  design: |
+    1. THE INPUT CARRIES THE RED. `buildFixProgressInput` accepts the current red's failure evidence (per failing
+       check: its name, failing test titles and a bounded excerpt, in W1-T9057's `ciFailureLedgerEntry` shape), and
+       each sweep call site passes what it already holds for the head (the ci-log evidence it would hand the fix rung).
+       Absent evidence is recorded as absent, with why, never as an empty list.
+    2. THE PROMPT SAYS WHAT IT HOLDS. `productionFixProgressJudge` states that the judge's working directory is not the
+       PR head and that the input is the evidence; with zero rounds the question is whether round one can act on the
+       named failure, and a missing history is not a loop. No count or threshold is added: the judge still rules.
+    3. LEDGER: `fix.progress_judged` records whether failure evidence was supplied (and how many checks it covered).
+    Tests go in test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts, driving `buildFixProgressInput` and the
+    production judge's prompt through a fake spawn.
+  acceptance:
+    - claim: "the judge's input carries each failing check's titles and excerpt"
+      proof: 'grep: test("W1-T9297: the judge input carries the failing check evidence" in test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts'
+    - claim: "the production judge's prompt carries the evidence and says its checkout is not the PR head"
+      proof: 'grep: test("W1-T9297: the judge prompt says its checkout is not the PR head" in test/the-fix-progress-judge-sees-the-red-it-rules-on.test.ts'
+  falsifier: |
+    Leave the input without failure evidence: the first test finds no titles and fails. Leave the prompt unchanged:
+    the fake spawn's captured prompt lacks the evidence and the checkout line, and the second test fails.

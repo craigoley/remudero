@@ -1,0 +1,61 @@
+- id: W1-T9085
+  title: "A BUILD RUN EXECUTES IN A DETACHED CHILD WHEN sweep.runChild.mode IS on — runOne still calls runTask inside the daemon's own process, so every restart must drain or yield every run (restart idle 1,008 lane-min, 23.6% of capacity, 2026-10-12/13)"
+  repo: remudero
+  depends_on: [W1-T9083, W1-T8778]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — the spawn, settle and abort of a run child; adoption and the restart change are the next task
+  band_meaning: span
+  origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
+  plan_refs: [W1-T5723, W1-T7807, W1-T8778, W1-T9070, W1-T9077, W1-T9080, W1-T9082, W1-T9083]
+  files: [src/lib/run-child.ts, src/run-child-main.ts, src/run-task.ts, src/lib/ledger.ts, test/a-build-run-executes-in-a-detached-child.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    ADR 0007 decision A.1-A.4 and A.7. Depends on W1-T8778 so the garden children leave tsx (about 519 -> 175 MiB each,
+    two at once) before any run child adds a process per lane: the operator's 2026-10-13 approval asks that memory
+    pressure never rises unoffset.
+    READ on origin/main 5f8d3f178:
+    - `runOne: (taskId) => runTask(...)` in `daemonCommand` (src/run-task.ts); the worker CLI is already a detached
+      process group (`spawnDetachedGroup`, src/lib/worker-containment.ts) torn down by `withWorkerGroupTeardown`.
+    - `void runPairedTrial(...)` and `void runProspectiveAaPair(...)` run past `runTask`'s return; a child that exits on
+      return would cut them off.
+    - There is no per-run kill today: STOP and PAUSE block new dispatch and let running work complete; the quiet-worker
+      watchdog aborts inside the run.
+  design: |
+    1. Under mode `on`, the daemon's runOne calls `spawnRunChild(...)` (src/lib/run-child.ts), which writes the spec (plan snapshot, reservation id from the reservation task,
+       engine from `newestCurrentEngine`) and spawns `node <engine>/dist/child-entries/run-child.mjs --run-dir <dir>`
+       as a detached process-group leader, `unref`'d, stdio to the run directory's bounded stderr.log.
+    2. src/run-child-main.ts runs runTask with the spec's options. The inflight lock records the child's pid. It awaits
+       runPairedTrial and runProspectiveAaPair before its terminal status, and maps a thrown error through
+       `toRunChildFailure`.
+    3. The daemon's runOne promise settles from the status file (fs.watch with a poll fallback) and the child's exit: it
+       resolves the RunResult or rejects with `fromRunChildFailure(...)`, so the settle loop's classification is unchanged.
+       A child gone with a non-terminal status ledgers `run_child.lost` (stderr tail) and settles through the path a
+       crashed in-process run takes.
+    4. Abort: `abortRunChild(runDir)` sends SIGTERM to the group; the child's handler aborts at its next safe point
+       through the run's AbortController and `withWorkerGroupTeardown`, writes `aborted`, and exits. SIGKILL to the
+       group follows only after the run's learned teardown time (the yield-cost history the daemon keeps today); with
+       no history it waits for the status or the loss, never a fixed timeout. The existing hung-run watchdog calls it.
+    5. `deriveLedgerActor` (src/lib/ledger.ts) returns actor `run_child` for a process carrying the run-child marker.
+    6. `on` is not made the default here: plan/policy.yaml stays `shadow` until the auto-promotion task, which follows
+       adoption. With no adoption yet, a daemon booting beside live children leaves them alone.
+  acceptance:
+    - claim: "under mode on a run executes in a child whose pid holds the inflight lock and whose RunResult reaches the settle loop"
+      proof: 'grep: test("W1-T9085: a run under mode on executes in a child that holds the inflight lock" in test/a-build-run-executes-in-a-detached-child.test.ts'
+    - claim: "a child's task-admission failure classifies exactly as the in-process one does"
+      proof: 'grep: test("W1-T9085: a child task-admission failure classifies as the in-process one" in test/a-build-run-executes-in-a-detached-child.test.ts'
+    - claim: "a child that dies mid-run settles as lost with its stderr tail"
+      proof: 'grep: test("W1-T9085: a child that dies mid-run settles as lost" in test/a-build-run-executes-in-a-detached-child.test.ts'
+    - claim: "an abort ends the child at a safe point as aborted, and SIGKILL follows only past the learned teardown time"
+      proof: 'grep: test("W1-T9085: an abort ends at a safe point and kills only past the learned teardown" in test/a-build-run-executes-in-a-detached-child.test.ts'
+    - claim: "the child awaits its fire-and-forget trials before its terminal status"
+      proof: 'grep: test("W1-T9085: the child awaits its paired trials before its terminal status" in test/a-build-run-executes-in-a-detached-child.test.ts'
+    - claim: "the daemon's runOne wiring spawns the run child"
+      proof: 'grep: spawnRunChild( in src/run-task.ts'
+  falsifier: |
+    Keep runTask in-process under mode on: the first test's inflight lock pid is the daemon's. Exit on runTask's return:
+    the fifth test's paired trial is cut off.

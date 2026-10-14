@@ -39,6 +39,7 @@ the kind decides how a change lands:
 | [operator-message-standard.md](operator-message-standard.md) | hand-written | The shape every operator-facing message must take. |
 | [model-routing.md](model-routing.md) | hand-written | Balanced Codex routing policy, ledger attribution, and measurement limits. |
 | [probe.md](probe.md) | hand-written | Mount routing: deterministic task-class → model routing, proven by probe. |
+| [reservation-backed-skill-eval.md](reservation-backed-skill-eval.md) | hand-written | Default-off offline eval qualification, original READY60 and the prerequisites for safe live admission. |
 | [adr/](adr/README.md) | hand-written | Architecture Decision Records for one-way-door changes (and the test for which changes need one). |
 | [audits/](audits/README.md) | fixtures | Dated production-readiness reviews, kept byte-identical; corrections are recorded in the README, never in the fixture. |
 | [research/](research/README.md) | hand-written | Recon reports and surveys that informed plan sections. |

@@ -72,6 +72,8 @@ export interface PairedAttemptRequest<Arm extends string = PaidPilotArm> {
   isolation: { worktree: "fresh-detached"; push: false; openPr: false; merge: false };
   /** The pins the dispatcher passes into the attempt's own worker assignment receipt. */
   stackEvidence: BenchmarkStackEvidence;
+  /** Optional cancellation of this sealed side attempt; absent keeps ordinary trials unchanged. */
+  signal?: AbortSignal;
 }
 
 /** What a side attempt returns. `headDir` is the local head to grade; null when the attempt produced none. */
@@ -452,6 +454,9 @@ export interface SealedPairedAttemptOptions {
   installDependencies?: typeof execFileSync;
   probeIsolation?: (input: SealedProbeInput) => SealedIsolationReading;
   removeTree?: (repoDir: string, dir: string) => void;
+  /** The `skills` prompt part for one attempt, so a held-out skill eval can give one arm a draft
+   *  skill the other lacks. Absent (every caller today), the prompt is byte-identical. */
+  skillsPartFor?: (request: PairedAttemptRequest<string>) => string;
 }
 
 /**
@@ -464,6 +469,7 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
   const clock = options.clock ?? systemClock;
   let base: string | null = null;
   return async (request) => {
+    request.signal?.throwIfAborted();
     base ??= gitOut(options.repoDir, ["rev-parse", "--verify", `${options.baseRef ?? "origin/main"}^{commit}`]);
     const attemptId = `${request.pairId}-${request.arm}-${clock.now()}`;
     const dir = join(pairedAttemptRoot(options.config.root), attemptId);
@@ -476,19 +482,22 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
     try {
       registerReviewerCheckout(dir);
       ensureDeps(dir, options.installDependencies);
+      request.signal?.throwIfAborted();
       const installRoot = resolveInstallRoot(options.config);
       const settingsFile = renderWorkerSettings({ templatePath: join(installRoot, "settings", "worker.json"),
         hooksDir: join(installRoot, "hooks"), outPath: settingsOut });
       validateWorkerSettingsFile(settingsFile);
       const result = await (options.spawn ?? benchmarkNonDispatchSpawn("paired-trial", spawnWorker))({
         cwd: dir, permissionMode: "bypassPermissions", settingsFile, config: options.config,
-        prompt: `${renderImplementPrompt(options.task, "", attemptId)}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
+        prompt: `${renderImplementPrompt(options.task, "", attemptId, "", "", "", options.skillsPartFor?.(request) ?? "")}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
         model: request.pin.model, effort: request.pin.effort, mountProvider: request.pin.provider as WorkerProviderId,
         maxBudgetUsd: Math.min(options.maxBudgetUsd ?? PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_ATTEMPT_MAX_BUDGET_USD),
         runId: `paired-${attemptId}`, taskId: `${request.pairId}:${request.arm}`,
         env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.pushurl", GIT_CONFIG_VALUE_0: "sealed-paired-attempt://push-refused" },
         ...(options.clockBoundMs === undefined ? {} : { clockBound: { boundMs: options.clockBoundMs } }),
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
       });
+      request.signal?.throwIfAborted();
       const reading = (options.probeIsolation ?? probeSealedIsolation)({ repoDir: options.repoDir, dir, base,
         text: [result.text, ...result.blocks].join("\n") });
       const sealed = reading.pushedRef === null && reading.prUrl === null && reading.breach === null;

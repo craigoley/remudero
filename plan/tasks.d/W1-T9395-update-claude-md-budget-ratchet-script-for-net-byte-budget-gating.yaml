@@ -1,0 +1,27 @@
+- id: W1-T9395
+  title: Update claude-md-budget-ratchet script for net-byte budget gating
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=aa14ed4f5d15f375
+  attempts: 0
+  files:
+    - scripts/claude-md-budget-ratchet.mjs
+  acceptance:
+    - claim: script provides net-byte budget check function
+      proof: "unit test: net-byte budget check returns false on oversized budget"
+  origin: architect
+
+  rationale: >-
+    From the 2026-09-22 follow-up on https://github.com/craigoley/remudero/pull/6562, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: whether `scripts/claude-md-budget-ratchet.mjs`'s net-byte gate
+    should be exercised by a cheap pre-push check (it currently only surfaces inside the full
+    instrumented suite via `test/the-doctrine-cap-tracks-the-index.test.ts`), so a future
+    doctrine-adding PR fails fast locally instead of red on the expensive required check. — from
+    PR-6562 (run DAEMON-1790081891181, https://github.com/craigoley/remudero/pull/6562)

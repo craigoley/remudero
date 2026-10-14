@@ -24,7 +24,7 @@ import {
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import { refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { plainTemplate } from "../src/lib/inbox-plain.js";
+import { plainTemplate, servePlainOptions } from "../src/lib/inbox-plain.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
 import {
   captureFeedback,
@@ -1397,7 +1397,7 @@ const READY_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -1411,7 +1411,7 @@ const READY_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/example.ts]
+  files: [src/lib/plan.ts]
   acceptance:
     - claim: "the candidate does the other thing"
       proof: "unit test: fixture Y -> observable Z"
@@ -1476,8 +1476,13 @@ test("GET /v1/inbox: a proposal with an in-flight draft (state/inbox-draft-infli
     const body = (await res.json()) as { ready: unknown[]; drafting: Array<{ proposalId: string; spawnedAt: string }> };
     assert.deepEqual(body.ready, []);
     // W1-T4087: every item also carries its plain message; with nothing stored, its kind's template.
+    // W1-T8825: and its sender stamp - a bare id is no kind, and nothing recorded a time for it yet.
+    // W1-T8826: and each option's intent, with the route valid for its lane.
     assert.deepEqual(body.drafting, [
-      { proposalId: "P901", summary: "mid-draft", plain: plainTemplate({ id: "P901", summary: "mid-draft" }), spawnedAt },
+      {
+        proposalId: "P901", summary: "mid-draft", plain: servePlainOptions(plainTemplate({ id: "P901", summary: "mid-draft" }), "drafting", "P901"), spawnedAt,
+        from: { kind: "proposal", name: "Proposal" }, receivedAt: null, lastActivityAt: null, groupKey: "proposal",
+      },
     ]);
   });
 });

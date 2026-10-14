@@ -52,12 +52,13 @@
 // task (the retry always fires on a non-zero first attempt, same as today).
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
+import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -324,7 +325,52 @@ export function coverageRetryInvocation(cmd, args, failedFiles, env = process.en
   return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
 }
 
-function runOnce(cmd, args, env = process.env) {
+/**
+ * A PASS IS A RUN THAT FINISHED (2026-10-11 follow-up to #10894). Every attempt this wrapper spawns
+ * that is itself a `node --test` run — `test:ci`, the coverage shard's instrumented pass, every
+ * failed-file retry — is judged by scripts/pure-test-pool.mjs: it passes only when every test file it
+ * names reached its own summary with `# fail 0`. Node reports a file whose child exits 0 part-way as
+ * `ok`, so exit 0 alone is not a pass. A file the judge names as unreported is one this wrapper
+ * retries, like a file with a `not ok`. A wrapped runner that is not `node --test` itself
+ * (scripts/test-tier-manifest.mjs) judges its own children and prints the same lines.
+ */
+function isNodeTestRun(cmd, args) {
+  return isNodeCommand(cmd) && args.includes("--test");
+}
+
+async function runOnce(cmd, args, env = process.env) {
+  if (!isNodeTestRun(cmd, args)) return runChild(cmd, args, env);
+  const judged = prepareJudgedRun();
+  const files = testFilesInArgv(args, process.cwd());
+  const first = await runChild(cmd, judgedNodeTestArgs(args, judged.args), { ...env, ...judged.env });
+  const lines = [];
+  const { status, verdict } = closeJudgedRun(judged, files, {
+    status: first.code,
+    pool: args.includes(POOL_ISOLATION_FLAG),
+    root: process.cwd(),
+    role: "node --test",
+    log: (line) => {
+      lines.push(line);
+      process.stderr.write(`${line}\n`);
+    },
+  });
+  return { code: status, output: `${first.output}\n${lines.join("\n")}\n`, unreported: verdict.missing };
+}
+
+/**
+ * The files a failed attempt names: each `not ok` file, and each file the judge never heard finish.
+ * An attempt this wrapper judged itself carries its verdict's `unreported` list, and only that list
+ * is trusted: the output also holds what the tests printed, and a test of the judge prints judge lines
+ * about its own fixture files. A wrapped runner that judges its own children (the tier manifest) is
+ * read from its output, keeping only files that exist here.
+ */
+export function failedFilesOf(attempt, cwd = process.cwd()) {
+  const named = attempt.unreported ?? unreportedFilesIn(attempt.output).filter((file) => existsSync(resolve(cwd, file)));
+  const unreported = named.map((file) => (isAbsolute(file) ? relative(cwd, file) : file).split(sep).join("/"));
+  return [...new Set([...parseFailingTestFiles(attempt.output, cwd), ...unreported.filter((rel) => rel !== ".." && !rel.startsWith("../"))])].sort();
+}
+
+function runChild(cmd, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["inherit", "pipe", "pipe"], env });
     let combined = "";
@@ -430,11 +476,32 @@ function rebuildCoverage(rawDir, args) {
   }
 }
 
+// W1-T8585: the run's OWN summary is the TAP summary block after the LAST `# tests` line. A nested
+// `node --test` prints a bare summary of its own earlier. Only summary lines are read, so interleaved
+// spec lines do not split the block; a label missing or repeated in it means no summary (null).
+const SUMMARY_LINE = /^# (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) (\d+(?:\.\d+)?)$/;
+
+function finalSummary(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trimEnd().match(SUMMARY_LINE)).filter(Boolean);
+  const start = lines.findLastIndex(([, label]) => label === "tests");
+  if (start < 0) return null;
+  const counts = {};
+  for (const [, label, value] of lines.slice(start)) {
+    if (label in counts) return null;
+    counts[label] = Number(value);
+  }
+  return ["tests", "pass", "fail", "cancelled"].every((label) => label in counts) ? counts : null;
+}
+
+function finalSummaryAllPass(output) {
+  const counts = finalSummary(output);
+  return counts !== null && counts.tests > 0 && counts.tests === counts.pass && counts.fail === 0 && counts.cancelled === 0;
+}
+
 function emptyCoverageFailure(cmd, args, output) {
-  const count = (label) => Number(output.match(new RegExp(`^# ${label} (\\d+)$`, "m"))?.[1]);
   return isNodeCommand(cmd) && args.includes("--test") && args.includes("--experimental-test-coverage") &&
     /ERR_OPERATION_FAILED[^\n]*(?:coverage file is empty:|failed to parse coverage file )/.test(output) &&
-    count("tests") > 0 && count("tests") === count("pass") && count("fail") === 0 && count("cancelled") === 0;
+    finalSummaryAllPass(output);
 }
 
 // A child killed mid-write leaves a truncated report; it moves beside rawDir as evidence, never deleted.
@@ -469,7 +536,8 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
   }
   if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
   const env = { ...process.env, NODE_V8_COVERAGE: "" };
-  const rebuilt = await runOnce(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+  // The rebuild is this script, not a test run, even though the coverage command's own args ride along.
+  const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
   let code = rebuilt.code;
   if (code === 1) {
     console.log(`FLAKE-RETRY: coverage rebuild failed — retrying the coverage shard once — ${dropped.join(", ")}`);
@@ -482,7 +550,8 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
     console.log(line);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
   }
-  return reportTrackedTreeDirt(treeBefore, code === 0 ? 0 : first.code);
+  // W1-T8585: the rebuild repairs coverage only; a run whose own summary is not all-pass keeps its code.
+  return reportTrackedTreeDirt(treeBefore, code === 0 && finalSummaryAllPass(first.output) ? 0 : first.code || 1);
 }
 
 export async function main(argv) {
@@ -516,7 +585,7 @@ export async function main(argv) {
 
   const firstPassElapsedMs = Date.now() - startedAt;
   const firstNames = parseFailingTestNames(first.output);
-  const failedFiles = parseFailingTestFiles(first.output);
+  const failedFiles = failedFilesOf(first);
   recordFlakeEvidence("first attempt failed", firstNames);
   appendFlakeLedger(parseFailingTestEntries(first.output), "first attempt failed");
 
@@ -532,7 +601,9 @@ export async function main(argv) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
 
-  if (coverageFirstPass && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
+  // W1-T8585: a run that names a failing test or file is never recovered by dropping coverage.
+  const namedFailure = firstNames.length > 0 || failedFiles.length > 0;
+  if (coverageFirstPass && !namedFailure && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
   if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
 
   const retry = retryInvocationForFailedFiles(cmd, args, failedFiles);

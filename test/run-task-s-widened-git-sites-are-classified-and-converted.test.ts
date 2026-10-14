@@ -50,7 +50,7 @@ const GARDEN = "a gardener worktree cut at origin/main that only spec.apply writ
 export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cls: SiteClass; reason: string }>> = {
   inspectFreshReviewerWorktree: { count: 1, cls: "CHECKOUT", reason: `${MANAGED}: lists its registered trees to find the origin/main reviewer-<sha> tree` },
   buildFreshTreeReviewRunner: { count: 1, cls: "CHECKOUT", reason: `${MANAGED}: fetches origin/main before the harness cuts its own reviewer tree` },
-  buildBaseReproductionProbe: { count: 3, cls: "CHECKOUT", reason: "the probe's clone (repoDir): prune, add and remove of a detached origin/main tree no PR content reaches" },
+  buildBaseReproductionProbe: { count: 3, cls: "CHECKOUT", reason: "seam argv: prune, add and remove of a detached origin/main tree in the probe's repoDir; the default seam runs them through the leaf" },
   syncPlanFromOrigin: { count: 2, cls: "CHECKOUT", reason: `${MANAGED}: plan fetch and origin/main blob reads` },
   planSyncGitRunnerAsync: { count: 1, cls: "CHECKOUT", reason: `${MANAGED}: the async plan-sync runner` },
   refreshManagedCheckout: { count: 1, cls: "CHECKOUT", reason: MANAGED },
@@ -94,7 +94,6 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   resolveMergeLogReadOptions: { count: 1, cls: "CHECKOUT", reason: `${OWN}: the credit evidence root` },
   creditEvidenceRootFor: { count: 1, cls: "CHECKOUT", reason: `${OWN}: or a managed clone of the credited repo` },
   registeredFixWorktreeOwner: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
-  removeAbandonedFixWorktreeOwner: { count: 1, cls: "CHECKOUT", reason: `${FIX_CLONE}; git resolves the removed tree from the clone's admin dir` },
   refCommitMatchesDirtyRecovery: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   preserveFixHead: { count: 3, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
@@ -106,7 +105,7 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
 };
 
 /** The functions this task routed through the leaf: each holds no widened site and calls the leaf. */
-const CONVERTED = ["planCriteriaAtHeadForRepair", "materializeReviewerSnapshot"] as const;
+const CONVERTED = ["planCriteriaAtHeadForRepair", "materializeReviewerSnapshot", "removeAbandonedFixWorktreeOwner"] as const;
 const LEAF_CALL = /\bhostWorktreeGit(?:Async|Result|AtTopLevel)?\(/;
 
 function widenedByFunction(text: string): Record<string, number> {

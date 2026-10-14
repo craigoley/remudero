@@ -3,7 +3,7 @@
 // worker spawn, a fixed clock and injected config: nothing here spawns a real worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,7 +55,7 @@ function sealedFixture(): { origin: GitRepo; fleet: GitRepo; root: string; base:
   seed.addRemote("origin", origin.dir);
   seed.git("push", "--quiet", "origin", "main");
   const fleet = gitRepo({ cloneFrom: origin.dir, kind: "sealed-attempt-fleet" });
-  const root = mkdtempSync(join(tmpdir(), "rmd-sealed-attempt-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-sealed-attempt-")));
   return { origin, fleet, root, base: fleet.git("rev-parse", "origin/main") };
 }
 
@@ -100,6 +100,16 @@ function options(fixture: ReturnType<typeof sealedFixture>, spawn: typeof spawnW
 const registered = (repoDir: string) => git(repoDir, "worktree", "list", "--porcelain");
 const branches = (repoDir: string) => git(repoDir, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n").sort();
 const remoteRefs = (repoDir: string) => git(repoDir, "ls-remote", "origin");
+
+test("a sealed attempt refuses prior cancellation before cutting a checkout and forwards an active caller signal", async () => {
+  const fixture = sealedFixture(), source = new AbortController(), spawned: SpawnWorkerArgs[] = [];
+  const request = { ...attemptRequest(), signal: source.signal }, dispatch = sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned)));
+  const result = await dispatch(request);
+  assert.equal(spawned[0]?.signal, source.signal);result.cleanup?.();
+  const before = registered(fixture.fleet.dir);source.abort();
+  await assert.rejects(dispatch(request));assert.equal(registered(fixture.fleet.dir), before);assert.equal(spawned.length, 1);
+  fixture.fleet.cleanup();fixture.origin.cleanup();
+});
 
 test("a sealed attempt runs the pinned arm in a fresh detached worktree at the base and returns its head for grading", async () => {
   const fixture = sealedFixture();
@@ -426,4 +436,20 @@ test("the daemon's run wires the sealed dispatcher; a CLI run refuses the pair b
   assert.ok(cli.trial.state === "refused" && cli.trial.reasons.includes(PAIRED_CLI_REFUSAL), JSON.stringify(cli.trial));
   assert.equal(cli.side.length, 0, "a CLI run never spawns a side attempt");
   assert.equal(assignmentsOf(daemon.rows), assignmentsOf(cli.rows), "the side attempts wrote no worker.assignment of their own");
+});
+
+test("a sealed attempt carries the skills part its request is given, and an empty part is byte-identical to no hook", async () => {
+  const fixture = sealedFixture();
+  const spawned: SpawnWorkerArgs[] = [];
+  const draft = "## skill: draft-procedure\n\nRun the declared proof before claiming the task is done.";
+  const hooked = sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned), {
+    skillsPartFor: (request) => (request.arm === "paid" ? draft : ""),
+  }));
+  (await hooked(attemptRequest("paid"))).cleanup?.();
+  (await hooked(attemptRequest("control"))).cleanup?.();
+  (await sealedPairedAttemptDispatcher(options(fixture, fakeWorker(spawned)))(attemptRequest("control"))).cleanup?.();
+  const [skilled, unskilled, unhooked] = spawned.map((args) => args.prompt);
+  assert.ok(skilled!.includes(draft), "the arm given the draft skill carries it");
+  assert.ok(!unskilled!.includes("draft-procedure"), "the other arm of the same dispatcher does not");
+  assert.equal(unskilled, unhooked, "an empty skills part renders exactly the prompt a dispatcher without the hook renders");
 });

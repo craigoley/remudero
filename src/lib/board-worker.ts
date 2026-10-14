@@ -7,6 +7,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
 import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import { startWorker } from "./child-entry-argv.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -162,7 +163,7 @@ export function createBoardProjectionWorker(
         delayMs: options.delayMs ?? 0,
       };
       try {
-        thread = new Worker(options.workerUrl ?? new URL(import.meta.url), { workerData: data, transferList: [port2] });
+        thread = startWorker(import.meta.url, { workerData: data, transferList: [port2] }, { override: options.workerUrl });
       } catch (error) {
         // A spawn failure is not an absent projection: it is surfaced to the caller below with its
         // cause as the `worker_spawn_failed` reason, so the board falls back knowingly.
@@ -197,9 +198,11 @@ export function createBoardProjectionWorker(
           options.onSnapshot?.(message.planIdentity);
         } else unavailable(`worker_projection_failed: ${message.reason}`);
       });
-      thread.once("error", (error) => unavailable(`worker_crashed: ${error.message}`));
+      let crash: string | undefined;
+      thread.once("error", (error) => unavailable(crash = `worker_crashed: ${error.message}`));
+      // 'exit' follows 'error': still unavailable, but naming the crash, not its exit code (#8429).
       thread.once("exit", (code) => {
-        if (!stopped) unavailable(`worker_exited: ${code}`);
+        if (!stopped) unavailable(crash ?? `worker_exited: ${code}`);
         thread = undefined;
         replyPort?.close();
         replyPort = undefined;

@@ -3,6 +3,8 @@
 // read was in flight never reached it: on 2026-10-07 the core daemon decided a freshness restart at 20:38:42Z and
 // started W1-T6262 at 20:39:46Z, a 20-minute run that then had to yield. These drive the REAL runDaemon at
 // laneCount 2; only the worker spawn, the freshness reading and the two awaited reads are faked.
+// W1-T7806: a lane in flight when the restart latches holds refill open until it settles or reaches a worker
+// boundary, so these fixtures have A reach its boundary once the restart is decided (the common case).
 
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -56,8 +58,10 @@ function harness(gate: "merged" | "run-branches") {
   let branchReads = 0;
   let mergedReads = 0;
   const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
-  const runOne = (id: string): Promise<RunResult> => {
+  const boundaries = new Map<string, () => unknown>();
+  const runOne = (id: string, options?: { restartAtWorkerBoundary: () => unknown }): Promise<RunResult> => {
     started.push(id);
+    if (options) boundaries.set(id, options.restartAtWorkerBoundary);
     if (started.includes("A") && started.includes("B")) bothStarted.resolve();
     if (id === "A" || id === "B") return release[id].promise;
     return Promise.resolve(okResult(id));
@@ -103,6 +107,7 @@ function harness(gate: "merged" | "run-branches") {
   return {
     steps, started, release, bothStarted, refillRead, refillReadStarted, run,
     freeB: () => { bReleased = true; release.B.resolve(okResult("B")); },
+    boundary: (id: string) => boundaries.get(id)?.(),
     goStale: () => { stale = true; },
     advanceClock: (ms: number) => { nowMs += ms; },
     tick: async () => {
@@ -125,6 +130,7 @@ async function decideRestartWhileTheRefillReadIsInFlight(gate: "merged" | "run-b
   await h.tick(); // past the window: the dispatch tick decides to restart
   assert.ok(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"),
     "control: the restart was decided while the refill read was in flight");
+  assert.equal(h.boundary("A"), staleOwnCode, "A reaches a worker boundary and reads the latched restart");
   h.refillRead.resolve();
   await drainMicrotasks();
   await drainMicrotasks();

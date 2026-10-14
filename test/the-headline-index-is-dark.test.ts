@@ -24,12 +24,18 @@ function expectedIndexLines(markdown: string): string[] {
 }
 
 test("W1-T3134 (1): absent workerRuleHeadlines row lifts false and renders no headline part", () => {
-  const raw = rawPolicy();
-  assert.equal("workerRuleHeadlines" in raw, false, "the real plan/policy.yaml must still ship the row absent");
-
+  const { workerRuleHeadlines: _shipped, ...raw } = rawPolicy();
   const policy = validatePolicy(raw);
   assert.deepEqual(policy.values.workerRuleHeadlines, { enabled: false });
   assert.equal(buildRuleHeadlinesPart(policy.values.workerRuleHeadlines.enabled, CLAUDE_MD), "");
+});
+
+test("the shipped policy turns worker rule headlines on, so the rules wipe-test factor varies a real part", () => {
+  const policy = validatePolicy(rawPolicy());
+  assert.deepEqual(policy.values.workerRuleHeadlines, { enabled: true }, "operator ruling 2026-10-13: the row ships ON");
+  const part = buildRuleHeadlinesPart(policy.values.workerRuleHeadlines.enabled, CLAUDE_MD);
+  assert.notEqual(part, "", "arm A of a rules-factor pair now carries the headline index; arm B masks it to empty");
+  assert.match(part, /CLAUDE\.md's rule headlines/);
 });
 
 test("W1-T3134 (2): enabling the same real CLAUDE.md carries every rule headline", () => {

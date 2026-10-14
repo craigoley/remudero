@@ -1,0 +1,37 @@
+- id: W1-T9054
+  title: "THE MACHINE JUDGE AND AUTO-TRIAGE LAND THEIR RULINGS IN BATCHES — 33 judge PRs and 41 triage PRs merged in a week, one per ruling or feedback entry, each a full CI run for a status flip"
+  repo: remudero
+  depends_on: [W1-T9043]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when ruling and triage outcomes land; spans the judge and triage
+  band_meaning: span
+  origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
+  plan_refs: [W1-T8350, W1-T8830]
+  files: [src/lib/machine-filing-judge.ts, src/lib/auto-triage.ts, test/the-judge-and-triage-land-rulings-in-batches.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-06..12 on main: 33 "the machine-filing judge rules on N machine-filed task(s)" PRs and 41 triage
+    PRs merged. All 30 triage PRs in the last 8 days were status flips ("no task" or "ambiguous, parked for the grill").
+    VERIFIED:
+    - `runMachineFilingJudge` keeps one pending PR. When it merges, the next pass rules and lands whatever is due, with no
+      interval floor. Rulings already persist in `state.rulings`, so holding them costs nothing.
+    - `decideAutoTriage` (src/lib/auto-triage.ts) opens one PR per feedback entry, within `minIntervalMinutes: 15` and
+      `maxPerDay: 24` (plan/policy.yaml).
+  design: |
+    1. The judge lands when at least 5 rulings are due or the oldest due ruling has waited 6 hours. An escalation the
+       silence policy (W1-T9043) must retire is never held past its window.
+    2. A triage outcome that is "no task" or "parked for the grill" adds its commit to the open triage-outcome PR instead
+       of opening a new one. Each entry keeps its own grep proof.
+  acceptance:
+    - claim: "the judge holds fewer than five due rulings until the oldest has waited six hours"
+      proof: "grep: test(\"W1-T9054: the judge holds fewer than five due rulings until the oldest has waited six hours\" in test/the-judge-and-triage-land-rulings-in-batches.test.ts"
+    - claim: "a status-only triage outcome joins the open triage PR instead of opening another"
+      proof: "grep: test(\"W1-T9054: a status-only triage outcome joins the open triage PR\" in test/the-judge-and-triage-land-rulings-in-batches.test.ts"
+  falsifier: |
+    Make two rulings due, ten minutes apart. At origin/main the judge lands a PR for each; with the change it lands one
+    PR for both once the six-hour bound or the fifth ruling arrives.

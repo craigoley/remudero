@@ -315,6 +315,18 @@ render_app_private_key_mount() {
   printf '\napp_private_key_mount_args %q %q || exit 1\n' "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V"
 }
 
+# W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
+# /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon's
+# SRE lane could not tell which instance it was. An --instance install hands its launcher the name;
+# the legacy no-instance install renders an empty list and the container gets nothing.
+render_instance_name_env() {
+  if [ -n "$INSTANCE_NAME" ]; then
+    printf 'INSTANCE_ENV_ARGS=(-e %q)\n' "RMD_INSTANCE_NAME=${INSTANCE_NAME}"
+  else
+    printf 'INSTANCE_ENV_ARGS=()\n'
+  fi
+}
+
 # Insert literal shell into the rendered launcher. The outer launcher heredoc is expanded by the
 # installer, so writing dollar signs directly there would read the installer's environment instead
 # of the daemon host's environment at boot.
@@ -479,6 +491,7 @@ refresh_deploy_code() {
 # src/lib/deployer.ts with every local module it imports (test/a-busy-primary-reaches-its-image-
 # recycle.test.ts walks that import graph and fails when a module is missing here).
 DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliation.ts
+  src/lib/actor-evidence.ts
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
@@ -1166,6 +1179,16 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
   fi
+  # W1-T9409 -- A RECYCLE PAUSE WHOSE WRITER DIED BEFORE IT STOPPED THE CONTAINER IS RELEASED. On
+  # 2026-10-14 the recycle this tick ran died in its wait (rc=2) and its PAUSE held core dispatch for
+  # ~2h45m; SIGKILL runs no trap at all. Only proof releases it (writer dead by pid + start time, phase
+  # waiting, this host, the recorded container still running); an operator PAUSE is never touched.
+  # BEFORE the unchanged-tick exit, which a paused daemon reads as healthy. Bounded, never fatal.
+  if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/release-orphan-recycle-pause.sh" ]; then
+    ORP_TMO=(); command -v timeout >/dev/null 2>&1 && ORP_TMO=(timeout 60)
+    \${ORP_TMO[@]+"\${ORP_TMO[@]}"} bash "\$CHECKOUT/deploy/release-orphan-recycle-pause.sh" \\
+      --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+  fi
   if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
   rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
   WATCHDOG_UNCHANGED_TICKS=0
@@ -1276,8 +1299,20 @@ if [ -r "\$SCRATCH_LIB" ]; then
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
 
+# W1-T9071: the Codex sessions bind, once this state dir's stopped-window copy made it ready.
+CODEX_SESSIONS_ARGS=()
+CODEX_SESSIONS_LIB="\$CHECKOUT/deploy/codex-sessions-mount.sh"
+if [ -r "\$CODEX_SESSIONS_LIB" ]; then
+  . "\$CODEX_SESSIONS_LIB"
+  codex_sessions_plan "\$STATE_DIR" || true
+  echo "rmd-relaunch: codex sessions \$CODEX_SESSIONS_NOTE"
+fi
+
 CREDENTIAL_ARGS=()
 $(render_credential_mount)
+
+# W1-T9500: the instance this launcher was installed for, named to its container (empty legacy).
+$(render_instance_name_env)
 
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
@@ -1299,12 +1334,14 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e RMD_FOUNDRY_CLAUDE_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_ENDPOINT \\
   -v ${CODEX_DIR}:/home/node/.codex \\
+  "\${CODEX_SESSIONS_ARGS[@]+"\${CODEX_SESSIONS_ARGS[@]}"}" \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
   "\${APP_PRIVATE_KEY_ARGS[@]+"\${APP_PRIVATE_KEY_ARGS[@]}"}" \\
   "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
+  "\${INSTANCE_ENV_ARGS[@]+"\${INSTANCE_ENV_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
@@ -1653,7 +1690,8 @@ if [ -n "$CLEANUP_PATH" ]; then
   # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
   # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
   CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op}"
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
 
   crontab_read() {

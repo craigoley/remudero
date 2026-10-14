@@ -1,6 +1,8 @@
+import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
+import { childEntryArgv, type ChildEntryStoreOptions } from "./child-entry-argv.js";
+import { fileURLToPath } from "node:url";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
@@ -33,12 +35,25 @@ export type OpenPullRequestProofRunner = (
   target?: SuiteRegistryTarget,
 ) => OpenPullRequestProofResult;
 
-/** W1-T4590: rmd's OWN launcher, resolved from this module rather than from the tree being
- *  published — a consumer repository carries neither tsx nor src/run-task.ts, which failed every
- *  console and site PR open (19 builds, 2026-09-25..26) with "Cannot find package 'tsx'". bin/rmd
- *  runs its own node_modules/.bin/tsx on its own src/run-task.ts. (`import.meta.resolve` is not
- *  available when tsx loads this module through its CommonJS path, so it is not used here.) */
-const RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+/** Use the harness runtime and entry even in consumer repositories without tsx or rmd. */
+const PROOF_NODE = process.execPath;
+
+/** The harness package root, never the cwd: a consumer repository carries neither the entry nor tsx. */
+const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+/**
+ * W1-T9279: the node argv that runs the narrow check-proof entry for `root` (default: this harness). The
+ * precompiled bundle runs under plain node when childEntryIsCurrent vouches for it; any other answer takes
+ * the tsx source entry, exactly as checkProofChildArgv did. `extra` follows `--base <base>`.
+ */
+export function checkProofLaunchArgv(
+  proof: string, base: string, root: string = HARNESS_ROOT, extra: readonly string[] = [],
+  store: ChildEntryStoreOptions = {},
+): string[] {
+  const launch = childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra], undefined, store);
+  store.log?.("pr_open.check_proof_child", { kind: launch.kind, reason: launch.reason });
+  return launch.argv;
+}
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
 
@@ -49,9 +64,14 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 }
 
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
-function proofArgs(proof: string, mergeBase: string, target?: SuiteRegistryTarget): string[] {
+function proofArgs(
+  proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
+): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
-  return ["check-proof", proof, "--base", mergeBase, ...repo];
+  // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
+  if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
+  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo, store);
 }
 
 // A PR proof runs on the branch being published. The child already receives its exact base
@@ -64,9 +84,12 @@ export function defaultProofRunner(
   mergeBase: string,
   repoRoot: string,
   target?: SuiteRegistryTarget,
-  bin: string = RMD_BIN,
+  bin: string = PROOF_NODE,
+  /** The tree whose check-proof entry runs; the harness itself unless a test supplies a fixture. */
+  harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
 ): OpenPullRequestProofResult {
-  const result = spawnSync(bin, proofArgs(proof, mergeBase, target), {
+  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot, store), {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: PROOF_MAX_BUFFER,
@@ -94,6 +117,7 @@ export const PR_OPEN_PROOF_TIMEOUT_MS = 15 * 60_000;
 
 export interface AsyncProofRunOptions {
   bin?: string;
+  store?: ChildEntryStoreOptions;
   timeoutMs?: number;
   /** How long a SIGTERMed child may linger before SIGKILL. */
   graceMs?: number;
@@ -117,8 +141,8 @@ export function defaultProofRunnerAsync(
   return new Promise((resolve) => {
     let timedOut = false;
     const child = execFile(
-      opts.bin ?? RMD_BIN,
-      proofArgs(proof, mergeBase, target),
+      opts.bin ?? PROOF_NODE,
+      proofArgs(proof, mergeBase, target, opts.bin, undefined, opts.store),
       { cwd: repoRoot, encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER, env: proofEnv() },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
         clearTimeout(timer);

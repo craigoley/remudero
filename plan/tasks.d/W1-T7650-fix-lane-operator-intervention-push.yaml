@@ -6,7 +6,13 @@
   verify: auto
   risk: low
   priority: 1
-  status: queued
+  status: blocked
+  retirement: withdrawn  # superseded by W1-T8264 (PR #10957, cause-classed operator.intervention rows); operator ruling 2026-10-11
+  # Why retired: the fix-lane gardener filed this from its CAUSELESS fallback class `operator-intervention:<kind>`
+  # (fixLaneInventoryOf in src/lib/fix-lane-gardener.ts), used when no ledgered defect event precedes the push.
+  # The claim names no cause and no remedy; the PR-hours figure charges each push's span to its PR's end (PR #8080
+  # alone 3672.75), which is not credible; three build attempts (run-W1-T7650-1791670097134, -1791694245847,
+  # -1791731727798) have burned fleet time without landing.
   attempts: 0
   author_class: machine
   origin: "fix-lane:operator-intervention:push"

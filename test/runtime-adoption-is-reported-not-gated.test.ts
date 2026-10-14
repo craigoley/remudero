@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import {
   declaredLedgerSteps,
   type RuntimeAdoptionRow,
 } from "../src/lib/producer-completeness.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "../src/lib/short-path-root.js";
 
 // ── W1-T2408 — the fifth shape. W1-T2266's four shapes (symbol/field/script/gate) and
 // producer-completeness above both ask a STATIC corpus whether a mechanism was WIRED. This file
@@ -21,12 +22,23 @@ function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+/** A fixture root a unix socket named `socketName` binds beneath. Under `base` when the socket path fits
+ *  sun_path; otherwise under the short /tmp root, exactly as production's socket paths move
+ *  (`shortPathWhenTooLong`). A macOS per-user TMPDIR is ~57 bytes once resolved, so any longer TMPDIR
+ *  (a `mktemp -d` under it, a session scratch dir) overruns the 103-byte limit and listen() fails EINVAL. */
+function socketTmp(prefix: string, socketName: string, base: string = tmpdir()): string {
+  const root = shortPathWhenTooLong(join(base, prefix), (short) => join(short, prefix),
+    (path) => Buffer.byteLength(join(`${path}XXXXXX`, socketName)) <= MAX_UNIX_SOCKET_PATH_BYTES, existsSync);
+  return mkdtempSync(root);
+}
+
 /** One synthetic `src/` tree: a ledger-step-emitting file, a `panel.*`-shaped family that never
  *  fires, a governor-shaped step that only logs while deferring (the correctly-rare zero), an
  *  env seam nothing supplies, a supplied control env var, and a filename that LOOKS dotted but
  *  must never be read as a step. */
-function buildFixtureSrc(): string {
-  const root = tmp("rmd-runtime-adoption-src-");
+function buildFixtureSrc(socketName?: string): string {
+  const prefix = "rmd-runtime-adoption-src-";
+  const root = socketName === undefined ? tmp(prefix) : socketTmp(prefix, socketName);
   mkdirSync(join(root, "src/lib"), { recursive: true });
   writeFileSync(
     join(root, "src/lib/serve.ts"),
@@ -260,13 +272,21 @@ test("the report never produces a joinable per-section reaching fraction", () =>
 // directory, so the walk collects it, and reading it fails ENXIO for every uid — including root,
 // where a chmod-000 fixture would silently still be readable and the arm would go uncovered.
 
-function withSocket(dir: string, name: string, run: () => void): void {
+// The bind is AWAITED and the socket's presence asserted: listen() reports a refused path (EINVAL past
+// sun_path) only asynchronously, so an unawaited bind let `run` pass over a tree with NO socket in it,
+// a vacuous green, and the error surfaced after the test as an uncaught exception.
+async function withSocket(dir: string, name: string, run: () => void): Promise<void> {
+  const path = join(dir, name);
   const srv = createServer();
+  await new Promise<void>((resolve, reject) => {
+    srv.once("error", reject);
+    srv.listen(path, () => resolve());
+  });
   try {
-    srv.listen(join(dir, name));
+    assert.ok(lstatSync(path).isSocket(), `the unreadable fixture must be a bound socket at ${path}`);
     run();
   } finally {
-    srv.close();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
   }
 }
 
@@ -332,10 +352,10 @@ test("auditRuntimeAdoption: a deployRoot that does not exist degrades to no depl
   }
 });
 
-test("auditRuntimeAdoption: an entry under deployRoot that cannot be stat'd or cannot be read is skipped, and the rest of the tree is still scanned", () => {
+async function assertUnusableDeployEntriesAreSkipped(deployBase: string): Promise<void> {
   const srcRoot = buildFixtureSrc();
   const stateDir = tmp("rmd-adopt-state-");
-  const deployRoot = tmp("rmd-adopt-deploy-");
+  const deployRoot = socketTmp("rmd-adopt-deploy-", "unreadable.sock", deployBase);
   try {
     buildLedgerFixture(stateDir);
     // (a) a DANGLING SYMLINK: readdir lists it, statSync throws on it.
@@ -345,7 +365,7 @@ test("auditRuntimeAdoption: an entry under deployRoot that cannot be stat'd or c
     writeFileSync(join(deployRoot, "zz-supplies.env"), "RMD_ACCOUNT_FILE_PATH=/x\n");
 
     // (b) a SOCKET: statSync says not-a-directory, readFileSync throws ENXIO.
-    withSocket(deployRoot, "unreadable.sock", () => {
+    await withSocket(deployRoot, "unreadable.sock", () => {
       const rows = auditRuntimeAdoption({
         srcRoot,
         stateDir,
@@ -365,14 +385,33 @@ test("auditRuntimeAdoption: an entry under deployRoot that cannot be stat'd or c
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(deployRoot, { recursive: true, force: true });
   }
+}
+
+test("auditRuntimeAdoption: an entry under deployRoot that cannot be stat'd or cannot be read is skipped, and the rest of the tree is still scanned", async () => {
+  await assertUnusableDeployEntriesAreSkipped(tmpdir());
 });
 
-test("declaredLedgerSteps: a listed source file that cannot be read contributes no literals and does not abort the scan", () => {
-  const srcRoot = buildFixtureSrc();
+test("auditRuntimeAdoption: the unreadable-socket arm still binds and is skipped when TMPDIR is too deep for a unix socket path", async () => {
+  // A base whose socket path overruns sun_path on EVERY platform (107 bytes on Linux, 103 on macOS),
+  // so this reddens in CI too, not only on a Mac whose per-user TMPDIR sits near the limit.
+  const deep = mkdtempSync(join(tmpdir(), "rmd-adopt-deep-"));
+  const base = join(deep, "d".repeat(Math.max(1, MAX_UNIX_SOCKET_PATH_BYTES - deep.length)));
+  mkdirSync(base);
+  try {
+    assert.ok(Buffer.byteLength(join(base, "rmd-adopt-deploy-XXXXXX", "unreadable.sock")) > MAX_UNIX_SOCKET_PATH_BYTES,
+      "the base must really overrun sun_path, or this proves nothing");
+    await assertUnusableDeployEntriesAreSkipped(base);
+  } finally {
+    rmSync(deep, { recursive: true, force: true });
+  }
+});
+
+test("declaredLedgerSteps: a listed source file that cannot be read contributes no literals and does not abort the scan", async () => {
+  const srcRoot = buildFixtureSrc("unreadable.ts");
   try {
     const before = declaredLedgerSteps(srcRoot).length;
     assert.ok(before > 0, "the fixture must declare at least one step, or this proves nothing");
-    withSocket(srcRoot, "unreadable.ts", () => {
+    await withSocket(srcRoot, "unreadable.ts", () => {
       const after = declaredLedgerSteps(srcRoot);
       assert.equal(after.length, before, "an unreadable .ts file changes nothing and throws nothing");
     });

@@ -1,0 +1,102 @@
+- id: W1-T9390
+  title: "ESCALATION TRIAGE FREEZES THE CORE DAEMON LOOP FOR 57-105 S ON EVERY FULL SWEEP — sweepEscalationTriage (W1-T8868, #11487) reads the WHOLE ledger union synchronously, lists issues through the sync ghIssueGateway, and copies that history once per open issue: every one of its 3 passes since it shipped froze all timers (230 s total, 0 daemon rows in each window)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the escalation-triage rung's GitHub and ledger reads leave the daemon loop; it runs inside the daemon process on every full sweep
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 (Craig): diagnose the 04:16Z core loop stall and file it if uncovered; standing rulings: no hard fixed thresholds, automated flow, fix at the root"
+  plan_refs: [W1-T8868, W1-T5283, W1-T5765, W1-T4046, W1-T7746, W1-T9361, W1-T100]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/escalation-triage-runs-off-the-loop.test.ts]
+  status: merged
+  priority: 1  # every full sweep since #11487 froze the core loop 57-105 s (230 s over 3 of 3 passes, 03:15-04:16Z) and pushed the pass past its abandon bound
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core daemon, container d9b143bab561, head cf93dfe1b; local copy of the 27 rotations
+    2026-10-13..14 plus the live file, Azure host read-only; ~/Remudero-notes/esctriage-stall-2026-10-14/):
+      - #11487 (W1-T8868) merged 02:19:41Z and wired `sweepEscalationTriage` into the daemon's full sweep. It has run
+        3 times since. Each run is the gap from `sweep.headroom_recovery.summary` (the step before it) to
+        `sweep.escalation_rejudge.summary` (its last row), and the core daemon wrote ZERO rows inside each gap while
+        serve and other actors kept writing (91 rows from other pids in the 04:14-04:16 gap):
+          pid 2693547  03:15:43.986 -> 03:16:52.274   68.3 s   total 0 candidates
+          pid 2693547  04:02:57.535 -> 04:03:54.348   56.8 s   total 2, rejudged 0
+          pid 3010310  04:14:39.294 -> 04:16:24.415  105.1 s   total 1, rejudged 0
+        230 s frozen over 3 of 3 passes, with no judge call made in any of them.
+      - The loop monitor saw each one: `daemon.loop_lag` 65,655 ms at 03:16:53 (sync_spawn_top caller
+        src/lib/escalate.ts:1685, leaf ghExec, first_arg "issue"), 65,046 ms at 04:03:55 (last step
+        sweep.escalation_rejudge.summary), and 62,057 ms (dispatch) / 72,031 ms (pulse) at 04:16:25/32 (same caller).
+        The interval's sync spawns came to only 10.3 s of that, so most of the freeze is CPU, not gh.
+      - `daemon.loop_stall_profile` 04:16:34 (lag 103,761 ms): (garbage collector) 5,282 ms, readFileUtf8 4,584,
+        sweepEscalationTriage SELF 3,810, readdir 1,777, parseObject (ledger-union.ts) 1,499; unattributed 93,696
+        (the profile keeps two chunks; W1-T9361 fixes that, it does not remove the stall).
+      - The full sweep then overran its abandon bound: `daemon.sweep.abandoned` elapsed 608,298 ms at 04:04:11 and
+        583,849 ms at 04:16:33 (bound 559,000).
+      - The corpus it reads: 450 rotations, 214 MB gzipped, back to 2026-08-08. The reconciler rung just before it
+        lists the same issues through the same sync gateway in about 3 s (issues_seen 26).
+    READ on origin/main c05549268 (symbols, not lines):
+      - `sweepEscalationTriage` (src/run-task.ts) runs once per full pass from `buildSweepHook`'s closure
+        (`if (!github)`), and from the `rmd sweep` path after `sweepEscalationReconcile`.
+      - `history = io.rows ?? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows`: no
+        `step` filter, no `since`, no memo, so every pass gunzips and parses every rotation on the loop and keeps
+        every row.
+      - `issues = io.issues ?? ghIssueGateway(owner, repo)` (escalate.ts, the `ghExec` leaf at :1685) drives
+        `listRetirableEscalationIssues` (src/lib/sweep.ts: one `gh issue list` per label in
+        `RETIRABLE_ESCALATION_LABELS`), the demote `issues.comment`, and `triageExistingEscalation`'s
+        `comment`/`closeWithComment`. Only `relabel` uses `ghTextAsync`.
+      - Per open issue, `[...history].reverse().find(...)` copies the whole history array; `alreadyJudgedStateKeys`
+        filters it once more. With 26 open issues that is 27 full passes over every row ever written.
+      - The rung needs only four steps: `escalation.issue_opened`, `escalation.demoted` and
+        `escalation.auto_resolve_started` rows carrying `triage_subject` (an issue's birth), and `escalation.rejudged`
+        rows' `state_key`.
+      - The async pieces already exist: `ghIssueGatewayAsync` (W1-T5283), `ghTextAsync` and `GhAsyncExecutor`
+        (src/lib/github-transport.ts), and the incremental union readers `createLedgerRotationMemo` (async `load`)
+        and `createIncrementalLedgerUnion` (src/lib/ledger-union.ts) with the `step` filter every union reader honours.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 352 open origin heads (04:2xZ) for
+    sweepEscalationTriage, escalate.ts:1685, escalation_rejudge, triageExistingEscalation and "escalation triage ...
+    loop": 0 shards on main and 0 on every head. Control: runStaleEscalationRejudge reads 2 shards on main (W1-T8864,
+    W1-T8868) and 106 summed over the heads. No head changes the rung's sync read (8 heads carry the function; all
+    keep the `readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true })` line).
+    Neighbours: W1-T5283 and W1-T5765 moved the main-health rung and `escalateWithJudge` to the async gateway, not
+    this rung (it postdates both). W1-T4046 (blocked) is the measurement cadence's union read. W1-T9361 and W1-T7746
+    change what a stall profile reports. W1-T9114 and W1-T100 share src/run-task.ts and src/lib/sweep.ts as whole
+    files only: W1-T100 routes a blocked_ci failure to the ci-log fix path, and neither touches the triage rung.
+    W1-T8868's shard still reads `status: queued`; it shipped in #11487.
+  design: |
+    No new constant, no window and no cap. The rung's outputs (candidates, ledger rows, labels, comments) do not change.
+    1. GITHUB OFF THE LOOP. The rung's default gateway becomes `ghIssueGatewayAsync(owner, repo)`, built on the same
+       `io.execAsync` seam the relabel already takes, so one injected executor covers every gh call the rung makes.
+       Add an awaitable twin of `listRetirableEscalationIssues` in src/lib/sweep.ts with the same dedupe by number
+       and the same whole-list fail-soft contract (a failed label read fails the whole list). The demote `comment`
+       and `triageExistingEscalation`'s `comment`/`closeWithComment` use the async gateway. No sync gh spawn is left on
+       this rung's path. The reconciler rung is out of scope.
+    2. READ ONLY THE SLICE, AND ONLY WHAT IS NEW SINCE THE LAST PASS. Replace the whole-union sync read with an
+       escalation-history reader that `buildSweepHook` builds once per daemon start, beside `boardGithub`. It sits on
+       the existing incremental union machinery, step-filtered to the four steps above. Its first load runs off the
+       loop (the memo's async `load`), and each later pass parses only the rotations and live-file bytes added since
+       the pass before. There is no time window: an issue born in the oldest rotation is still found. The
+       `refuseIncomplete` meaning stays: an unread rotation gives no history, and the rung skips the pass rather than
+       judging from a partial one. The `rmd sweep` call site, which passes no reader, gets a one-shot async read of the
+       same slice. `io.rows` stays as the test seam.
+    3. INDEX ONCE PER PASS. One map from `issue_url` to its newest birth row, plus the set of judged `state_key`s, is
+       built in a single walk of the slice. It replaces the per-issue `[...history].reverse().find` copy.
+    4. Unchanged: the judge, the triage modes, relabel routing, every ledger row written, and dryRun.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive `sweepEscalationTriage`
+    with an injected `execAsync` whose `gh issue list` resolves on a timer, and with a fixture state dir of gzipped
+    rotations whose reads are counted.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/escalation-triage-runs-off-the-loop.test.ts"
+    - claim: "a concurrent timer keeps firing while the rung's gh issue list is pending"
+      proof: 'grep: test("W1-T9390: a slow gh issue list does not block a concurrent timer" in test/escalation-triage-runs-off-the-loop.test.ts'
+    - claim: "a second pass parses only the rotations and live bytes appended since the first"
+      proof: 'grep: test("W1-T9390: a second pass parses only what was appended since the first" in test/escalation-triage-runs-off-the-loop.test.ts'
+    - claim: "an issue whose birth row sits in the oldest rotation is still a rejudge candidate"
+      proof: 'grep: test("W1-T9390: an issue born in the oldest rotation is still rejudged" in test/escalation-triage-runs-off-the-loop.test.ts'
+  falsifier: |
+    Restore the `ghIssueGateway` default: the first test's injected executor never sees the list call (the sync leaf
+    runs instead) and the timer records no tick while the list is pending. Restore the whole-union sync read: the
+    second test counts every rotation parsed again on the second pass. Bound the read by a time window: the third
+    test's oldest-rotation birth is missed and the issue is not a candidate.

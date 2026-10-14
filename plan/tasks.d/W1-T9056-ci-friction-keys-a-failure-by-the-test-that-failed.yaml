@@ -1,0 +1,41 @@
+- id: W1-T9056
+  title: "CI FRICTION KEYS A FAILURE BY THE TEST THAT FAILED, NOT THE SHARD IT RAN IN — one failing test was filed three times under three checks (W1-T5136, W1-T5152, W1-T5164), and an aggregator check splits a round's minutes with the producer that actually failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T4435, W1-T5380, W1-T6311]
+  files: [src/lib/ci-friction-gardener.ts, test/ci-friction-keys-a-failure-by-the-test-that-failed.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main (src/lib/ci-friction-gardener.ts `ciLogCauses`):
+    - A ci-log cause is `check:ci-log:<family>:<signature>`, keyed by the CHECK family first. When the signature is the
+      failing test file, the same test failing under different checks becomes different causes:
+      `test/deps-interface-census.test.ts` was filed three times (W1-T5136, W1-T5152, W1-T5164).
+    - A round's minutes are split evenly over every red check in it, including aggregators (coverage-ratchet, ci-required,
+      ci-gate) that are red only because a producer was. That is why `check:ci-log:coverage-ratchet` (W1-T4810,
+      W1-T5309) carries about 1.4–1.9k minutes over about 455 rounds with no signature.
+    The gate path's runtime pricing (the eight coverage-shard tasks) was fixed separately; this is the ci-log path.
+  design: |
+    1. A failure whose signature is a test file keys as `check:test:<path>`, independent of the check it ran in. Other
+       signatures keep `check:ci-log:<family>:<signature>`.
+    2. Causes are deduped within a round.
+    3. When a producer check in the same round carries a signature, aggregator checks (coverage-ratchet, ci-required,
+       ci-gate) are dropped from that round's split.
+    4. The kind stays `check`, so the receipt regex and `CiFrictionCauseKind` are unchanged. Retired records under the
+       old keys stay inert history.
+  acceptance:
+    - claim: "one round naming a failing test under a shard and its aggregator prices one test cause"
+      proof: "grep: test(\"W1-T9056: one round naming a failing test under a shard and its aggregator prices one test cause\" in test/ci-friction-keys-a-failure-by-the-test-that-failed.test.ts"
+    - claim: "the same failing test under two different checks is one cause"
+      proof: "grep: test(\"W1-T9056: the same failing test under two different checks is one cause\" in test/ci-friction-keys-a-failure-by-the-test-that-failed.test.ts"
+  falsifier: |
+    Price two rounds: one where coverage-shard (3/8) fails on test/x.test.ts beside a red coverage-ratchet, and one where
+    ci-shard (2/8) fails on the same file. At origin/main that gives three causes; with the change it gives one,
+    `check:test:test/x.test.ts`.

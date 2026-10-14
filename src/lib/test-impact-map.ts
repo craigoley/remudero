@@ -166,10 +166,13 @@ function scanSource(content: string, mask: boolean, keepLines: boolean): string 
 }
 
 
-/** Commits the base may be past the map's sha before the arm stops trusting it. Main lands a few
- *  dozen merges a day and the shard artifacts live one day, so a map this far behind is no longer
- *  the newest one obtainable. PRIMARY CONTROL: it alone decides when the arm stops speaking. */
-export const IMPACT_MAP_STALENESS_BOUND = 150;
+/** Commits the base may be past the map's sha before the arm stops trusting it. MEASURED 2026-09-30..
+ *  10-13: main lands 149–272 first-parent commits a day, so 150 silenced the arm for the last hours of
+ *  11 of 13 days and for every day after a missed nightly. 500 covers two days at the busiest rate.
+ *  A changed file that moved since the map still falls back on its own; the shadow record carries
+ *  the distance so the miss rate by distance can set this. PRIMARY CONTROL: it alone decides when the
+ *  arm stops speaking. */
+export const IMPACT_MAP_STALENESS_BOUND = 500;
 
 /** One test file's coverage, keyed by the files it loaded. `functions` rows are
  *  `[startLine, endLine, ...suite indices that executed the function]`, 1-based original lines. */
@@ -269,24 +272,57 @@ function lineStarts(lineLengths: readonly number[]): number[] {
   return starts;
 }
 
+/** One source map, placed: its segments as generated offsets in ascending order beside their
+ *  original lines, and every span already asked of it. Placed ONCE per map, not per report: on the
+ *  2026-10-14 nightly the per-report rescan cost ~0.7s a report over ~3,400 reports and timed the
+ *  merge job out before the floor ratchet ran (run 38514060349). */
+interface PlacedMap {
+  at: Int32Array;
+  orig: Int32Array;
+  spans: Map<string, [number, number] | undefined>;
+}
+
+function placeMap(lineLengths: readonly number[], mappings: string): PlacedMap {
+  const starts = lineStarts(lineLengths);
+  const decoded = decodeMappings(mappings);
+  const pairs: Array<[number, number]> = [];
+  for (let line = 0; line < starts.length && line < decoded.length; line += 1) {
+    for (const [col, orig] of decoded[line]!) pairs.push([starts[line]! + col, orig]);
+  }
+  pairs.sort((a, b) => a[0] - b[0]);
+  return { at: Int32Array.from(pairs, (p) => p[0]), orig: Int32Array.from(pairs, (p) => p[1]), spans: new Map() };
+}
+
 /** The 1-based original line span of the generated range `[start, end)`: the min and max original
  *  line of every mapping segment INSIDE it. A function with no segment of its own — a bundler
  *  helper, a synthesized export getter — maps to nothing and is left out, so it can never claim a
  *  module-scope line as its body. */
-function mappedSpan(start: number, end: number, starts: readonly number[], decoded: Array<Array<[number, number]>>): [number, number] | undefined {
+function mappedSpan(start: number, end: number, map: PlacedMap, counts?: ImpactMapCounts): [number, number] | undefined {
+  const key = `${start}:${end}`;
+  if (map.spans.has(key)) return map.spans.get(key);
+  if (counts) counts.placed += 1;
+  let i = 0;
+  let j = map.at.length;
+  while (i < j) {
+    const mid = (i + j) >> 1;
+    if (map.at[mid]! < start) i = mid + 1;
+    else j = mid;
+  }
   let lo = Infinity;
   let hi = -Infinity;
-  for (let line = 0; line < starts.length && line < decoded.length; line += 1) {
-    const base = starts[line]!;
-    if (base >= end) break;
-    for (const [col, orig] of decoded[line]!) {
-      const at = base + col;
-      if (at < start || at >= end) continue;
-      lo = Math.min(lo, orig);
-      hi = Math.max(hi, orig);
-    }
+  for (; i < map.at.length && map.at[i]! < end; i += 1) {
+    lo = Math.min(lo, map.orig[i]!);
+    hi = Math.max(hi, map.orig[i]!);
   }
-  return lo === Infinity ? undefined : [lo + 1, hi + 1];
+  const span: [number, number] | undefined = lo === Infinity ? undefined : [lo + 1, hi + 1];
+  map.spans.set(key, span);
+  return span;
+}
+
+/** What the builder did: `placed` counts spans computed, `maps` source maps placed. */
+export interface ImpactMapCounts {
+  placed: number;
+  maps: number;
 }
 
 /** The 1-based line span of `[start, end)` in an unmapped script, from its own source text. */
@@ -323,7 +359,7 @@ export function reportSuite(report: CoverageProcessReport, rootUrl: string): str
  *  edit to it selects them all. Throws when no report names a suite: a map of nothing is not one. */
 export function buildImpactMap(
   reports: Iterable<CoverageProcessReport>,
-  opts: { sha: string; root: string; readSource?: (path: string) => string | undefined },
+  opts: { sha: string; root: string; readSource?: (path: string) => string | undefined; counts?: ImpactMapCounts },
 ): ImpactMap {
   const rootUrl = opts.root.startsWith("file:") ? (opts.root.endsWith("/") ? opts.root : `${opts.root}/`) : new URL(`file://${opts.root.replace(/\/?$/, "/")}`).href;
   const loaded = new Map<string, Set<string>>();
@@ -331,7 +367,26 @@ export function buildImpactMap(
   const suites = new Set<string>();
   const credited = new Set<string>();
   let orphans = 0;
-  const decodedCache = new Map<string, { starts: number[]; decoded: Array<Array<[number, number]>> }>();
+  // A compact shard hands every report the SAME source-map object; a raw report its own copy, so
+  // a miss on the object falls back to the url's maps compared by content.
+  const placedByObject = new WeakMap<object, PlacedMap>();
+  const placedByUrl = new Map<string, Array<{ lineLengths: readonly number[]; mappings: string; placed: PlacedMap }>>();
+  const placedFor = (url: string, cached: { lineLengths: number[]; data: { mappings: string } }): PlacedMap => {
+    const known = placedByObject.get(cached);
+    if (known) return known;
+    const { lineLengths, data: { mappings } } = cached;
+    const seen = placedByUrl.get(url) ?? [];
+    let placed = seen.find((m) => m.mappings === mappings && m.lineLengths.length === lineLengths.length &&
+      m.lineLengths.every((len, i) => len === lineLengths[i]))?.placed;
+    if (!placed) {
+      placed = placeMap(lineLengths, mappings);
+      if (opts.counts) opts.counts.maps += 1;
+      seen.push({ lineLengths, mappings, placed });
+      placedByUrl.set(url, seen);
+    }
+    placedByObject.set(cached, placed);
+    return placed;
+  };
   for (const report of reports) {
     const suite = reportSuite(report, rootUrl);
     if (suite === undefined) {
@@ -351,14 +406,8 @@ export function buildImpactMap(
       const cached = report["source-map-cache"]?.[script.url];
       let place: (start: number, end: number) => [number, number] | undefined;
       if (cached?.data?.mappings !== undefined && Array.isArray(cached.lineLengths)) {
-        const key = `${cached.lineLengths.join(",")}|${cached.data.mappings}`;
-        let entry = decodedCache.get(key);
-        if (!entry) {
-          entry = { starts: lineStarts(cached.lineLengths), decoded: decodeMappings(cached.data.mappings) };
-          decodedCache.set(key, entry);
-        }
-        const { starts, decoded } = entry;
-        place = (s, e) => mappedSpan(s, e, starts, decoded);
+        const map = placedFor(script.url, cached as { lineLengths: number[]; data: { mappings: string } });
+        place = (s, e) => mappedSpan(s, e, map, opts.counts);
       } else {
         const text = opts.readSource?.(path);
         if (text === undefined) continue;

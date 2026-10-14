@@ -26,17 +26,50 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { beforeEach } from "node:test";
 import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
-import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
+import { appendGitConfigEnv, DEAD_PUSH_ROOT, GH_CONFIG_DIR_PREFIX, GITHUB_PUSH_PREFIXES,
+  reapDeadOwnerDirs, runsTestFilesInThisProcess, setupDirOwnerTag } from "./no-live-remote.js";
 // #7598: pin TMPDIR to its real path before any fixture builds a temp path (macOS /var -> /private/var).
 import "./canonical-tmpdir.js";
 import { installReadMapFromEnv } from "./read-map.js";
 import { admitTestFile } from "../../src/lib/test-file-admission.js";
 import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
+import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+
+if (isMainThread && runsTestFilesInThisProcess()) {
+  const missing: string[] = [];
+  if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
+  const configDir = process.env.GH_CONFIG_DIR;
+  try {
+    if (!configDir || !basename(configDir).startsWith(`${GH_CONFIG_DIR_PREFIX}${setupDirOwnerTag()}`) ||
+        !fs.lstatSync(configDir, { throwIfNoEntry: false })?.isDirectory() ||
+        dirname(fs.realpathSync(configDir)) !== tmpdir()) {
+      missing.push("GH_CONFIG_DIR owned by this process");
+    }
+  } catch (error) {
+    missing.push(`GH_CONFIG_DIR unreadable: ${String(error)}`);
+  }
+  const count = Number(process.env.GIT_CONFIG_COUNT);
+  const pushPrefixes = new Set<string>();
+  if (Number.isSafeInteger(count) && count > 0) {
+    for (let i = 0; i < count; i += 1) {
+      if (process.env[`GIT_CONFIG_KEY_${i}`] === `url.${DEAD_PUSH_ROOT}.pushInsteadOf`) {
+        pushPrefixes.add(process.env[`GIT_CONFIG_VALUE_${i}`] ?? "");
+      }
+    }
+  }
+  if (!GITHUB_PUSH_PREFIXES.every((prefix) => pushPrefixes.has(prefix))) missing.push("dead push URL config");
+  if (missing.length > 0) throw new Error(`pooled test containment missing: ${missing.join(", ")}`);
+  beforeEach((context) => {
+    if (context.filePath !== undefined) setTestFileSlotScope(context.filePath);
+  });
+}
 
 /**
  * W1-T3069 — REFUSE THE READ-ONLY ESCAPE BEFORE A SINGLE TEST RUNS.
@@ -183,6 +216,9 @@ if (isMainThread) {
   reapDeadOwnerDirs(TEST_HOME_PREFIX);
   const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${setupDirOwnerTag()}`));
   process.env.HOME = testHome;
+  // fb-1791856944992-903702: a real worktreeRemove sweeps the claude-<uid> scratch root, which defaults to the one live
+  // Claude Code sessions share; a suite calling it deleted one mid-run. Each test process sweeps under its own HOME.
+  process.env.CLAUDE_CODE_TMPDIR = testHome;
   const testConfigDir = join(testHome, ".config", "remudero");
   fs.mkdirSync(testConfigDir, { recursive: true });
   fs.writeFileSync(join(testConfigDir, "config.json"), JSON.stringify({

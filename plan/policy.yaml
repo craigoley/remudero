@@ -870,14 +870,26 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
-  # W1-T7094 — the REPORT-ONLY host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is
-  # a PROPOSAL to calibrate from `memory_budget.shadow` rows, not a ruling. `mode` accepts only off
-  # or shadow: no enforce mode exists, a later task must add one with operator approval, and nothing
-  # switches it on a timer. Read by host-memory-shadow.ts itself, never by validatePolicy.
+  # W1-T7094 — the host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is a PROPOSAL
+  # to calibrate from `memory_budget.shadow` rows, not a ruling. mode accepts off, shadow or enforce.
+  # "shadow" (shipped) records a verdict per start and delays nothing. "enforce"
+  # (src/lib/host-memory-admission.ts, #10730) makes a start that would not fit wait, tiered: one
+  # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
+  # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
+  # nothing switches it on a timer. Read by host-memory-shadow.ts
+  # itself, never by validatePolicy. `classModes` overrides mode for named worker classes: garden
+  # (gardener/cleanup-bot children) enforces on operator 2026-10-14, after the 10-14 loop stalls in which
+  # the shadow verdict would have refused the 3 running garden children. A garden child that would not
+  # fit is deferred to its next pass (memory_budget.enforce_defer), never dropped. Builds, fixes and
+  # reviews stay in shadow until W1-T8472 lands.
   hostMemoryBudget:
     mode:
       value: "shadow"
       origin: "proposal"
+    classModes:
+      garden:
+        value: "enforce"
+        origin: "proposal"
     # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
     hostReserveMib:
       value: 2048
@@ -905,9 +917,9 @@ sweep:
       origin: "proposal"
       min: 0
       max: 100
-    # OBSERVED 2026-10-09: serve's cold start peaks at 7.5 GB; a cold start begins from nothing resident.
+    # OBSERVED 2026-10-11: serve cold-start peak 5,707 MiB; 6,144 MiB leaves 437 MiB margin.
     serveColdStartReserveMib:
-      value: 7680
+      value: 6144
       origin: "proposal"
       min: 0
       max: 16384
@@ -931,6 +943,17 @@ sweep:
       origin: "proposal"
       min: 1000
       max: 86400000
+  # W1-T9082 — ADR 0007 decision A.9: whether a build run also starts a child process. mode accepts off, shadow,
+  # on or auto, and an absent block reads as off. "shadow" (shipped) starts one PROBE child per dispatched run
+  # beside the in-process run: it loads what a run child would load, round-trips the run-child contract and records
+  # `run_child.shadow` (load time, tree peak, entry kind), and never touches the task. "on" and "auto" are accepted
+  # and implemented by later tasks; until then they behave as shadow and say so. Switching beyond shadow is an
+  # operator ruling made by editing this row; nothing switches it on a timer. Read by src/lib/policy.ts
+  # (loadRunChildMode), never by validatePolicy.
+  runChild:
+    mode:
+      value: "shadow"
+      origin: "proposal"
 
 drain:
   max:
@@ -1622,6 +1645,15 @@ githubEventWake:
 #       note: "the class the operator is watching, once measured"
 armCalibrationBands: []
 
+# W1-T2761's row, ON by the operator's 2026-10-13 ruling. Claude implement workers now receive
+# CLAUDE.md's rule headlines (about 9.6k chars) as the `rule_headlines` prompt part; Codex workers
+# already read AGENTS.md. While this row was absent, the wipe test's `rules` factor (which masks
+# only this part) compared two identical empty parts; it now measures the headlines' effect.
+workerRuleHeadlines:
+  enabled:
+    value: true
+    origin: "net-new"
+
 # W1-T4050 — RISK LEVELS ARE RUNTIME POLICY, not a source literal. OPERATOR'S WORDS: "I don't
 # want strictness, I want risk levels and rules that can be configured in the console."
 #
@@ -1644,6 +1676,14 @@ risk:
   confidenceThreshold:
     value: 0.7
     origin: "lifted:src/lib/risk-judge.ts:593 (DEFAULT_CONFIDENCE_THRESHOLD, as measured at 855dcb0b6)"
+    min: 0
+    max: 1
+  # W1-T7724: how far ABOVE confidenceThreshold a `low` verdict is still uncertain. A `low` verdict below the
+  # threshold, or inside [threshold, threshold + borderlineBand), is judged a second time with the diff before
+  # it may escalate. 0 = no band: only a verdict below the threshold is re-judged.
+  borderlineBand:
+    value: 0
+    origin: "net-new"
     min: 0
     max: 1
   verifyHumanReleaseEnabled:
@@ -1679,3 +1719,33 @@ daemonMemory:
     origin: "net-new"
     min: 0.1
     max: 1
+
+# WHO DECIDES WHETHER AN ESCALATION NEEDS THE OPERATOR (W1-T8868), read by
+# src/lib/escalation-triage.ts's `parseEscalationTriagePolicy` (OPTIONAL: absent reads as the
+# defaults below; NOT threaded through src/lib/policy.ts's `validatePolicy`, exactly like `risk:`).
+#
+# Every escalation is triaged at src/lib/escalate.ts into auto_resolve (a reversible executor from a
+# closed set), digest, or deliver. `shadow` ledgers `escalation.triaged` with the would-be outcome and
+# still delivers every escalation as needs-human; `act` follows the outcome. MANUAL and HARD_STOP are
+# always delivered in either mode. `maxAutoResolvesPerPass` is capped at 5 by the parser.
+escalationTriage:
+  mode: shadow
+  maxAutoResolvesPerPass: 5
+
+# W1-T8864: the issue-revalidation garden (src/lib/issue-revalidation-garden.ts) re-checks every open
+# issue against current evidence once an hour at most. `mode` ships as "shadow": each verdict and the
+# action it would take is ledgered as issue_revalidation.verdict and nothing is written to GitHub.
+# "act" closes only positively-evidenced issues that are not MANUAL or GRILL and whose newest comment is
+# not the operator's, at most `maxClosesPerPass` a pass; "off" stops the garden. The operator flips it
+# once the shadow verdict table over the open backlog is right (operator ruling 2026-10-13).
+# Flipped to "act" on operator 2026-10-14 ("go with your recommendations"): on 10-14 the shadow pass
+# judged #11639 resolved, and the escalation reconciler closed it about 40 min after its PR merged.
+issueRevalidation:
+  mode:
+    value: "act"
+    origin: "net-new"
+  maxClosesPerPass:
+    value: 5
+    origin: "net-new"
+    min: 1
+    max: 20

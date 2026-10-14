@@ -16,6 +16,7 @@
 import { join } from "node:path";
 import { ENV_REGISTRY, type EnvRegistryEntry } from "./config-schema.js";
 import { LIVE_LEDGER_DENY_ROOT_ENV } from "./live-write-guard.js";
+import { GARDENER_ORIGIN_ENV, gardenerOriginEnv, readGardenerOrigin } from "./worker-containment.js";
 
 // Why: why USER/CLAUDE_CODE_OAUTH_TOKEN/GH_TOKEN are each safe to copy, and the container-parity
 // incident behind GH_TOKEN — docs/forensics/env.md#allowlist (W1-T236, W1-T258).
@@ -48,9 +49,9 @@ const ANTHROPIC_KEY = /^ANTHROPIC_/i;
 const SANCTIONED_KEY = "ANTHROPIC_API_KEY";
 
 /**
- * Build a child environment from an explicit allowlist plus caller-supplied vars — never
- * `process.env` wholesale. Throws if any `ANTHROPIC_*` key other than the sanctioned
- * `ANTHROPIC_API_KEY` overflow valve survives, so a leak fails loud here rather than on the invoice.
+ * Construct only allowlisted/caller-supplied env, never `process.env` wholesale. Origin is correlation only.
+ * Decoded ambient origin wins extras; malformed stays invalid. `ANTHROPIC_*` keys require the existing
+ * two-factor `ANTHROPIC_API_KEY` valve; every other survivor throws here rather than on the invoice.
  * INVARIANT: shell isolation mirrors that denial — `opts.home`/`shell`/`zdotdir` grant
  * HOME/CLAUDE_CODE_SHELL/ZDOTDIR so a worker's shell sources Remudero's own empty rc, never the
  * operator's `~/.zshrc`; see config.workerHomeDir/workerShell/workerZdotdir.
@@ -75,7 +76,13 @@ export function buildWorkerEnv(
   }
 
   for (const [key, val] of Object.entries(extra)) {
-    child[key] = val;
+    if (key !== GARDENER_ORIGIN_ENV) child[key] = val;
+  }
+  const gardenerOrigin = readGardenerOrigin(parent) ?? readGardenerOrigin(extra);
+  if (gardenerOrigin !== undefined) {
+    child[GARDENER_ORIGIN_ENV] = gardenerOrigin.state === "linked"
+      ? gardenerOriginEnv(gardenerOrigin.name, gardenerOrigin.passId)!
+      : "null";
   }
   const liveDenyRoot = parent[LIVE_LEDGER_DENY_ROOT_ENV];
   if (typeof liveDenyRoot === "string" && liveDenyRoot.length > 0) child[LIVE_LEDGER_DENY_ROOT_ENV] = liveDenyRoot;
@@ -112,6 +119,13 @@ export function buildWorkerEnv(
   // docs/forensics/env.md#disable_autoupdater (W1-T236).
   if (!("DISABLE_AUTOUPDATER" in child)) {
     child.DISABLE_AUTOUPDATER = "1";
+  }
+
+  // Grants CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 (unless the caller set one via `extra`) — auto memory loads
+  // whatever `settingSources` says and is shared by every worktree of a repo, ungoverned by any budget.
+  // Why: the SDK's own isolation table and the shared grant — docs/forensics/env.md#claude_code_disable_auto_memory.
+  if (!("CLAUDE_CODE_DISABLE_AUTO_MEMORY" in child)) {
+    child.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
   }
 
   // Overflow valve — engaged only when the caller passes `opts.allowApiKey` (the config.overflow

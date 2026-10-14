@@ -52,10 +52,29 @@ export const LEDGER_PROJECTOR_DDL = `
   CREATE TABLE IF NOT EXISTS fact(seq INTEGER PRIMARY KEY, ts TEXT NOT NULL, ts_ms INTEGER NOT NULL, step TEXT NOT NULL,
     task_id TEXT, run_id TEXT, body TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS fact_task ON fact(task_id, seq) WHERE task_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS fact_step ON fact(step, ts_ms);
+  CREATE TABLE IF NOT EXISTS fact_alias(task TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(task, seq)) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS quarantine(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, ts TEXT NOT NULL, step TEXT NOT NULL,
     ingested_ms INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;
   INSERT OR IGNORE INTO meta(k, v) VALUES('generation', '0');
 `;
+
+/**
+ * W1-T9436: `fact_alias` names each fact row whose `task` differs from its `task_id` (a DAEMON-lane row naming the task
+ * it acted on), so a task's own rows are read from the store by `fact_task` plus this table, as `buildLedgerIndex` files
+ * them. The writer adds a row beside each such fact row; a store built before the table is backfilled once from its own
+ * fact bodies, and this meta key says it was.
+ */
+export const FACT_ALIAS_META = "fact_alias";
+const FACT_ALIAS_BACKFILLED = "backfilled";
+const FACT_ALIAS_BACKFILL = `INSERT OR IGNORE INTO fact_alias(task, seq)
+  SELECT json_extract(body, '$.task'), seq FROM fact
+  WHERE json_type(body, '$.task') = 'text' AND json_type(body, '$.task_id') = 'text' AND json_extract(body, '$.task') <> json_extract(body, '$.task_id')`;
+
+/** True once every fact row's alias is in `fact_alias`: written with the row, or backfilled. */
+export function factAliasReady(db: ReadModelDb): boolean {
+  return db.meta(FACT_ALIAS_META) === FACT_ALIAS_BACKFILLED;
+}
 
 /** Opens (or creates) one instance's projector read model under `stateDir` (core's, design §1.7). */
 export function openProjectorReadModel(stateDir: string, instance: string, clock?: Clock, generation?: string | null): ReadModelDb {
@@ -401,6 +420,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   const sql = {
     seen: db.prepare("INSERT OR IGNORE INTO seen(ts_ms, h) VALUES(?, ?)"),
     fact: db.prepare("INSERT INTO fact(ts, ts_ms, step, task_id, run_id, body) VALUES(?, ?, ?, ?, ?, ?)"),
+    alias: db.prepare("INSERT OR IGNORE INTO fact_alias(task, seq) VALUES(?, last_insert_rowid())"),
     quarantine: db.prepare("INSERT INTO quarantine(ts_ms, h, ts, step, ingested_ms, body) VALUES(?, ?, ?, ?, ?, ?)"),
     checkpoint: db.prepare(`INSERT INTO source_file(name, ino, size, off, fp) VALUES(?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET ino = excluded.ino, size = excluded.size, off = excluded.off, fp = excluded.fp`),
@@ -444,9 +464,15 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       withWriteTransaction(db, lease, () => {
         for (const p of projections) db.exec(p.ddl);
         if (Number(db.prepare("SELECT count(*) AS n FROM source_file").get()?.n) > 0) {
-          for (const table of ["seen", "fact", "quarantine", "source_file", ...projections.flatMap((p) => p.tables)]) db.exec(`DELETE FROM ${table}`);
+          for (const table of ["seen", "fact", "fact_alias", "quarantine", "source_file", ...projections.flatMap((p) => p.tables)]) db.exec(`DELETE FROM ${table}`);
         }
         for (const p of stale) db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(`projection:${p.name}`, String(p.version));
+      });
+    }
+    if (!factAliasReady(db)) {
+      withWriteTransaction(db, lease, () => {
+        db.exec(FACT_ALIAS_BACKFILL);
+        db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(FACT_ALIAS_META, FACT_ALIAS_BACKFILLED);
       });
     }
     projectionsBuilt = true;
@@ -486,6 +512,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       if (!isFactRow(row, factStep)) continue;
       const task = typeof row.task_id === "string" ? row.task_id : typeof row.task === "string" ? row.task : null;
       sql.fact.run(id.ts, id.tsMs, row.step, task, typeof row.run_id === "string" ? row.run_id : null, line);
+      if (typeof row.task_id === "string" && typeof row.task === "string" && row.task !== row.task_id) sql.alias.run(row.task);
       c.facts++;
     }
   }

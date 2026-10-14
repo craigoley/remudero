@@ -1,0 +1,67 @@
+- id: W1-T8779
+  title: "A RECORD THAT PROMISES FOLLOW-UP TASKS REPORTS THEM FOR HARVEST BEFORE ITS PR PASSES REVIEW — W1-T7729's design required ADR 0006 to name \"the follow-up tasks it files\", the ADR listed four, and the PR merged with none of them filed or reported, so the memory cut it existed for never shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-12: W1-T7729 (#11136) merged without its ADR's follow-ups; filed by hand as W1-T8775..W1-T8778"
+  plan_refs: [W1-T7729, W1-T105, W1-T2456]
+  files: [src/lib/promised-follow-ups.ts, src/lib/review.ts, src/lib/worker.ts, src/run-task.ts, test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts, test/review-engine-revision-rearm.test.ts, test/inverse-scope-advisory-section.test.ts, test/unwired-export-advisory-section.test.ts, test/review-deletion-blind.test.ts, test/run-review-evidence-target.test.ts, test/review-status-pending.test.ts, test/scope-guard-overrun.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T7729's design said the ADR must decide "the follow-up tasks it files". docs/adr/0006-precompiled-daemon-child-entries.md
+    ends with "Follow-up tasks this record files:" and four bullets. #11136 merged on 2026-10-12 with every criterion
+    proven, and none of the four existed anywhere in plan/ until an operator session filed them by hand (W1-T8775 to
+    W1-T8778). Nothing in review compared the promise with what was delivered.
+    WHY REPORT FOR HARVEST, NOT "PLAN RECORDS MUST EXIST": rule 15 keeps a shard and its implementation in separate PRs,
+    and a fleet worker cannot open a second filing PR, so requiring plan records before the build's PR passes would
+    deadlock every such build. The route a single PR CAN satisfy already exists: a worker report's `## Follow-ups`
+    section is ledgered as `report.followups` and mined into proposal candidates (W1-T105, src/lib/retro.ts; W1-T2456
+    governs). The gap is that nothing requires a promised follow-up to enter it.
+  design: |
+    1. src/lib/promised-follow-ups.ts: a pure `promisedFollowUps(diffFiles, readFile)` that finds, in any docs/adr/*.md
+       the diff adds or edits, a "Follow-up tasks this record files:" list (and the same phrasing in a task's design
+       text), and returns its bullets.
+    2. `unreportedFollowUps(promised, implementationReport, planRecords)`: a bullet is satisfied when the report's
+       `## Follow-ups` section carries an entry naming it (the same section the harvest reads), or when a plan record on
+       origin/main cites the task in plan_refs and names it. Everything else is unreported.
+    3. judgeReview adds one unmet synthetic criterion, "promised follow-ups reported for harvest", naming each
+       unreported bullet, so the PR cannot pass until they are reported; a PR that promises none is unaffected.
+    4. The same typed Follow-ups parser must serve worker harvesting and this guard; put the lean parser in the new
+       module and have worker.ts delegate, never import worker.ts into review's narrower dependency graph. Only
+       research:, task: and action: entries in the actual section count, not a PR body's prose or a heading alone.
+    5. runReview reads promise sources at the exact head and plan records at one pinned origin/main, awaited and
+       bounded, before claiming a review decision. Carry that same observation into the judge and decision digest;
+       a later filing must invalidate an earlier missing-promise decision, not replay it forever. Unreadable evidence
+       is UNKNOWN, never an empty promise list. Rearm both review identities with a policy revision and cover the
+       existing review-engine revision fixture. No extra model calls, live harvest writes or auto-filing here.
+    6. Enroll the promise observer as the sixth changed-file consumer in the existing deletion census, explicitly
+       stating its verdict change and exact-head deletion handling. The bound preparation/judge path must keep
+       rendered inverse/unwired advisory sections out of decision inputs and still append them to the PR comment;
+       update those two existing wiring fixtures for the new producer while retaining their independence assertions.
+       Preserve fetched-body provenance separately from the implementation transcript; its existing wiring fixture
+       must pass without weakening its trusted/substitute distinction.
+    7. Repair the remaining three direct-judge source-wiring fixtures on the actual bound preparation/judge path:
+       run-review-evidence-target preserves the exact owner/repo target and every pre-existing evidence field;
+       review-status-pending preserves pending-before-diff/judge and terminal-after-judge ordering; scope-guard-overrun
+       preserves actual comment append and excludes rendered scope sections from BOTH preparation and judging.
+       Do not add fake direct-call aliases or comments merely to satisfy old source literals. Hosted full gates still
+       run; a local over-capacity subset with zero failures never certifies the omitted integration fixtures.
+  acceptance:
+    - claim: "a PR whose ADR lists follow-up tasks fails review while any listed follow-up is missing from the report's Follow-ups section"
+      proof: 'grep: test("W1-T8779: an ADR follow-up missing from the report blocks the review" in test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts'
+    - claim: "the same PR passes that criterion once every listed follow-up is reported or already filed with the task in plan_refs"
+      proof: 'grep: test("W1-T8779: reported or filed follow-ups satisfy the promise" in test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts'
+    - claim: "a PR that promises no follow-ups is judged exactly as before"
+      proof: 'grep: test("W1-T8779: a PR with no promised follow-ups is unaffected" in test/a-record-that-promises-follow-up-tasks-reports-them-for-harvest.test.ts'
+    - claim: "review consults the promised follow-ups"
+      proof: "grep: unreportedFollowUps( in src/lib/review.ts"
+  falsifier: |
+    Count a follow-up as satisfied because the ADR lists it, and W1-T7729's own diff passes with an empty report: the
+    first test fails. Add the criterion to every PR and the third test sees a changed verdict.

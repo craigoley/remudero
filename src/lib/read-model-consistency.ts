@@ -14,18 +14,23 @@
  */
 import { createHash } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { LEDGER_ROW_PROJECTIONS, isFactRow, isFactStep, ledgerLineIdentity, type LedgerRowProjection } from "./ledger-projector.js";
-import { ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { openScratchReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 
 export const READ_MODEL_CONSISTENCY_STEP = "read_model.consistency";
 export const READ_MODEL_SELF_HEALED_STEP = "read_model.self_healed";
+/** W1-T8866: the producer closed the issue it opened once the oracle agreed again. */
+export const READ_MODEL_CONSISTENCY_CLEARED_STEP = "read_model.consistency_cleared";
+export const READ_MODEL_CONSISTENCY_CLEAR_FAILED_STEP = "read_model.consistency_clear_failed";
+/** Consecutive `agree` runs after an `escalated` one before the escalation's own issue is closed. */
+export const ORACLE_AGREE_RUNS_TO_CLEAR = 3;
 /** The window closes this long before now, so only the documented late rows can still move it. */
 export const ORACLE_CLOSED_LAG_MS = 10 * 60_000;
 /**
@@ -529,17 +534,74 @@ export interface ConsistencyCheckOptions {
   projections?: readonly LedgerRowProjection[];
   /** Only rows below these positions are compared; defaults to the store's checkpoints now. */
   ingestMark?: IngestMark;
+  /** Consecutive agreeing runs that close the issue an earlier escalated run opened; default {@link ORACLE_AGREE_RUNS_TO_CLEAR}. */
+  agreeRunsToClear?: number;
 }
 
 function lostFingerprint(keys: string[]): string {
   return createHash("sha1").update([...keys].sort().join("\n")).digest("hex").slice(0, 16);
 }
 
-function history(db: ReadModelDb): Array<{ atMs: number; outcome: string; healed: number; lostFp: string | null }> {
+function history(db: ReadModelDb): Array<{ atMs: number; t0: number; t1: number; outcome: string; healed: number; lostFp: string | null }> {
   const exists = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'consistency_run'").get();
   if (!exists) return [];
-  return db.prepare("SELECT at_ms, outcome, healed, lost_fp FROM consistency_run ORDER BY id").all()
-    .map((row) => ({ atMs: Number(row.at_ms), outcome: String(row.outcome), healed: Number(row.healed), lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+  return db.prepare("SELECT at_ms, t0, t1, outcome, healed, lost_fp FROM consistency_run ORDER BY id").all()
+    .map((row) => ({ atMs: Number(row.at_ms), t0: Number(row.t0), t1: Number(row.t1), outcome: String(row.outcome), healed: Number(row.healed),
+      lostFp: row.lost_fp === null ? null : String(row.lost_fp) }));
+}
+
+/**
+ * W1-T8866 — THE PRODUCER CLOSES ITS OWN ESCALATION. After the run that just agreed, if the run history is an
+ * `escalated` run followed by `agree` runs, at least {@link ORACLE_AGREE_RUNS_TO_CLEAR} of them, the
+ * issue that escalated run opened (a heal or transient may sit between) is closed with the agreeing windows
+ * cited. The URL is read from the escalated run's own metric row in the ledger (`issue_url`), never from memory, so a restart cannot lose it.
+ * A ledger loss stays open (its `lost_fp` is set: the loss is real, agreement elsewhere does not undo it), and
+ * every unreadable input — the ledger, the issue gateway — closes nothing.
+ */
+function closeRecoveredEscalation(opts: ConsistencyCheckOptions, past: ReturnType<typeof history>, metric: ReturnType<typeof metricBase>): void {
+  const close = opts.escalation?.issues.closeWithComment?.bind(opts.escalation.issues);
+  if (!close) return;
+  const need = opts.agreeRunsToClear ?? ORACLE_AGREE_RUNS_TO_CLEAR;
+  let streak = 0;
+  let at = past.length - 1;
+  while (at >= 0 && past[at]!.outcome === "agree") {
+    streak++;
+    at--;
+  }
+  // The run that escalated may be followed by a heal (and a transient) before the agreement begins.
+  while (at >= 0 && (past[at]!.outcome === "healed" || past[at]!.outcome === "transient")) at--;
+  const escalated = at >= 0 ? past[at]! : undefined;
+  if (streak < need || escalated === undefined || escalated.outcome !== "escalated" || escalated.lostFp !== null) return;
+  let url: string | undefined;
+  try {
+    const read = readLedgerUnionRecordsSync(dirname(opts.metricLedgerPath), { since: isoAt(escalated.atMs - 1000), step: [READ_MODEL_CONSISTENCY_STEP, READ_MODEL_CONSISTENCY_CLEARED_STEP], refuseIncomplete: true });
+    if (!read.ok) throw new Error(`the ledger union was incomplete: ${read.unread.length} file(s) unread`);
+    const mine = read.rows.filter((row) => row.instance === opts.instance);
+    const named = mine.filter((row) => row.step === READ_MODEL_CONSISTENCY_STEP && row.outcome === "escalated" && typeof row.issue_url === "string" && row.issue_url !== "").at(-1);
+    url = named === undefined ? undefined : String(named.issue_url);
+    if (url !== undefined && mine.some((row) => row.step === READ_MODEL_CONSISTENCY_CLEARED_STEP && row.issue_url === url && row.delivered === true)) return;
+  } catch (error) {
+    // CANNOT-OBSERVE MEANS WAIT: an unreadable ledger leaves the issue open and names why.
+    appendLedger(opts.metricLedgerPath, { ...metric, step: READ_MODEL_CONSISTENCY_CLEAR_FAILED_STEP, reason: "ledger_unreadable", failure: String((error as Error)?.message ?? error) });
+    return;
+  }
+  if (url === undefined) return;
+  const windows = past.slice(-need).map((row) => `${isoAt(row.t0)}..${isoAt(row.t1)}`);
+  try {
+    close(url, `Resolved automatically: the read-model oracle agreed with the ledger on ${need} consecutive runs after this escalation (windows ${windows.join(", ")}). Reopen this issue if it drifts again.`);
+  } catch (error) {
+    appendLedger(opts.metricLedgerPath, { ...metric, step: READ_MODEL_CONSISTENCY_CLEAR_FAILED_STEP, reason: "close_failed", issue_url: url, failure: String((error as Error)?.message ?? error) });
+    return;
+  }
+  appendLedger(opts.metricLedgerPath, { ...metric, step: READ_MODEL_CONSISTENCY_CLEARED_STEP, issue_url: url, agree_runs: need, windows, delivered: true });
+}
+
+/** A heal RECURS when the projector lost rows again: an earlier heal (within {@link ORACLE_RECURRENCE_MS}) covered an
+ *  overlapping window, or this window holds rows written after that heal. A rolling slice reaching an older gap for the
+ *  first time is neither — #10884 logged 33 "recurrences" as backward slices each healed their own part of one gap. */
+export function healRecurs(past: readonly { atMs: number; t0: number; t1: number; healed: number }[], window: OracleWindow, started: number): boolean {
+  return past.some((row) => row.healed > 0 && row.atMs >= started - ORACLE_RECURRENCE_MS
+    && ((row.t0 <= window.t1 && window.t0 <= row.t1) || window.t1 > row.atMs));
 }
 
 /** The schedule hook's two tiers: hourly after an agreement, sooner while the last run found anything. */
@@ -700,7 +762,7 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
     outcome = "healed";
     const after = compare();
     if (projectionDrift(after) > 0) reasons.push(`${projectionDrift(after)} projection mismatch(es) survived a rebuild of the window`);
-    else if (past.some((row) => row.healed > 0 && row.atMs >= started - ORACLE_RECURRENCE_MS)) reasons.push("the projection drifted again within 24 h of an earlier self-heal");
+    else if (healRecurs(past, window, started)) reasons.push("the projection drifted again within 24 h of an earlier self-heal");
   }
   if (reasons.length > 0) outcome = "escalated";
   const sample = [...c.missing, ...c.ledgerLost, ...c.factMissing].slice(0, SAMPLE_LIMIT).map((key) => c.lines.get(key) ?? `seen ${key}`)
@@ -738,5 +800,6 @@ function runOnce(opts: ConsistencyCheckOptions): ConsistencyRun {
     ...(run.issueUrl ? { issue_url: run.issueUrl } : {}),
   });
   if (healedRows > 0) appendLedger(opts.metricLedgerPath, { ...metric, step: READ_MODEL_SELF_HEALED_STEP, window: [window.t0, window.t1], healed_rows: healedRows });
+  if (outcome === "agree" && opts.lease) closeRecoveredEscalation(opts, history(opts.db), metric);
   return run;
 }

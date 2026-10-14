@@ -19,7 +19,7 @@ test("W1-T4205: a git-grep error keeps the branch held", () => {
     if (args[0] === "for-each-ref") return args.includes("--merged=origin/main")
       ? "origin/main\n"
       : ["main", "stale-topic"].map((n) => `origin/${n}\ttip-${n}\t1`).join("\n");
-    if (args[0] === "grep" && args.includes("-F")) throw gitGrepFailure(128, "fatal: pathspec 'deploy/' did not match any files");
+    if (args[0] === "grep" && (args.includes("-F") || args.includes("-P"))) throw gitGrepFailure(128, "fatal: pathspec 'deploy/' did not match any files");
     return "";
   };
   const lines: string[] = [];

@@ -1,3 +1,4 @@
+// @source-text-subject: this census classifies actual git call sites in shipped source.
 /**
  * W1-T6121 — RUN-TASK'S GIT CALLS INTO A WORKER WORKTREE GO THROUGH THE LEAF.
  *
@@ -48,7 +49,7 @@ const FRESH_REVIEWER = "the reviewer-<sha> tree at origin/main the harness runs 
 const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>> = {
   inspectFreshReviewerWorktree: { count: 3, reason: `${FRESH_REVIEWER}; its git is the injected seam` },
   buildFreshTreeReviewRunner: { count: 1, reason: `${FRESH_REVIEWER}: the fetch into repoRoot` },
-  buildBaseReproductionProbe: { count: 4, reason: "the base-reproduction probe's clone: prune, add and remove of its origin/main tree" },
+  buildBaseReproductionProbe: { count: 3, reason: "seam argv for its git seam (prune, add and remove of its origin/main tree), whose default runs the leaf" },
   buildSweepEffects: { count: 1, reason: `the fresh-tree runner's git seam over repoRoot; ${FRESH_REVIEWER}` },
   syncPlanFromOrigin: { count: 4, reason: CLONE },
   planSyncGitRunnerAsync: { count: 1, reason: CLONE },
@@ -97,7 +98,6 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   resolveMergeLogReadOptions: { count: 1, reason: OWN },
   creditEvidenceRootFor: { count: 1, reason: OWN },
   registeredFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
-  removeAbandonedFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
   refCommitMatchesDirtyRecovery: { count: 6, reason: FIX_CLONE },
   preserveFixHead: { count: 6, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
@@ -121,7 +121,7 @@ const CONVERTED = [
   "readRegistrationChanges", "captureRegisteredFixOwnerSnapshot", "temporaryIndexTree",
   "preserveStagedFixOwnerResidue", "readFixOwnerResidue", "readTrackedDirtyOwnerPatch", "preserveTrackedDirtyPatch",
   "resetTrackedDirtyFixOwner", "checkoutFixHeadRef", "createFixRungWorktree", "triageCommandLocked", "planCommand",
-  "defaultShardGitRunner",
+  "defaultShardGitRunner", "removeAbandonedFixWorktreeOwner",
 ] as const;
 
 /** Raw git sites and leaf calls per top-level declaration of `text`. */
@@ -156,6 +156,7 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
   const text = readFileSync(SOURCE, "utf8");
   const { raw, leaf, declared } = sitesByDeclaration(text);
+  const proofSites = sitesByDeclaration(readFileSync(fileURLToPath(new URL("../src/lib/check-proof.ts", import.meta.url)), "utf8"));
 
   it("the census sees the file: a positive control on its own pattern", () => {
     const total = [...raw.values()].reduce((a, b) => a + b, 0);
@@ -177,6 +178,7 @@ describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS
   it("every function that addresses a worker or reviewer tree calls the leaf and spawns no raw git", () => {
     const failures: string[] = [];
     for (const name of CONVERTED) {
+      const { raw, leaf, declared } = ["buildBaseProofDir", "removeBaseProofWorktree"].includes(name) ? proofSites : sitesByDeclaration(text);
       if (!declared.has(name)) failures.push(`${name}: not found`);
       else if (!leaf.has(name)) failures.push(`${name}: does not call the hardened leaf`);
       else if (raw.has(name)) failures.push(`${name}: still holds ${raw.get(name)} raw git site(s)`);

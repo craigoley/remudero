@@ -24,6 +24,8 @@ export interface FixProgressRound {
   subtype?: string;
   refusal?: string;
   redBefore: string[];
+  /** The class of {@link redBefore} ({@link fixRedClass}): which red this round was dispatched against. */
+  redClass?: string;
   redAfter?: string[];
   diffStat?: unknown;
   diffDigest?: string;
@@ -48,6 +50,8 @@ export interface FixProgressInput {
   headSha: string;
   strikesSpent: number;
   currentRed: string[];
+  /** W1-T7762: the class of the red now judged ({@link fixRedClass}); a verdict is ruled on exactly one class. */
+  redClass?: string;
   rounds: FixProgressRound[];
   remedyHistory?: readonly Record<string, unknown>[];
   operatorAnswer?: string;
@@ -58,6 +62,9 @@ export interface FixProgressInput {
     /** Rounds whose worker reported FIXED, after which the reviewer failed the same proof with the same output.
      *  Another identical fix round cannot help; a fresh-sandbox re-review or an escalation carrying the excerpt can. */
     reviewerOnlyFailurePersists: number;
+    /** W1-T7762: rounds dispatched against a red of a DIFFERENT class than the current one. They are context,
+     *  not failed attempts at this red; the judge rules whether they still apply. Present only when non-zero. */
+    otherClassRounds?: number;
     /** Rounds whose scope amendment merged: the paths they lacked are now in scope, so the next round can act. */
     scopeAmendmentsMerged?: number;
     /** Rounds whose scope amendment is still open: a wait on that PR, not a failed attempt. */
@@ -74,6 +81,20 @@ export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressV
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
 
 const sorted = (values: string[]) => [...new Set(values)].sort();
+
+/** A shard index in a check name: `ci-shard (3/8)`, `coverage-shard 3/8`, `shard 3 of 8`. */
+const SHARD_INDEX = /\s*\(?\b\d+\s*(?:\/|of)\s*\d+\)?/g;
+
+/**
+ * W1-T7762: the CLASS of a red set — what a fix-progress verdict is ruled on. The sorted set of failing gate
+ * names with shard indices folded (`ci-shard (3/8)` and `ci-shard (7/8)` are one class). A caller that can
+ * name the failing sub-gate passes gate names (`census-precheck`, `diff-coverage`) in place of the check
+ * that hosts them, which keeps two reds under one check apart. PURE.
+ */
+export function fixRedClass(red: readonly string[]): string {
+  const folded = sorted(red.map(name => name.replace(SHARD_INDEX, "").trim()).filter(name => name !== ""));
+  return folded.length > 0 ? folded.join("+") : "none";
+}
 
 /** Digest a recorded proof output so two runs of one failure compare equal: timings and counts vary between runs. */
 export function reviewerFailureDigest(output: string): string {
@@ -132,6 +153,8 @@ export function rowPrNumber(row: Record<string, unknown>): number | undefined {
 export function buildFixProgressInput(facts: {
   taskId?: string; prNumber?: number; headSha: string; strikesSpent?: number; currentRed: string[];
   ledger: readonly Record<string, unknown>[]; operatorAnswer?: string; formerCeiling?: number; parkedReason?: string;
+  /** W1-T7762: the red's names at gate granularity, when the caller can name the failing sub-gate. */
+  redClassNames?: readonly string[];
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
@@ -151,7 +174,7 @@ export function buildFixProgressInput(facts: {
     if (row.step === "fix.dispatch" || row.step === "fix.retrigger") {
       if (id && byId.has(id)) continue;
       const round: FixProgressRound = { id: id ?? `legacy:${index}`, dispatchedHead: stringValue(row.head_sha),
-        redBefore: redSet(row), diffStat: row.diff_stat ?? row.diffstat, diffDigest: stringValue(row.diff_digest), completed: false,
+        redBefore: redSet(row), redClass: fixRedClass(redSet(row)), diffStat: row.diff_stat ?? row.diffstat, diffDigest: stringValue(row.diff_digest), completed: false,
         reviewerFailures: failuresOfDispatch(row) };
       rounds.push(round);
       if (id) byId.set(id, round);
@@ -217,8 +240,12 @@ export function buildFixProgressInput(facts: {
     signals.reviewerOnlyFailurePersists += 1;
     persistentReviewerFailures.push(...repeated);
   }
+  // Rounds carry their class at check granularity, so they are compared with the current red at that granularity.
+  const checkClass = fixRedClass(currentRed);
+  const otherClassRounds = rounds.filter(r => r.redClass !== undefined && r.redClass !== checkClass).length;
+  if (otherClassRounds > 0) signals.otherClassRounds = otherClassRounds;
   return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
-    strikesSpent: facts.strikesSpent ?? 0, currentRed, rounds,
+    strikesSpent: facts.strikesSpent ?? 0, currentRed, redClass: fixRedClass(facts.redClassNames ?? currentRed), rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
     ...(persistentReviewerFailures.length > 0 ? { persistentReviewerFailures } : {}) };
 }

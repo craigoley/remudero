@@ -191,7 +191,7 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
-    file: "src/run-task.ts",
+    file: "src/lib/check-proof.ts",
     site: "buildBaseProofDir",
     creates:
       "a throwaway worktree materialized AT A REVIEW'S MERGE-BASE, detached — the base side a `unit test:` " +
@@ -208,6 +208,23 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "re-run in — is carried as `baseIsCheckout` to classifyBaseProofOutcome, which fails closed to " +
         "base_unknown without it; a worktree that cannot be created degrades to the blob fallback, never " +
         "to a wrong tree.",
+    },
+  },
+  {
+    file: "src/lib/engine-tree.ts",
+    site: "buildEngine",
+    creates:
+      "a DETACHED worktree at a daemon-pinned commit, built into a temporary sibling and then moved to " +
+      "<state>/engines/<sourceHash>/ — the frozen engine tree a run child loads its bundle and scripts from",
+    disposition: {
+      kind: "exempt",
+      because:
+        "it materializes at the exact commit the daemon is running (a pinned sha), DETACHED, not a fresh " +
+        "branch cut off origin/main — 'is this behind origin/main' is not this site's question, since the " +
+        "engine must be the revision the child started on, however far main has moved. worktreeAdd would cut " +
+        "a new branch off origin/main, the opposite of a tree nothing moves under it. The guard that DOES " +
+        "apply is the source-hash check: a checkout whose tree hashes to anything but the requested " +
+        "sourceHash fails the build (source-moved) and is never published (W1-T9077).",
     },
   },
   {

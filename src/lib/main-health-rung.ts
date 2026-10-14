@@ -22,6 +22,9 @@ import {
   failedMainGuardRuns,
   MAIN_HEALTH_FALLBACK_WINDOW_COMMITS,
   mainGuardFailureCandidates,
+  mainRunConcludedRed,
+  mainRunIsVerdict,
+  mainHealthUnattributedSpan,
   mainHealthEscalationDecision,
   mainHealthFallbackCandidates,
   mainHealthWalkRuns,
@@ -32,6 +35,7 @@ import {
   REQUIRED_CHECK_FAIL,
   requeuedCheckKeysFromLedger,
   type CiFailure,
+  type MainHealthFirstRedCommit,
   type MainHealthObservation,
   type MainHealthRunHistoryEntry,
   type RollupCheckEntry,
@@ -307,6 +311,276 @@ export interface MainRepairLane {
   recordRatchet?(request: MainRatchetRecordRequest): Awaitable<MainRatchetRecordOutcome>;
   readPr?(prUrl: string): Awaitable<MainRepairPr>;
   closePr?(prUrl: string, comment: string): Awaitable<void>;
+  /** W1-T7760: runs CI on commits whose own push run was cancelled. Defaults to GitHub's REST over `fetch`. */
+  probes?: MainRepairProbes;
+}
+
+/** W1-T7760 — the workflow a probe runs. It carries ci-gate's required checks, has a
+ *  `workflow_dispatch` trigger, and its `push` trigger is `branches: [main]`, so creating a probe's
+ *  ref fires no workflow's push trigger (read from .github/workflows/*.yml: every `push:` there is
+ *  filtered to main). */
+export const MAIN_PROBE_WORKFLOW = "ci.yml";
+
+/** W1-T7760 — a probe's ref lives under this prefix: its concurrency group (`ci-refs/heads/<ref>`)
+ *  is its own, never main's `ci-refs/heads/main`. */
+export const MAIN_PROBE_REF_PREFIX = "rmd-attribution/";
+
+/** One probe: CI run on one commit under its own ref. */
+export interface MainProbeHandle {
+  readonly sha: string;
+  /** The branch name, without `refs/heads/`. */
+  readonly ref: string;
+  readonly runId?: number;
+  readonly runUrl?: string;
+}
+
+/** What one probe's CI run reads as right now. `missing`: no run registered for the ref (yet). */
+export interface MainProbeReading {
+  readonly status: "running" | "completed" | "missing";
+  readonly runId?: number;
+  readonly runUrl?: string;
+  /** The run's jobs, shaped as rollup entries; judged by {@link mainHealthFromRollup}. */
+  readonly jobs?: readonly RollupCheckEntry[];
+}
+
+/** The repo's CI load: jobs waiting for a runner, and runners that are online and idle. */
+export interface MainRunnerLoad {
+  readonly queuedJobs: number;
+  readonly idleRunners: number;
+}
+
+/** W1-T7760 — the lane's probe effects. A probe never re-runs a push run in place and never
+ *  dispatches at `main`: either would join main's own concurrency group and cancel its pending run. */
+export interface MainRepairProbes {
+  /** Create `rmd-attribution/<sha>` at `sha`, then dispatch {@link MAIN_PROBE_WORKFLOW} on it. */
+  dispatch(sha: string): Awaitable<MainProbeHandle>;
+  read(probe: MainProbeHandle): Awaitable<MainProbeReading>;
+  /** Delete the probe's ref once its run concluded. */
+  release(probe: MainProbeHandle): Awaitable<void>;
+  readRunnerLoad(): Awaitable<MainRunnerLoad>;
+}
+
+export type MainProbeVerdict = "green" | "red" | "inconclusive";
+
+/** Probes in flight: one at a time while any CI job in the repo waits for a runner; otherwise as many
+ *  as there are idle runners (at least one). No constant: both inputs are readings. */
+export function chooseProbeConcurrency(load: MainRunnerLoad): number {
+  return load.queuedJobs > 0 ? 1 : Math.max(1, Math.floor(load.idleRunners));
+}
+
+/** The median wall-clock duration (ms) of the completed runs in `history` that carry a start and a
+ *  completion time; undefined when none do. Prices one probe. */
+export function medianCiRunMs(history: readonly MainHealthRunHistoryEntry[], workflows?: ReadonlySet<string>): number | undefined {
+  const durations = history
+    .filter((run) => (run.status === undefined || run.status.toLowerCase() === "completed") && mainRunIsVerdict(run) && (!workflows || workflows.size === 0 || run.workflowName === undefined || workflows.has(run.workflowName)))
+    .map((run) => {
+      const start = timeMs(run.startedAt ?? run.createdAt);
+      const end = timeMs(run.completedAt);
+      return start !== undefined && end !== undefined && end > start ? end - start : undefined;
+    })
+    .filter((ms): ms is number => ms !== undefined)
+    .sort((a, b) => a - b);
+  if (durations.length === 0) return undefined;
+  const mid = Math.floor(durations.length / 2);
+  return durations.length % 2 === 1 ? durations[mid]! : Math.round((durations[mid - 1]! + durations[mid]!) / 2);
+}
+
+/** What the planner decided this pass. */
+export type MainBisectionPlan =
+  | { readonly state: "proven"; readonly offendingSha: string; readonly parentSha: string }
+  | {
+      readonly state: "probe";
+      /** Commits to start probes on now, in the order they are dispatched. */
+      readonly shas: readonly string[];
+      readonly strategy: "linear-newest-first" | "split-points" | "wait";
+      /** Commits between the newest proven green and the oldest proven red: the interval still open. */
+      readonly open: readonly string[];
+      /** Worst-case probes the chosen strategy spends on `open`, and the other strategy's. */
+      readonly estimatedProbes: number;
+      readonly alternativeProbes: number;
+    };
+
+/**
+ * W1-T7760 — where main turned red, from verdicts only. The sequence is `green`, the `span` oldest
+ * first, `red`. Verdicts are the completed runs and concluded probes; the newest proven green and the
+ * oldest proven red above it bound the open interval. The first red is PROVEN when those two are
+ * adjacent: a completed red whose first parent is a completed green.
+ *
+ * With `concurrency` probes allowed in flight, the open commits are probed newest first (a linear
+ * walk from the known red) while that costs no more than a bisection would, and at split points once
+ * it costs more. Cost is worst-case probes, each priced alike, so the comparison needs no constant.
+ */
+export function planMainBisection(input: {
+  readonly green: string;
+  readonly red: string;
+  /** The unattributed commits, newest first. */
+  readonly span: readonly string[];
+  readonly verdicts: ReadonlyMap<string, MainProbeVerdict>;
+  readonly inFlight: ReadonlySet<string>;
+  readonly concurrency: number;
+}): MainBisectionPlan {
+  const sequence = [input.green, ...[...input.span].reverse(), input.red];
+  const verdictAt = (index: number): MainProbeVerdict | undefined =>
+    index === 0 ? "green" : index === sequence.length - 1 ? "red" : input.verdicts.get(sequence[index]!);
+  let lo = 0;
+  for (let index = sequence.length - 2; index > 0; index -= 1) {
+    if (verdictAt(index) === "green") {
+      lo = index;
+      break;
+    }
+  }
+  let hi = sequence.length - 1;
+  for (let index = lo + 1; index < sequence.length - 1; index += 1) {
+    if (verdictAt(index) === "red") {
+      hi = index;
+      break;
+    }
+  }
+  if (hi === lo + 1) return { state: "proven", offendingSha: sequence[hi]!, parentSha: sequence[lo]! };
+  const open = sequence.slice(lo + 1, hi);
+  const n = open.length;
+  const k = Math.max(1, Math.floor(input.concurrency));
+  const linear = n;
+  const rounds = Math.ceil(Math.log(n + 1) / Math.log(k + 1) - 1e-9);
+  const split = k * Math.max(1, rounds);
+  const free = k - [...input.inFlight].filter((sha) => open.includes(sha)).length;
+  if (free <= 0) {
+    return { state: "probe", shas: [], strategy: "wait", open, estimatedProbes: Math.min(linear, split), alternativeProbes: Math.max(linear, split) };
+  }
+  const startable = (sha: string): boolean => !input.inFlight.has(sha);
+  if (linear <= split) {
+    const shas = [...open].reverse().filter(startable).slice(0, free);
+    return { state: "probe", shas, strategy: "linear-newest-first", open, estimatedProbes: linear, alternativeProbes: split };
+  }
+  const points = new Set<number>();
+  for (let i = 1; i <= k; i += 1) points.add(Math.min(n - 1, Math.max(0, Math.round((i * (n + 1)) / (k + 1)) - 1)));
+  const shas = [...points].sort((a, b) => b - a).map((index) => open[index]!).filter(startable).slice(0, free);
+  return { state: "probe", shas, strategy: "split-points", open, estimatedProbes: split, alternativeProbes: linear };
+}
+
+/** One red's bisection, folded from `main.repair.bisecting` and `main.repair.probe_concluded` rows. */
+export interface MainBisectionState {
+  /** Probes dispatched and not yet concluded, by commit. */
+  readonly inFlight: Map<string, MainProbeHandle>;
+  /** Concluded probes that said green or red, by commit. */
+  readonly verdicts: Map<string, MainProbeVerdict>;
+  /** Their evidence, by commit. */
+  readonly evidence: Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>;
+  /** True once the bisection was dispatched at all. */
+  readonly started: boolean;
+  /** The located row that closed it, if one was written. */
+  readonly located: boolean;
+}
+
+/** The ledger, not memory, is the dedupe: a restarted daemon (or a rotated ledger) must not
+ *  dispatch a probe that is already running, nor re-run one that concluded. Keyed by the first red
+ *  `firstRedSha` the walk named. */
+export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[], firstRedSha: string): MainBisectionState {
+  const inFlight = new Map<string, MainProbeHandle>();
+  const verdicts = new Map<string, MainProbeVerdict>();
+  const evidence = new Map<string, { verdict: MainProbeVerdict; runUrl?: string; runId?: number; failingChecks: string[] }>();
+  let started = false;
+  let located = false;
+  for (const line of lines) {
+    if (line.first_red_sha !== firstRedSha && line.bisection_of !== firstRedSha) continue;
+    if (line.step === "main.repair.bisecting" && Array.isArray(line.probes)) {
+      started = true;
+      for (const probe of line.probes as Array<Record<string, unknown>>) {
+        if (typeof probe?.sha !== "string" || typeof probe.ref !== "string") continue;
+        inFlight.set(probe.sha, {
+          sha: probe.sha,
+          ref: probe.ref,
+          ...(typeof probe.run_id === "number" ? { runId: probe.run_id } : {}),
+          ...(typeof probe.run_url === "string" ? { runUrl: probe.run_url } : {}),
+        });
+      }
+    } else if (line.step === "main.repair.probe_concluded" && typeof line.probe_sha === "string") {
+      inFlight.delete(line.probe_sha);
+      const verdict = line.verdict === "green" || line.verdict === "red" ? line.verdict : undefined;
+      if (verdict) {
+        verdicts.set(line.probe_sha, verdict);
+        evidence.set(line.probe_sha, {
+          verdict,
+          ...(typeof line.run_url === "string" ? { runUrl: line.run_url } : {}),
+          ...(typeof line.run_id === "number" ? { runId: line.run_id } : {}),
+          failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+        });
+      } else {
+        verdicts.delete(line.probe_sha);
+      }
+    } else if (line.step === "main.repair.located" && line.bisection_of === firstRedSha) {
+      located = true;
+    }
+  }
+  return { inFlight, verdicts, evidence, started, located };
+}
+
+/**
+ * W1-T7760 — why `sha` may NOT be written as a located offender, or undefined when it may. A sha is
+ * nameable only when a COMPLETED run of it whose required checks concluded red exists in main's push
+ * run history, or a concluded probe of it read red. A cancelled run concluded nothing.
+ */
+export function locatedWriterRefusal(
+  sha: string,
+  history: readonly MainHealthRunHistoryEntry[] | undefined,
+  probeVerdicts: ReadonlyMap<string, MainProbeVerdict> = new Map(),
+): string | undefined {
+  if (probeVerdicts.get(sha) === "red") return undefined;
+  const own = (history ?? []).filter((run) => run.headSha === sha);
+  if (own.some(mainRunConcludedRed)) return undefined;
+  const cancelled = own.filter((run) => !mainRunIsVerdict(run)).length;
+  return (
+    `\`${sha}\` has no completed run whose required checks concluded red, and no concluded red probe` +
+    (own.length > 0 ? ` (${own.length} run(s) in main's push run history, ${cancelled} of them cancelled, skipped or stale)` : " (no run in main's push run history)")
+  );
+}
+
+/** Folds `{ref}` branch listing rows into the newest run's reading. */
+interface BranchRunsResponse {
+  workflow_runs?: ReadonlyArray<{ id?: unknown; html_url?: unknown; status?: unknown; head_sha?: unknown }>;
+}
+
+/** The production {@link MainRepairProbes}: GitHub's REST `git/refs`, workflow dispatch, runs and
+ *  runners endpoints over the same `fetch` the rung reads with. */
+export function restMainProbes(owner: string, repo: string, fetch: GhApiFetcher): MainRepairProbes {
+  const repoPath = `repos/${owner}/${repo}`;
+  return {
+    async dispatch(sha) {
+      const ref = `${MAIN_PROBE_REF_PREFIX}${sha}`;
+      try {
+        await fetch(["api", "--method", "POST", `${repoPath}/git/refs`, "-f", `ref=refs/heads/${ref}`, "-f", `sha=${sha}`]);
+      } catch (error) {
+        // A ref left by an earlier, unreleased probe of the same commit is reused, never an error.
+        if (!/already exists/i.test(String((error as Error)?.message ?? error))) throw error;
+      }
+      await fetch(["api", "--method", "POST", `${repoPath}/actions/workflows/${MAIN_PROBE_WORKFLOW}/dispatches`, "-f", `ref=${ref}`]);
+      return { sha, ref };
+    },
+    async read(probe) {
+      const runs = (await fetch([
+        "api",
+        `${repoPath}/actions/workflows/${MAIN_PROBE_WORKFLOW}/runs?branch=${encodeURIComponent(probe.ref)}&event=workflow_dispatch&per_page=5`,
+      ])) as BranchRunsResponse | undefined;
+      const run = (runs?.workflow_runs ?? []).find((candidate) => candidate.head_sha === probe.sha && typeof candidate.id === "number");
+      if (!run) return { status: "missing" };
+      const runId = run.id as number;
+      const runUrl = typeof run.html_url === "string" ? run.html_url : undefined;
+      const completed = String(run.status ?? "").toLowerCase() === "completed";
+      const jobs = rollupFromJobs((await fetch(["api", `${repoPath}/actions/runs/${runId}/jobs?per_page=100`])) as WorkflowJobsResponse);
+      return { status: completed ? "completed" : "running", runId, ...(runUrl ? { runUrl } : {}), jobs };
+    },
+    async release(probe) {
+      await fetch(["api", "--method", "DELETE", `${repoPath}/git/refs/heads/${probe.ref}`]);
+    },
+    async readRunnerLoad() {
+      const queued = (await fetch(["api", `${repoPath}/actions/runs?status=queued&per_page=1`])) as { total_count?: unknown } | undefined;
+      const runners = (await fetch(["api", `${repoPath}/actions/runners?per_page=100`])) as
+        | { runners?: ReadonlyArray<{ status?: unknown; busy?: unknown }> }
+        | undefined;
+      const idle = (runners?.runners ?? []).filter((runner) => runner.status === "online" && runner.busy !== true).length;
+      return { queuedJobs: typeof queued?.total_count === "number" ? queued.total_count : 0, idleRunners: idle };
+    },
+  };
 }
 
 /** One offending merge's repair, folded from its `main.repair.*` ledger rows. */
@@ -327,6 +601,9 @@ export interface MainRepairRecord {
   revertRefused?: string;
   /** Why the revert was withheld: the located merge was not proven to be the culprit. */
   revertWithheld?: string;
+  /** W1-T7760: set when the merge was located by probing CI on the cancelled commits before it; the
+   *  probe runs, not main's push run history, are then its proof. */
+  bisected?: { parentSha: string; evidence: string; failingChecks: string[] };
   resolved: boolean;
 }
 
@@ -408,6 +685,17 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
           ...(typeof line.offending_pr === "number" ? { offendingPr: line.offending_pr } : {}),
           failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
           ...(red ? { red } : {}),
+          ...(line.method === "bisected-first-red" && typeof line.parent_sha === "string"
+            ? {
+                bisected: {
+                  parentSha: line.parent_sha,
+                  evidence: Array.isArray(line.probe_runs)
+                    ? (line.probe_runs as Array<Record<string, unknown>>).map((probe) => `${String(probe.sha)} ${String(probe.verdict)} ${String(probe.run_url ?? "")}`.trim()).join("; ")
+                    : "",
+                  failingChecks: Array.isArray(line.probe_failing_checks) ? line.probe_failing_checks.map(String) : [],
+                },
+              }
+            : {}),
           fixDispatched: false,
           attempts: [],
           resolved: false,
@@ -1062,6 +1350,18 @@ export function buildMainHealthRung(
     evidence: RepairEvidence | undefined,
   ): Promise<{ proven: true; detail: string } | { proven: false; reason: string } | { unreadable: string }> => {
     const sha = record.offendingSha;
+    if (record.bisected) {
+      // Located by probing CI on the commits whose own push run was cancelled: the probe runs, recorded
+      // on the located row, are the proof, because main's push run history holds none for them.
+      const probed = record.bisected.failingChecks;
+      if (probed.length > 0 && !mainRedSignaturesMatch(mainRedSignature(probed, undefined), red)) {
+        return { proven: false, reason: `\`${sha}\`'s probe run is red on ${probed.join(", ")}, not on this repair's ${describeMainRed(red)}` };
+      }
+      return {
+        proven: true,
+        detail: `\`${sha}\` was bisected: its probe run is red and its first parent \`${record.bisected.parentSha}\` is green (${record.bisected.evidence})`,
+      };
+    }
     const history = evidence === undefined ? undefined : evidence.runHistory;
     if (history === undefined) return { proven: false, reason: "main's push run history was not read" };
     try {
@@ -1220,6 +1520,191 @@ export function buildMainHealthRung(
     repairRow("main.repair.revert_refused", { ...at, reason: outcome.refused, conflict_paths: outcome.conflictPaths ?? [] });
     return false;
   };
+  let restProbes: MainRepairProbes | undefined;
+  const spanCache = new Map<string, readonly string[] | null>();
+  /** The unattributed commits between the first red's last green and it, newest first; undefined when
+   *  main's first-parent chain could not be read between them (named in the log, never guessed). */
+  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[]): Promise<readonly string[] | undefined> => {
+    if (first.span) return first.span;
+    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}`;
+    const cached = spanCache.get(key);
+    if (cached !== undefined) return cached ?? undefined;
+    try {
+      const order = [first.headSha];
+      while (order[order.length - 1] !== first.afterGreenSha) {
+        const at = order[order.length - 1]!;
+        const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${at}`])) as { parents?: ReadonlyArray<{ sha?: unknown }> };
+        const parent = commit?.parents?.[0]?.sha;
+        if (typeof parent !== "string") throw new Error(`the first-parent chain from ${first.headSha} ends at ${at}, short of ${first.afterGreenSha}`);
+        if (order.includes(parent)) throw new Error(`the first-parent chain from ${first.headSha} loops at ${parent}`);
+        order.push(parent);
+      }
+      const span = mainHealthUnattributedSpan(order, first, history) ?? null;
+      spanCache.set(key, span);
+      return span ?? undefined;
+    } catch (error) {
+      deps.log("main.repair.span_unread", { first_red_sha: first.headSha, after_green_sha: first.afterGreenSha, error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+  };
+  /**
+   * W1-T7760 — which commit the lane names, and never by naming a commit whose CI was cancelled. An
+   * empty span names the first completed red at once. A non-empty one is PROBED: CI runs on each
+   * commit under its own ref until the first red is bounded by a completed green; until then no fix is
+   * dispatched. A span that cannot be read falls back to the completed red, as before, and is logged.
+   */
+  const locateOffender = async (
+    lane: MainRepairLane,
+    first: MainHealthFirstRedCommit,
+    ctx: RepairContext,
+    lines: readonly Record<string, unknown>[],
+  ): Promise<
+    | { kind: "named"; sha: string; pr?: number; method: string; fields: Record<string, unknown>; probeVerdicts: ReadonlyMap<string, MainProbeVerdict> }
+    | { kind: "probing" }
+    | { kind: "unlocated"; reason: string }
+  > => {
+    const history = ctx.evidence?.runHistory ?? [];
+    const asFirstRed = {
+      kind: "named" as const,
+      sha: first.headSha,
+      ...(first.pullRequest?.number !== undefined ? { pr: first.pullRequest.number } : {}),
+      method: "first-red-run",
+      fields: {},
+      probeVerdicts: new Map<string, MainProbeVerdict>(),
+    };
+    const span = await spanOf(first, history);
+    if (span === undefined || span.length === 0) return asFirstRed;
+    const probes = lane.probes ?? (restProbes ??= restMainProbes(owner, repo, deps.fetch));
+    const state = mainBisectionFromLedger(lines, first.headSha);
+    const required = ctx.evidence?.required ?? new Set<string>();
+    const at = { first_red_sha: first.headSha, after_green_sha: first.afterGreenSha };
+    for (const probe of [...state.inFlight.values()]) {
+      let reading: MainProbeReading;
+      try {
+        reading = await probes.read(probe);
+      } catch (error) {
+        deps.log("main.repair.probe_unreadable", { ...at, probe_sha: probe.sha, error: String((error as Error)?.message ?? error) });
+        continue;
+      }
+      if (reading.status !== "completed") continue;
+      const judged = mainHealthFromRollup(probe.sha, [...(reading.jobs ?? [])], required.size > 0 ? required : undefined, undefined, { cancelledIsPending: true });
+      const verdict: MainProbeVerdict = judged.state === "green" ? "green" : judged.state === "red" ? "red" : "inconclusive";
+      const runUrl = reading.runUrl ?? probe.runUrl;
+      repairRow("main.repair.probe_concluded", {
+        ...at,
+        probe_sha: probe.sha,
+        ref: probe.ref,
+        verdict,
+        failing_checks: [...judged.failingChecks],
+        reason: judged.reason,
+        ...((reading.runId ?? probe.runId) !== undefined ? { run_id: reading.runId ?? probe.runId } : {}),
+        ...(runUrl ? { run_url: runUrl } : {}),
+      });
+      state.inFlight.delete(probe.sha);
+      if (verdict === "inconclusive") state.verdicts.delete(probe.sha);
+      else {
+        state.verdicts.set(probe.sha, verdict);
+        state.evidence.set(probe.sha, { verdict, ...(runUrl ? { runUrl } : {}), failingChecks: [...judged.failingChecks] });
+      }
+      try {
+        await probes.release(probe);
+      } catch (error) {
+        deps.log("main.repair.probe_ref_not_released", { ...at, probe_sha: probe.sha, ref: probe.ref, error: String((error as Error)?.message ?? error) });
+      }
+    }
+    const planFor = (concurrency: number) =>
+      planMainBisection({
+        green: first.afterGreenSha,
+        red: first.headSha,
+        span,
+        verdicts: state.verdicts,
+        inFlight: new Set(state.inFlight.keys()),
+        concurrency,
+      });
+    let plan = planFor(1);
+    if (plan.state === "proven") {
+      const evidenceOf = (probed: string, fallbackUrl?: string) => ({
+        sha: probed,
+        verdict: probed === first.headSha || probed === first.afterGreenSha ? (probed === first.headSha ? "red" : "green") : (state.evidence.get(probed)?.verdict ?? "unknown"),
+        run_url: state.evidence.get(probed)?.runUrl ?? fallbackUrl ?? null,
+      });
+      const proven = plan;
+      return {
+        kind: "named",
+        sha: proven.offendingSha,
+        ...(proven.offendingSha === first.headSha && first.pullRequest?.number !== undefined ? { pr: first.pullRequest.number } : {}),
+        method: "bisected-first-red",
+        fields: {
+          ...at,
+          bisection_of: first.headSha,
+          parent_sha: proven.parentSha,
+          span: [...span],
+          probe_runs: [
+            evidenceOf(proven.offendingSha, proven.offendingSha === first.headSha ? first.runUrl : undefined),
+            evidenceOf(proven.parentSha),
+            ...[...state.evidence.keys()].filter((probed) => probed !== proven.offendingSha && probed !== proven.parentSha).map((probed) => evidenceOf(probed)),
+          ],
+          probe_failing_checks: state.evidence.get(proven.offendingSha)?.failingChecks ?? [],
+        },
+        probeVerdicts: new Map([...state.verdicts, [first.headSha, "red" as const]]),
+      };
+    }
+    let load: MainRunnerLoad | undefined;
+    let loadUnread: string | undefined;
+    try {
+      load = await probes.readRunnerLoad();
+    } catch (error) {
+      loadUnread = String((error as Error)?.message ?? error);
+      deps.log("main.repair.runner_load_unread", { ...at, error: loadUnread });
+    }
+    const concurrency = load ? chooseProbeConcurrency(load) : 1;
+    plan = planFor(concurrency);
+    if (plan.state === "probe" && plan.shas.length > 0) {
+      const medianMs = medianCiRunMs(history);
+      const started: MainProbeHandle[] = [];
+      const refused: string[] = [];
+      for (const probeSha of plan.shas) {
+        try {
+          let handle = await probes.dispatch(probeSha);
+          try {
+            const reading = await probes.read(handle);
+            if (reading.runId !== undefined) handle = { ...handle, runId: reading.runId, ...(reading.runUrl ? { runUrl: reading.runUrl } : {}) };
+          } catch {
+            // The run registers a moment after its dispatch; the concluded row carries its id and url.
+          }
+          started.push(handle);
+        } catch (error) {
+          refused.push(`${probeSha}: ${String((error as Error)?.message ?? error)}`);
+          deps.log("main.repair.probe_dispatch_failed", { ...at, probe_sha: probeSha, error: String((error as Error)?.message ?? error) });
+        }
+      }
+      if (started.length > 0) {
+        repairRow("main.repair.bisecting", {
+          ...at,
+          head_sha: ctx.sha,
+          span: [...span],
+          open: [...plan.open],
+          strategy: plan.strategy,
+          probe_shas: started.map((probe) => probe.sha),
+          probes: started.map((probe) => ({
+            sha: probe.sha,
+            ref: probe.ref,
+            ...(probe.runId !== undefined ? { run_id: probe.runId } : {}),
+            ...(probe.runUrl ? { run_url: probe.runUrl } : {}),
+          })),
+          concurrency,
+          concurrency_reading: load ? { queued_jobs: load.queuedJobs, idle_runners: load.idleRunners } : { unread: loadUnread },
+          median_run_ms: medianMs ?? null,
+          estimated_probes: plan.estimatedProbes,
+          alternative_probes: plan.alternativeProbes,
+          estimated_runner_minutes: medianMs !== undefined ? Math.round((plan.estimatedProbes * medianMs) / 600) / 100 : null,
+        });
+      } else if (state.inFlight.size === 0) {
+        return { kind: "unlocated", reason: `no probe could be dispatched for the cancelled commits since ${first.afterGreenSha}: ${refused.join("; ")}` };
+      }
+    }
+    return { kind: "probing" };
+  };
   /** Locate the offending merge and open its fix PR, or advance the repair already under way. A red
    *  the lane already owns is the SAME repair whichever merge the locator names this pass: the
    *  dedupe is the red's signature, never the located sha. */
@@ -1244,7 +1729,14 @@ export function buildMainHealthRung(
       }
       return advanceRepair(lane, record, ctx);
     }
+    const lines = readLedgerLines(deps.ledgerPath);
     if (!first) {
+      // A bisection that has not located its offender is the lane still owning this red; an observation
+      // that carries no first red (the cached path reads none) must not file it as unlocated.
+      if (lines.some((line) => line.step === "main.repair.bisecting" && !lines.some((l) => l.step === "main.repair.located" && l.bisection_of === line.first_red_sha))) {
+        deps.log("main.repair.bisection_pending", { head_sha: sha });
+        return false;
+      }
       repairRow("main.repair.unlocated", {
         head_sha: sha,
         failing_checks: observation.failingChecks,
@@ -1254,15 +1746,29 @@ export function buildMainHealthRung(
       });
       return false;
     }
-    const offendingPr = first.pullRequest?.number;
-    const request = await fixRequestFor(observation, sha, branch, first.headSha, offendingPr, failures, observation.reason);
+    const located = await locateOffender(lane, first, ctx, lines);
+    if (located.kind === "probing") return true;
+    if (located.kind === "unlocated") {
+      repairRow("main.repair.unlocated", { head_sha: sha, failing_checks: observation.failingChecks, first_red_sha: first.headSha, reason: located.reason });
+      return false;
+    }
+    const alreadyOwned = active.find((r) => r.offendingSha === located.sha);
+    if (alreadyOwned) return advanceRepair(lane, alreadyOwned, ctx);
+    // The backstop for any path that hands the writer a commit whose CI never concluded red.
+    const refusal = locatedWriterRefusal(located.sha, ctx.evidence?.runHistory, located.probeVerdicts);
+    if (refusal) {
+      repairRow("main.repair.unlocated", { head_sha: sha, failing_checks: observation.failingChecks, first_red_sha: first.headSha, refused_sha: located.sha, reason: refusal });
+      return false;
+    }
+    const request = await fixRequestFor(observation, sha, branch, located.sha, located.pr, failures, observation.reason);
     repairRow("main.repair.located", {
       head_sha: sha,
-      offending_sha: first.headSha,
-      offending_pr: offendingPr,
+      offending_sha: located.sha,
+      offending_pr: located.pr,
       failing_checks: observation.failingChecks,
       test_files: request.testFiles,
-      method: "first-red-run",
+      method: located.method,
+      ...located.fields,
       ...redFields(red),
     });
     dispatchFix(lane, request, red);
@@ -1706,6 +2212,7 @@ export function buildMainHealthRung(
           });
         }
         observation = enrichMainHealthObservation(observation, {
+          ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
           ...(failures ? { ciFailures: failures } : {}),
           ...(ciFailuresUnavailable ? { ciFailuresUnavailable } : {}),
           ...(runHistory ? { runHistory } : {}),

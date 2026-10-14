@@ -18,16 +18,23 @@
  *
  * A no-reuse derive every {@link BOARD_ORACLE_INTERVAL_MS} diffs against the reused board, heals
  * what differs, and reports it: the rules above are measured, not assumed.
+ *
+ * WHAT IT HOLDS (W1-T9436): a re-derived task reads its own rows from the fact store, task by task, and they are
+ * released with the update (`storeIndex`). The rows it keeps in memory are only those {@link BOARD_ROW_RETENTION}
+ * holds for the now view's readers outside the derive: per key, never per row ever ingested (board:core held 663,486
+ * entries on 2026-10-14). `keepEveryRow` keeps the old behaviour as an equality test's reference arm.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
-import { runWorkerRow } from "./ledger-projector.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
+import { factAliasReady, runWorkerRow } from "./ledger-projector.js";
 import type { Plan, Task } from "./plan.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "./read-model-db.js";
 import {
+  buildLedgerIndex,
   DEFAULT_LIVENESS_BOUND_MS,
   defaultCreditOverridePath,
   defaultCreditStorePath,
@@ -37,9 +44,11 @@ import {
   type CreditStore,
   type DeriveDeps,
   type GitHub,
+  type LedgerIndex,
   type StatusProjection,
   WORKER_ACTIVITY_STAND_IN_STEP,
 } from "./status.js";
+import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 
 /** Bumped when this module's stamp or stored shape changes: every persisted projection then re-derives. */
 export const BOARD_PROJECTION_VERSION = 1;
@@ -60,6 +69,12 @@ export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot
  *  core's fact rows. They are never parsed; the newest `ts` among them rides a sentinel row, because
  *  `orphanedRunIds` reads the ledger's newest `ts` from every row. */
 export const BOARD_UNREAD_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary", "incident.event", "main.health.observed"]);
+/** W1-T9357: blob fields no reader of a projection row reads (a read census of the now view over 836,723 rows found
+ *  none): 36% of a core projection's kept field bytes. A row is kept without them for the life of the thread. */
+export const BOARD_ROW_UNREAD_FIELDS: ReadonlySet<string> = new Set([
+  "question", "benchmark_run", "stand_down_reason", "worker_assignment", "decision_verdict", "stderr_excerpt",
+  "review_input_digest", "proof_exec", "changed_paths", "evaluator_provenance", "reviewer_code_provenance",
+]);
 const LATEST_TS_META = "board.latest_ts_ms";
 /** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
 export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
@@ -156,6 +171,12 @@ export interface BoardProjectionOptions {
   ingestChunkMs?: number;
   /** False: rows keep their parsed strings (the arm an equality check compares the shared one against). */
   internStrings?: boolean;
+  /** W1-T9436: true keeps every row, as before the retention rules (the arm an equality check compares against). */
+  keepEveryRow?: boolean;
+  /** W1-T9436, with `keepEveryRow` only: derive from the rows held in memory, never from the fact store (today's derive). */
+  deriveFromRows?: boolean;
+  /** Each ingest's fresh fact rows, in the order read: a feed that takes each row once (the now view's recent feed). */
+  onIngest?: (rows: ReadonlyArray<Row>) => void;
 }
 
 /**
@@ -165,6 +186,16 @@ export interface BoardProjectionOptions {
  * ever replaced by one equal to it; objects, arrays, numbers, booleans, null and longer strings are left as
  * parsed, no object is shared, and key order does not change (an existing key is reassigned in place).
  */
+/** `row` without {@link BOARD_ROW_UNREAD_FIELDS}, other keys in order; `row` itself when it holds none. A fresh
+ *  object, never `delete`: deleting leaves the row in dictionary mode, which kept MORE (525 MB vs 504 MB). */
+export function withoutUnreadFields(row: Row): Row {
+  const keys = Object.keys(row);
+  if (!keys.some((key) => BOARD_ROW_UNREAD_FIELDS.has(key))) return row;
+  const kept: Row = {};
+  for (const key of keys) if (!BOARD_ROW_UNREAD_FIELDS.has(key)) kept[key] = row[key];
+  return kept;
+}
+
 export function internRowStrings(row: Row, table: Map<string, string>): Row {
   for (const key of Object.keys(row)) {
     const value = row[key];
@@ -204,14 +235,23 @@ export interface BoardUpdate {
 }
 
 export interface BoardProjection {
-  update(opts?: { force?: boolean }): BoardUpdate;
+  /** `readerNowMs`: the "now" the build's readers will use, so a windowed rule keeps their day and week (W1-T9436). */
+  update(opts?: { force?: boolean; readerNowMs?: number }): BoardUpdate;
   projections(): ReadonlyMap<string, StatusProjection>;
   /** The credit store and override text the last update read: a second derivation replays them. */
   creditRead(): { credit: CreditStore; overrides: string };
-  /** The fact rows the board derives from, in ledger order. */
+  /** W1-T9436: the rows a retention rule holds (every row, with `keepEveryRow`), in ledger order. */
   rows(): ReadonlyArray<Row>;
+  /** W1-T9436: a ledger index over `bound` whose task and step buckets the fact store answers on demand, for the
+   *  readers that look rows up by task or step; drop it after the build that asked for it. */
+  index(bound: ReadonlyArray<Row>): LedgerIndex;
   /** Distinct string values this projection's own table holds (W1-T6467); 0 before any ingest. */
   internedStrings(): number;
+  /**
+   * W1-T9403: what it keeps, counted as it ingests: the rows it holds (its sentinel aside), and the summed
+   * length of each kept row's source text (a fact row's ledger body; a stand-in's source columns).
+   */
+  size(): { rows: number; keptBytes: number };
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
   oracle(): BoardOracleResult;
 }
@@ -231,6 +271,120 @@ function readTextOr(path: string, fallback: string): string {
   }
 }
 
+/** A row's place in `rows`: by its time, then by when it was offered (W1-T9436). Array order is exactly this order. */
+type Ord = readonly [tsMs: number, ins: number];
+const ordCompare = (a: Ord, b: Ord): number => a[0] - b[0] || a[1] - b[1];
+
+/** What a retention rule may ask of a row beyond its fields. */
+export interface BoardRowFacts {
+  /** A run's stand-in (`run_activity` or `run_worker`), not a fact row. */
+  readonly standIn: boolean;
+  /** A `sweep.disposed` row re-emitting the disposition its PR's previous one recorded (the now view's `sweepRepeat`). */
+  readonly repeat: boolean;
+}
+
+/** The reader windows a rule may key on: each is the reader's own definition of "today" or "this week", not a bound. */
+export type BoardRetentionWindow = "utc-day" | "utc-day-text" | "iso-week";
+
+/**
+ * W1-T9436: one now-view reader's claim on board rows. `newest`/`first` hold one row per key (the last or first in
+ * row order), `all` every row the key names, `run` a task's newest `run.start` and its rows after it, and `asof` the
+ * row with the latest `ts` at or before the readers' now plus every row stamped after it (a reader asking "any row in
+ * [from, now]"). A windowed rule keys per window and lets a window go once the readers' day or week has moved past it.
+ */
+export interface BoardRetentionRule {
+  readonly reader: string;
+  /** The steps whose rows the rule can hold; "*" for any step. */
+  readonly steps: readonly string[] | "*";
+  /** The fields the reader reads off a row this rule holds: the census's contract. */
+  readonly fields: readonly string[];
+  readonly kind: "newest" | "first" | "all" | "run" | "asof";
+  readonly window?: BoardRetentionWindow;
+  /** The key the rule holds `row` under; undefined when it does not hold it. */
+  key(row: Row, facts: BoardRowFacts): string | undefined;
+}
+
+const HOLD_ENGAGED = "automerge.hold_engaged";
+const HOLD_RELEASED = "automerge.hold_released";
+const RUN_SPEND_STEPS: ReadonlySet<unknown> = new Set(["run.start", "verdict", "implement.done", "fix.done"]);
+const taskKey = (row: Row): string | undefined => (typeof row.task_id === "string" ? row.task_id : undefined);
+const prKey = (row: Row): string | undefined => (typeof row.pr_number === "number" ? String(row.pr_number) : undefined);
+const runKey = (row: Row): string | undefined => (typeof row.run_id === "string" ? row.run_id : undefined);
+const isHold = (row: Row): boolean => row.step === HOLD_ENGAGED || row.step === HOLD_RELEASED;
+const isMerge = (row: Row): boolean => (row.step === "verdict" && row.verdict === "merged") || row.step === "verdict.merged";
+/** The hold events `automergeHoldFromLedger` (review.ts) acts on: a confirmed human's engage with its actor and reason, or release. */
+function actedHold(row: Row): boolean {
+  if (row.authority !== "interactive-cli" && row.authority !== "console-confirmed") return false;
+  if (row.step === HOLD_RELEASED) return true;
+  return row.step === HOLD_ENGAGED && typeof row.by === "string" && typeof row.reason === "string" && row.by !== "" && row.reason !== "";
+}
+
+const windowRules = (window: BoardRetentionWindow, reader: string): BoardRetentionRule[] => [
+  // A stand-in is the first row of its run's window when the run's fact rows all fall before it; the day is inside its
+  // week, so the week's rule keeps the day's too.
+  { reader: `${reader}: each run's first row in the window`, steps: "*", fields: ["run_id", "ts"], kind: "first", window, key: (row, f) => (f.standIn ? undefined : runKey(row)) },
+  { reader: `${reader}: each run's first verdict in the window`, steps: ["verdict"], fields: ["run_id", "ts", "cost_usd", "task_id"], kind: "first", window, key: (row) => (row.step === "verdict" ? runKey(row) : undefined) },
+  { reader: `${reader}: each run's first costed row in the window`, steps: "*", fields: ["run_id", "ts", "cost_usd", "task_id"], kind: "first", window, key: (row, f) => (!f.standIn && typeof row.cost_usd === "number" ? runKey(row) : undefined) },
+  ...(window === "iso-week" ? [{
+    reader: `${reader}: the stand-ins in the window`, steps: [BOARD_RUN_ACTIVITY_STEP, WORKER_ACTIVITY_STAND_IN_STEP], fields: ["run_id", "ts", "cost_usd", "task_id"], kind: "all" as const, window,
+    key: (row: Row, f: BoardRowFacts) => (f.standIn && runKey(row) ? "stand-in" : undefined),
+  }] : []),
+];
+
+/**
+ * W1-T9436: the rows the now view walks outside the derive, per reader (the census in the task's rationale (b)).
+ * Ingest keeps a row while some rule holds it and drops it once every rule that held it is superseded, so `rows()`
+ * holds what these readers read and nothing else. A reader of a step no rule names fails the census test.
+ */
+export const BOARD_ROW_RETENTION: readonly BoardRetentionRule[] = [
+  { reader: "lastActivityByTask (board.ts): each task's newest row", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row) => taskKey(row) },
+  { reader: "changedActivityByTask (now-view.ts): each task's newest row, sweep repeats excluded", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row, f) => (f.repeat ? undefined : taskKey(row)) },
+  { reader: "rawBlockedPrCandidates (status-board.ts): each PR's newest disposition", steps: ["sweep.disposed"], fields: ["pr_number", "disposition", "task_id", "reason", "pr_url", "ts"], kind: "newest", key: (row) => (row.step === "sweep.disposed" ? prKey(row) : undefined) },
+  { reader: "nowActions (now-view.ts): each PR's newest disposition change", steps: ["sweep.disposed"], fields: ["pr_number", "disposition", "ts"], kind: "newest", key: (row, f) => (row.step === "sweep.disposed" && !f.repeat ? prKey(row) : undefined) },
+  {
+    reader: "derivePrQueue (board.ts): each PR head's newest disposition", steps: ["sweep.disposed"], fields: ["pr_number", "head_sha", "disposition", "reason", "task_id", "ts"], kind: "newest",
+    key: (row) => (row.step === "sweep.disposed" && typeof row.pr_number === "number" && typeof row.head_sha === "string" ? `${row.pr_number}\u0000${row.head_sha}` : undefined),
+  },
+  { reader: "automergeHoldFromLedger (review.ts): each PR's and the fleet's last acted hold event", steps: [HOLD_ENGAGED, HOLD_RELEASED], fields: ["pr_number", "authority", "by", "reason", "hold_actor"], kind: "newest", key: (row) => (actedHold(row) ? (prKey(row) ?? "fleet") : undefined) },
+  { reader: "deriveMergeHeld (status-board.ts): every PR a hold row names", steps: [HOLD_ENGAGED, HOLD_RELEASED], fields: ["pr_number"], kind: "newest", key: (row) => (isHold(row) ? prKey(row) : undefined) },
+  { reader: "latestHoldTaskId (status-board.ts): each scope's newest engage naming a task", steps: [HOLD_ENGAGED], fields: ["pr_number", "task_id"], kind: "newest", key: (row) => (row.step === HOLD_ENGAGED && typeof row.task_id === "string" && row.task_id !== "" ? (prKey(row) ?? "fleet") : undefined) },
+  { reader: "nowActions (now-view.ts): each PR's newest engage", steps: [HOLD_ENGAGED], fields: ["pr_number", "ts"], kind: "newest", key: (row) => (row.step === HOLD_ENGAGED ? prKey(row) : undefined) },
+  { reader: "liveRunSpendByTask (status-stream-publisher.ts): each task's current run", steps: [...RUN_SPEND_STEPS] as string[], fields: ["task_id", "cost_usd", "num_turns"], kind: "run", key: (row) => (RUN_SPEND_STEPS.has(row.step) ? taskKey(row) : undefined) },
+  { reader: "escalationClasses (now-decisions.ts): each task's newest escalation", steps: ["escalation.issue_opened"], fields: ["task_id", "class", "ts"], kind: "newest", key: (row) => (row.step === "escalation.issue_opened" ? taskKey(row) : undefined) },
+  { reader: "projectFeedbackGates (human-gate.ts): each feedback's triage claims up to and after the readers' now", steps: ["triage.start"], fields: ["feedback_id", "ts"], kind: "asof", key: (row) => (row.step === "triage.start" && typeof row.feedback_id === "string" ? row.feedback_id : undefined) },
+  { reader: "mergedTodayCount (now-view.ts): the day's merges, by their ts text", steps: ["verdict", "verdict.merged"], fields: ["verdict", "ts", "task_id", "pr_url", "run_id"], kind: "all", window: "utc-day-text", key: (row) => (isMerge(row) ? "merge" : undefined) },
+  { reader: "mergedTodayCount (now-view.ts): each run's newest PR url", steps: ["pr.opened"], fields: ["run_id", "pr_url"], kind: "newest", key: (row) => (row.step === "pr.opened" && typeof row.pr_url === "string" ? runKey(row) : undefined) },
+  { reader: "computeGlanceSpend (glance.ts): the day's merged verdicts", steps: ["verdict"], fields: ["verdict", "ts"], kind: "all", window: "utc-day", key: (row) => (row.step === "verdict" && row.verdict === "merged" ? "merge" : undefined) },
+  ...windowRules("utc-day", "windowCostRows (sweep.ts) for the day's spend"),
+  ...windowRules("iso-week", "windowCostRows (sweep.ts) for the week's spend"),
+];
+
+/** Fields a reader tests on every row before it looks at the step: `nowActions` and `automergeHoldFromLedger` scope by
+ *  `pr_number` first. A read of one names no step's payload, so the census does not count it. */
+export const BOARD_ROW_PROBE_FIELDS: ReadonlySet<string> = new Set(["pr_number"]);
+
+function windowStartOf(window: BoardRetentionWindow, row: Row): number | undefined {
+  if (typeof row.ts !== "string") return undefined;
+  if (window === "utc-day-text") {
+    const ms = Date.parse(`${row.ts.slice(0, 10)}T00:00:00.000Z`);
+    return Number.isFinite(ms) ? ms : undefined;
+  }
+  const ms = Date.parse(row.ts);
+  if (!Number.isFinite(ms)) return undefined;
+  return window === "iso-week" ? utcWeekWindowMs(ms)[0] : utcDayWindowMs(ms)[0];
+}
+
+const currentWindowStart = (window: BoardRetentionWindow, nowMs: number): number => (window === "iso-week" ? utcWeekWindowMs(nowMs)[0] : utcDayWindowMs(nowMs)[0]);
+
+/** W1-T9436: each kept `sweep.disposed` row's repeat judgement, made in full row order at ingest. */
+const SWEEP_REPEATS = new WeakMap<object, boolean>();
+
+/** Whether a kept `sweep.disposed` row repeats its PR's previous disposition, judged over every row the board ingested;
+ *  undefined for a row the board did not judge (a board keeping every row, or any other array). */
+export function boardSweepRepeat(row: object): boolean | undefined {
+  return SWEEP_REPEATS.get(row);
+}
+
 export function createBoardProjection(opts: BoardProjectionOptions): BoardProjection {
   const { db, lease } = opts;
   const clock = opts.clock ?? systemClock;
@@ -242,44 +396,89 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const githubGeneration = opts.githubGeneration ?? (() => githubGenerationOf(gateway()));
   const chunkRows = opts.ingestChunkRows ?? BOARD_INGEST_CHUNK_ROWS;
   const chunkMs = opts.ingestChunkMs ?? BOARD_INGEST_CHUNK_MS;
+  const keepAll = opts.keepEveryRow === true;
+  const fromRows = keepAll && opts.deriveFromRows === true;
   // W1-T6467: this projection's own table, dropped with it; each views worker isolate builds its own.
   const strings = opts.internStrings === false ? undefined : new Map<string, string>();
   db.exec(BOARD_PROJECTION_DDL);
+  const unread = [...BOARD_UNREAD_STEPS];
+  const unreadSql = unread.map(() => "?").join(", ");
   const sql = {
     facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq LIMIT ?"),
     upsert: db.prepare(`INSERT INTO task_projection(task_id, stamp, json) VALUES(?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET stamp = excluded.stamp, json = excluded.json`),
     remove: db.prepare("DELETE FROM task_projection WHERE task_id = ?"),
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
+    taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
+      UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
+    seqFact: db.prepare("SELECT seq, ts_ms, step, body FROM fact WHERE seq = ?"),
+    stepFacts: db.prepare("SELECT seq, ts_ms, body FROM fact WHERE step = ? AND seq <= ? ORDER BY ts_ms, seq"),
+    planOnlyFacts: db.prepare(`SELECT step, body FROM fact WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ? AND json_type(body, '$.plan_only') = 'true'`),
+    runNewestFact: db.prepare(`SELECT MAX(ts_ms) AS ms FROM fact WHERE task_id = ? AND run_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
+      AND json_type(body, '$.task_id') = 'text'`),
+  };
+  const tableExists = (name: string): boolean => db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+  /** A task's run stand-in sources, prepared once the store has their tables (a store built before them has none). */
+  let taskRunSql: { worker?: ReadModelStatement; activity?: ReadModelStatement } | undefined;
+  const taskRunStatements = (): { worker?: ReadModelStatement; activity?: ReadModelStatement } => {
+    if (taskRunSql?.worker && taskRunSql.activity) return taskRunSql;
+    taskRunSql = {
+      ...(tableExists("run_worker") ? { worker: db.prepare("SELECT ts_ms, body, fields, seq FROM run_worker WHERE task_id = ?") } : {}),
+      ...(tableExists("run_activity") ? { activity: db.prepare("SELECT run_id, ts, ts_ms, seq FROM run_activity WHERE task_id = ?") } : {}),
+    };
+    return taskRunSql;
   };
   const sentinel: Row = {};
   const rows: Row[] = [sentinel];
   const rowTsMs: number[] = [Number.NEGATIVE_INFINITY];
+  /** Each kept row's order, its source-text length, and how many rules hold it (W1-T9436). */
+  const kept = new Map<Row, { ord: Ord; bytes: number; holds: number; standIn?: { key: string; worker: boolean } }>();
+  /** Rows every holder released since the last compaction; `rows` drops them at the end of the ingest. */
+  const dropped = new Set<Row>();
+  let ins = 0;
   // W1-T6253: every in-place change to `rows` (or the sentinel's ts) is a new generation, so an index held for the
   // old contents is never served for the new ones.
   let rowsGeneration = 0;
   const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
   touched();
   let lastSeq = 0;
+  /** W1-T9403: the summed source-text length of every row in `rows` but the sentinel. */
+  let keptBytes = 0;
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
   let bulkOpen = false;
   let bulkOutOfOrder = false;
+  /** Per `task|run`, the newest fact row's time, while a cold load has not yet read the run tables; a later run row asks the store. */
+  let bulkNewestFactMs: Map<string, number> | undefined = new Map();
   let crossCount = 0;
   let crossSeq = 0;
   const taskCount = new Map<string, number>();
   const taskSeq = new Map<string, number>();
   const lastRunStartMs = new Map<string, number>();
-  /** Per `task|run`: its newest fact row, the row standing for a newer non-fact one, and the activity seq read. */
-  const newestFactMs = new Map<string, number>();
-  const activityRows = new Map<string, { row: Row; tsMs: number }>();
+  /** Per `task|run`, the KEPT row standing for its newest non-fact row, and for its worker rows. */
+  const activityRows = new Map<string, Row>();
+  const workerRows = new Map<string, Row>();
   const taskActivitySeq = new Map<string, number>();
   let activitySeq = 0;
   let activitySql: ReadModelStatement | undefined;
-  /** Per `task|run`: the row standing for its `worker.activity` rows (`run_worker`), and the worker seq read. */
-  const workerRows = new Map<string, { row: Row; tsMs: number }>();
   const taskWorkerSeq = new Map<string, number>();
   let workerSeq = 0;
   let workerSql: ReadModelStatement | undefined;
+  /** The newest parseable `ts` among every row the board ingested: `orphanedRunIds`'s ledger clock. */
+  let latestParsedTsMs: number | undefined;
+  /** Per PR, the newest `sweep.disposed` row's order and disposition: the repeat judgement's state. */
+  const lastDisposition = new Map<number, { ord: Ord; disposition: unknown }>();
+  /** Per rule, the rows it holds by key; per windowed rule, the window each key belongs to. */
+  type Held1 = { row: Row; ord: Ord; window?: number };
+  const ruleState = BOARD_ROW_RETENTION.map((rule) => ({
+    rule,
+    one: new Map<string, Held1>(),
+    all: new Map<string, { window?: number; rows: Set<Row> }>(),
+    runs: new Map<string, { anchor?: Held1; members: Held1[] }>(),
+  }));
+  /** The readers' "now": each windowed rule keeps from its day or week. Set by the first update, and never moved back. */
+  let readerNowMs: number | undefined;
+  const retainFrom = (): number => readerNowMs ?? clock.now();
+  const onIngest = opts.onIngest;
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
@@ -294,35 +493,154 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let lastOracleAt: number | undefined;
   let pending = false;
 
-  /** Takes out the row standing for a run's activity (or its worker rows), if any. */
-  function dropActivity(key: string, standing = activityRows): void {
-    const held = standing.get(key);
-    if (!held) return;
-    standing.delete(key);
-    let at = rows.length - 1;
-    while (at > 0 && rows[at] !== held.row) at--;
-    if (at > 0) {
-      rows.splice(at, 1);
-      rowTsMs.splice(at, 1);
-      touched();
+  const noteParsedTs = (ts: unknown): void => {
+    const ms = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    if (Number.isFinite(ms) && (latestParsedTsMs === undefined || ms > latestParsedTsMs)) latestParsedTsMs = ms;
+  };
+
+  function release(row: Row): void {
+    const k = kept.get(row);
+    if (!k || --k.holds > 0) return;
+    kept.delete(row);
+    dropped.add(row);
+    keptBytes -= k.bytes;
+    if (k.standIn) {
+      const standing = k.standIn.worker ? workerRows : activityRows;
+      if (standing.get(k.standIn.key) === row) standing.delete(k.standIn.key);
     }
   }
 
-  /** Places a stand-in row by its time, after the rows of its instant. */
-  function standIn(standing: Map<string, { row: Row; tsMs: number }>, key: string, row: Row, tsMs: number): void {
+  /** Releases every windowed rule's rows of a window the readers' day or week has moved past, and each `asof` key's
+   *  rows the readers' now has passed but its latest. */
+  function releasePastWindows(): void {
+    for (const state of ruleState) {
+      const window = state.rule.window;
+      if (state.rule.kind === "asof") {
+        for (const set of state.all.values()) {
+          const before = [...set.rows].filter((r) => Date.parse(r.ts as string) <= retainFrom());
+          const latest = before.reduce<Row | undefined>((a, r) => (!a || Date.parse(r.ts as string) >= Date.parse(a.ts as string) ? r : a), undefined);
+          for (const r of before) if (r !== latest) { set.rows.delete(r); release(r); }
+        }
+      }
+      if (!window) continue;
+      const from = currentWindowStart(window, retainFrom());
+      for (const [key, h] of state.one) if (h.window !== undefined && h.window < from) { state.one.delete(key); release(h.row); }
+      for (const [key, h] of state.all) if (h.window !== undefined && h.window < from) { state.all.delete(key); for (const row of h.rows) release(row); }
+    }
+  }
+
+  /** The rules that take `row` now, and the rows each one lets go for it; the row is kept when any rule takes it. */
+  function offer(row: Row, ord: Ord, facts: BoardRowFacts): number {
+    if (keepAll) return 1;
+    let holds = 0;
+    const let_go: Row[] = [];
+    for (const state of ruleState) {
+      const { rule } = state;
+      if (rule.steps !== "*" && !rule.steps.includes(row.step as string)) continue;
+      const base = rule.key(row, facts);
+      if (base === undefined) continue;
+      let window: number | undefined;
+      if (rule.window) {
+        window = windowStartOf(rule.window, row);
+        if (window === undefined || window < currentWindowStart(rule.window, retainFrom())) continue;
+      }
+      const key = window === undefined ? base : `${base}@${window}`;
+      if (rule.kind === "asof") {
+        const tsMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+        if (!Number.isFinite(tsMs)) continue;
+        const set = state.all.get(key) ?? state.all.set(key, { rows: new Set() }).get(key)!;
+        set.rows.add(row);
+        holds++;
+        const before = [...set.rows].filter((r) => Date.parse(r.ts as string) <= retainFrom());
+        const latest = before.reduce<Row | undefined>((a, r) => (!a || Date.parse(r.ts as string) >= Date.parse(a.ts as string) ? r : a), undefined);
+        for (const r of before) if (r !== latest) { set.rows.delete(r); if (r === row) holds--; else let_go.push(r); }
+      } else if (rule.kind === "all") {
+        const set = state.all.get(key) ?? state.all.set(key, { ...(window !== undefined ? { window } : {}), rows: new Set() }).get(key)!;
+        set.rows.add(row);
+        holds++;
+      } else if (rule.kind === "run") {
+        const run = state.runs.get(key) ?? state.runs.set(key, { members: [] }).get(key)!;
+        if (row.step === "run.start") {
+          if (run.anchor && ordCompare(ord, run.anchor.ord) < 0) continue;
+          if (run.anchor) let_go.push(run.anchor.row);
+          run.anchor = { row, ord };
+          run.members = run.members.filter((m) => ordCompare(m.ord, ord) > 0 || (let_go.push(m.row), false));
+          holds++;
+        } else if (run.anchor && ordCompare(ord, run.anchor.ord) > 0) {
+          run.members.push({ row, ord });
+          holds++;
+        }
+      } else {
+        const was = state.one.get(key);
+        const takes = !was || (rule.kind === "newest" ? ordCompare(ord, was.ord) > 0 : ordCompare(ord, was.ord) < 0);
+        if (!takes) continue;
+        if (was) let_go.push(was.row);
+        state.one.set(key, { row, ord, ...(window !== undefined ? { window } : {}) });
+        holds++;
+      }
+    }
+    // The row is counted held before its predecessors are let go, so a row held twice over is never dropped early.
+    if (holds > 0) kept.set(row, { ord, bytes: 0, holds });
+    for (const old of let_go) release(old);
+    return holds;
+  }
+
+  /** Takes a stand-in out of every rule holding it: a newer fact row (or stand-in) of its run now speaks for the run. */
+  function withdraw(row: Row | undefined): void {
+    if (!row || !kept.has(row)) return;
+    const facts: BoardRowFacts = { standIn: true, repeat: false };
+    for (const state of ruleState) {
+      const { rule } = state;
+      if (rule.steps !== "*" && !rule.steps.includes(row.step as string)) continue;
+      const base = rule.key(row, facts);
+      if (base === undefined) continue;
+      const window: number | undefined = rule.window ? windowStartOf(rule.window, row) : undefined;
+      const key: string = window === undefined ? base : `${base}@${window}`;
+      if (state.one.get(key)?.row === row) state.one.delete(key);
+      state.all.get(key)?.rows.delete(row);
+    }
+    const k = kept.get(row)!;
+    k.holds = 1;
+    release(row);
+  }
+
+  /** Places a held row by its time, after the rows of its instant (a bulk load appends and sorts at its tail). */
+  function place(row: Row, tsMs: number, bytes: number, bulk: boolean): void {
     let at = rows.length;
-    while (rowTsMs[at - 1]! > tsMs) at--;
+    if (!bulk) while (rowTsMs[at - 1]! > tsMs) at--;
     rows.splice(at, 0, row);
     rowTsMs.splice(at, 0, tsMs);
+    kept.get(row)!.bytes = bytes;
+    keptBytes += bytes;
+    if (strings) internRowStrings(row, strings);
     touched();
-    standing.set(key, { row, tsMs });
+  }
+
+  function sweepRepeatOf(row: Row, ord: Ord): boolean {
+    if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") return false;
+    const last = lastDisposition.get(row.pr_number);
+    const repeat = last !== undefined && last.disposition === row.disposition;
+    if (!last || ordCompare(ord, last.ord) > 0) lastDisposition.set(row.pr_number, { ord, disposition: row.disposition });
+    return repeat;
+  }
+
+  /** Offers a run's stand-in; true when a rule keeps it. */
+  function standIn(standing: Map<string, Row>, key: string, row: Row, tsMs: number, bytes: number): boolean {
+    noteParsedTs(row.ts);
     latestTsMs = Math.max(latestTsMs, tsMs);
+    const ord: Ord = [tsMs, ++ins];
+    if (offer(row, ord, { standIn: true, repeat: false }) === 0) return false;
+    if (keepAll) kept.set(row, { ord, bytes: 0, holds: 1 });
+    kept.get(row)!.standIn = { key, worker: standing === workerRows };
+    place(row, tsMs, bytes, false);
+    standing.set(key, row);
+    return true;
   }
 
   /** Each run's `worker.activity` rows stand as one row at the newest's time, carrying each field's newest value; true when one moved. */
   function ingestWorkers(): boolean {
     if (!workerSql) {
-      if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_worker'").get() === undefined) return false;
+      if (!tableExists("run_worker")) return false;
       workerSql = db.prepare("SELECT task_id, run_id, ts_ms, body, fields, seq FROM run_worker WHERE seq > ? ORDER BY seq");
     }
     let moved = false;
@@ -330,18 +648,28 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const [taskId, seq] = [String(r.task_id), Number(r.seq)];
       const key = `${taskId}|${String(r.run_id)}`;
       workerSeq = Math.max(workerSeq, seq);
-      dropActivity(key, workerRows);
       taskWorkerSeq.set(taskId, Math.max(taskWorkerSeq.get(taskId) ?? 0, seq));
-      standIn(workerRows, key, { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms));
+      const [body, fields] = [String(r.body), String(r.fields)];
+      const was = workerRows.get(key);
+      // The new stand-in is offered before the old one goes, so a rule holding the old one moves to it.
+      standIn(workerRows, key, { ...runWorkerRow(body, fields), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms), body.length + fields.length);
+      withdraw(was);
       moved = true;
     }
     return moved;
   }
 
+  function newestFactMsOf(taskId: string, runId: string): number {
+    const bulk = bulkNewestFactMs?.get(`${taskId}|${runId}`);
+    if (bulkNewestFactMs) return bulk ?? Number.NEGATIVE_INFINITY;
+    const r = sql.runNewestFact.get(taskId, runId, lastSeq, ...unread);
+    return r?.ms === null || r?.ms === undefined ? Number.NEGATIVE_INFINITY : Number(r.ms);
+  }
+
   /** Each run whose newest row of any step is newer than its newest fact row gets one row at that time, in time order; true when one moved. */
   function ingestActivity(): boolean {
     if (!activitySql) {
-      if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_activity'").get() === undefined) return false;
+      if (!tableExists("run_activity")) return false;
       activitySql = db.prepare("SELECT task_id, run_id, ts, ts_ms, seq FROM run_activity WHERE seq > ? ORDER BY seq");
     }
     let moved = false;
@@ -349,13 +677,41 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const [taskId, runId, tsMs, seq] = [String(r.task_id), String(r.run_id), Number(r.ts_ms), Number(r.seq)];
       activitySeq = Math.max(activitySeq, seq);
       const key = `${taskId}|${runId}`;
-      dropActivity(key);
       taskActivitySeq.set(taskId, Math.max(taskActivitySeq.get(taskId) ?? 0, seq));
       moved = true;
-      if (tsMs <= (newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY)) continue;
-      standIn(activityRows, key, { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs);
+      const was = activityRows.get(key);
+      if (tsMs > newestFactMsOf(taskId, runId)) {
+        const ts = String(r.ts);
+        standIn(activityRows, key, { ts, step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs, ts.length + taskId.length + runId.length);
+      }
+      withdraw(was);
     }
     return moved;
+  }
+
+  function compact(): void {
+    if (dropped.size === 0) return;
+    let to = 1;
+    for (let from = 1; from < rows.length; from++) {
+      const row = rows[from]!;
+      if (dropped.has(row)) continue;
+      rows[to] = row;
+      rowTsMs[to] = rowTsMs[from]!;
+      to++;
+    }
+    rows.length = to;
+    rowTsMs.length = to;
+    dropped.clear();
+    touched();
+    // W1-T9436: the table keeps only the kept rows' values; each is already the table's own copy, so identity holds.
+    if (strings) {
+      const values: string[] = [];
+      for (let at = 1; at < rows.length; at++) {
+        for (const value of Object.values(rows[at]!)) if (typeof value === "string" && value.length <= BOARD_INTERN_MAX_CHARS) values.push(value);
+      }
+      strings.clear();
+      for (const value of values) if (!strings.has(value)) strings.set(value, value);
+    }
   }
 
   function ingest(limit: number, deadline = Number.POSITIVE_INFINITY): { fresh: number; caughtUp: boolean } {
@@ -364,6 +720,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     // The first load is sorted once; afterwards a live row a few ms early walks back a step or two.
     const bulk = lastSeq === 0 || bulkOpen;
     let outOfOrder = bulk && bulkOutOfOrder;
+    const ingested: Row[] = [];
     for (const r of sql.facts.iterate(lastSeq, Number.isFinite(limit) ? limit : -1)) {
       if (fresh > 0 && clock.now() >= deadline) {
         cut = true;
@@ -376,20 +733,25 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (BOARD_UNREAD_STEPS.has(String(r.step))) {
         if (tsMs > latestTsMs) {
           sentinel.ts = String(r.ts);
+          noteParsedTs(sentinel.ts);
           touched();
         }
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const parsed = JSON.parse(String(r.body)) as Row;
-      const row = strings ? internRowStrings(parsed, strings) : parsed;
-      let at = rows.length;
-      if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
-      else while (rowTsMs[at - 1]! > tsMs) at--;
-      rows.splice(at, 0, row);
-      rowTsMs.splice(at, 0, tsMs);
-      touched();
+      const body = String(r.body);
+      const row = withoutUnreadFields(JSON.parse(body) as Row);
+      noteParsedTs(row.ts);
       latestTsMs = Math.max(latestTsMs, tsMs);
+      if (onIngest) ingested.push(row);
+      const ord: Ord = [tsMs, ++ins];
+      const repeat = keepAll ? false : sweepRepeatOf(row, ord);
+      if (offer(row, ord, { standIn: false, repeat }) > 0) {
+        if (keepAll) kept.set(row, { ord, bytes: 0, holds: 1 });
+        else if (row.step === "sweep.disposed" && typeof row.pr_number === "number") SWEEP_REPEATS.set(row, repeat);
+        if (bulk) outOfOrder ||= tsMs < rowTsMs[rows.length - 1]!;
+        place(row, tsMs, body.length, bulk);
+      }
       const dirt = boardDirtForRow(row, rules);
       if (dirt.all) {
         crossCount++;
@@ -405,16 +767,23 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       if (typeof row.task_id === "string" && typeof row.run_id === "string") {
         const key = `${row.task_id}|${row.run_id}`;
-        newestFactMs.set(key, Math.max(newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
-        if ((activityRows.get(key)?.tsMs ?? Number.POSITIVE_INFINITY) <= tsMs) dropActivity(key);
+        if (bulkNewestFactMs) bulkNewestFactMs.set(key, Math.max(bulkNewestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
+        const standing = activityRows.get(key);
+        if (standing && kept.get(standing)!.ord[0] <= tsMs) {
+          activityRows.delete(key);
+          withdraw(standing);
+        }
       }
     }
+    if (onIngest && ingested.length > 0) onIngest(ingested);
     const caughtUp = !cut && fresh < limit;
     [bulkOpen, bulkOutOfOrder] = [bulk && !caughtUp, !caughtUp && outOfOrder];
     if (!caughtUp) {
+      compact();
       pending = true;
       return { fresh, caughtUp };
     }
+    compact();
     // Ledger order is time order, so a row is placed by its ts, not by when the projector read it.
     if (outOfOrder) {
       const order = rows.map((_, i) => i).sort((a, b) => rowTsMs[a]! - rowTsMs[b]!);
@@ -423,8 +792,96 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       touched();
     }
     const workers = ingestWorkers();
-    if (ingestActivity() || workers || fresh > 0) pending = true;
+    const activity = ingestActivity();
+    // The cold load's per-run times have served the run tables' first read; later rows ask the store.
+    bulkNewestFactMs = undefined;
+    compact();
+    if (activity || workers || fresh > 0) pending = true;
     return { fresh, caughtUp };
+  }
+
+  /**
+   * W1-T9436: a ledger index whose task and step buckets are read on demand from the fact store, as
+   * {@link buildLedgerIndex} would file them over every row: a task's rows by `fact_task` and `fact_alias`, with
+   * its runs' stand-ins built as ingest builds them, in row order. Its rows are released with it, after the update.
+   */
+  function storeIndex(bound: ReadonlyArray<Row>): LedgerIndex {
+    const upTo = lastSeq;
+    const aliasReady = factAliasReady(db);
+    let aliasSeqs: Map<string, number[]> | undefined;
+    let last: { id: string; rows: Row[] } | undefined;
+    const steps = new Map<string, Row[]>();
+    const runSql = taskRunStatements();
+    let filing: Set<string> | undefined;
+    let reviewed: Map<string, Set<string>> | undefined;
+    const parse = (body: unknown): Row => withoutUnreadFields(JSON.parse(String(body)) as Row);
+    const taskBucket = (id: string): Row[] => {
+      const facts: Array<{ row: Row; key: [number, number, number] }> = [];
+      const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
+      for (const r of source) facts.push({ row: parse(r.body), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      if (!aliasReady) {
+        if (!aliasSeqs) {
+          // A store whose writer has not yet backfilled `fact_alias`: one scan of the fact bodies, held for this index only.
+          aliasSeqs = new Map();
+          for (const r of db.prepare(`SELECT seq, json_extract(body, '$.task') AS task FROM fact WHERE json_type(body, '$.task') = 'text'
+            AND json_type(body, '$.task_id') = 'text' AND json_extract(body, '$.task') <> json_extract(body, '$.task_id')`).iterate()) {
+            const list = aliasSeqs.get(String(r.task)) ?? aliasSeqs.set(String(r.task), []).get(String(r.task))!;
+            list.push(Number(r.seq));
+          }
+        }
+        for (const seq of aliasSeqs.get(id) ?? []) {
+          const r = sql.seqFact.get(seq);
+          if (r && seq <= upTo && !BOARD_UNREAD_STEPS.has(String(r.step))) facts.push({ row: parse(r.body), key: [Number(r.ts_ms), 0, seq] });
+        }
+      }
+      const newest = new Map<string, number>();
+      for (const f of facts) {
+        if (f.row.task_id === id && typeof f.row.run_id === "string") newest.set(f.row.run_id, Math.max(newest.get(f.row.run_id) ?? Number.NEGATIVE_INFINITY, f.key[0]));
+      }
+      // Its runs' stand-ins, as ingest builds them: a run's worker rows always, its newest row only past its newest fact row.
+      for (const r of runSql.worker?.iterate(id) ?? []) {
+        facts.push({ row: { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, key: [Number(r.ts_ms), 1, Number(r.seq)] });
+      }
+      for (const r of runSql.activity?.iterate(id) ?? []) {
+        const [runId, tsMs] = [String(r.run_id), Number(r.ts_ms)];
+        if (tsMs > (newest.get(runId) ?? Number.NEGATIVE_INFINITY)) facts.push({ row: { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: id, run_id: runId }, key: [tsMs, 2, Number(r.seq)] });
+      }
+      facts.sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2]);
+      return facts.map((f) => f.row);
+    };
+    const planOnly = (): void => {
+      filing = new Set();
+      reviewed = new Map();
+      for (const r of sql.planOnlyFacts.iterate(PLAN_ONLY_REVIEW_MARKER_STEP, upTo)) {
+        const row = JSON.parse(String(r.body)) as Row;
+        if (typeof row.pr_url !== "string") continue;
+        if (r.step === "pr.opened") filing.add(row.pr_url);
+        else if (typeof row.head_sha === "string") reviewed.set(row.pr_url, (reviewed.get(row.pr_url) ?? new Set()).add(row.head_sha));
+      }
+    };
+    return {
+      rows: bound,
+      byTask: { get: (id) => (last?.id === id ? last.rows : (last = { id, rows: taskBucket(id) }).rows) },
+      byStep: {
+        get: (step) => {
+          let bucket = steps.get(step);
+          if (!bucket) {
+            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : sql.stepFacts.all(step, upTo).map((r) => parse(r.body));
+            steps.set(step, bucket);
+          }
+          return bucket;
+        },
+      },
+      get planOnlyFilingPrUrls() {
+        if (!filing) planOnly();
+        return filing!;
+      },
+      get planOnlyReviewedHeads() {
+        if (!reviewed) planOnly();
+        return reviewed!;
+      },
+      latestTsMs: latestParsedTsMs,
+    };
   }
 
   function hashTask(task: Task): string {
@@ -444,6 +901,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       writeCreditStore: () => {},
       readCreditOverrideFile: () => overrides,
       skipUncreditedBuildWarning: true,
+      ...(fromRows ? {} : { ledgerIndex: storeIndex(rows) }),
       ...(reuse ? { reuseProjection: reuse } : {}),
     };
     return projectPlan(plan, deps);
@@ -549,6 +1007,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   return {
     update(options = {}): BoardUpdate {
       const startedAt = clock.now();
+      const readers = options.readerNowMs ?? startedAt;
+      if (!keepAll && (readerNowMs === undefined || readers > readerNowMs)) {
+        readerNowMs = readers;
+        releasePastWindows();
+      }
       const { fresh: newRows, caughtUp } = ingest(chunkRows, startedAt + chunkMs);
       if (!caughtUp) return { derived: false, deferred: false, caughtUp, newRows, rederived: [], reused: 0, full: false, elapsedMs: clock.now() - startedAt };
       const now = clock.now();
@@ -602,7 +1065,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     },
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
+    index: (bound) => (fromRows ? buildLedgerIndex(bound) : storeIndex(bound)),
     internedStrings: () => strings?.size ?? 0,
+    size: () => ({ rows: rows.length - 1, keptBytes }),
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
       ingest(Number.POSITIVE_INFINITY);

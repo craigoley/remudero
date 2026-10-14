@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { finishJudgedRun, isJudgedRun } from "./helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -148,7 +149,8 @@ test("unit test: a pool failure re-runs the pool isolated and names the file tha
   const reruns = calls.filter((c) => c.role === "rerun");
   assert.deepEqual(reruns, [{ files: ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"], pool: false, role: "rerun" }]);
   assert.ok(log.some((l) => l.includes("POOL DEFECT") && l.includes("leaking file: test/b.test.ts")), log.join("\n"));
-  assert.equal(calls.at(-1)?.role, "rest", "the non-pooled file still runs after the defect is named");
+  const roles = calls.map((c) => c.role);
+  assert.ok(roles.includes("rest") && roles.indexOf("rest") < roles.indexOf("locate"), "the non-pooled file runs before the leak is located");
 });
 
 test("unit test: a pooled file that also fails isolated is a test failure, not a pool defect", () => {
@@ -191,9 +193,9 @@ test("unit test: --run fast spawns the pool with isolation off and the leftovers
   });
   const calls: string[][] = [];
   const code = manifest.main(["--root", root, "--run", "fast"], {
-    spawn: (_cmd, args) => {
+    spawn: (_cmd, args, spawnOpts) => {
       calls.push(args);
-      return { status: 0 };
+      return finishJudgedRun(args, spawnOpts);
     },
     env: {},
   });
@@ -201,6 +203,8 @@ test("unit test: --run fast spawns the pool with isolation off and the leftovers
   assert.equal(calls.length, 2);
   const [first, second] = calls as [string[], string[]];
   assert.ok(first.includes(pool.POOL_ISOLATION_FLAG));
+  assert.ok(isJudgedRun(first), "the pool run is judged by its summary, not its exit status alone");
+  assert.ok(isJudgedRun(second), "the shard's ordinary isolated rest is judged by its summary too");
   assert.deepEqual(first.filter((a) => a.endsWith(".test.ts")), ["test/a.test.ts", "test/b.test.ts"]);
   assert.ok(!second.includes(pool.POOL_ISOLATION_FLAG));
   assert.deepEqual(second.filter((a) => a.endsWith(".test.ts")), ["test/env.test.ts"]);
@@ -222,9 +226,9 @@ test("unit test: a duration reporter writes each pool child to its own file so e
   });
   const destinations: string[] = [];
   manifest.main(["--root", root, "--run", "fast"], {
-    spawn: (_cmd, args) => {
-      destinations.push(args.filter((a) => a.startsWith("--test-reporter-destination=") && a.endsWith(".json")).join(","));
-      return { status: 0 };
+    spawn: (_cmd, args, spawnOpts) => {
+      destinations.push(args.filter((a) => a.startsWith("--test-reporter-destination=") && a.endsWith(".json") && !/rmd-pool-run-/.test(a)).join(","));
+      return finishJudgedRun(args, spawnOpts);
     },
     env: { RMD_TEST_DURATION_OUTPUT: "out/shard-1.json" },
   });

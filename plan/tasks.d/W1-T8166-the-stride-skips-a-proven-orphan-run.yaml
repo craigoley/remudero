@@ -1,0 +1,66 @@
+- id: W1-T8166
+  title: "THE COST-OF-DELAY STRIDE SKIPS A PROVEN ORPHAN RUN — `costOfDelayContext` charges a stride step to every start with no verdict, while the dispatch breaker and the lifetime sensor both leave out a run `orphanedRunIds` proves was killed before it wrote anything, so a task whose worker the host killed sorts behind fresh work of the same priority"
+  repo: remudero
+  depends_on: [W1-T8164]  # shares src/lib/status.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the stride reads the same proven-orphan exclusion as the breaker
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with your recommendations\"): the stride and the breaker disagree about orphans (follow-up to #10916)"
+  plan_refs: [W1-T7742, W1-T3523, W1-T4064, W1-T7534, W1-T4025]
+  files: [src/lib/non-worker-verdict.ts, src/lib/status.ts, src/lib/dispatch-value.ts, test/the-stride-skips-a-proven-orphan-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 233304449:
+      - `costOfDelayContext` (src/lib/dispatch-value.ts:329) counts one stride step per run (:363):
+        `if (!verdict || streakRefusal(verdict.row) === undefined)`. #10916 added the `streakRefusal` half, so a
+        run no worker tried spends no stride. A run with NO verdict is still always charged.
+      - The dispatch breaker (`dispatchStreakTally`, src/lib/status.ts) and the lifetime sensor
+        (`taskAttributableLifetimeDispatches`, :1738) both leave out a run in `orphanedRunIds` (:1516). That is a
+        run whose only own row is its `run.start`, older than `DEFAULT_LIVENESS_BOUND_MS` (:500). W1-T3523 measured
+        that shape as the container-recycle kill: 97 of 203 dispatched runs on 2026-09-13. Monitor rows
+        (`MONITOR_WRITTEN_RUN_STEPS`, :1489) do not count as own rows.
+      - So the three readers disagree about one run. The breaker and the sensor say the host spent it. The stride
+        charges the task for it, so it sorts after fresh tasks of the same score.
+      - The stride cannot import status.ts. non-worker-verdict.ts is a leaf "so the pure dispatch calibration can
+        share it without an import ring through status.ts" (its own header). The orphan rule has to live there too.
+    DEVIATION FROM THE FILING BRIEF, measured on the host read-only. The brief named W1-T7742's run of 2026-10-10
+    18:35Z as the example. That run, W1-T7742-1791657284294, is NOT a proven orphan. It wrote about 250 own rows,
+    the last at 19:00:17Z (`implement.resumed`). After that it wrote only `run.running_long` monitor rows (20:01Z),
+    and it has no verdict. Its worker ran, so `orphanedRunIds` keeps it, and all three readers charge it. This task
+    makes the stride agree with the breaker. It does not decide whether a run killed mid-work by a restart should
+    be charged. That would change the breaker as well and needs its own evidence.
+  design: |
+    1. MOVE THE ORPHAN RULE INTO THE LEAF. Move `MONITOR_WRITTEN_RUN_STEPS` and the pure core of `orphanedRunIds`
+       into src/lib/non-worker-verdict.ts, as a function over rows that takes the clock and liveness bound.
+       `orphanedRunIds` in status.ts keeps its signature, its index fast path and its replay dedup, and delegates
+       to the leaf. The breaker and the lifetime sensor do not change behaviour.
+    2. THE STRIDE READS IT. `costOfDelayContext` computes the proven orphans over the rows it already has, using
+       its own `nowMs` and `DEFAULT_LIVENESS_BOUND_MS`. A run in that set spends no stride, like a `streakRefusal`
+       verdict. A run with no verdict that is not a proven orphan stays charged ("unknown stays counted",
+       W1-T3523).
+    3. A run younger than the liveness bound is still live, not an orphan, and is charged as today.
+    Tests go in the new file test/the-stride-skips-a-proven-orphan-run.test.ts, with `test(` titles exactly as in
+    the proofs below. test/new-work-is-ordered-by-cost-of-delay.test.ts,
+    test/one-undatable-task-never-disables-cost-of-delay-ordering.test.ts and the breaker orphan suites must stay
+    green.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-stride-skips-a-proven-orphan-run.test.ts"
+    - claim: "a run whose only own row is its run.start, older than the liveness bound, spends no stride"
+      proof: 'grep: test("W1-T8166: a proven orphan run spends no stride" in test/the-stride-skips-a-proven-orphan-run.test.ts'
+    - claim: "a run with no verdict that wrote its own rows past run.start still spends a stride"
+      proof: 'grep: test("W1-T8166: a verdictless run that did work still spends a stride" in test/the-stride-skips-a-proven-orphan-run.test.ts'
+    - claim: "a lone run.start younger than the liveness bound is live and still spends a stride"
+      proof: 'grep: test("W1-T8166: a start inside the liveness bound still spends a stride" in test/the-stride-skips-a-proven-orphan-run.test.ts'
+    - claim: "the stride and orphanedRunIds name the same runs as orphans for one ledger"
+      proof: 'grep: test("W1-T8166: the stride and the breaker agree on which runs are orphans" in test/the-stride-skips-a-proven-orphan-run.test.ts'
+  falsifier: |
+    Leave `costOfDelayContext` charging every run with no verdict: the proven-orphan run adds a stride step, its task
+    sorts after a fresh task of the same score, and the first and fourth tests fail. Exclude every run with no
+    verdict: the run that did work spends nothing and the second test fails. Drop the liveness bound: the young
+    start is excluded and the third test fails.

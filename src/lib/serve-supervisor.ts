@@ -10,10 +10,14 @@
  *   active asks (`rmd.handoff_request`) → prepare the inactive slot → memory headroom → fork a
  *   standby → poll its `/v1/ready` and smoke-test real read routes → `rmd.promote` → it binds the
  *   shared fd and says `rmd.promoted` → `rmd.drain` the old one → `serve.handoff_done`.
+ * W1-T8311: memory headroom is the container's cgroup AND a fresh host reading (MemAvailable, swap-in, PSI)
+ * against the candidate's measured peak. A refusal (`serve.handoff_deferred` with a named `hold`) keeps the
+ * active generation serving and retries; pressure never exits the supervisor. Unknown evidence is a hold.
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
  * A COLD start, or replacing the only generation after a crash, has nothing to protect, so it promotes once
- * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
+ * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, a bounded `serve.cold_start_still_degraded`
+ * per interval while it stays so, then `serve.cold_start_ready`): gating it only kept 4317 dark.
  *
  * Kill switch: `RMD_SERVE_HANDOFF=off`, or a `handoff.off` file in the generations directory, turns a
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
@@ -31,10 +35,14 @@ export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
 export const HANDOFF_OFF_FILE = "handoff.off";
 /** BACKSTOP on a wedged boot, about 5x the slowest boot measured (66 s); never a bound on a healthy one. */
 export const STANDBY_READY_BOUND_MS = 330_000;
+/** BACKSTOP: the slowest boot measured, so a healthy cold start writes no `serve.cold_start_still_degraded` row. */
+export const COLD_START_STILL_DEGRADED_EVERY_MS = STANDBY_READY_BOUND_MS / 5;
 /** The drain's own bound (10 s) plus the exit watchdog (5 s), with room: past it the old generation is killed. */
 export const DRAIN_BACKSTOP_MS = 30_000;
 /** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
 export const SHED_BACKSTOP_MS = 10_000;
+/** W1-T8873: tier 2 (worker threads) runs at most once in this window, however many memory deferrals retry inside it. */
+export const WORKER_SHED_MIN_INTERVAL_MS = 15 * 60_000;
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
 /** The shortest gap between two handoffs: serve.ts's SERVE_HANDOFF_COALESCE_MS, the operator's 15-minute window. */
@@ -121,9 +129,15 @@ export interface ServeSupervisorOptions {
   readyBoundMs?: number;
   pollMs?: number;
   drainBackstopMs?: number;
-  /** When memory is short, a handoff waits this long before it asks again. */
+  /** When memory is short, a handoff waits this long before it asks again; each further refusal doubles it, up to the spacing base. */
   deferMs?: number;
+  /** W1-T8311: one fresh host pressure reading; defaults to /proc read twice a second apart. */
+  hostPressure?: () => Promise<HostPressureReading | undefined>;
+  /** W1-T8311: the host memory budget's thresholds; defaults to the active slot's plan/policy.yaml. */
+  upgradeThresholds?: (activeDir: string) => ServeUpgradeThresholds | { unread: string };
   shedBackstopMs?: number;
+  /** W1-T8873: the least gap between two worker-thread sheds; defaults to {@link WORKER_SHED_MIN_INTERVAL_MS}. */
+  workerShedIntervalMs?: number;
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
@@ -140,6 +154,8 @@ interface Generation {
   asked: boolean;
   /** It dropped its caches for a handoff that has not yet replaced it. */
   shed?: boolean;
+  /** W1-T8873: when it terminated its worker threads for a handoff that has not yet replaced it; absent once restored. */
+  workersShedAt?: number;
 }
 
 export interface ServeSupervisor {
@@ -228,6 +244,179 @@ export function procRss(pid: number, read: (path: string) => string = (path) => 
   }
 }
 
+/**
+ * W1-T8311: ONE FRESH READING OF THE HOST'S MEMORY PRESSURE, taken before a planned upgrade forks a
+ * standby. The cgroup headroom above sees only this container; the host's MemAvailable, swap-in and
+ * PSI see the other containers that share its RAM. A measurement not taken is NAMED in `unread`, so
+ * it is a hold and never zero pressure.
+ */
+export interface HostPressureReading {
+  atMs: number;
+  memAvailableBytes?: number;
+  /** pswpin delta over the sample window, pages per second. */
+  swapInPagesPerSec?: number;
+  psiSomeAvg10?: number;
+  psiFullAvg10?: number;
+  unread: string[];
+}
+
+/** The host memory budget's existing thresholds (plan/policy.yaml sweep.hostMemoryBudget), read, never changed. */
+export interface ServeUpgradeThresholds {
+  hostReserveBytes: number;
+  swapInPagesPerSecMax: number;
+  psiSomeAvg10Max: number;
+  psiFullAvg10Max: number;
+  staleMs: number;
+}
+
+export type ServeUpgradeHold = "policy_unread" | "pressure_unread" | "pressure_stale" | "peak_unknown" | "swap_in" | "psi" | "host_headroom";
+
+export type ServeUpgradeAdmission =
+  | { admit: true; availableBytes: number; needBytes: number; candidatePeakBytes: number; peakBasis: string }
+  | { admit: false; hold: ServeUpgradeHold; detail: string };
+
+const MIB = 1024 * 1024;
+const BUDGET_KEYS = { hostReserveMib: "hostReserveMib", swapInPagesPerSecMax: "swapInPagesPerSecMax", psiSomeAvg10Max: "psiSomeAvg10Max", psiFullAvg10Max: "psiFullAvg10Max", staleReadingMs: "staleReadingMs" } as const;
+
+/**
+ * The thresholds out of a policy.yaml text. The baked supervisor may import no YAML package (its closure is
+ * cataloged in baked-runtime-inputs.ts), so this walks `sweep.hostMemoryBudget.<key>.value` by indentation;
+ * test/serve-supervisor.test.ts holds it equal to host-memory-shadow.ts's validated loader on the shipped file.
+ * A missing or non-numeric key is `unread`, which holds an upgrade: never a default threshold.
+ */
+export function serveUpgradeThresholdsFromPolicy(text: string): ServeUpgradeThresholds | { unread: string } {
+  const values: Record<string, number> = {};
+  let inBudget = false;
+  let key: string | undefined;
+  for (const line of text.split("\n")) {
+    if (/^ {2}hostMemoryBudget:\s*$/.test(line)) {
+      inBudget = true;
+      continue;
+    }
+    if (!inBudget || /^\s*(#.*)?$/.test(line)) continue;
+    if (!/^ {3}/.test(line)) break; // the block ended
+    const keyMatch = /^ {4}(\w+):\s*$/.exec(line);
+    if (keyMatch) key = keyMatch[1];
+    const valueMatch = /^ {6}value:\s*(-?[0-9.]+)\s*$/.exec(line);
+    if (valueMatch && key !== undefined) values[key] = Number(valueMatch[1]);
+  }
+  const missing = Object.values(BUDGET_KEYS).filter((k) => !Number.isFinite(values[k]));
+  if (missing.length > 0) return { unread: `sweep.hostMemoryBudget ${missing.join(", ")} unread` };
+  return {
+    hostReserveBytes: values.hostReserveMib! * MIB,
+    swapInPagesPerSecMax: values.swapInPagesPerSecMax!,
+    psiSomeAvg10Max: values.psiSomeAvg10Max!,
+    psiFullAvg10Max: values.psiFullAvg10Max!,
+    staleMs: values.staleReadingMs!,
+  };
+}
+
+/** The real thresholds: the active slot's own checkout's plan/policy.yaml. */
+export function readServeUpgradeThresholds(slotDir: string, read: (path: string) => string = (path) => readFileSync(path, "utf8")): ServeUpgradeThresholds | { unread: string } {
+  try {
+    return serveUpgradeThresholdsFromPolicy(read(join(slotDir, "plan", "policy.yaml")));
+  } catch (err) {
+    // an unreadable policy is a named hold for the caller, never a default threshold
+    return { unread: `plan/policy.yaml: ${errorText(err)}` };
+  }
+}
+
+/**
+ * Two pswpin reads `sampleMs` apart give the swap-in rate; MemAvailable and the PSI avg10 lines are read after
+ * the second. Every read that fails or does not parse is named in `unread`.
+ */
+export async function readHostPressure(ports: { read?: (path: string) => string; clock: Clock; sleep: (ms: number) => Promise<void>; sampleMs?: number }): Promise<HostPressureReading> {
+  const read = ports.read ?? ((path: string) => readFileSync(path, "utf8"));
+  const sampleMs = ports.sampleMs ?? 1_000;
+  const unread: string[] = [];
+  const attempt = <T>(name: string, fn: () => T | undefined): T | undefined => {
+    try {
+      const value = fn();
+      if (value === undefined) unread.push(`${name}: no such field`);
+      return value;
+    } catch (err) {
+      // the failure is named in `unread`, which holds the upgrade; undefined is never read as zero
+      unread.push(`${name}: ${errorText(err)}`);
+      return undefined;
+    }
+  };
+  const pswpin = (): number | undefined => {
+    const raw = /^pswpin\s+(\d+)/m.exec(read("/proc/vmstat"))?.[1];
+    return raw === undefined ? undefined : Number(raw);
+  };
+  const firstAt = ports.clock.now();
+  const first = attempt("/proc/vmstat pswpin", pswpin);
+  await ports.sleep(sampleMs);
+  const secondAt = ports.clock.now();
+  const second = first === undefined ? undefined : attempt("/proc/vmstat pswpin", pswpin);
+  const seconds = (secondAt - firstAt) / 1000;
+  let swapInPagesPerSec: number | undefined;
+  if (first !== undefined && second !== undefined) {
+    if (seconds > 0) swapInPagesPerSec = Math.max(0, second - first) / seconds;
+    else unread.push("/proc/vmstat pswpin: no time elapsed between samples");
+  }
+  const memKb = attempt("/proc/meminfo MemAvailable", () => {
+    const kb = /^MemAvailable:\s+(\d+)\s+kB/m.exec(read("/proc/meminfo"))?.[1];
+    return kb === undefined ? undefined : Number(kb);
+  });
+  const psi = attempt("/proc/pressure/memory", () => {
+    const text = read("/proc/pressure/memory");
+    const avg10 = (kind: string): number | undefined => {
+      const m = new RegExp(`^${kind} .*\\bavg10=([0-9.]+)`, "m").exec(text);
+      return m ? Number(m[1]) : undefined;
+    };
+    const some = avg10("some");
+    const full = avg10("full");
+    return some === undefined || full === undefined ? undefined : { some, full };
+  });
+  return {
+    atMs: secondAt,
+    ...(memKb !== undefined ? { memAvailableBytes: memKb * 1024 } : {}),
+    ...(swapInPagesPerSec !== undefined ? { swapInPagesPerSec } : {}),
+    ...(psi ? { psiSomeAvg10: psi.some, psiFullAvg10: psi.full } : {}),
+    unread,
+  };
+}
+
+/**
+ * Does a planned serve upgrade fit NOW? The candidate's peak lands on top of what is resident: MemAvailable
+ * already excludes the active generation (and every other container), so it is not counted twice. `freedBytes`
+ * is memory the transition releases BEFORE the candidate starts (the container path stops the old console first);
+ * the supervisor's overlap frees nothing. Unknown, stale or unread evidence is a named hold, never a fit.
+ */
+export function judgeServeUpgradeAdmission(i: {
+  reading: HostPressureReading | undefined;
+  thresholds: ServeUpgradeThresholds | { unread: string };
+  candidatePeakBytes: number | undefined;
+  peakBasis: string;
+  freedBytes?: number;
+  nowMs: number;
+}): ServeUpgradeAdmission {
+  const t = i.thresholds;
+  if ("unread" in t) return { admit: false, hold: "policy_unread", detail: t.unread };
+  const r = i.reading;
+  if (!r) return { admit: false, hold: "pressure_unread", detail: "no host pressure reading" };
+  if (r.unread.length > 0) return { admit: false, hold: "pressure_unread", detail: r.unread.join("; ") };
+  if (r.memAvailableBytes === undefined || r.swapInPagesPerSec === undefined || r.psiSomeAvg10 === undefined || r.psiFullAvg10 === undefined) {
+    return { admit: false, hold: "pressure_unread", detail: "a host pressure field is missing" };
+  }
+  const ageMs = i.nowMs - r.atMs;
+  if (!(ageMs >= 0 && ageMs <= t.staleMs)) return { admit: false, hold: "pressure_stale", detail: `reading is ${ageMs} ms old (bound ${t.staleMs} ms)` };
+  const peak = i.candidatePeakBytes;
+  if (peak === undefined || !Number.isFinite(peak) || peak <= 0) return { admit: false, hold: "peak_unknown", detail: i.peakBasis };
+  if (r.swapInPagesPerSec > t.swapInPagesPerSecMax) {
+    return { admit: false, hold: "swap_in", detail: `swap-in ${r.swapInPagesPerSec.toFixed(1)} pages/s > ${t.swapInPagesPerSecMax}` };
+  }
+  if (r.psiSomeAvg10 > t.psiSomeAvg10Max || r.psiFullAvg10 > t.psiFullAvg10Max) {
+    return { admit: false, hold: "psi", detail: `memory PSI some avg10 ${r.psiSomeAvg10} (max ${t.psiSomeAvg10Max}), full avg10 ${r.psiFullAvg10} (max ${t.psiFullAvg10Max})` };
+  }
+  const needBytes = t.hostReserveBytes + Math.max(0, peak - Math.max(0, i.freedBytes ?? 0));
+  if (r.memAvailableBytes < needBytes) {
+    return { admit: false, hold: "host_headroom", detail: `MemAvailable ${r.memAvailableBytes} B < need ${needBytes} B (reserve ${t.hostReserveBytes} + candidate ${peak} - freed ${i.freedBytes ?? 0})` };
+  }
+  return { admit: true, availableBytes: r.memAvailableBytes, needBytes, candidatePeakBytes: peak, peakBasis: i.peakBasis };
+}
+
 export function handoffSwitch(env: NodeJS.ProcessEnv, gensDir: string, exists: (path: string) => boolean = existsSync): () => boolean {
   return () => env[SERVE_HANDOFF_ENV] !== "off" && !exists(join(gensDir, HANDOFF_OFF_FILE));
 }
@@ -249,12 +438,18 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const clock = opts.clock ?? systemClock;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref()));
   const readyBoundMs = opts.readyBoundMs ?? STANDBY_READY_BOUND_MS;
+  const stillDegradedRows = Math.floor(readyBoundMs / COLD_START_STILL_DEGRADED_EVERY_MS);
   const pollMs = opts.pollMs ?? 500;
   const drainBackstopMs = opts.drainBackstopMs ?? DRAIN_BACKSTOP_MS;
   const deferMs = opts.deferMs ?? 60_000;
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
+  const workerShedIntervalMs = opts.workerShedIntervalMs ?? WORKER_SHED_MIN_INTERVAL_MS;
   const spacingBaseMs = opts.spacingBaseMs ?? 0;
   const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
+  const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
+  const upgradeThresholds = opts.upgradeThresholds ?? ((dir: string) => readServeUpgradeThresholds(dir));
+  /** A refused upgrade retries on the existing deferral, doubling per refusal; never later than the spacing base. */
+  const retryCapMs = Math.max(deferMs, SERVE_HANDOFF_SPACING_BASE_MS);
 
   let next = 0;
   let active: Generation | undefined;
@@ -263,8 +458,13 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let askedAgain = false;
   let stopping = false;
   let deferrals = 0;
+  let lastWorkerShedAt: number | undefined;
   let retryPending = false;
   let largestRss = 0;
+  let largestRssGeneration: number | undefined;
+  // W1-T8378: the largest positive high-water mark read from an active generation. Monotone: it only grows.
+  let observedPeak = 0;
+  let observedPeakGeneration: number | undefined;
   let crashes = 0;
   const failed = new Set<string>();
   let pressure: HandoffPressure | undefined;
@@ -336,19 +536,30 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     }
   };
 
-  /** The handoff gate's criteria, as names a promoted cold generation does not yet meet. */
-  const coldUnmet = async (generation: Generation): Promise<string[]> => {
+  /** The handoff gate's criteria a promoted cold generation does not yet meet, each with its readiness detail. */
+  const coldUnmet = async (generation: Generation): Promise<UnmetCriterion[]> => {
     const ready = await get(generation.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
     if (ready.status !== 200) return unmetCriteria(ready.body);
     const smoke = await smokeFailure(generation);
-    return smoke ? [smoke.criterion] : [];
+    return smoke ? [{ name: smoke.criterion, detail: smoke.detail }] : [];
   };
 
-  /** A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s. */
+  /**
+   * A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s.
+   * #8429: while it stays degraded, each interval says so with every unmet criterion's detail, never past the ready bound's worth.
+   */
   const watchColdStart = async (generation: Generation, startedAt: number): Promise<void> => {
+    let rows = 0;
+    let dueAt = startedAt + COLD_START_STILL_DEGRADED_EVERY_MS;
     while (generation === active && generation.isAlive() && !stopping) {
       await sleep(pollMs);
-      if ((await coldUnmet(generation)).length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: clock.now() - startedAt });
+      const unmet = await coldUnmet(generation);
+      const now = clock.now();
+      if (unmet.length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: now - startedAt });
+      if (now < dueAt || rows >= stillDegradedRows) continue;
+      rows += 1;
+      dueAt = now + COLD_START_STILL_DEGRADED_EVERY_MS;
+      opts.log("serve.cold_start_still_degraded", { sha: generation.slot.sha, unmet: unmet.map((c) => c.name), criteria: unmet, elapsedMs: now - startedAt, row: rows });
     }
   };
 
@@ -375,7 +586,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     // The standby's boot peak, not its RSS at this instant: both generations are resident until the drain ends.
     const pid = generation.process.pid;
     const sample = pid === undefined ? undefined : (peakRss(pid) ?? rss(pid));
-    if (sample !== undefined) largestRss = Math.max(largestRss, sample);
+    if (sample !== undefined && Number.isFinite(sample) && sample > largestRss) {
+      largestRss = sample;
+      largestRssGeneration = generation.id;
+    }
     return true;
   };
 
@@ -419,7 +633,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   };
 
   const reportAlone = async (generation: Generation, startedAt: number, readyMs: number): Promise<void> => {
-    const unmet = await coldUnmet(generation);
+    const unmet = (await coldUnmet(generation)).map((c) => c.name);
     if (unmet.length === 0) return;
     opts.log("serve.cold_start_degraded", { sha: generation.slot.sha, unmet, readyMs });
     void watchColdStart(generation, startedAt);
@@ -443,13 +657,102 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     return freeAfter;
   };
 
+  /** One reply of `type` from `generation`, or undefined if it exits or stays silent past the backstop. */
+  const awaitReply = (generation: Generation, type: string): Promise<GenerationMessage | undefined> =>
+    new Promise<GenerationMessage | undefined>((resolve) => {
+      generation.process.onMessage((message) => message.type === type && resolve(message));
+      void generation.exited.then(() => resolve(undefined));
+      void sleep(shedBackstopMs).then(() => resolve(undefined));
+    });
+
+  /**
+   * W1-T8873, tier 2: tier 1 frees only the main heap, while the active generation's rebuildable worker threads hold
+   * most of its resident bytes. A handoff already deferred for memory asks it to terminate them; it keeps answering
+   * from the bodies it holds. Free memory is measured again; {@link restoreWorkers} ends the degraded mode.
+   */
+  const shedWorkers = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
+    const startedAt = clock.now();
+    lastWorkerShedAt = startedAt;
+    generation.workersShedAt = startedAt;
+    const reply = awaitReply(generation, GENERATION_MESSAGES.shed_workers_done);
+    generation.process.send({ type: GENERATION_MESSAGES.shed_workers });
+    const done = await reply;
+    const freeAfter = freeMemory();
+    const before = done?.beforeBytes;
+    const after = done?.afterBytes;
+    opts.log("serve.handoff_shed", {
+      tier: 2, phase: "shed", generation: generation.id, answered: done !== undefined, workers: done?.workers, workerHeapBytes: done?.heapBytes, error: done?.error,
+      beforeBytes: before, afterBytes: after, freedBytes: typeof before === "number" && typeof after === "number" ? Math.max(0, before - after) : undefined,
+      freeBefore, freeAfter, needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
+    });
+    return freeAfter;
+  };
+
+  /** Ends tier 2's degraded mode on the active generation: its worker threads start again. A no-op when none was shed. */
+  const restoreWorkers = async (reason: string): Promise<void> => {
+    const generation = active;
+    const shedAt = generation?.workersShedAt;
+    if (generation === undefined || shedAt === undefined) return;
+    generation.workersShedAt = undefined;
+    if (stopping || !generation.isAlive()) return;
+    const reply = awaitReply(generation, GENERATION_MESSAGES.restore_workers_done);
+    generation.process.send({ type: GENERATION_MESSAGES.restore_workers, reason });
+    const done = await reply;
+    opts.log("serve.handoff_shed", { tier: 2, phase: "restored", generation: generation.id, reason, answered: done !== undefined, error: done?.error, degradedMs: clock.now() - shedAt });
+  };
+
   /**
    * What a standby needs: its boot peak. The active's own distance to its high-water mark is ledgered, not
    * added: GC swings its RSS over 1 GB in 10 s, yet the 07:33Z 2026-10-02 overlap passed with no memory.max event.
    */
-  const need = (generation: Generation): { needBytes: number; activeRssBytes?: number; activePeakBytes?: number } => {
+  const need = (generation: Generation): { needBytes?: number; activeRssBytes?: number; activePeakBytes?: number } => {
     const pid = generation.process.pid;
-    return { needBytes: largestRss, activeRssBytes: pid === undefined ? undefined : rss(pid), activePeakBytes: pid === undefined ? undefined : peakRss(pid) };
+    return { needBytes: candidatePeak(generation).bytes, activeRssBytes: pid === undefined ? undefined : rss(pid), activePeakBytes: pid === undefined ? undefined : peakRss(pid) };
+  };
+
+  /**
+   * W1-T8311: the candidate's peak, positively measured: the largest boot peak a generation of this supervisor
+   * reached (sampled at its promotion), else the active generation's own high-water mark, which covers its boot.
+   * Neither readable is UNKNOWN, never a zero-sized candidate.
+   */
+  const candidatePeak = (generation: Generation): { bytes?: number; basis: string } => {
+    const pid = generation.process.pid;
+    const hwm = pid === undefined ? undefined : peakRss(pid);
+    // A missing or invalid reading contributes nothing: never a zero, and never a shrink of a known peak.
+    if (hwm !== undefined && Number.isFinite(hwm) && hwm > observedPeak) {
+      observedPeak = hwm;
+      observedPeakGeneration = generation.id;
+    }
+    if (observedPeak > 0 && observedPeak >= largestRss) {
+      return { bytes: observedPeak, basis: `generation ${observedPeakGeneration} high-water mark (refreshed before this handoff, later than promotion)` };
+    }
+    if (largestRss > 0) return { bytes: largestRss, basis: `generation ${largestRssGeneration} boot peak (sampled at promotion)` };
+    return { basis: "no generation's boot peak or high-water mark was readable" };
+  };
+
+  /** Is the kept generation positively healthy: alive, with its readiness answering 200? */
+  const answering = async (generation: Generation): Promise<boolean> => {
+    if (!generation.isAlive()) return false;
+    const reply = await get(generation.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
+    return reply.status === 200;
+  };
+
+  /**
+   * W1-T8311: a memory refusal keeps the active generation. No standby is forked and the supervisor never exits
+   * for pressure: the retry re-runs the whole handoff, so `prepare` targets the newest main and an obsolete
+   * candidate is superseded. No lock is held while it waits; `preserved` is reported only for a generation that
+   * positively answers its readiness.
+   */
+  const deferUpgrade = async (from: Generation, slot: PreparedSlot, extra: Record<string, unknown>): Promise<void> => {
+    deferrals += 1;
+    const retryMs = Math.min(retryCapMs, deferMs * 2 ** Math.min(deferrals - 1, 20));
+    const preserved = await answering(from);
+    opts.log("serve.handoff_deferred", { reason: "memory", ...extra, ...need(from), deferrals, retryMs, sha: slot.sha, activeSha: from.slot.sha, preserved });
+    retryPending = true;
+    void sleep(retryMs).then(() => {
+      retryPending = false;
+      return supervisor.requestHandoff();
+    });
   };
 
   const legacyExit = async (reason: string): Promise<void> => {
@@ -493,20 +796,27 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       opts.log("serve.handoff_skipped", { sha: slot.sha, reason: slot.sha === from.slot.sha ? "already_serving" : "failed_before" });
       return;
     }
-    const short = (bytes: number | undefined): bytes is number => bytes !== undefined && largestRss > 0 && bytes < need(from).needBytes;
+    const peak = candidatePeak(from);
+    if (peak.bytes === undefined) return deferUpgrade(from, slot, { hold: "peak_unknown", detail: peak.basis });
+    const peakBytes = peak.bytes;
+    const short = (bytes: number | undefined): bytes is number => bytes !== undefined && bytes < peakBytes;
     let free = freeMemory();
     if (short(free)) free = await shedActive(from, free);
-    if (short(free)) {
-      deferrals += 1;
-      opts.log("serve.handoff_deferred", { reason: "memory", freeBytes: free, ...need(from), deferrals, sha: slot.sha });
-      if (deferrals >= 3) return legacyExit("memory");
-      retryPending = true;
-      void sleep(deferMs).then(() => {
-        retryPending = false;
-        return supervisor.requestHandoff();
-      });
-      return;
+    // Tier 2 only once an earlier attempt was deferred for memory, and at most once per interval.
+    if (short(free) && deferrals > 0 && (lastWorkerShedAt === undefined || clock.now() - lastWorkerShedAt >= workerShedIntervalMs)) {
+      free = await shedWorkers(from, free ?? 0);
+      // Still short: the workers come back before the deferral, so the generation is not left degraded for nothing.
+      if (short(free)) await restoreWorkers("still_short");
     }
+    if (short(free)) return deferUpgrade(from, slot, { hold: "container_headroom", freeBytes: free });
+    // W1-T8311: the cgroup sees only this container; the host's other containers share the same RAM.
+    const reading = await hostPressure().catch((err: unknown): undefined => {
+      opts.log("serve.host_pressure_unread", { reason: errorText(err) });
+      return undefined;
+    });
+    const admission = judgeServeUpgradeAdmission({ reading, thresholds: upgradeThresholds(from.slot.dir), candidatePeakBytes: peakBytes, peakBasis: peak.basis, nowMs: clock.now() });
+    if (!admission.admit) return deferUpgrade(from, slot, { hold: admission.hold, detail: admission.detail, freeBytes: free });
+    opts.log("serve.handoff_admitted", { sha: slot.sha, availableBytes: admission.availableBytes, needBytes: admission.needBytes, peakBasis: admission.peakBasis, deferrals });
     deferrals = 0;
     const up = await bringUp(slot);
     if (!up.generation) {
@@ -520,7 +830,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const drainMs = await drainOld(from, "handoff");
     lastDoneAt = clock.now();
     pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
-    opts.log("serve.handoff_done", { fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)) });
+    opts.log("serve.handoff_done", {
+      fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
+      ...(from.workersShedAt === undefined ? {} : { workersShedMs: lastDoneAt - from.workersShedAt }),
+    });
   };
 
   /** A promoted generation died on its own: replace it, from the previous slot when it is a different build. */
@@ -578,6 +891,8 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       }
       inFlight = handoff()
         .catch((err: unknown) => opts.log("serve.handoff_failed", { reason: errorText(err) }))
+        // Whatever ended the handoff without replacing the generation, its worker threads come back.
+        .then(() => restoreWorkers("handoff_abandoned"))
         .finally(() => {
           inFlight = undefined;
           if (askedAgain) {
@@ -598,10 +913,15 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   return supervisor;
 }
 
-function unmetCriteria(body: string): string[] {
-  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean }> } | undefined;
-  const names = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map((c) => c.name) : [];
-  return names.length > 0 ? names : ["ready"];
+interface UnmetCriterion {
+  name: string;
+  detail?: unknown;
+}
+
+function unmetCriteria(body: string): UnmetCriterion[] {
+  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean; detail?: unknown }> } | undefined;
+  const unmet = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map(({ name, detail }) => ({ name, detail })) : [];
+  return unmet.length > 0 ? unmet : [{ name: "ready", detail: report }];
 }
 
 function safeJson(text: string): unknown {

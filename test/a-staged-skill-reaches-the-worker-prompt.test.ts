@@ -348,6 +348,7 @@ test("W1-T3379 criterion 2: the report joins terminal outcomes by run id and ren
   assert.deepEqual(report.selected, {
     observed_eligible_runs: 1,
     terminal_runs: 1,
+    pending_merge_runs: 0,
     merged_runs: 1,
     harmful_terminal_runs: 0,
     outcomes: { merged: 1 },
@@ -355,6 +356,7 @@ test("W1-T3379 criterion 2: the report joins terminal outcomes by run id and ren
   assert.deepEqual(report.control, {
     observed_eligible_runs: 1,
     terminal_runs: 1,
+    pending_merge_runs: 1,
     merged_runs: 0,
     harmful_terminal_runs: 0,
     outcomes: { blocked_ci: 1 },
@@ -381,8 +383,8 @@ test("W1-T3379 criterion 4: zero selection, no improvement, and named harm retir
   assert.equal(zero.basis, "zero-selection");
 
   const noImprovement = buildSkillEffectivenessReport(effectivenessRows(
-    [...Array(5).fill("merged"), ...Array(5).fill("blocked_ci")],
-    [...Array(5).fill("merged"), ...Array(5).fill("blocked_ci")],
+    [...Array(5).fill("merged"), ...Array(5).fill("no_diff")],
+    [...Array(5).fill("merged"), ...Array(5).fill("no_diff")],
   ), "procedure");
   assert.equal(noImprovement.status, "RETIRE-CANDIDATE");
   assert.equal(noImprovement.basis, "not-better-than-control");
@@ -395,8 +397,8 @@ test("W1-T3379 criterion 4: zero selection, no improvement, and named harm retir
   assert.equal(harmful.basis, "named-harm-signal");
 
   const favorable = buildSkillEffectivenessReport(effectivenessRows(
-    [...Array(8).fill("merged"), ...Array(2).fill("blocked_ci")],
-    [...Array(3).fill("merged"), ...Array(7).fill("blocked_ci")],
+    [...Array(8).fill("merged"), ...Array(2).fill("no_diff")],
+    [...Array(3).fill("merged"), ...Array(7).fill("no_diff")],
   ), "procedure");
   assert.equal(favorable.status, "REVIEW-CANDIDATE");
   assert.equal(favorable.basis, "favorable-comparison");
@@ -445,7 +447,7 @@ test("W1-T3379: the report command reads one complete union and refuses malforme
       unread: [],
       unclassified: [],
       ok: true,
-      rows: effectivenessRows(Array(10).fill("merged"), Array(10).fill("blocked_ci")),
+      rows: effectivenessRows(Array(10).fill("merged"), Array(10).fill("no_diff")),
       torn: 0,
       filesRead: 1,
     };
@@ -604,10 +606,12 @@ test("W1-T3379 criterion 1: a real implement dispatch emits its run-correlated a
     const pathFiltered = selection.path_filtered_names as string[];
     const selected = selection.selected_names as string[];
     const omitted = selection.budget_omitted_names as string[];
+    const withheld = selection.withheld_names as string[];
+    assert.ok(Array.isArray(withheld), "the implement path always randomizes, so its row names what it withheld");
     assert.deepEqual([...eligible, ...pathFiltered].sort(), [...treeImplementNames].sort(),
       "every approved implement skill in the tree is either eligible or path-filtered");
-    assert.deepEqual([...selected, ...omitted].sort(), [...eligible].sort(),
-      "every eligible skill is either selected or budget-omitted, never both");
+    assert.deepEqual([...selected, ...omitted, ...withheld].sort(), [...eligible].sort(),
+      "every eligible skill is exactly one of selected, budget-omitted or withheld");
     assert.equal(selection.zero_selection, selected.length === 0);
     assert.equal(ledger.some((row) => row.step === "skills.injected"), true,
       "an approved selected skill still reaches the compatibility injection event");

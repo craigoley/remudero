@@ -1,0 +1,11 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -0,0 +1,6 @@
++- id: docs-index-stale-after-doc-edit
++  subsystem: ci
++  lifecycle: active
++  files: ["docs/**", "docs/docs-index.json", "docs/README.md", "scripts/generate-docs-index.mjs"]
++  fact: Regenerate docs/docs-index.json with `npm run --silent docs-index` after any docs edit and confirm docs-index:check prints OK.
++  src: "ci-learning:11388:docs-index-check"

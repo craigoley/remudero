@@ -133,6 +133,16 @@ export interface FeedbackEntry {
 export interface DecisionSummaryOption {
   label: string;
   consequence: string;
+  /** Optional (W1-T8826): which inbox verb this choice performs; escalation and triage omit it. */
+  intent?: OptionIntent;
+}
+
+/** What an inbox option does (W1-T8826): the route it maps onto is attached at serve time. */
+export const OPTION_INTENTS = ["approve", "decline", "reframe", "reply", "keep"] as const;
+export type OptionIntent = (typeof OPTION_INTENTS)[number];
+
+export function isOptionIntent(x: unknown): x is OptionIntent {
+  return typeof x === "string" && (OPTION_INTENTS as readonly string[]).includes(x);
 }
 
 /** A machine-written, plain-language decision card. `options` is 2-3 labelled choices — for an
@@ -146,6 +156,8 @@ export interface DecisionSummary {
   decision: string;
   /** 2-3 labelled choices, each with a one-line consequence. */
   options: DecisionSummaryOption[];
+  /** Optional (W1-T8829): what happens if nobody decides; escalation and triage omit it. */
+  if_nothing_happens?: string;
 }
 
 const DECISION_SUMMARY_MAX_HEADLINE_WORDS = 15;
@@ -159,6 +171,7 @@ function isBoundedString(x: unknown, maxLen: number): x is string {
 function isValidDecisionSummaryOptionShape(x: unknown): x is DecisionSummaryOption {
   if (typeof x !== "object" || x === null) return false;
   const o = x as Record<string, unknown>;
+  if (o.intent !== undefined && !isOptionIntent(o.intent)) return false;
   return isBoundedString(o.label, 80) && isBoundedString(o.consequence, 240) && !(o.consequence as string).includes("\n");
 }
 
@@ -181,8 +194,13 @@ export function validateDecisionSummary(x: unknown): DecisionSummary | null {
   const options = (o.options as DecisionSummaryOption[]).map((opt) => ({
     label: opt.label.trim(),
     consequence: opt.consequence.trim(),
+    ...(opt.intent === undefined ? {} : { intent: opt.intent }),
   }));
-  return { headline, what_happened: (o.what_happened as string).trim(), decision, options };
+  const card: DecisionSummary = { headline, what_happened: (o.what_happened as string).trim(), decision, options };
+  if (isBoundedString(o.if_nothing_happens, 300) && !(o.if_nothing_happens as string).includes("\n")) {
+    card.if_nothing_happens = (o.if_nothing_happens as string).trim();
+  }
+  return card;
 }
 
 /** What a decision-summary rung reads to write its plain-language card — free-text context
@@ -228,7 +246,9 @@ export function buildDecisionSummaryPrompt(input: SummarizeInput): string {
     "no markdown fence — shaped EXACTLY:",
     '{"headline": string (<=15 words), "what_happened": string (1-2 sentences),',
     ' "decision": string (an IMPERATIVE instruction, never a question),',
-    ' "options": [{"label": string, "consequence": string (one line)}, ...] (2-3 entries)}',
+    ' "options": [{"label": string, "consequence": string (one line), "intent": string (optional)}, ...] (2-3 entries)}',
+    'An optional "intent" on each option is one of "approve", "decline", "reframe", "reply", "keep"; include it when the item asks for it.',
+    'When the item below asks for it, add one more key, "if_nothing_happens": string (one line).',
     "",
     "ITEM:",
     input.context,
@@ -796,8 +816,8 @@ export interface CaptureFeedbackOptions {
   raw: string;
   attachments?: string[];
   origin?: FeedbackOrigin;
-  /** Explicit id, overriding the default random `fb-<epoch>-<hex>` id. Machine-origin intake
-   *  passes a deterministic id so a re-run's `existsSync` check is the whole dedup mechanism. */
+  /** Explicit id, overriding the default random `fb-<epoch>-<hex>` id. Machine-origin intake passes a deterministic
+   *  id, and an id whose entry exists returns it untouched, never rewriting a tracked entry (#11528). */
   id?: string;
   /** Passed verbatim to {@link landFeedback} after the write. A console route sets `stateRoot`: nothing
    *  lands here, the route stages the record with `queueFeedbackRecord` (W1-T5525), and the
@@ -845,6 +865,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, opts.land?.stateRoot);
     if (existing) return existing;
   }
+  if (opts.id !== undefined && existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";

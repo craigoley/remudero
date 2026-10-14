@@ -45,6 +45,7 @@ import {
   DEPLOY_RESTART_SCORE_THRESHOLD,
   IMAGE_BAKED_PATHS,
   accumulateDeployRestartPressure,
+  imageBakedPathsForRole,
   judgeDeployWorth,
   resetDeployRestartPressure,
   type DeployRestartPressureState,
@@ -512,17 +513,56 @@ export const IMAGE_SHA_CONTAINER = "remudero-daemon";
 export function bakedPathCommitsBehind(
   imageBuildSha: string | undefined,
   runGit: (args: readonly string[]) => string,
+  role?: string,
 ): number | undefined {
   const sha = imageBuildSha?.trim();
   if (!sha) return undefined;
   let out: string;
   try {
-    out = runGit(["rev-list", "--count", `${sha}..origin/main`, "--", ...IMAGE_BAKED_PATHS]);
+    // W1-T9094 — only the inputs THIS role executes from the image; an unknown role counts them all.
+    out = runGit(["rev-list", "--count", `${sha}..origin/main`, "--", ...imageBakedPathsForRole(role)]);
   } catch {
     return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
   }
   const n = Number.parseInt(String(out).trim(), 10);
   return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+export const IMAGE_DRIFT_SCOPED_STEP = "deploy.image_drift_scoped";
+
+/**
+ * W1-T9094 — {@link bakedPathCommitsBehind} for `role`, ledgering `deploy.image_drift_scoped` whenever
+ * the role's count differs from the full list's: the evidence for each recycle the scoping withheld.
+ * `files` names the withheld baked paths those commits touched.
+ */
+export function roleScopedBakedCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+  role: string | undefined,
+  log: (step: string, data?: Record<string, unknown>) => void,
+): number | undefined {
+  const behindRole = bakedPathCommitsBehind(imageBuildSha, runGit, role);
+  const rolePaths = imageBakedPathsForRole(role);
+  if (rolePaths === IMAGE_BAKED_PATHS) return behindRole;
+  const behindAll = bakedPathCommitsBehind(imageBuildSha, runGit);
+  if (behindAll === behindRole) return behindRole;
+  const withheld = IMAGE_BAKED_PATHS.filter((path) => !rolePaths.includes(path));
+  let files: string[] = [];
+  let filesError: string | undefined;
+  try {
+    const out = runGit(["log", "--format=", "--name-only", `${imageBuildSha!.trim()}..origin/main`, "--", ...withheld]);
+    files = [...new Set(String(out).split("\n").map((line) => line.trim()).filter(Boolean))].sort();
+  } catch (err) {
+    filesError = err instanceof Error ? err.message : String(err); // the counts stand; say why files is empty
+  }
+  log(IMAGE_DRIFT_SCOPED_STEP, {
+    role,
+    behind_all: behindAll ?? null,
+    behind_role: behindRole ?? null,
+    files,
+    ...(filesError === undefined ? {} : { files_error: filesError }),
+  });
+  return behindRole;
 }
 
 /**
@@ -1301,6 +1341,12 @@ const FETCH_LOCK_RETRY_PAUSE_MS = 250;
 
 // ── The orchestrated cycle (all side effects injected) ─────────────────────────
 
+/** W1-T8311: the serve launcher held its replace on a named admission refusal; nothing was changed. */
+export interface ServeReplaceHold {
+  held: string;
+  detail: string;
+}
+
 export interface DeployDeps {
   log: (step: string, data?: Record<string, unknown>) => void;
   now: () => number;
@@ -1342,8 +1388,10 @@ export interface DeployDeps {
   serveHandoffInProgress?: () => boolean | undefined;
   /** Is remudero-serve running and not restarting? */
   serveHealthy?: () => boolean | undefined;
-  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. */
-  replaceServe?: () => void;
+  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. W1-T8311: a fresh host
+   *  pressure refusal before the launcher's first destructive step RETURNS a {@link ServeReplaceHold}: the old
+   *  console is untouched, so it is a hold, never a failure. */
+  replaceServe?: () => void | ServeReplaceHold;
   servePolicyLastFailedAtMs?: () => number | undefined;
   recordServePolicyFailure?: (message: string, atMs: number) => void;
   clearServePolicyFailure?: () => void;
@@ -2391,7 +2439,9 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       } catch {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
-      const baked = bakedPathCommitsBehind(sha, (args) => git([...args]));
+      // W1-T9094 — a build (daemon) container is stale only for the image inputs it executes.
+      const role = process.env.RMD_RESOURCE_POLICY_ROLE;
+      const baked = roleScopedBakedCommitsBehind(sha, (args) => git([...args]), role, log);
       // W1-T4061 — a playwright-core version bump is image drift too, even though it lands only
       // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
       // one known signal must never be swallowed by the other going unreadable.

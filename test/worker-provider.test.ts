@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
-  CODEX_WORKER_STDERR_MAX_BYTES,
   CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
   CodexToolchainBlockedError,
   isCodexWorkerOutputLimitError,
@@ -924,7 +923,6 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
 test("W1-T3490 criterion 1: an over-budget Codex stream tears down its contained process exactly once", { timeout: 5000 }, async () => {
   for (const [stream, limitBytes] of [
     ["stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES],
-    ["stderr", CODEX_WORKER_STDERR_MAX_BYTES],
   ] as const) {
     const stdin = new PassThrough();
     const stdout = new PassThrough();

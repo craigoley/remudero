@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.13
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "flow-blocker:awaiting-review:dependabot PR"
@@ -16,7 +16,7 @@
   acceptance:
     - claim: "awaiting-review:dependabot PR is cleared by its owner without manual intervention"
       proof: "grep: test(\"W1-T6175: flow-awaiting-review-dependabot-pr clears without a person\" in test/flow-awaiting-review-dependabot-pr.test.ts"
-  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  note: "WITHDRAWN 2026-10-13 by operator ruling: priced by a defect. flow-remedy's isFleet missed the bare remudero-fleet login GraphQL returns for mergedBy, so fleet merges read as failed blocker episodes and inflated this cause; #11221 fixes it, and the gardener re-files any real cause from corrected pricing. Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
   rationale: |
     awaiting-review:dependabot PR cost 10.21 PR-hours; owner review-lane
     Owner review-lane failed to clear eligible episodes.
