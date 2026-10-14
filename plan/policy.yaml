@@ -887,9 +887,9 @@ sweep:
       value: "shadow"
       origin: "proposal"
     classModes:
-      value:
-        garden: "enforce"
-      origin: "proposal"
+      garden:
+        value: "enforce"
+        origin: "proposal"
     # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
     hostReserveMib:
       value: 2048

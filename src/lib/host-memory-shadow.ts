@@ -174,18 +174,18 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
   return out as HostMemoryBudgetPolicy;
 }
 
-function parseClassModes(path: string, row: Record<string, unknown>): Partial<Record<WorkerClass, ShadowMode>> {
-  proposalOrigin(path, row);
-  const value = mapping(`${path}.value`, row.value);
+function parseClassModes(path: string, block: Record<string, unknown>): Partial<Record<WorkerClass, ShadowMode>> {
   const out: Partial<Record<WorkerClass, ShadowMode>> = {};
-  for (const [workerClass, mode] of Object.entries(value)) {
+  for (const [workerClass, raw] of Object.entries(block)) {
     if (!WORKER_CLASSES.includes(workerClass as WorkerClass)) {
-      throw new Error(`policy.yaml: '${path}.value' names an unknown worker class ${JSON.stringify(workerClass)}.`);
+      throw new Error(`policy.yaml: '${path}' names an unknown worker class ${JSON.stringify(workerClass)}.`);
     }
-    if (!SHADOW_MODES.includes(mode as ShadowMode)) {
-      throw new Error(`policy.yaml: '${path}.value.${workerClass}' accepts only "off", "shadow" or "enforce", got ${JSON.stringify(mode)}.`);
+    const row = mapping(`${path}.${workerClass}`, raw);
+    proposalOrigin(`${path}.${workerClass}`, row);
+    if (!SHADOW_MODES.includes(row.value as ShadowMode)) {
+      throw new Error(`policy.yaml: '${path}.${workerClass}' accepts only "off", "shadow" or "enforce", got ${JSON.stringify(row.value)}.`);
     }
-    out[workerClass as WorkerClass] = mode as ShadowMode;
+    out[workerClass as WorkerClass] = row.value as ShadowMode;
   }
   return out;
 }

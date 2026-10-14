@@ -147,9 +147,9 @@ test("the shipped budget enforces garden children only and keeps builds, fixes a
   }
   const row = (value: unknown) => ({ value, origin: "proposal" });
   const base = block as Record<string, unknown>;
-  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: row({ gardener: "enforce" }) }), /unknown worker class/);
-  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: row({ garden: "block" }) }), /accepts only/);
-  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: { value: { garden: "enforce" }, origin: "ruling" } }), /origin/);
+  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: { gardener: row("enforce") } }), /unknown worker class/);
+  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: { garden: row("block") } }), /accepts only/);
+  assert.throws(() => parseHostMemoryBudgetPolicy({ ...base, classModes: { garden: { value: "enforce", origin: "ruling" } } }), /origin/);
   const { classModes: _dropped, ...withoutOverrides } = base;
   void _dropped;
   assert.equal(parseHostMemoryBudgetPolicy(withoutOverrides).classModes, undefined, "a block with no classModes has no override");
