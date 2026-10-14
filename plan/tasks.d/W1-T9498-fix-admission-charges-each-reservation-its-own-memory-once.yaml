@@ -1,0 +1,86 @@
+- id: W1-T9498
+  title: "FIX ADMISSION CHARGES EACH RESERVATION ITS OWN MEMORY, ONCE — `createSweepFixAdmissionController` cuts the memory reading into whole 2,048 MiB fix slots, removes a whole slot per review reservation for the controller's whole life, and keeps charging admitted fixes and reviews whose workers are already inside the reading; at 6,652 MiB available, floor 3,072, 0 active workers and 1 review reserved it admitted no fix, and on 2026-10-14 04:07-16:07Z fix admission read 0 for 57% (light) and 66% (full) of the minutes a repair was queued"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what a review reservation and an admitted fix cost against the fix admission's memory reading
+  band_meaning: span
+  origin: "operator session 2026-10-14: flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.txt, recommendation 1); standing rulings: no hard fixed thresholds, automated flow, never raise core memory.max, lanes come from the memory governor"
+  plan_refs: [W1-T7243, W1-T2931, W1-T8401, W1-T9358, W1-T7094, W1-T9097, W1-T9297]
+  files:
+    - src/lib/sweep.ts
+    - test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts
+    # existing admission tests that may encode slot-count arithmetic; each changes only if red without the change
+    - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
+  status: queued
+  priority: 1  # measured: red share 9.2% -> 25.8% and red -> first remedy 5.3 -> 39 min (10-13 vs 10-14 re-measure)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 04:07-16:07Z (core ledger union streamed read-only from the Azure host,
+    ~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.txt section 5):
+      - `sweep.fix_capacity` with fix_admissions_available 0 and queue_depth > 0: light 384 of 674 covered minutes,
+        full 370 of 561 (the night before: 41% and 31%). 68 `sweep.disposed` "live host capacity exhausted" rows over
+        17 PRs. `fix.dispatch` 7 in the window against 31 in the 10 h before. Red share of PR-minutes 25.8% (10-13:
+        9.2%); red -> first remedy median 39.3 min (10-13: 5.3).
+      - #11559 (W1-T3956): 28 `fix.progress_judged` continue verdicts at round_count 0 from 03:44Z to 11:11Z and no
+        round until 11:14Z.
+    RE-READ for this filing: the `sweep.fix_capacity` rows the 10-14 rotations and live file retain (368 in the window,
+    04:19-16:06Z; per-step retention keeps a subset). 131 read 0 admissions with a repair queued and a pressure reading.
+    Against a fix at 2,048 MiB and a review at its learned estimate (1,220 MiB, `memory_budget.shadow` claims 16:38Z):
+      - 8 rows admit a fix on the review charge alone, e.g. 08:46:34.080Z light: available 6,652, floor 3,072,
+        active_workers 0, review_reservations 1 (headroom 3,580: one whole slot, minus one slot = 0).
+      - 78 rows have headroom for a fix only if their reserved workers are already resident; 45 of them read at least as
+        many active workers as reservations, e.g. 04:48:14.951Z full: available 5,293, floor 3,072, active_workers 2,
+        review_reservations 2.
+      - 45 rows are short of one fix under any accounting. This task does not admit those; the floor binds there.
+    READ on origin/main f07a85601 (symbols):
+      - `createSweepFixAdmissionController`, `refresh`: `free = pressureWorkers(pressure, DEFAULT_ESTIMATE_MIB.fix)`,
+        i.e. floor((availableMib - floorMib) / 2048), then `available = free - input.reviewReservations -
+        reservations`. A review costs a whole fix slot, though `DEFAULT_ESTIMATE_MIB.review` is 1,024 and a learned
+        estimate exists per class (`classEstimate`, src/lib/host-memory-learning.ts).
+      - `input.reviewReservations` is a number fixed when the controller is built (light: `spawning.length`; full:
+        `Math.min(fullReviewQueueDepth, fullReviewLanes)`). It is never reduced when a review starts or settles, while
+        `refresh` re-reads MemAvailable on every claim, so a running review is charged twice. An admitted fix's
+        `reservations` entry stays until its release (its CI wait or its end), with its worker resident meanwhile.
+      - The shadow budget already states the rule this misses (src/lib/host-memory-shadow.ts module doc, "NO DOUBLE
+        COUNT"): a reservation counts only its unrealized part, max(0, estimate - the tree's current rss+swap).
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 14 open PR heads (2026-10-14 16:21Z) for
+    createSweepFixAdmissionController, fix_admissions_available, review_reservations, "capacity exhausted",
+    pressureWorkers and "fix admission". Control: "fix admission" reads 5 shards on main and on 13 heads (4 on one);
+    no head reads more than main for any term. W1-T7243 built the controller; W1-T8401 and W1-T9358 reclaim before a
+    short reading (they change the reading, not the charge); W1-T9359 names a memory hold on the WIP governor's row;
+    W1-T9097 sizes build lanes; W1-T9297 changes the judge's input. None changes what a reservation costs here.
+  design: |
+    Operator rulings: no hard fixed threshold, never raise core memory.max, lanes come from the memory governor.
+    1. ACCOUNT IN MiB. With a pressure reading, headroom is `availableMib - floorMib` of the binding pool (as today).
+       A fix claim is admitted when the headroom left after every outstanding charge covers one fix at the fix class's
+       learned estimate (`classEstimate("fix")`, the class default when unmeasured, said so on the row).
+    2. EACH RESERVATION AT ITS OWN ESTIMATE. A review reservation is charged at the review class's learned estimate,
+       not a fix slot. An admitted fix is charged at the fix estimate.
+    3. RESERVATIONS ARE READ LIVE, AND CHARGED ONCE. The controller reads its reservations on each refresh, not a count
+       fixed at construction: a review reservation ends when its review settles. A reservation whose worker is running
+       is charged only its unrealized part, max(0, estimate - its tree's current rss+swap), the shadow budget's rule.
+       A reservation whose worker has not started, or whose residency cannot be read, is charged its whole estimate.
+    4. The stand-in path (no pressure reading) keeps `hostWorkerBudget - activeWorkers` worker counting. The
+       `nothing-to-wait-for` tier still admits one. An unreadable pressure still admits none.
+    5. `sweep.fix_capacity` adds `headroom_mib`, `review_charge_mib`, `fix_charge_mib`, `fix_estimate_mib` and its
+       source, so a refusal row shows the arithmetic it refused on. The refusal reason names MiB, not slot counts.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below, using the 08:46:34 and 04:48:14
+    rows above as fixtures with injected estimates and residency.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts"
+    - claim: "at 6,652 MiB available, floor 3,072, 0 active workers and 1 unstarted review at a 1,220 MiB review estimate, a fix at 2,048 MiB is admitted"
+      proof: 'grep: test("W1-T9498: a review reservation is charged its own estimate, not a fix slot" in test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts'
+    - claim: "a reservation whose worker is resident is charged only its unrealized part, one not yet started its whole estimate, and a settled review nothing"
+      proof: 'grep: test("W1-T9498: a resident reservation is charged only its unrealized part" in test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts'
+    - claim: "a refusal row names the headroom and the charges it refused on"
+      proof: 'grep: test("W1-T9498: the capacity row shows the MiB arithmetic" in test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts'
+  falsifier: |
+    Keep `free - reviewReservations - reservations` over whole fix slots: the 08:46:34 fixture admits 0 fixes and the
+    first test fails. Keep a fixed review count, or charge a running reservation its whole estimate: the 04:48:14
+    fixture with two resident reviews stays refused and the second test fails. Charge an unstarted reservation zero:
+    the second test's not-started half admits over the headroom and fails.

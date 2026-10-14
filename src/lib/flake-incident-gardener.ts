@@ -124,14 +124,21 @@ export function flakeIncidentOriginFile(origin: string): string | undefined {
   return origin.slice("flake-incident:".length).split("#")[0];
 }
 
-/** The repo paths a test file's own relative imports name — the source its failure could come from. */
+/** The repo paths a test file's own relative imports name — the source its failure could come from.
+ *  A `.js` specifier names its `.ts` source (this repo's ESM convention). A `.mjs` specifier names a
+ *  real `.mjs` file (scripts/*.mjs), so it is kept as written, beside the `.mts` a TypeScript build
+ *  would resolve it to: rewriting it to `.ts` named a file that does not exist, and the ci-friction
+ *  gardener then had no source owner for the failing test (#11716). */
 export function testSourcePaths(file: string, source: string | undefined): string[] {
   if (source === undefined) return [];
   const out = new Set<string>();
   const specifier = /(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
   for (const match of source.matchAll(specifier)) {
     const resolved = normalize(join(dirname(file), match[1]!));
-    out.add(resolved.replace(/\.(?:js|mjs)$/, ".ts"));
+    if (resolved.endsWith(".mjs")) {
+      out.add(resolved);
+      out.add(resolved.replace(/\.mjs$/, ".mts"));
+    } else out.add(resolved.replace(/\.js$/, ".ts"));
     if (!/\.\w+$/.test(resolved)) out.add(`${resolved}.ts`);
   }
   return [...out].sort();
