@@ -1,4 +1,4 @@
-/** Exact-head metadata policy. No API writes, dispatch, source execution or notification.
+/** Shared runtime exact-head metadata policy. No API writes, dispatch, source execution or notification.
  * UNKNOWN is never a reusable merge permission. Production adapter must re-read HEAD
  * immediately before its write and attest complete file/check pagination from trusted APIs. */
 export const CODE_SCANNING_MERGE_POLICY = 'exact-head-new-high-critical-v1';

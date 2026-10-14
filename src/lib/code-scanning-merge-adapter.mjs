@@ -5,7 +5,7 @@ export const SECURITY_METADATA_MAX_PAGES = 30; // BACKSTOP: complete evidence or
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 
-/** Trusted API metadata ONLY. Caller supplies an authenticated, bounded HTTP reader;
+/** Shared runtime trusted API metadata ONLY. Caller supplies an authenticated, bounded HTTP reader;
  * no PR checkout, uploaded artifact, evaluator, install, merge or dispatch is executed.
  * SHIPS-UNWIRED: GitHub producer/protection activation awaits main adoption and smoke evidence.
  */

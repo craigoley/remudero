@@ -8412,7 +8412,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^scripts/acceptance-author-gate\\.mjs$",
   "^scripts/ci-gate-from-contract\\.mjs$",
   "^scripts/security-merge-producer\\.mjs$",
-  "^scripts/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
+  "^src/lib/code-scanning-merge-(?:policy|adapter)\\.mjs$",
   "^scripts/merge-queue-review-attest\\.mjs$",
   // W1-T3386: the proof-discrimination gate compares acceptance proofs against the PR head and merge base, and a
   // change to it changes which stale proofs CI refuses.
