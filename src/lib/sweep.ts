@@ -247,6 +247,7 @@ import {
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
+  prFilesRestArgs,
   rollupFromRest,
   needsWorkflowIdentity,
   runsForHeadRestArgs,
@@ -1910,6 +1911,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
+  "mainInheritance", // W1-T8042
   // W1-T4817: finds a main commit no workflow ran on and dispatches its workflows at main's head.
   "reconcileMainRunGaps",
   "readFleetState",
@@ -2056,6 +2058,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
+  | "mainInheritance"
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
@@ -4355,6 +4358,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // lane may still use a valid SHA when the timestamp is absent; the newer lane cannot.
     readMainRepair,
     readMainTip: async () => (await readMainCommit())?.sha,
+    mainInheritance: restMainInheritanceReads(owner, repo, readJsonImpl),
 
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
@@ -8343,6 +8347,270 @@ export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readon
   }
   const name = environmentFaultCheckName(pr) ?? "a required check";
   return `red cause: environment — ${name} repeats one message across its whole log tail, an environment fault rather than a diff defect; no strike spent`;
+}
+
+// ── W1-T8042 — a red shared across open PRs is main's, and is repaired on main once ──────────────
+// 2026-10-11: after #10834 merged, eight open PRs went red on ci-shards with one pure-test-pool hang.
+// Each was worked as its own red (fix strikes, shard re-runs) while main's own runs were cancelled
+// before concluding, so W1-T5490's base-red read main as undetermined. The one plentiful observation
+// was the same check and signature on the other open PRs; this classifier reads it.
+
+/**
+ * The red a repair is for, independent of which merge the locator names: the failing checks (a
+ * matrix shard's index folded away) and what the failing logs said — the gates they named BLOCKED
+ * and the tests they reported `not ok`. `detail` is absent when no failing log was readable, and
+ * the signature is then the failing check set alone.
+ */
+export interface MainRedSignature {
+  readonly checks: readonly string[];
+  readonly detail?: readonly string[];
+}
+
+const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const SHARD_INDEX = / \(\d+\/\d+\)$/;
+const BLOCKED_GATE = [/^main-ceiling-drift: (\S+) BLOCKED\b/, /^([A-Za-z0-9_.-]+): BLOCKED\b/];
+const NOT_OK_TITLE = /^\s*not ok\s+\d+\s+-\s+(.+?)\s*$/i;
+
+/** The {@link MainRedSignature} of failing checks `failingChecks` whose logs `failures` were read. */
+export function mainRedSignature(failingChecks: readonly string[], failures: readonly CiFailure[] | undefined): MainRedSignature {
+  const checks = [...new Set(failingChecks.map((name) => name.replace(SHARD_INDEX, "")))].sort();
+  const readable = (failures ?? []).filter((failure) => !failure.logUnavailable && failure.logTail.trim() !== "");
+  if (readable.length === 0) return { checks };
+  const detail = new Set<string>();
+  for (const failure of readable) {
+    for (const raw of failure.logTail.split("\n")) {
+      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const gate = BLOCKED_GATE.map((pattern) => pattern.exec(line)?.[1]).find((name) => name !== undefined);
+      if (gate !== undefined) detail.add(`BLOCKED ${gate}`);
+      const title = NOT_OK_TITLE.exec(line)?.[1];
+      if (title !== undefined) detail.add(`not ok ${title}`);
+    }
+  }
+  return { checks, detail: [...detail].sort() };
+}
+
+/** One red, or not: the same failing checks, and the same log detail wherever both sides read one. */
+export function mainRedSignaturesMatch(a: MainRedSignature, b: MainRedSignature): boolean {
+  const same = (x: readonly string[], y: readonly string[]) => x.length === y.length && x.every((v, i) => v === y[i]);
+  return same(a.checks, b.checks) && (a.detail === undefined || b.detail === undefined || same(a.detail, b.detail));
+}
+
+/** W1-T8042 — a PR-side red is part of `whole` when its checks are among whole's and its log detail too:
+ *  main's own red also names the aggregator (`ci`) and every shard's detail at once. */
+export function mainRedCovers(part: MainRedSignature, whole: MainRedSignature): boolean {
+  return part.checks.every((check) => whole.checks.includes(check)) &&
+    (part.detail === undefined || whole.detail === undefined || part.detail.every((line) => whole.detail!.includes(line)));
+}
+
+export function describeMainRed(red: MainRedSignature): string {
+  return `${red.checks.join(", ")}${red.detail ? ` [${red.detail.join("; ") || "no gate or test named"}]` : " [no log read]"}`;
+}
+
+export function mainRedOfRow(line: Record<string, unknown>): MainRedSignature | undefined {
+  if (!Array.isArray(line.red_checks)) return undefined;
+  return {
+    checks: line.red_checks.map(String),
+    ...(Array.isArray(line.red_detail) ? { detail: line.red_detail.map(String) } : {}),
+  };
+}
+
+export function mainRedFields(red: MainRedSignature): Record<string, unknown> {
+  return { red_signature: describeMainRed(red), red_checks: [...red.checks], red_detail: red.detail ? [...red.detail] : null };
+}
+
+/** The ledger row that hands a shared red to main repair. main-health-rung.ts folds an `opened` row into
+ *  the same record main's own red would open; an `advanced` row only adds PRs to it. */
+export const MAIN_INHERITED_RED_STEP = "main.repair.inherited";
+
+const SHARED_RED_TEST_FILE = /test\/[\w./-]+\.test\.[cm]?[jt]s/g;
+
+/** One failing check's signature: its family (shard index folded) with the tests and gates its log
+ *  names, plus W1-T8040's pool/timeout signature. `files` are the test files the log names. */
+export interface SharedRedFailure {
+  readonly key: string;
+  readonly red: MainRedSignature;
+  readonly files: readonly string[];
+}
+
+/** `undefined` when the log names no test, gate or pool failure: such a red cannot be matched. */
+export function sharedRedFailureOf(failure: CiFailure): SharedRedFailure | undefined {
+  const red = mainRedSignature([failure.name], [failure]);
+  const pooled = deterministicTimeoutSignature(failure.logTail);
+  if ((red.detail ?? []).length === 0 && pooled === undefined) return undefined;
+  const named = failure.logTail.match(SHARED_RED_TEST_FILE) ?? [];
+  const files = [...new Set([...baseReproductionFiles([failure]), ...named])].sort();
+  return { key: [red.checks[0], ...(red.detail ?? []), pooled ?? ""].join(" | "), red, files };
+}
+
+/** An aggregator (or ci-gate) that failed beside a check it aggregates: it carries no red of its own. */
+function aggregatesAnotherFailure(name: string, failures: readonly CiFailure[]): boolean {
+  if (name === "ci-gate") return failures.some((f) => f.name !== name);
+  const entry = CI_MATRIX_AGGREGATORS.find((a) => a.aggregator === name);
+  return entry !== undefined && failures.some((f) => entry.constituent.test(f.name));
+}
+
+/** The reads the classification needs. Each `undefined` is unreadable, which keeps that PR on its own lane. */
+export interface MainInheritanceReads {
+  changedFiles(pr: OpenPrView): Promise<readonly string[] | undefined>;
+  mergeBase(pr: OpenPrView): Promise<string | undefined>;
+  /** True when main commit `ancestor` is `of` or in its history. */
+  contains(of: string, ancestor: string): Promise<boolean>;
+}
+
+export interface MainInheritedRed {
+  readonly key: string;
+  readonly red: MainRedSignature;
+  readonly files: readonly string[];
+  /** The PRs carrying it whose own diffs touch none of `files`. */
+  readonly prs: ReadonlyArray<{ readonly prNumber: number; readonly headSha: string; readonly mergeBase: string }>;
+  /** Design 1b's witness: the affected merge base every other affected base contains and no green base does. */
+  readonly candidateSha: string;
+  readonly logExcerpt: string;
+}
+
+export interface MainInheritedClassification {
+  readonly reds: readonly MainInheritedRed[];
+  /** The PRs whose EVERY red is main-inherited, with the reds each carries: the stand-down set. */
+  readonly standDown: ReadonlyMap<number, readonly MainInheritedRed[]>;
+}
+
+/**
+ * A signature is MAIN-INHERITED when (a) it is red on more than one open PR whose own diff touches no
+ * file it names, and (b) one main commit is in every such PR's merge base and in no merge base of a PR
+ * green this pass (nor main's last green run, `mainGreenSha`). A PR whose diff touches a named file is
+ * never counted: it may be the cause, so it keeps its own lane. Structural, never a tuned count; with
+ * no green base to compare against, nothing is classified.
+ */
+export async function classifyMainInheritedReds(
+  prs: readonly OpenPrView[],
+  reads: MainInheritanceReads,
+  mainGreenSha?: string,
+): Promise<MainInheritedClassification> {
+  const ownReds = new Map<number, { whole: boolean; keys: Set<string> }>();
+  const groups = new Map<string, { failure: SharedRedFailure; logTail: string; prs: OpenPrView[] }>();
+  for (const pr of prs) {
+    if (!isBlockedCi(pr)) continue;
+    const failures = pr.ciFailures ?? [];
+    const own = failures.filter((f) => !aggregatesAnotherFailure(f.name, failures));
+    const named = new Set(failures.map((f) => f.name));
+    const keys = new Set<string>();
+    let whole = own.length > 0 && (pr.redRequiredChecks ?? []).every((n) => named.has(n) || aggregatesAnotherFailure(n, failures));
+    for (const failure of own) {
+      const shared = sharedRedFailureOf(failure);
+      if (!shared) { whole = false; continue; }
+      if (keys.has(shared.key)) continue;
+      keys.add(shared.key);
+      const group = groups.get(shared.key) ?? { failure: shared, logTail: failure.logTail, prs: [] };
+      group.prs.push(pr);
+      groups.set(shared.key, group);
+    }
+    ownReds.set(pr.prNumber, { whole, keys });
+  }
+  const memo = <T>(cache: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> => {
+    if (!cache.has(key)) cache.set(key, read());
+    return cache.get(key)!;
+  };
+  const changedCache = new Map<string, Promise<readonly string[] | undefined>>();
+  const baseCache = new Map<string, Promise<string | undefined>>();
+  const containsCache = new Map<string, Promise<boolean>>();
+  const changedOf = (pr: OpenPrView) =>
+    pr.changedFiles !== undefined ? Promise.resolve(pr.changedFiles) : memo(changedCache, `${pr.prNumber}@${pr.headSha}`, () => reads.changedFiles(pr));
+  const baseOf = (pr: OpenPrView) =>
+    pr.currentMergeBaseSha !== undefined ? Promise.resolve(pr.currentMergeBaseSha) : memo(baseCache, `${pr.prNumber}@${pr.headSha}`, () => reads.mergeBase(pr));
+  const contains = (of: string, ancestor: string) =>
+    of === ancestor ? Promise.resolve(true) : memo(containsCache, `${of}>${ancestor}`, () => reads.contains(of, ancestor));
+  let greenBases: string[] | undefined;
+  const reds: MainInheritedRed[] = [];
+  for (const [key, group] of groups) {
+    if (group.prs.length < 2) continue;
+    const affected: Array<{ prNumber: number; headSha: string; mergeBase: string }> = [];
+    for (const pr of group.prs) {
+      const changed = await changedOf(pr);
+      if (changed === undefined || changed.some((path) => group.failure.files.includes(path))) continue;
+      const mergeBase = await baseOf(pr);
+      if (mergeBase !== undefined) affected.push({ prNumber: pr.prNumber, headSha: pr.headSha, mergeBase });
+    }
+    if (affected.length < 2) continue;
+    if (greenBases === undefined) {
+      const read = await Promise.all(prs.filter((pr) => pr.checksState === "green").map(baseOf));
+      greenBases = [...new Set([...read.filter((sha): sha is string => sha !== undefined), ...(mainGreenSha ? [mainGreenSha] : [])])];
+    }
+    if (greenBases.length === 0) continue;
+    const bases = [...new Set(affected.map((a) => a.mergeBase))];
+    let candidate: string | undefined;
+    for (const base of bases) {
+      if ((await Promise.all(bases.map((other) => contains(other, base)))).every(Boolean)) { candidate = base; break; }
+    }
+    if (candidate === undefined) continue;
+    const witness = candidate;
+    if ((await Promise.all(greenBases.map((green) => contains(green, witness)))).some(Boolean)) continue;
+    reds.push({ key, red: group.failure.red, files: group.failure.files, prs: affected, candidateSha: witness,
+      logExcerpt: group.logTail.slice(-2000) });
+  }
+  const standDown = new Map<number, MainInheritedRed[]>();
+  for (const [prNumber, own] of ownReds) {
+    if (!own.whole) continue;
+    const carried = reds.filter((red) => red.prs.some((p) => p.prNumber === prNumber));
+    if (carried.length > 0 && [...own.keys].every((key) => carried.some((red) => red.key === key))) standDown.set(prNumber, carried);
+  }
+  return { reds, standDown };
+}
+
+/** One page of `pulls/N/files` holds at most this many rows; a full page may be truncated. */
+const PR_FILES_PAGE = 100;
+
+/** The production reads: one PR file list, and two `compare` reads (`main...head`, `ancestor...of`). */
+export function restMainInheritanceReads(
+  owner: string,
+  repo: string,
+  readJson: (args: string[]) => Promise<unknown>,
+): MainInheritanceReads {
+  const compare = async (base: string, head: string) =>
+    (await readJson(compareRestArgs(owner, repo, base, head))) as { status?: string; merge_base_commit?: { sha?: string } } | undefined;
+  return {
+    changedFiles: async (pr) => {
+      const rows = await readJson(prFilesRestArgs(owner, repo, pr.prNumber));
+      // A diff this reader cannot see whole is unreadable, never disjoint.
+      if (!Array.isArray(rows) || rows.length >= PR_FILES_PAGE) return undefined;
+      return rows.map((row: { filename?: unknown }) => row.filename).filter((f): f is string => typeof f === "string");
+    },
+    mergeBase: async (pr) => (await compare("main", pr.headSha))?.merge_base_commit?.sha,
+    contains: async (of, ancestor) => {
+      const status = (await compare(ancestor, of))?.status;
+      return status === "ahead" || status === "identical";
+    },
+  };
+}
+
+/** The handed-over and located reds main repair holds, by offending sha, with the PRs each was handed. */
+export function mainRepairRedsFromLedger(
+  lines: readonly Record<string, unknown>[],
+): Array<{ offendingSha: string; red: MainRedSignature; prs: Map<number, string>; resolved: boolean }> {
+  const bySha = new Map<string, { offendingSha: string; red: MainRedSignature; prs: Map<number, string>; resolved: boolean }>();
+  for (const line of lines) {
+    const sha = line.offending_sha;
+    if (typeof sha !== "string") continue;
+    const opens = line.step === "main.repair.located" || (line.step === MAIN_INHERITED_RED_STEP && line.outcome === "opened");
+    const red = mainRedOfRow(line);
+    if (opens && red && (!bySha.get(sha) || bySha.get(sha)!.resolved)) bySha.set(sha, { offendingSha: sha, red, prs: new Map(), resolved: false });
+    const record = bySha.get(sha);
+    if (!record) continue;
+    if (line.step === "main.repair.resolved") record.resolved = true;
+    if (line.step !== MAIN_INHERITED_RED_STEP || !Array.isArray(line.inherited_prs)) continue;
+    for (const pr of line.inherited_prs as Array<Record<string, unknown>>) {
+      if (typeof pr?.pr_number === "number" && !record.prs.has(pr.pr_number)) record.prs.set(pr.pr_number, String(pr.first_seen_at ?? line.ts ?? ""));
+    }
+  }
+  return [...bySha.values()];
+}
+
+/** The `sweep.disposed` stand-down sentence: the signature, and the other PRs sharing it. */
+export function describeMainInherited(pr: OpenPrView, reds: readonly MainInheritedRed[]): string {
+  const each = reds.map((red) => {
+    const others = red.prs.filter((p) => p.prNumber !== pr.prNumber).map((p) => `#${p.prNumber}`).join(", ");
+    return `${describeMainRed(red.red)} is also red on ${others}, whose diffs touch none of the files it names, and main ${red.candidateSha.slice(0, 12)} is in every one's base and no green base`;
+  });
+  return `red cause: main-inherited — ${each.join("; ")}; handed to main repair; no strike, re-run or refresh spent`;
 }
 
 /** W1-T2620 — per PR, the `main_tip_sha` most recently recorded on a base-caused `sweep.disposed`
@@ -12405,6 +12673,8 @@ export interface SweepDeps {
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
    *  caught identically, FAIL QUIET, never a false "released" ledger line. */
   releaseBaseCausedStandDown?: (pr: OpenPrView, mainTipSha: string) => void | Promise<void>;
+  /** W1-T8042 — the reads {@link classifyMainInheritedReds} takes. Omitted, no red is classified main-inherited. */
+  mainInheritance?: MainInheritanceReads;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -15031,6 +15301,30 @@ export async function runSweep(
   // W1-T4351 — both folds read once per pass; `baseRedRefreshPr` holds this pass's ONE refresh.
   const mainLatestRun = mainLatestRunFromLedger(ledgerLines);
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
+  // W1-T8042 — ONE correlation per pass across every open PR; each shared red is handed to main repair once.
+  let mainInherited: MainInheritedClassification = { reds: [], standDown: new Map() };
+  if (deps.mainInheritance) {
+    try {
+      mainInherited = await classifyMainInheritedReds(openPrs, deps.mainInheritance,
+        mainLatestRun?.state === "green" ? mainLatestRun.decidedBySha : undefined);
+    } catch (error) {
+      // An unreadable merge base or diff proves nothing shared: every red keeps its own lane this pass.
+      log("sweep.main_inherited.unreadable", { reason: String((error as Error)?.message ?? error) });
+    }
+    const held = mainRepairRedsFromLedger(ledgerLines);
+    for (const red of mainInherited.reds) {
+      const owner = held.findLast((record) => !record.resolved && mainRedCovers(red.red, record.red));
+      const joined = owner ? red.prs.filter((p) => !owner.prs.has(p.prNumber)) : red.prs;
+      if (owner && joined.length === 0) continue;
+      const seenAt = clockFromMillisFn(() => now).iso();
+      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: MAIN_INHERITED_RED_STEP,
+        outcome: owner ? "advanced" : "opened", offending_sha: owner?.offendingSha ?? red.candidateSha,
+        candidate_sha: red.candidateSha, record_key: red.key, ...mainRedFields(red.red), test_files: [...red.files],
+        inherited_prs: red.prs.map((p) => ({ pr_number: p.prNumber, head_sha: p.headSha, merge_base: p.mergeBase,
+          first_seen_at: owner?.prs.get(p.prNumber) ?? seenAt })),
+        log_excerpt: red.logExcerpt });
+    }
+  }
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
   // W1-T7848: one `main.rule_checks.observed` row per main sha and suite set, across passes.
@@ -17483,6 +17777,18 @@ export async function runSweep(
                   break;
                 }
                 if (!await askProgress()) break;
+              }
+              // W1-T8042 — a PR whose every red is main-inherited stands down for main repair: no fix
+              // strike, job re-run or base refresh. Re-derived each pass, so a changed signature releases it.
+              const inheritedReds = mainInherited.standDown.get(pr.prNumber);
+              if (inheritedReds) {
+                acted = false;
+                baseRedStandDownPrs.add(pr.prNumber);
+                standDownReason = describeMainInherited(pr, inheritedReds);
+                extraDisposedFields = { ...extraDisposedFields, red_cause: "main-inherited",
+                  main_inherited: inheritedReds.map((red) => ({ red_signature: describeMainRed(red.red),
+                    candidate_sha: red.candidateSha, pr_numbers: red.prs.map((p) => p.prNumber) })) };
+                break;
               }
               // W1-T527 — classify the evidence in hand before selecting a worker.
               // Only base-caused and environment stand down here.
