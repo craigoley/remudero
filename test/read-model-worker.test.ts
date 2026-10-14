@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import type { Clock } from "../src/lib/clock.js";
@@ -19,7 +19,13 @@ import {
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
 } from "../src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease } from "../src/lib/read-model-db.js";
+import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "../src/lib/read-model-db.js";
+import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
+import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
+import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "../src/lib/views.js";
+import { shadowReadiness, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
+import { createService } from "../src/lib/service.js";
 import {
   READ_MODEL_CHECK_SHARE,
   READ_MODEL_LEASE_RENEW_MS,
@@ -32,6 +38,7 @@ import {
   readModelSwitchesPath,
   readReadModelSwitches,
   runReadModelWorker,
+  readModelStatusView,
   type ReadModelView,
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
@@ -41,6 +48,172 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
+
+test("W1-T9244: default worker and HTTP serve complete cached proposals without side effects", async (t) => {
+  const stateDir = scratch(t, "agent-record-worker");
+  const now = Date.now(), asOf = new Date(now - 60_000).toISOString(), repository = "owner/repo";
+  writeFileSync(join(stateDir, LIVE), "");
+  const db = openProjectorReadModel(stateDir, "core");
+  db.exec(SOURCE_SNAPSHOT_DDL);
+  const lease = acquireLease(db, { holder: "proposal-source-fixture" });
+  assert.ok(lease.ok);
+  const cold = coldAnalyticsSnapshot();
+  const snapshot = { ...cold, asOf, consoleV1: { ...cold.consoleV1, metrics: [{ key: "runs.completed" as const, class: "observed" as const, value: 10 }, { key: "tokens.total" as const, class: "provider_reported" as const, value: 1_000_000 }] } };
+  writeSourceSnapshot(db, lease.lease, { instance: "core", ok: true, asOf, bodies: analyticsSourceBodies(snapshot, repository) });
+  releaseLease(db, lease.lease);
+  db.close();
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { agent: "serve" } }));
+  const messages: ReadModelWorkerMessage[] = [];
+  const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], tickMs: 20, observe: (msg) => void messages.push(msg) });
+  t.after(() => worker.stop());
+  worker.start();
+  const key = agentViewKey("core", "proposals"), deadline = Date.now() + 30_000;
+  while (!worker.body("agent", key) && Date.now() < deadline) await sleep(20);
+  const entry = worker.body("agent", key)!;
+  assert.ok(entry, "actual default worker commits the proposals part");
+  assert.equal(entry.qualificationGeneration, AGENT_QUALIFICATION_GENERATION);
+  const body = (entry.body.data as AgentViewData).body as AgentProposalsBody;
+  assert.equal(body.proposals?.length, 1, "positive new candidate with empty durable history");
+  assert.equal(body.records?.[0]?.detail.state, "reported");
+  assert.equal(body.coverage?.complete, 1);
+  assert.deepEqual(body.records?.[0]?.durable, { state: "unregistered" });
+  assert.equal(worker.stop(), true);
+  const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }] });
+  assert.deepEqual(restarted.body("agent", key)?.body.data, entry.body.data, "restart restores the exact generated observation");
+  assert.equal(restarted.body("agent", key)?.qualificationGeneration, AGENT_QUALIFICATION_GENERATION, "warm boot restores producer provenance without relabeling");
+  const source = { body: (view: string, key?: string) => restarted.body(view, key), judge: restarted.judge, switches: restarted.switches };
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["agent"], requiredParams: { agent: ["instance", "part"] }, readModel: source }) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const before = readFileSync(join(stateDir, LIVE), "utf8"), store = openProjectorReadModel(stateDir, "core");
+  const digest = readModelDigest(store);
+  const originalRead = fs.readFileSync;
+  const reads = mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    assert.ok(!String(args[0]).startsWith(stateDir), "HTTP reads no source file or ledger");
+    return originalRead.apply(fs, args as never);
+  });
+  const writes = mock.method(fs, "writeFileSync", () => assert.fail("HTTP writes no file"));
+  const appends = mock.method(fs, "appendFileSync", () => assert.fail("HTTP appends no ledger decision"));
+  syncBuiltinESMExports();
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/agent?instance=core&part=proposals`;
+    const response = await fetch(url, { headers: { authorization: "Bearer r" } });
+    assert.equal(response.status, 200);
+    const served = await response.json() as ViewBody<AgentViewData>;
+    assert.deepEqual(served.data.body, body);
+    assert.equal(served.data.repository, repository);
+    const same = await fetch(url, { headers: { authorization: "Bearer r", "if-none-match": response.headers.get("etag")! } });
+    assert.equal(same.status, 304);
+    assert.equal((await fetch(url)).status, 401, "cached records do not bypass authentication");
+  } finally {
+    reads.mock.restore(); writes.mock.restore(); appends.mock.restore(); syncBuiltinESMExports();
+  }
+  assert.equal(readFileSync(join(stateDir, LIVE), "utf8"), before);
+  assert.deepEqual(readModelDigest(store), digest, "GET preserves persisted facts and fold state");
+  assert.equal(Number(store.prepare("SELECT count(*) AS n FROM fact WHERE step LIKE 'panel.%'").get()?.n), 0);
+  store.close();
+  assert.ok(!messages.some((msg) => msg.type === "log" && /provider|proposal_registered|proposal_decision/.test(msg.step)));
+});
+
+test("default agent worker and warm boot refuse old generation readiness and compare current matched producers", async (t) => {
+  const stateDir = makeTempDir("agent-generation-worker");
+  let worker: ReturnType<typeof createReadModelWorker> | undefined;
+  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  const now = Date.now(), day = 24 * 60 * 60_000, asOf = new Date(now - 60_000).toISOString(), repository = "owner/repo";
+  writeFileSync(join(stateDir, LIVE), "");
+  const db = openProjectorReadModel(stateDir, "core");
+  db.exec(SOURCE_SNAPSHOT_DDL);
+  const lease = acquireLease(db, { holder: "generation-source-fixture" });
+  assert.ok(lease.ok);
+  const cold = coldAnalyticsSnapshot();
+  const snapshot = { ...cold, asOf, consoleV1: { ...cold.consoleV1, metrics: [{ key: "runs.completed" as const, class: "observed" as const, value: 10 }, { key: "tokens.total" as const, class: "provider_reported" as const, value: 1_000_000 }] } };
+  writeSourceSnapshot(db, lease.lease, { instance: "core", ok: true, asOf, bodies: analyticsSourceBodies(snapshot, repository) });
+  releaseLease(db, lease.lease);
+  db.close();
+  const old: ViewShadowState = { requests: 7, firstRequestMs: now - 2 * day, samples: 3000, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 3000, streakSinceMs: now - 2 * day, lastRealMs: null, streakKeys: ["oldShape"] };
+  assert.equal(shadowReadiness("agent", old, now).ready, true);
+  const path = viewShadowPath(stateDir);
+  writeFileSync(path, JSON.stringify({ agent: old }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { agent: "auto" } }));
+  // The genuine old, unbound status producer persists its ready body; this is not a mocked route reading.
+  const prior = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], views: [readModelStatusView], post: () => {} });
+  try { prior.tick(); } finally { prior.release(); }
+  const messages: ReadModelWorkerMessage[] = [];
+  worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], tickMs: 20, observe: (msg) => void messages.push(msg) });
+  assert.equal((worker.body("read-model")!.body.data as { shadow: Array<{ ready: boolean }> }).shadow[0]!.ready, true, "positive warm old-body control");
+  assert.equal(viewMode(worker, "agent"), "shadow", "before start, routes refuse the old ready body");
+  assert.deepEqual([shownReadiness(worker, "agent")?.ready, shownReadiness(worker, "agent")?.samples], [false, 0]);
+  worker.start();
+  const key = agentViewKey("core", "proposals"), deadline = Date.now() + 30_000;
+  while ((!worker.body("agent", key) || shownReadiness(worker, "agent")?.qualificationGeneration !== AGENT_QUALIFICATION_GENERATION) && Date.now() < deadline) await sleep(20);
+  const entry = worker.body("agent", key);
+  assert.ok(entry, "the actual default factory built proposals");
+  assert.equal(entry.qualificationGeneration, AGENT_QUALIFICATION_GENERATION);
+  assert.equal(((entry.body.data as AgentViewData).body as AgentProposalsBody).coverage?.complete, 1, "fully supported source positive control");
+  worker.shadow({ view: "agent", key, requests: 0 });
+  const current = (): ViewShadowState | undefined => Object.values(JSON.parse(readFileSync(path, "utf8")) as Record<string, ViewShadowState>).find((s) => s.qualificationGeneration === AGENT_QUALIFICATION_GENERATION);
+  while (!current()?.samples && !current()?.skipped && Date.now() < deadline) await sleep(20);
+  const measured = current();
+  assert.ok(measured, "one native comparator received the default worker's pair");
+  assert.deepEqual([measured.samples, measured.streakSamples, measured.diffs.real, measured.streakKeys], [1, 1, 0, [key]], "equal current producer pair begins its own streak, not 3001 samples");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).agent, old, "old qualified history survives actual worker comparison");
+  const nativeBody = () => worker!.body("read-model")!.body;
+  const nativeRow = () => (nativeBody().data as { shadow?: Array<{ view: string; samples: number; skipped?: number; qualificationGeneration?: string }> }).shadow?.find((s) => s.view === "agent");
+  while ((nativeRow()?.samples !== 1 || nativeRow()?.qualificationGeneration !== AGENT_QUALIFICATION_GENERATION) && Date.now() < deadline) await sleep(20);
+  assert.equal(nativeRow()?.samples, 1, "status publishes the actual current-generation receipt");
+  t.diagnostic(JSON.stringify({ nativeAgentReadinessFixture: "fresh", clockMs: Date.now(), body: nativeBody() }));
+  worker.shadow({ view: "agent", key, requests: 0, legacy: { data: entry.body.data, asOfMs: Date.now(), qualificationGeneration: "old-record-contract" } });
+  while (nativeRow()?.skipped !== 1 && Date.now() < deadline) await sleep(20);
+  assert.deepEqual([nativeRow()?.samples, nativeRow()?.skipped], [1, 1], "actual worker refusal preserves counters and publishes named diagnostic fields");
+  t.diagnostic(JSON.stringify({ nativeAgentReadinessFixture: "mismatch", clockMs: Date.now(), body: nativeBody() }));
+  assert.equal(viewMode(worker, "agent"), "shadow");
+  assert.ok(!messages.some((msg) => msg.type === "log" && msg.step === "view.auto_promoted"), "old readiness never grants promotion");
+  assert.equal(worker.stop(), true);
+  worker = undefined;
+  const restarted = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }] });
+  assert.equal(restarted.body("agent", key)?.qualificationGeneration, AGENT_QUALIFICATION_GENERATION);
+  assert.equal(viewMode(restarted, "agent"), "shadow", "same-generation one-sample warm boot is still not ready");
+  const stored = openProjectorReadModel(stateDir, "core");
+  try {
+    stored.prepare("UPDATE meta SET v = ? WHERE k = ?").run(JSON.stringify({ etag: "wrong-etag", qualificationGeneration: AGENT_QUALIFICATION_GENERATION }), `view_qualification:${JSON.stringify(["agent", key])}`);
+  } finally { stored.close(); }
+  const mismatched = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }] });
+  assert.equal(mismatched.body("agent", key)?.qualificationGeneration, undefined, "provenance for another exact body cannot relabel a warm body");
+  assert.match(mismatched.body("agent", key)?.qualificationReason!, /another body ETag/);
+  const ownReady = { ready: true, reason: "same-generation qualified control", samples: 3000, lastRealMs: null, qualificationGeneration: AGENT_QUALIFICATION_GENERATION };
+  const statusEntry = restarted.body("read-model")!;
+  const qualifiedSource = {
+    body: (view: string, bodyKey?: string) => view === "read-model" ? { ...statusEntry, body: { ...statusEntry.body, data: { shadow: [{ view: "agent", ...ownReady }] } } } : mismatched.body(view, bodyKey),
+    judge: mismatched.judge, switches: mismatched.switches, qualificationGeneration: mismatched.qualificationGeneration,
+  };
+  assert.equal(shownReadiness(qualifiedSource, "agent")?.ready, true, "current ready status is a positive route control, not a runtime receipt");
+  const server = createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModelViews: ["agent"], readModel: qualifiedSource }) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/agent?${key}`, { headers: { authorization: "Bearer r" } });
+  assert.equal(response.status, 404, "even current ready status cannot serve an unqualified exact body in auto mode");
+  assert.match((await response.json() as { reason: string }).reason, /no matched body for current generation/);
+  const unrelated = openProjectorReadModel(stateDir, "core");
+  try { unrelated.prepare("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(`view_qualification:${JSON.stringify(["read-model", ""])}`, "{"); }
+  finally { unrelated.close(); }
+  const named: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const partial = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], log: (step, extra) => void named.push({ step, extra }) });
+  assert.equal(partial.bodies.size, mismatched.bodies.size, "one unrelated metadata parse failure cannot erase valid warm rows");
+  assert.deepEqual(partial.body("agent", key)?.body, entry.body, "valid sibling data remains cached");
+  assert.equal(partial.body("read-model")?.qualificationReason, "stored qualification metadata is not valid JSON");
+  assert.ok(named.some((event) => event.step === "read_model.qualification_unknown" && event.extra?.view === "read-model"));
+  const controls = openProjectorReadModel(stateDir, "core");
+  try {
+    for (const [metadata, reason] of [[null, "metadata is malformed"], [[], "metadata is malformed"], [{ etag: statusEntry.etag, qualificationGeneration: 3 }, "generation is malformed"], [{ etag: statusEntry.etag, qualificationGeneration: "" }, "generation is malformed"], [{ etag: statusEntry.etag, qualificationGeneration: "x".repeat(161) }, "generation is malformed"]] as const) {
+      controls.prepare("UPDATE meta SET v = ? WHERE k = ?").run(JSON.stringify(metadata), `view_qualification:${JSON.stringify(["read-model", ""])}`);
+      const loaded = loadCommittedViewBodies(stateDir, "core");
+      assert.equal(loaded.bodies.length, partial.bodies.size);
+      assert.ok(loaded.bodies.find((body) => body.view === "read-model")?.qualificationReason?.includes(reason));
+    }
+    controls.prepare("UPDATE meta SET v = ? WHERE k = ?").run(JSON.stringify({ etag: statusEntry.etag, qualificationGeneration: null }), `view_qualification:${JSON.stringify(["read-model", ""])}`);
+    assert.equal(loadCommittedViewBodies(stateDir, "core").bodies.find((body) => body.view === "read-model")?.qualificationReason, undefined, "explicit unqualified metadata is not malformed");
+  } finally { controls.close(); }
+});
 
 type TestCtx = { after: (fn: () => void) => void };
 
