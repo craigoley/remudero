@@ -19677,6 +19677,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
+  // W1-T8776: a checkout now at main fills the shared child-entry store once per main revision, in a child process
+  // and unawaited, so every worktree cut at this source hash can copy the bundle instead of cold-starting tsx. A hash
+  // already stored is a no-op; a failed build is ledgered and changes nothing (children keep running tsx).
+  if (checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded") {
+    void buildIntoStore(repoDir, {
+      storeRoot: childEntryStoreRoot(config.root),
+      log,
+      liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
+    });
+  }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
   // after a full run as the scope guard's "forged merge-base" misdiagnosis. Verdict stays
@@ -56494,6 +56504,7 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
