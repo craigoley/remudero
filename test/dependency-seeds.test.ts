@@ -280,6 +280,8 @@ test("dependency seed installer publishes complete immutable tools and preserves
   const versions = join(home, ".local", "share", "remudero", "dependency-seed-tools");
   const version = readdirSync(versions).find(name => /^[a-f0-9]{64}$/.test(name))!;
   assert.ok(existsSync(join(versions, version, "src", "lib", "clock.ts")));
+  assert.throws(() => execFileSync(process.execPath, [join(versions, version, "scripts", "dependency-seeds.mjs"), "enable"], { env, stdio: "pipe" }), /existing seed configuration/);
+  assert.deepEqual(readFileSync(dependencySeedConfigPath(home)), config);
   execFileSync("bash", [installer], { env });
   assert.deepEqual(readFileSync(wrapper), saved);
   assert.deepEqual(readFileSync(dependencySeedConfigPath(home)), config);
