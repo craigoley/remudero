@@ -327,7 +327,12 @@ test("flow production sources read all archive forms, main trailers and merge ac
   assert.equal(inv.charges.length, 4);
   assert.deepEqual([...new Set(inv.charges.map(c => c.pr))].sort(), [1, 2, 3]);
   assert.equal(inv.episodes.find(e => e.pr === 2)!.outcome, "failed");
-  assert.equal(inv.ladder.find(l => l.cause === "escalated:metadata-only body red")!.state, "resolved", "a build trailer, not queued status, supplies the merge time");
+  // W1-T9060: the trailer credits the merge (else the remedy would still be `in_progress`), and the fixture holds no
+  // before-window evidence, so the effect is unmeasurable: it keeps measuring and is NEVER called resolved.
+  const rung = inv.ladder.find(l => l.cause === "escalated:metadata-only body red")!;
+  assert.equal(rung.state, "measuring", "a build trailer, not queued status, supplies the merge time; an unmeasurable effect is not resolved");
+  assert.equal(rung.effect?.verdict, "unmeasurable");
+  assert.match(rung.effect!.reason, /^no-before-evidence:/);
   assert.equal(shim.calls().length, 1);
   const landing = spec.apply(workspace(repo.dir), { actions: spec.candidates(inv, () => 0), acting: ["draft"] }, {})!;
   assert.equal(ciFrictionRecordVerdict(readFileSync(join(repo.dir, landing.paths[0]!), "utf8"), "default owner search").ok, true);
