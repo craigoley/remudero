@@ -13,7 +13,9 @@
     rmd approve:
   
     config mask handling touches both config and review subsystems
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=320f7193d097c391
   attempts: 0
   files:
     - src/lib/review.ts

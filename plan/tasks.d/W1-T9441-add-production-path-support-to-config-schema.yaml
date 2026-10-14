@@ -12,7 +12,9 @@
     rmd approve:
   
     changes span config schema and review usage
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=bad0e52f841bd4fc
   attempts: 0
   files:
     - src/lib/config.ts
