@@ -7,7 +7,7 @@ import { relative } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import type { Escalation } from "./escalate.js";
+import { ghIssueGateway, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { GardenEffectsUnreadableError, GardenStateUnreadableError, gardenEffectsPath, gardenStatePath, readGardenEffects, readGardenState, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -142,6 +142,11 @@ export interface GardenerOverseerPorts {
   effectReading?: (pr: TrackedGardenerPr & { mergedAt: string }, rows: readonly Row[]) => EffectReading | undefined;
   /** When the gardener's own state file last changed (ms); an idle pass still touches it. */
   stateMtime?: (name: string) => number | undefined;
+  /** W1-T8866: closes an issue with a citing comment (escalate.ts's gateway); absent, a recovery closes nothing. */
+  closeIssue?: (url: string, comment: string) => void;
+  /** W1-T8866: this overseer's own `escalated` and `cleared` ledger rows; THROWS when they cannot be read,
+   *  and an unreadable read closes nothing. */
+  readEscalationRows?: () => Row[];
 }
 
 interface Episode {
@@ -429,6 +434,23 @@ function scorecardRow(
   return { window_days: 7, gardeners, rows_read: rows.length };
 }
 
+/** The issue a gardener's episode opened, from the durable ledger — never memory: the latest `escalated` row naming it
+ *  unless a later delivered `cleared` row already closed it. `null` when there is nothing left to close. */
+function openEscalationUrl(rows: readonly Row[], name: string): string | null {
+  const ordered = rows.map((row, i) => ({ row, i })).sort((a, b) => {
+    const ta = typeof a.row.ts === "string" ? a.row.ts : "";
+    const tb = typeof b.row.ts === "string" ? b.row.ts : "";
+    return ta < tb ? -1 : ta > tb ? 1 : a.i - b.i;
+  });
+  let url: string | null = null;
+  for (const { row } of ordered) {
+    if (row.gardener !== name) continue;
+    if (row.step === `${OVERSEER_NAME}.escalated`) url = typeof row.issue_url === "string" && row.issue_url !== "" ? row.issue_url : null;
+    else if (row.step === `${OVERSEER_NAME}.cleared` && row.delivered !== false) url = null;
+  }
+  return url;
+}
+
 /** Gardener state files present on disk: `<name>-gardener.json`. */
 function gardenerNamesOnDisk(stateDir: string): string[] {
   if (!existsSync(stateDir)) return [];
@@ -492,11 +514,38 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   const cadences = new Map<string, number | undefined>();
 
   // LIVENESS — notice, then heal, then escalate once per episode.
+  let closedThisPass = false;
   for (const name of names) {
     const list = events.get(name) ?? [];
     const { health, cadence } = judgeHealth(list, nowMs, mtimeOf(name));
     cadences.set(name, cadence);
     if (!health) {
+      const recovered = state.episodes[name];
+      if (recovered?.escalatedAt !== undefined && deps.closeIssue && deps.readEscalationRows) {
+        // W1-T8866: the producer closes the issue it opened. One close per pass; the episode is KEPT (so the next pass
+        // retries) when the cap is spent or the ledger or the close could not be read, never closed on a guess.
+        if (closedThisPass) continue;
+        let url: string | null;
+        try {
+          url = openEscalationUrl(deps.readEscalationRows(), name);
+        } catch (error) {
+          deps.log(`${OVERSEER_NAME}.clear_unreadable`, { gardener: name, error: String((error as Error)?.message ?? error) });
+          continue;
+        }
+        if (url !== null) {
+          const healedMs = Date.parse(recovered.healedAt ?? recovered.since);
+          const passAt = list.find((e) => e.kind === "pass" && e.at >= healedMs) ?? [...list].reverse().find((e) => e.kind === "pass");
+          const recoveredAt = passAt ? fixedClock(passAt.at).iso() : clock.iso();
+          closedThisPass = true;
+          try {
+            deps.closeIssue(url, `Recovered: first passing scorecard at ${recoveredAt}. Closing automatically; a relapse opens its own issue.`);
+          } catch (error) {
+            deps.log(`${OVERSEER_NAME}.clear_failed`, { gardener: name, issue_url: url, error: String((error as Error)?.message ?? error) });
+            continue;
+          }
+          deps.log(`${OVERSEER_NAME}.cleared`, { gardener: name, kind: recovered.kind, issue_url: url, recovered_at: recoveredAt, delivered: true });
+        }
+      }
       delete state.episodes[name];
       continue;
     }
@@ -706,6 +755,7 @@ export function productionGardenerOverseerPorts(opts: {
   fetch: (args: string[]) => unknown;
   log: GardenerOverseerPorts["log"];
   escalate?: GardenerOverseerPorts["escalate"];
+  closeIssue?: GardenerOverseerPorts["closeIssue"];
   clock?: Clock;
 }): GardenerOverseerPorts {
   const clock = opts.clock ?? systemClock;
@@ -760,5 +810,18 @@ export function productionGardenerOverseerPorts(opts: {
       }
     },
     effectReading: (pr, rows) => ciFrictionEffectReading(pr, rows, remedyFor, roundsOnce, clock.now()),
+    closeIssue: opts.closeIssue ?? ((url, comment) => {
+      const gateway = ghIssueGateway(opts.owner, opts.repo);
+      if (!gateway.closeWithComment) throw new Error("issue gateway cannot close issues");
+      gateway.closeWithComment(url, comment);
+    }),
+    readEscalationRows: () => {
+      const read = readLedgerUnionRecordsSync(opts.stateDir, {
+        since: fixedClock(clock.now() - KEEP_MS).iso(), step: [`${OVERSEER_NAME}.escalated`, `${OVERSEER_NAME}.cleared`],
+        rotationWindowMs: KEEP_MS, minRotations: 2, refuseIncomplete: true,
+      });
+      if (!read.ok) throw new Error(`the ledger union was incomplete: ${read.unread.length} file(s) unread`);
+      return read.rows;
+    },
   };
 }

@@ -64,7 +64,7 @@ test("native Semgrep error inventory preserves partial scans without exposing me
   ];
   const summary = summarizeReports({ ...report, errors }, sarif, 0);
   assert.equal(summary.status, "INCOMPLETE", "exit zero with parser errors is never complete");
-  assert.deepEqual(summary.errorInventory, [
+  assert.deepEqual(summary.errorInventory.map(({ type, level, path }: { type: string; level: string; path: string | null }) => ({ type, level, path })), [
     { type: "ParseError", level: "warn", path: "test/fixtures/invalid.ts" },
     { type: "PartialParsing", level: "warning", path: "src/example.ts" },
     { type: "UNKNOWN", level: "UNKNOWN", path: null },
@@ -77,6 +77,46 @@ test("native Semgrep error inventory preserves partial scans without exposing me
   assert.equal(many.errorCount, 65);
   assert.equal(many.errorInventory.length, 64);
   assert.equal(many.errorInventoryTruncated, true);
+});
+
+test("native Semgrep warning diagnostics retain schema labels, observed rules and omitted source ranges", () => {
+  const { report, sarif } = reports();
+  const omitted = { path: "src/partial.ts", start: { line: 12 }, end: { line: 18 }, snippet: "never emit source" };
+  const errors = [
+    { type: "Syntax error", level: "warn", path: ".mcp.json" },
+    { type: "Timeout", level: "warn", path: "src/review.ts", rule_id: ruleId },
+    { type: ["PartialParsing", [omitted]], level: "warn", path: "src/partial.ts" },
+    { type: "Timeout", level: "warn", rule_id: "unobserved-private-rule" },
+    { type: "secret type with spaces", level: "warn", spans: [
+      { file: "../private.ts", start: { line: 0 }, end: { line: 5 } },
+      { file: "/private/source.ts", start: { line: 10 }, end: { line: 2 } },
+      null, { file: "src/valid.ts", start: { line: 2 }, end: { line: 2 } },
+      { file: "src/huge.ts", start: { line: 10000001 }, end: { line: 10000002 } },
+    ] },
+  ];
+  const summary = summarizeReports({ ...report, errors }, sarif, 0);
+  assert.equal(summary.status, "INCOMPLETE", "better diagnostics do not waive warnings");
+  assert.equal(summary.errorInventory[0].type, "Syntax error");
+  assert.equal(summary.errorInventory[0].locations, null, "missing spans are not zero locations");
+  assert.equal(summary.errorInventory[0].ruleIdObserved, null, "missing rule is not an unobserved rule");
+  assert.equal(summary.errorInventory[1].ruleId, ruleId);
+  assert.equal(summary.errorInventory[1].ruleIdObserved, true);
+  assert.deepEqual(summary.errorInventory[2].locations, [{ path: "src/partial.ts", startLine: 12, endLine: 18 }]);
+  assert.equal(summary.errorInventory[2].locationCount, 1);
+  assert.equal(summary.errorInventory[3].ruleId, null);
+  assert.equal(summary.errorInventory[3].ruleIdObserved, false);
+  assert.equal(summary.errorInventory[4].type, "UNKNOWN");
+  assert.deepEqual(summary.errorInventory[4].locations, [
+    { path: null, startLine: null, endLine: null }, { path: null, startLine: null, endLine: null },
+    { path: null, startLine: null, endLine: null }, { path: "src/valid.ts", startLine: 2, endLine: 2 },
+    { path: "src/huge.ts", startLine: null, endLine: null },
+  ]);
+  const bounded = summarizeReports({ ...report, errors: [{ type: ["PartialParsing", Array(9).fill(omitted)] }] }, sarif, 0);
+  assert.equal(bounded.errorInventory[0].locations.length, 8);
+  assert.equal(bounded.errorInventory[0].locationCount, 9);
+  assert.equal(bounded.errorInventory[0].locationsTruncated, true);
+  assert.ok(!JSON.stringify(summary).includes("never emit source"));
+  assert.ok(!JSON.stringify(summary).includes("unobserved-private-rule"));
 });
 
 test("native Semgrep real subprocess fixture exercises CLI contracts without pretending to be native engine evidence", () => {
