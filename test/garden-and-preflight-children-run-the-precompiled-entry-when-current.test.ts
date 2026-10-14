@@ -232,7 +232,7 @@ test("W1-T8778: every switched verb starts no self-URL worker", async (t) => {
 });
 
 /** Run the REAL default `ledgerGateLog` in a child whose HOME holds a fixture config naming `root`. */
-function ledgerGateLogChild(root: string): { status: number | null; stderr: string } {
+function runDefaultGateLogChild(root: string): { status: number | null; stderr: string } {
   const home = scratch("t8778-home");
   const configFile = join(home, ...FIXTURE_CONFIG_PATH_SEGMENTS);
   mkdirSync(dirname(configFile), { recursive: true });
@@ -248,7 +248,7 @@ function ledgerGateLogChild(root: string): { status: number | null; stderr: stri
 
 test("W1-T8778: the default pre-open gate log writes one row under a declared sender, and a failed write is noted, never thrown", () => {
   const root = scratch("t8778-ledger-root");
-  const ok = ledgerGateLogChild(root);
+  const ok = runDefaultGateLogChild(root);
   assert.equal(ok.status, 0, ok.stderr);
   const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n");
   assert.equal(lines.length, 1, "exactly one row");
@@ -261,7 +261,7 @@ test("W1-T8778: the default pre-open gate log writes one row under a declared se
   // A root that is a FILE cannot hold state/: the write fails, the gate goes on, and stderr names the step.
   const blocked = join(scratch("t8778-blocked"), "not-a-dir");
   writeFileSync(blocked, "");
-  const failed = ledgerGateLogChild(blocked);
+  const failed = runDefaultGateLogChild(blocked);
   assert.equal(failed.status, 0, "a failed ledger write is never the gate's failure");
   assert.match(failed.stderr, new RegExp(`preopen gate: could not ledger ${CHILD_ENTRY_SPAWNED_STEP.replace(".", "\\.")}: `));
 });
