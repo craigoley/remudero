@@ -111,10 +111,11 @@ test("the read hook records repo-relative NON-CODE reads and the directories a s
     restore();
   }
   assert.deepEqual(recorder.snapshot(), {
-    format: "rmd-read-record-v1",
+    format: "rmd-read-record-v2",
     suite: "test/x.test.ts",
     reads: ["deploy/unit.service", "openapi/daemon.yaml", "package.json"],
     listed: ["docs", "plan/tasks.d", "src/**", "test"],
+    unknownDescriptors: true,
   });
 });
 
@@ -198,10 +199,10 @@ const SUITES = ["test/a-reads-openapi.test.ts", "test/b-lists-openapi.test.ts", 
 function map(): ReadMap {
   return buildReadMap(
     [
-      { suite: SUITES[0]!, reads: ["openapi/daemon.yaml"], listed: [] },
-      { suite: SUITES[1]!, reads: [], listed: ["openapi"] },
-      { suite: SUITES[2]!, reads: ["deploy/unit.service", "package.json"], listed: [] },
-      { suite: SUITES[3]!, reads: [], listed: ["src/**"] },
+      { suite: SUITES[0]!, reads: ["openapi/daemon.yaml"], listed: [], unknownDescriptors: false },
+      { suite: SUITES[1]!, reads: [], listed: ["openapi"], unknownDescriptors: false },
+      { suite: SUITES[2]!, reads: ["deploy/unit.service", "package.json"], listed: [], unknownDescriptors: false },
+      { suite: SUITES[3]!, reads: [], listed: ["src/**"], unknownDescriptors: false },
     ],
     { sha: "a".repeat(40) },
   );
@@ -254,7 +255,7 @@ test("what the record cannot see is still selected: a spawner naming the file, a
   files.set("test/g-new.test.ts", "export {};\n");
   const seen = buildReadMap(
     [...SUITES, "test/e-spawns.test.ts", "test/f-spawns-elsewhere.test.ts"].map((suite) => ({
-      suite, reads: suite === SUITES[0] ? ["openapi/daemon.yaml"] : [], listed: [],
+      suite, reads: suite === SUITES[0] ? ["openapi/daemon.yaml"] : [], listed: [], unknownDescriptors: false,
     })),
     { sha: "b".repeat(40) },
   );
@@ -323,7 +324,7 @@ test("a read map file round-trips, and a malformed one is a named problem, never
     writeFileSync(path, JSON.stringify(map()));
     assert.deepEqual(readReadMap(path).map, map());
     writeFileSync(path, "{}");
-    assert.match(readReadMap(path).problem!, /is not a rmd-read-map-v1 file/);
+    assert.match(readReadMap(path).problem!, /is not a rmd-read-map-v2 file/);
     assert.match(readReadMap(join(dir, "missing.json")).problem!, /unreadable/);
     writeFileSync(join(dir, "stray.json"), JSON.stringify({ format: "other" }));
     assert.deepEqual(readReadRecords(dir).problems, ["read-map.json is not a read record", "stray.json is not a read record"]);
@@ -381,7 +382,7 @@ test("readReadMapInput preserves missing and malformed map problems without meas
     writeFileSync(path, "{}");
     const malformed = readReadMapInput(dir, path, "base-tip", run);
     assert.deepEqual(malformed, {
-      mapProblem: `read map ${path} is not a rmd-read-map-v1 file`,
+      mapProblem: `read map ${path} is not a rmd-read-map-v2 file`,
       drift: { changedSinceMap: [] },
     });
     for (const loaded of [missing, malformed]) {

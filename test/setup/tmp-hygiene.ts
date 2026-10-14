@@ -130,7 +130,7 @@ if (isMainThread) {
 
 // W1-T6084: record the non-code files this test file reads, when main's full run asks for it
 // (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.
-installReadMapFromEnv();
+await installReadMapFromEnv();
 
 // Coverage runs execute each test file in a separate instrumented process. Those fixture reads
 // never leave the test harness, so making every child wait on the production cross-process gap
