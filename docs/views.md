@@ -444,6 +444,8 @@ the old rank-only body are not a qualification receipt for these records. The ag
 identity; older per-view counters and prior generations remain untouched in the same durable shadow store.
 Both matched producers must name the current generation before a sample counts. The worker persists body
 provenance beside the exact ETag in its existing meta table, and restores it without relabeling old bodies.
+This is provenance of the exact persisted body, not a read-time label or the projector's numeric
+generation. One row's malformed provenance is named unknown, never an empty set of otherwise valid bodies.
 Warm-boot `auto` resolution refuses missing or older-generation readiness before the first worker tick.
 The 24-hour duration, per-key cadence and measured-traffic floors are unchanged. Preserve the existing shadow pairing,
 fast comparator ownership, floors, 24-hour horizon and traffic multiplier. This source change authorizes no

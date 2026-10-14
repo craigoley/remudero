@@ -305,7 +305,6 @@ export interface ReadModelViewFactory {
 
 const isViewFactory = (view: ReadModelView | ReadModelViewFactory): view is ReadModelViewFactory => "create" in view;
 
-/** Provenance of the exact persisted body, not a read-time label or the projector's numeric generation. */
 const bodyQualificationKey = (view: string, key: string): string => `view_qualification:${JSON.stringify([view, key])}`;
 
 /** Why a projector that is not fresh is not: the structured half of its `reason`. */
@@ -2031,7 +2030,6 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
   parentPort.postMessage(answerReadModelIssueRequest((workerData as { request: ReadModelIssueRequest }).request));
 }
 
-/** One row's malformed provenance is named unknown, never an empty set of otherwise valid bodies. */
 function storedBodyQualification(raw: string | undefined, etag: string): { qualificationGeneration?: string; reason?: string } {
   if (raw === undefined) return {};
   try {
