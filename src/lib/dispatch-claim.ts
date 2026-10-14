@@ -186,6 +186,8 @@ export interface ClaimMintRow {
   readonly actor: string;
   readonly ts: string;
   readonly source: string;
+  /** W1-T8616: the minting run, so a `dispatch.rerun_override` row from the same run can be found. */
+  readonly runId?: string;
 }
 
 export interface ReplacedClaimantProbe {
@@ -393,6 +395,26 @@ export interface DispatchClaimReserverAsync {
   lastAttemptStderr?(): string | undefined;
   anchorMessage?(taskId: string): Awaitable<string | undefined>;
   list?(): Awaitable<string[]>;
+  /** W1-T8616: every claim with the anchor sha the ONE listing saw; a failed listing says so, never `[]`. */
+  listHeld?(): Awaitable<DispatchClaimListing>;
+}
+
+/** One claim as a listing saw it: the task and the anchor sha then at its ref. */
+export interface ListedDispatchClaim {
+  readonly taskId: string;
+  readonly holder: string;
+}
+
+export type DispatchClaimListing = { ok: true; claims: ListedDispatchClaim[] } | { ok: false; stderr: string };
+
+export function claimListingFromLsRemote(res: GitAnswer): DispatchClaimListing {
+  if (res.status !== 0) return { ok: false, stderr: res.stderr.trim() || `git ls-remote exited ${res.status}` };
+  const claims: ListedDispatchClaim[] = [];
+  for (const line of res.stdout.split("\n")) {
+    const m = /^([0-9a-f]{7,64})\s+refs\/rmd-dispatch\/(\S+)$/.exec(line.trim());
+    if (m) claims.push({ taskId: m[2], holder: m[1] });
+  }
+  return { ok: true, claims };
 }
 
 export interface ClaimGitDepsAsync {
@@ -424,6 +446,9 @@ export function gitDispatchClaimReserverAsync(deps: ClaimGitDepsAsync): Dispatch
     },
     async list() {
       return claimIdsFromLsRemote(await deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
+    },
+    async listHeld() {
+      return claimListingFromLsRemote(await deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
     },
     async anchorMessage(taskId) {
       const sha = await holder(taskId);
@@ -561,6 +586,8 @@ export async function releaseDispatchClaimAsync(
     anchor?: string;
     evidenceObserved?: boolean;
     livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
+    /** W1-T8616: the anchor sha the caller judged; the evidence drop is leased to it, so a re-minted claim survives. */
+    expect?: string;
   } = {},
 ): Promise<DispatchClaimReleaseResult> {
   let anchorIdentity: ClaimAnchorIdentity | undefined;
@@ -581,10 +608,27 @@ export async function releaseDispatchClaimAsync(
     const judged = await reserver.holder(taskId);
     return { ...decision, dropped: judged ? await reserver.drop(taskId, { expect: judged }) : false };
   }
-  return { ...decision, dropped: await reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+  const expect = i.anchor ?? i.expect;
+  return { ...decision, dropped: await reserver.drop(taskId, expect !== undefined ? { expect } : {}) };
 }
 
 const MINT_ROW_ARCHIVE_READS = 3;
+
+function claimLedgerFiles(stateDir: string, anchor: ClaimAnchorIdentity, fs: LedgerGrepFsDeps): Array<{ path: string; gzip: boolean; name: string }> {
+  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
+  const archives = ledgerRotationEntries(names, stateDir)
+    .map((entry) => ({ entry, name: entry.path.slice(stateDir.length + 1) }))
+    .filter(({ name }) => (rotationStampIso(name) ?? "") >= anchor.mintedAtIso)
+    .slice(0, MINT_ROW_ARCHIVE_READS);
+  const files = [...archives.map(({ entry, name }) => ({ path: entry.path, gzip: entry.form === "gzip", name }))];
+  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false, name: LEDGER_FILENAME });
+  return files;
+}
+
+function claimLedgerText(file: { path: string; gzip: boolean }, fs: LedgerGrepFsDeps): string {
+  const raw = fs.readFileSync(file.path);
+  return (file.gzip ? fs.gunzipSync(raw) : raw).toString("utf8");
+}
 
 export function findClaimMintRow(
   stateDir: string,
@@ -593,16 +637,8 @@ export function findClaimMintRow(
   fs: LedgerGrepFsDeps = realLedgerFs,
 ): ClaimMintRow | undefined {
   const ref = dispatchClaimRef(taskId);
-  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
-  const archives = ledgerRotationEntries(names, stateDir)
-    .map((entry) => ({ entry, name: entry.path.slice(stateDir.length + 1) }))
-    .filter(({ name }) => (rotationStampIso(name) ?? "") >= anchor.mintedAtIso)
-    .slice(0, MINT_ROW_ARCHIVE_READS);
-  const files = [...archives.map(({ entry, name }) => ({ path: entry.path, gzip: entry.form === "gzip", name }))];
-  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false, name: LEDGER_FILENAME });
-  for (const file of files) {
-    const raw = fs.readFileSync(file.path);
-    const text = (file.gzip ? fs.gunzipSync(raw) : raw).toString("utf8");
+  for (const file of claimLedgerFiles(stateDir, anchor, fs)) {
+    const text = claimLedgerText(file, fs);
     for (const line of text.split("\n")) {
       if (!line.includes(ref) || !line.includes("dispatch.claim")) continue;
       const parsed = parseLedgerRow(line);
@@ -610,10 +646,30 @@ export function findClaimMintRow(
       const row = parsed.row;
       if (row.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
       if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || row.host !== anchor.host) continue;
-      return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name };
+      const runId = typeof row.run_id === "string" ? row.run_id : undefined;
+      return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name, ...(runId ? { runId } : {}) };
     }
   }
   return undefined;
+}
+
+/** W1-T8616: was this claim minted by a `--rerun` lane? Its mint row's run also wrote `dispatch.rerun_override`. */
+export function claimMintedByRerun(
+  stateDir: string,
+  taskId: string,
+  anchor: ClaimAnchorIdentity,
+  fs: LedgerGrepFsDeps = realLedgerFs,
+): boolean {
+  const runId = findClaimMintRow(stateDir, taskId, anchor, fs)?.runId;
+  if (runId === undefined) return false;
+  for (const file of claimLedgerFiles(stateDir, anchor, fs)) {
+    for (const line of claimLedgerText(file, fs).split("\n")) {
+      if (!line.includes("dispatch.rerun_override") || !line.includes(runId)) continue;
+      const parsed = parseLedgerRow(line);
+      if (parsed.kind === "row" && parsed.row.step === "dispatch.rerun_override" && parsed.row.run_id === runId) return true;
+    }
+  }
+  return false;
 }
 
 function parseLedgerRow(line: string): { kind: "row"; row: Record<string, unknown> } | { kind: "torn" | "not-an-object" } {
@@ -647,6 +703,69 @@ export function releaseReplacedContainerClaims(
       }),
     }),
   }));
+}
+
+export interface LandedClaimSweepDeps {
+  isMerged: (taskId: string) => boolean;
+  isIndeterminate: (taskId: string) => boolean;
+  /** The crediting PR, for the row; optional. */
+  prUrlFor?: (taskId: string) => string | undefined;
+  /** True when the claim's mint row belongs to a `--rerun` lane ({@link claimMintedByRerun}). */
+  isRerunClaim?: (taskId: string, anchor: ClaimAnchorIdentity) => Awaitable<boolean>;
+  /** The host whose ledger `isRerunClaim` reads; a claim minted on another host has no mint row there to find. */
+  localHost?: string;
+  /** Holder shas whose rerun exception was already reported, so a long rerun lane writes one row. */
+  reportedRerun?: Set<string>;
+  log: (step: string, fields: Record<string, unknown>) => void;
+}
+
+/**
+ * W1-T8616: THE TICK-SIDE SWEEP. Arm 2 (evidence) for every claim whose task the merged projection
+ * credits and does not mark indeterminate. One `ls-remote` lists every claim with its anchor sha; each
+ * drop is leased to that sha, so a claim re-minted after the listing survives. Any host may run it:
+ * the evidence arm needs no liveness answer (W1-T396). An unmerged or indeterminate claim writes
+ * nothing; a failed listing writes `dispatch.claim_sweep_failed`, never an empty list.
+ */
+export async function releaseLandedDispatchClaims(
+  reserver: DispatchClaimReserverAsync,
+  deps: LandedClaimSweepDeps,
+): Promise<Array<DispatchClaimReleaseResult & ListedDispatchClaim>> {
+  const listing: DispatchClaimListing = reserver.listHeld
+    ? await reserver.listHeld()
+    : { ok: false, stderr: "this reserver cannot list claims with their holders" };
+  if (!listing.ok) {
+    deps.log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: listing.stderr.slice(0, 300) });
+    return [];
+  }
+  const results: Array<DispatchClaimReleaseResult & ListedDispatchClaim> = [];
+  for (const claim of listing.claims) {
+    if (!deps.isMerged(claim.taskId) || deps.isIndeterminate(claim.taskId)) continue;
+    const ref = dispatchClaimRef(claim.taskId);
+    const row = { ref, surface: "tick-sweep", holder: claim.holder, pr_url: deps.prUrlFor?.(claim.taskId) };
+    if (deps.isRerunClaim) {
+      const anchor = parseClaimAnchorMessage(await reserver.anchorMessage?.(claim.taskId));
+      const local = anchor !== undefined && (deps.localHost === undefined || anchor.host === deps.localHost);
+      if (anchor && local && (await deps.isRerunClaim(claim.taskId, anchor))) {
+        const left = {
+          ...claim,
+          arm: "evidence" as const,
+          release: false,
+          dropped: false,
+          reason: `${ref} was minted by a --rerun lane (dispatch.rerun_override), which dispatches a merged task on purpose — leaving it`,
+        };
+        if (!deps.reportedRerun?.has(claim.holder)) {
+          deps.reportedRerun?.add(claim.holder);
+          deps.log("dispatch.claim_released", { ...row, arm: left.arm, release: false, dropped: false, reason: left.reason });
+        }
+        results.push(left);
+        continue;
+      }
+    }
+    const released = await releaseDispatchClaimAsync(claim.taskId, reserver, { evidenceObserved: true, expect: claim.holder });
+    deps.log("dispatch.claim_released", { ...row, arm: released.arm, release: released.release, dropped: released.dropped, reason: released.reason });
+    results.push({ ...claim, ...released });
+  }
+  return results;
 }
 
 // ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────

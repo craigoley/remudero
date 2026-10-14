@@ -1620,6 +1620,8 @@ import {
   readNamespaceBootMs,
   findClaimMintRow,
   releaseReplacedContainerClaims,
+  releaseLandedDispatchClaims,
+  claimMintedByRerun,
   type DispatchClaimReserver,
   type DispatchClaimReserverAsync,
 } from "./lib/dispatch-claim.js";
@@ -38875,6 +38877,7 @@ export async function daemonCommand(
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     bootClaimReserver?: DispatchClaimReserver;
+    tickClaimReserver?: DispatchClaimReserverAsync;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
@@ -39323,6 +39326,7 @@ export async function daemonCommand(
     throw e;
   }
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
+  const landedClaimRerunReported = new Set<string>();
   try {
     const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
@@ -39785,6 +39789,17 @@ export async function daemonCommand(
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
+        releaseLandedClaims: async (isMerged) => {
+          await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
+            isMerged,
+            isIndeterminate,
+            prUrlFor: (id) => lastProj?.get(id)?.prUrl,
+            isRerunClaim: (id, anchor) => claimMintedByRerun(dirname(ledgerPath), id, anchor),
+            reportedRerun: landedClaimRerunReported,
+            localHost: hostname(),
+            log,
+          });
+        },
         isIndependentFailureBlocked,
         independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
