@@ -1,0 +1,19 @@
+- id: W1-T9415
+  title: "THE leak-grep GATE REFUSED 1 PULL REQUEST IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:11383:leak-grep"
+  ci_learning_prs: [11383]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the leak-grep gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:11383:leak-grep in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:11383:leak-grep. The leak-grep gate went red on #11383 and was repaired; the repair touched plan/tasks.d/W1-T9181-the-revalidation-garden-never-closes-on-an-absence.yaml. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
