@@ -69,7 +69,10 @@ function world(t: Context) {
 }
 
 async function untilSnapshot(root: string) {
-  const deadline = Date.now() + 10_000;
+  // This exercises a worker-thread startup, lease acquisition, fixture worktrees, and a slow-lane
+  // pass. CI repeats it under CPU contention, so give the maintained producer room to finish rather
+  // than making scheduler latency look like a missing classification.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (readPersistedInbox(join(root, "state"))) return;
     await sleep(20);
