@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reviewerUnmetPrevention } from "../src/lib/prompt-render.js";
+import { renderImplementPrompt, renderImplementPromptWithParts, reviewerUnmetPrevention } from "../src/lib/prompt-render.js";
+
+test("W1-T6166: renderImplementPrompt is still renderImplementPromptWithParts' prompt", () => {
+  const task = { id: "W1-T1", title: "t", files: [], acceptance: [] } as never;
+  assert.equal(renderImplementPrompt(task, "recon", "run-1"), renderImplementPromptWithParts(task, "recon", "run-1").prompt);
+});
 
 test("W1-T6166: check:reviewer-unmet is prevented, not retried", () => {
   const empty = reviewerUnmetPrevention({ review: { unmetCriteria: [], summary: "  " } });
