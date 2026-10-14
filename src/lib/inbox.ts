@@ -2119,7 +2119,8 @@ export interface DraftRepoFacts {
 export function checkoutRepoFacts(root: string): DraftRepoFacts {
   return {
     pathIsDirectory: (path) => fs.statSync(resolvePath(root, path), { throwIfNoEntry: false })?.isDirectory() === true,
-    pathExistsAtBase: (path) => hostWorktreeGit(root, ["ls-tree", "-z", "--name-only", "origin/main", "--", path])
+    pathExistsAtBase: (path) => fs.existsSync(resolvePath(root, ".git")) &&
+      hostWorktreeGit(root, ["ls-tree", "-z", "--name-only", "origin/main", "--", path])
       .split("\0").includes(path),
     moduleExists: (path) => fs.existsSync(resolvePath(root, path)),
     readGrepProofFile: (path) => {

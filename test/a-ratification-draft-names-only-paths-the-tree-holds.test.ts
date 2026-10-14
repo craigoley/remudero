@@ -84,6 +84,8 @@ test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY", ()
   const classified = classifyProposal(proposal, draft(withCaller), context());
   assert.equal(classified.state, "ready", JSON.stringify(classified.reasons));
   assert.deepEqual(lintDraftedFragment(withCaller, proposal.id, undefined, undefined, facts.moduleExists, facts.readGrepProofFile), []);
+  assert.deepEqual(lintDraftedFragment(withCaller, proposal.id, undefined, undefined, facts.moduleExists,
+    facts.readGrepProofFile, () => false, () => { throw new Error("allowed new paths need no base lookup"); }), []);
   const newDirectory = withCaller.replaceAll("src/lib/new-path.ts", "new-directory/new-path.ts");
   assert.deepEqual(lintDraftedFragment(newDirectory, proposal.id, undefined, undefined, facts.moduleExists, facts.readGrepProofFile), []);
   const noCaller = classifyProposal(proposal, draft(withCaller.replace("newPath( in src/lib/plan.ts", "newPath( in src/lib/new-path.ts")), context());
@@ -99,6 +101,26 @@ test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY", ()
   const parsed = loadPlanFromYaml(fragment.replace("files: [src/lib/plan.ts]", "files: [src/lib/plan.ts, docs/base-only.md]")
     .replace("risk: medium", "risk: high\n  band_meaning: span"), "fragment");
   assert.deepEqual(blockingLintMessages(plan, parsed, undefined, baseOnly), []);
+});
+
+test("W1-T9062: a checkout without git metadata still refuses missing draft paths", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9062-paths-`));
+  try {
+    mkdirSync(join(root, "src/lib"), { recursive: true });
+    writeFileSync(join(root, "src/lib/plan.ts"), "");
+    const checkout = checkoutRepoFacts(root);
+    assert.equal(checkout.moduleExists("src/lib/plan.ts"), true);
+    assert.equal(checkout.pathExistsAtBase!("src/lib/fixWorker.ts"), false);
+    const lint = (yaml: string) => lintDraftedFragment(yaml, proposal.id, undefined, undefined,
+      checkout.moduleExists, checkout.readGrepProofFile, checkout.pathIsDirectory, checkout.pathExistsAtBase);
+    assert.deepEqual(lint(fragment), []);
+    const missing = fragment.replace("src/lib/plan.ts]", "src/lib/plan.ts, src/lib/fixWorker.ts]")
+      .replace("risk: medium", "risk: high\n  band_meaning: span") +
+      '    - claim: the existing caller reaches the new module\n      proof: "grep: fixWorker( in src/lib/plan.ts"\n';
+    const violations = lint(missing);
+    assert.deepEqual(violations.map((v) => v.check), ["draft-path-missing"]);
+    assert.match(violations[0].message, /src\/lib\/fixWorker\.ts/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("W1-T9062: a parked-task proposal prompt shows the shard files and offers the release", () => {

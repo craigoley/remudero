@@ -1356,7 +1356,7 @@ export function missingDeclaredPaths(
   allowedNewPath: (path: string) => boolean = () => false,
 ): string[] {
   return (task.files ?? []).filter((path) =>
-    !facts.pathExists?.(path) && !facts.pathExistsAtBase?.(path) && !allowedNewPath(path));
+    !facts.pathExists?.(path) && !allowedNewPath(path) && !facts.pathExistsAtBase?.(path));
 }
 
 export function machineFilingAdmissionViolations(
