@@ -26682,13 +26682,14 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   // The sha each id's ref was left at, so a refused filing can release exactly its own claim.
   const held = new Map<string, string>();
   const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
+  const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
       const remaining = bound - (now() - started);
       if (remaining <= 0) throw new GardenMintTimedOutError(now() - started, bound);
-      const result = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: Math.ceil(remaining), killSignal: "SIGKILL" });
+      const result = gitAt(args, Math.ceil(remaining));
       if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new GardenMintTimedOutError(now() - started, bound);
       return result;
     };
@@ -26720,7 +26721,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
       if (!claim) return;
       const timeout = Math.ceil(mintBudget.boundMs());
       releaseTaskIdReservation((args) => {
-        const r = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
+        const r = gitAt(args, timeout);
         return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || String(r.error ?? "") };
       }, claim, releaseOpts(reason));
     },
