@@ -1,9 +1,9 @@
 - id: W1-T9494
   title: "The default SDK environment retains the bounded gardener parent pass"
   repo: remudero
-  depends_on: [W1-T8484]
+  depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 2.5
@@ -16,10 +16,10 @@
   plan_refs: [W1-T8484, W1-T8667, W1-T5527, W1-T6466]
   files: [src/lib/env.ts, test/env.test.ts, test/a-garden-child-retains-its-parent-pass-identity.test.ts]
   note: |
-    MACHINE-AUTHORED, UNJUDGED: verify:human is the native machine-filing checkpoint,
-    not a claim that a person has been asked. Let the existing machine-filing judge
-    decide release or escalation and pin its actual ruling; do not invent a ruling,
-    omit authorship, or bypass the normal CI/review gates. No activation, permissions,
+    MACHINE-AUTHORED, OPERATOR-APPROVED: the operator explicitly approved this exact
+    metadata-only repair in the console follow-up chat on 2026-10-14. The task-scoped
+    native rmd approve W1-T9494 release and native renderer pin that actual approval,
+    not a model verdict. Keep machine authorship and all CI/review gates. No activation, permissions,
     credentials, billing mode, provider routing, service restart or live Inbox write
     is authorized by this task. The implementation budget is bounded at 6 USD, not
     the old draft's 24 USD or a missing-budget fallback. Completion and live benefit
@@ -48,6 +48,12 @@
     source provenance, not a task dependency or an implementation credit to reuse.
     W8866/#11697, W9435/#11714 and W9489/#11718 retain their distinct owned scopes.
 
+    No unbuilt predecessor is required: the collector and aggregation are already
+    in the adopted merge base, and none of this task's three files imports or
+    changes the collector. Retain their exact merged credit in plan_refs/context,
+    not as an unbuilt dispatch prerequisite. This removes no actual outstanding
+    dependency and does not rely on decorative status or relax a filing gate.
+
     Genuine blast radius is the existing environment's credential/billing/identity
     boundary, not the number of files. Correlation data must not gain authority.
     Research: https://opentelemetry.io/docs/specs/otel/baggage/api/ describes explicit
@@ -68,6 +74,10 @@
     the same validation. Invalid, oversized, extra-key or conflicting input cannot
     fabricate linked context or leak raw values. Preserve no-carrier behavior and
     the existing ledger's invalid/missing semantics instead of inventing correlation.
+    A present malformed ambient carrier stays invalid, not missing; valid extras
+    cannot conceal it by creating a new linked parent. Forward only a bounded
+    canonical invalid marker understood by the existing decoder, never rejected raw
+    input. Decode valid input before using the serializer, which does not validate.
 
     Preserve ANTHROPIC denial and its two-factor exception; auth/HOME/shell/cache/
     secret handling, live-root denial and authoritative task/run/repo/scope identity
@@ -102,3 +112,11 @@
     Native author, stored-body proofs, governed review and required hosted CI stay
     mandatory. Plan filing, implementation merge, adoption and live cost coverage are
     different receipts; no cap, selector, permission or provider waiver is allowed.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Released by the operator through rmd approve W1-T9494 after explicit metadata-only approval in the console follow-up chat; credentials, billing, permissions, authoritative identity, service settings and all test/review/merge gates remain unchanged. Shipped collector context remains referenced; no unbuilt predecessor or implementation scope is removed."
+    judged_at: "2026-10-14T17:07:51.940Z"
+    pin: "ce564816c96fc6f71c42559304511ff8f33ab79eca217a789ae6519d9f85344d"
