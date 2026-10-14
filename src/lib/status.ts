@@ -1229,9 +1229,9 @@ export interface LedgerIndex {
   /** The exact array this index was built over — identity-compared, never re-read. */
   readonly rows: ReadonlyArray<Record<string, unknown>>;
   /** Rows naming an id in `task_id` OR `task`, in ledger order, each row at most once per id. */
-  readonly byTask: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byTask: LedgerBuckets;
   /** Rows by `step`, in ledger order — backs the whole-ledger step scans, not the per-task ones. */
-  readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byStep: LedgerBuckets;
   /** Every `pr_url` carried by a `plan_only: true` `pr.opened` row — `isPlanOnlyFilingPr`'s set. */
   readonly planOnlyFilingPrUrls: ReadonlySet<string>;
   /** Positive plan-only review evidence, tied to the exact PR head so a later implementation push is not refused. */
@@ -1240,6 +1240,18 @@ export interface LedgerIndex {
    *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
    *  when no row carries a parseable `ts` at all. */
   readonly latestTsMs: number | undefined;
+}
+
+/** W1-T9436: what a {@link LedgerIndex} bucket answers — a lookup by key, never an enumeration — so an index can
+ *  answer a bucket on demand from the read model's fact store instead of holding every row in memory. */
+export interface LedgerBuckets {
+  get(key: string): ReadonlyArray<Record<string, unknown>> | undefined;
+}
+
+/** The index {@link buildLedgerIndex} builds in memory: every bucket held, so it can also be enumerated. */
+export interface InMemoryLedgerIndex extends LedgerIndex {
+  readonly byTask: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
 }
 
 /** Append `row` to `id`'s bucket, creating it on first use. */
@@ -1255,7 +1267,7 @@ function pushIndexed(
 
 /** W1-T6253: the row generation an owner of a mutable rows array last registered for it, and the index held for it. */
 const ledgerGenerations = new WeakMap<ReadonlyArray<Record<string, unknown>>, number>();
-const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: LedgerIndex }>();
+const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: InMemoryLedgerIndex }>();
 let ledgerIndexBuilds = 0;
 
 /** W1-T6253: an owner mutating `rows` in place registers each generation; an unregistered array is indexed every call. */
@@ -1274,7 +1286,7 @@ export function ledgerIndexBuildCount(): number {
 }
 
 /** Build the {@link LedgerIndex} for `rows` in a single pass, or return the one held for its unchanged generation. */
-export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): InMemoryLedgerIndex {
   const generation = ledgerGenerations.get(rows);
   const held = generation === undefined ? undefined : generationIndexes.get(rows);
   if (held && held.generation === generation) return held.index;
@@ -1284,7 +1296,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
   return index;
 }
 
-function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): InMemoryLedgerIndex {
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();

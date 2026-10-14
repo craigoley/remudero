@@ -85,9 +85,11 @@ function store(t: TestContext, instance: string) {
     ms += 1_000;
   };
   append(...rows(0, 6));
+  // W1-T9436: these boards keep every row, so the count names every fact row; what the retention rules keep is counted
+  // by the-board-projection-holds-per-key-state-not-history.test.ts.
   const board = (): BoardProjection => createBoardProjection({
     db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1",
-    readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "", keepEveryRow: true,
   });
   const now = (): ReturnType<typeof createNowView> => {
     const feedbackRoot = join(ledgerDir, "checkout");
@@ -96,7 +98,7 @@ function store(t: TestContext, instance: string) {
       readPlan: () => PLAN, github: () => ({ github: GATEWAY, generation: "g", source: { asOf: null, state: "fresh" } }),
       hostProbe: { rateLimit: () => 5_000, diskFree: () => 1_000_000, readLive: () => [] }, listGrilling: () => [], planBehind: () => ({ commits: 0 }),
     };
-    return createNowView({ instances: [{ name: instance, ledgerDir, repo: "o/r", feedbackRoot }], clock, ...seams });
+    return createNowView({ instances: [{ name: instance, ledgerDir, repo: "o/r", feedbackRoot }], clock, boardOptions: { keepEveryRow: true }, ...seams });
   };
   const ctx = (): NowViewContext => {
     const generation = Number((db as unknown as { meta(k: string): string | undefined }).meta("generation"));
