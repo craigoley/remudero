@@ -236,7 +236,7 @@ function undeterminedMain(): GhApiFetcher {
     if (path === `repos/${OWNER}/${REPO}/commits/${POOL_MERGE}`) {
       return { parents: [{ sha: GREEN }], files: [{ filename: "scripts/pure-test-pool.mjs", additions: 120, deletions: 4 }] };
     }
-    throw new Error(`unrouted gh api call: ${args.join(" ")}`);
+    throw new Error(`unrouted read: ${args.join(" ")}`);
   }) as GhApiFetcher;
 }
 
@@ -307,3 +307,65 @@ test("W1-T8042: the production reads ask GitHub for the diff, the merge base and
   assert.equal(await reads.contains(GREEN, POOL_MERGE), false);
   assert.ok(asked.includes(`repos/${OWNER}/${REPO}/compare/main...${sha("ead10852")}`), asked.join("\n"));
 });
+
+test("W1-T8042: main's own later red on the shared signature advances the same record", async () => {
+  const ledgerPath = tmpLedger();
+  seedGreenMain(ledgerPath);
+  await runSweep(shared(), fakeDeps(ledgerPath).deps);
+
+  const fixes: MainRepairFixRequest[] = [];
+  const lane: MainRepairLane = {
+    openFixPr: async (request) => {
+      fixes.push(request);
+      return `https://github.com/${OWNER}/${REPO}/pull/10880`;
+    },
+    openRevertPr: async () => ({ refused: "not expected" }),
+  };
+  const errors: unknown[] = [];
+  const rung = buildMainHealthRung(OWNER, REPO, {
+    fetch: redMain(),
+    issues: { create: async () => undefined, listOpen: async () => [], comment: async () => {}, closeWithComment: async () => {} },
+    ledgerPath,
+    runId: "DAEMON-W1-T8042",
+    log: (step, extra) => {
+      if (step === "main.health.error") errors.push(extra);
+    },
+    now: () => NOW,
+    readRequiredChecks: () => ["ci"],
+    readCiFailures: (rollup) => (rollup ?? []).map((entry) => ({
+      name: entry.name ?? "", conclusion: "FAILURE", logTail: entry.name === "ci" ? "a ci shard FAILED" : POOLED_LOG })),
+    mergeReader: { prMerge: () => undefined, mergeBase: () => GREEN, prsMergedBetween: () => [] },
+    repair: lane,
+  });
+  await rung();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(errors, []);
+  assert.deepEqual(fixes.map((fix) => fix.offendingSha), [POOL_MERGE], "main's red is the record the PRs opened");
+  assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === "main.repair.located").length, 0, "no second record");
+  assert.equal(mainRepairRecordsFromLedger(readLedgerLines(ledgerPath)).size, 1);
+});
+
+/** Main red on its own head: `ci` and the shard fail there; the merge before #10834 was green. */
+function redMain(): GhApiFetcher {
+  const runs = [{ id: 902, head: LATER_2, conclusion: "failure" }, { id: 601, head: GREEN, conclusion: "success" }];
+  const jobs = (conclusion: string) => conclusion === "failure"
+    ? [{ id: 1, name: "ci", status: "completed", conclusion }, { id: 2, name: "ci-shard (7/8)", status: "completed", conclusion }]
+    : [{ id: 1, name: "ci", status: "completed", conclusion }];
+  return ((args: string[]) => {
+    const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+    if (path === `repos/${OWNER}/${REPO}`) return { default_branch: "main" };
+    if (path === `repos/${OWNER}/${REPO}/commits/main`) return { sha: LATER_2 };
+    if (path === `repos/${OWNER}/${REPO}/commits/${LATER_2}/check-runs?per_page=100`) return { check_runs: jobs("failure") };
+    if (path === `repos/${OWNER}/${REPO}/commits/${LATER_2}/status`) return { statuses: [] };
+    if (path.startsWith(`repos/${OWNER}/${REPO}/actions/runs?`)) {
+      return { workflow_runs: runs.map((run) => ({ id: run.id, name: "CI", head_sha: run.head, status: "completed", conclusion: run.conclusion })) };
+    }
+    const runJobs = /actions\/runs\/(\d+)\/jobs\?per_page=100$/.exec(path)?.[1];
+    if (runJobs) return { jobs: jobs(runs.find((run) => run.id === Number(runJobs))?.conclusion ?? "success") };
+    if (path === `repos/${OWNER}/${REPO}/commits/${POOL_MERGE}`) {
+      return { parents: [{ sha: GREEN }], files: [{ filename: "scripts/pure-test-pool.mjs", additions: 120, deletions: 4 }] };
+    }
+    throw new Error(`unrouted read: ${args.join(" ")}`);
+  }) as GhApiFetcher;
+}

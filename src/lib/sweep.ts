@@ -15304,7 +15304,7 @@ export async function runSweep(
     const held = mainRepairRedsFromLedger(ledgerLines);
     for (const red of mainInherited.reds) {
       const owner = held.findLast((record) => !record.resolved && mainRedCovers(red.red, record.red));
-      const joined = red.prs.filter((p) => !owner?.prs.has(p.prNumber));
+      const joined = owner ? red.prs.filter((p) => !owner.prs.has(p.prNumber)) : red.prs;
       if (owner && joined.length === 0) continue;
       const seenAt = clockFromMillisFn(() => now).iso();
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: MAIN_INHERITED_RED_STEP,
