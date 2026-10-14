@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.17
   status: queued
@@ -35,3 +35,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The description and files list show a narrow remedy. It touches src/lib/ci-friction-gardener.ts and adds one test file. Nothing in either points to secrets, auth, permissions, deletions, or merge, deploy, or review policy."
+      - "The acceptance criterion is a grep-verifiable test in the declared new test file. The task is therefore verifiable from what is shown, and no operator-only decision is requested."
+      - "The family track record is mixed (24 merged, 40 declined, Beta mean 0.61). That calls for normal scrutiny but is not a gates-state concern. The change still goes through CI and review."
+      - "No bounded change view was supplied, so I cannot confirm the actual change matches the declared files."
+    judged_at: "2026-10-14T10:02:44.753Z"
+    pin: "129281edd0b72cd3c712b295844158adb3825827b5028a53da3f05d37bcb7982"
