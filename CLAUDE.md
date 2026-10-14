@@ -7,8 +7,7 @@ gets a filed task.
 **THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** **The headline is the whole rule:
 obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
 
-**Upkeep (§8A):** interactive sessions pay per byte; workers never load it (`settingSources: []`).
-A new rule is three edits: headline + pointer here, its body file (a 2–4 word slug),
+**Upkeep (§8A):** workers never load it (`settingSources: []`). Rule: headline + pointer here, body (a 2–4 word slug),
 `npm run agents-md`. A fold keeps the instruction in the headline; a frozen W1-T3323 row leaves only
 VERBATIM in the body of the live rule carrying its instruction, its id (and a moved body's old path)
 aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the earning PR.
@@ -144,6 +143,7 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
   use a private TMPDIR.** → doctrine/investigation-discipline/clock-shift-enoent.md
 - **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
   forever under steady merges.** → doctrine/investigation-discipline/main-genuine-evidence.md
+- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair (#3030/#3039/#3043).** → doctrine/investigation-discipline/recurrence-is-a-class-signal.md
 
 ## Code traps
 

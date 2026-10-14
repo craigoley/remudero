@@ -37,6 +37,7 @@ import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.j
 import type { GitHub } from "./status.js";
 import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
+import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 /** BACKSTOP: the lane's heap; a unit that outgrows it kills this thread, never serve's. */
@@ -48,6 +49,7 @@ export const SLOW_LANE_MAX_RESPAWN_MS = 30 * 60_000;
 export interface SlowLaneConfig {
   /** The inbox unit's inputs; absent, the lane has no inbox unit. */
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
+  instanceInboxes?: Array<NonNullable<SlowLaneConfig["inbox"]> & { instance: string }>;
   /** The credit-edge unit's inputs (account-usage.ts); absent, the lane records no credit edge. */
   accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   /** The analytics unit's instances, each by the state dir holding its ledger; it runs only while the analytics view is switched on. */
@@ -83,7 +85,25 @@ export interface SlowLaneWork {
 
 interface SlowLaneUnit {
   name: string;
+  instance?: string;
   run(): Promise<{ views: SlowLaneBodies[] }>;
+}
+
+function instanceInboxUnit(config: NonNullable<SlowLaneConfig["instanceInboxes"]>[number], clock: Clock,
+  captureOwnership: () => () => boolean, log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  const [owner, repo] = config.repository.split("/");
+  const snapshot = ownerSnapshotGithub(config.inboxRoot, owner, repo, clock);
+  const deps: PanelGraphDeps = { ...config, github: slowLaneTraceGithub, statusGithub: snapshot().github, ratify: NO_INSTANCE_RATIFY,
+    inboxSourceIdentity: config };
+  const memo: InboxRefreshMemo = {};
+  return { name: `inbox:${config.instance}`, instance: config.instance, run: async () => {
+    deps.inboxMayPersist = captureOwnership();
+    deps.statusGithub = snapshot().github;
+    const refreshed = await refreshInboxClassification(deps, memo, clock);
+    if (refreshed.written) log("inbox.classification_written", { instance: config.instance, repository: config.repository,
+      proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
+    return { views: [] };
+  } };
 }
 
 class SlowLaneGithubRefused extends RmdError {
@@ -241,7 +261,7 @@ function analyticsUnit(
 /** A view switch mode under which the view is built: the analytics unit runs only then. */
 const BUILT_MODES: ReadonlySet<unknown> = new Set(["shadow", "serve", "auto"]);
 
-type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown }) => void): unknown; postMessage(value: unknown): void };
+type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void): unknown; postMessage(value: unknown): void };
 
 /**
  * The thread's body: run every unit each interval while the lease is held. A lease newly held runs a
@@ -264,18 +284,26 @@ export function runSlowLaneWorker(
   const analytics = data.analytics
     ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), opts.analyticsRefresh ?? deriveAnalyticsSnapshotFromCheckpointedLedger)]
     : [];
-  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []), ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics];
   let held = false;
   let running = false;
   let stopped = false;
+  let ownedInstances = new Set<string>();
+  let leaseEpoch = 0;
+  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
+    ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
+      const startedEpoch = leaseEpoch;
+      return () => !stopped && held && ownedInstances.has(config.instance) && leaseEpoch === startedEpoch;
+    }, log)),
+    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics];
   let cancel: () => void = () => {};
   const pass = async (): Promise<void> => {
     cancel = () => {};
     if (held && !running) {
       running = true;
       for (const unit of units) {
+        if (unit.instance && (!held || !ownedInstances.has(unit.instance))) continue;
         const started = clock.now();
-        const work: SlowLaneWork = { unit: unit.name, phase: "run" };
+        const work: SlowLaneWork = { unit: unit.name, ...(unit.instance ? { instance: unit.instance } : {}), phase: "run" };
         port.postMessage({ type: "begin", work } satisfies SlowLaneMessage);
         let ok = true;
         try {
@@ -295,8 +323,11 @@ export function runSlowLaneWorker(
     if (msg.type === "views") modes = (msg.modes ?? {}) as Record<string, unknown>;
     if (msg.type !== "lease") return;
     const was = held;
+    const previous = [...ownedInstances].join("|");
+    ownedInstances = new Set(Array.isArray(msg.instances) ? msg.instances.filter((id): id is string => typeof id === "string") : []);
     held = msg.held === true;
-    if (held && !was && !running) {
+    if (was !== held || previous !== [...ownedInstances].join("|")) leaseEpoch += 1;
+    if (held && (!was || previous !== [...ownedInstances].join("|")) && !running) {
       cancel();
       void pass();
     }
@@ -316,7 +347,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SL
 
 export interface SlowLane {
   /** Whether this serve holds the home lease; the thread is spawned the first time it does. */
-  lease(held: boolean): void;
+  lease(held: boolean, instances?: readonly string[]): void;
   /** The view switches as the worker last read them: a unit whose view is off does not run. */
   views(modes: Record<string, string>): void;
   close(): void;
@@ -338,6 +369,7 @@ export function threadSlowLane(opts: {
   const baseMs = opts.config.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   let worker: Worker | undefined;
   let held = false;
+  let ownedInstances: readonly string[] = [];
   let modes: Record<string, string> = {};
   let deaths = 0;
   let closed = false;
@@ -377,17 +409,18 @@ export function threadSlowLane(opts: {
         respawn = undefined;
         if (closed) return;
         spawn();
-        worker?.postMessage({ type: "lease", held });
+        worker?.postMessage({ type: "lease", held, instances: ownedInstances });
       }, delayMs);
       respawn.unref();
     });
   };
   return {
-    lease: (now) => {
-      if (closed || now === held) return;
+    lease: (now, instances = []) => {
+      if (closed || now === held && JSON.stringify(instances) === JSON.stringify(ownedInstances)) return;
       held = now;
+      ownedInstances = [...instances];
       if (held && !worker && respawn === undefined) spawn();
-      worker?.postMessage({ type: "lease", held });
+      worker?.postMessage({ type: "lease", held, instances: ownedInstances });
     },
     views: (next) => {
       if (closed || JSON.stringify(next) === JSON.stringify(modes)) return;

@@ -1,0 +1,72 @@
+- id: W1-T9358
+  title: "A HOST-SHORT HOLD RECLAIMS THE DAEMON'S OWN SLACK FIRST — W1-T8401 reclaims before a container-short hold only, so on 2026-10-14 00:19-00:31Z the WIP governor held all 3 empty core lanes host-short three times (available 3477, 4669, 2678 MiB against a 3072 floor) with no reclaim, while reclaims in the same hour freed 0.18-2.24 GB each"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the host-short arm asks the daemon to reclaim before it holds, as the container-short arm does
+  band_meaning: span
+  origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, never raise core memory.max, reduce usage and let the memory governor set lane count"
+  plan_refs: [W1-T8401, W1-T7243, W1-T321, W1-T9097, W1-T9080, W1-T9102, W1-T9352]
+  files: [src/lib/sweep.ts, src/lib/daemon-memory-policy.ts, test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts]
+  status: queued
+  priority: 1.5  # measured 38 lane-min in one window (00:19:14-00:31:48Z, 3 lanes empty behind host-short holds)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger, daemon pid 1710758, boot head 08cbabc50; read from a local copy of the
+    rotated archives, Azure host read-only):
+      - `dispatch_deferred_wip` (task GOVERNOR) at 00:19:14, 00:23:20 and 00:28:11: measured_bound 0,
+        pressure_binding host, pressure_tier host-short, pressure_available_mib 3477, 4669 and 2678,
+        pressure_floor_mib 3072. None carries a `reclaim_*` field: no reclaim ran. Against the 2048 MiB unit the
+        shortfalls were 1643, 451 and 2442 MiB. All 3 lanes were empty from 00:13:50 (`lane.idle_changed`
+        idle_slots 3); from the first host-short hold at 00:19:14 to the freshness exit at 00:31:48 that is 38 lane-min.
+      - In the same process, W1-T8401's reclaim ran 15 times between 23:36 and 00:29 (`sweep.fix_capacity`,
+        `dispatch_wip_observed`), all outcome `reclaimed`, freeing 182,738,944 to 2,237,661,184 bytes each (00:18:23:
+        container 6446 to 3637 MiB). Freed daemon memory is host memory too: the container's pages are the host's.
+    READ on origin/main b102674b1 (src/lib/sweep.ts, symbols):
+      - `reclaimBeforeHold` returns its first reading unchanged unless `first.tier === "container-short"`.
+      - `readFixHostPressureOnce` returns tier host-short whenever the binding pool is the host
+        (`pool.binding === "host"`), and also when the container is unbounded or unread (`hostTier`). So a host-short
+        reading never reaches the reclaim, in both the WIP governor's pressure (`checkQueueGovernor` reads it through
+        `pressureWorkers`) and the fix admission.
+      - `checkMemoryGovernor`'s host arm (`availableMib < policy.memoryFloorMib` gives tier host-short) defers with no
+        reclaim either.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 8 open PR heads (2026-10-14 01:28Z) for host-short,
+    reclaimBeforeHold, container-short and the reclaim fields. Control: "reclaimBeforeHold|container-short" reads 1
+    shard (W1-T8401) on main and on every head; "host-short" reads only W1-T9352, which quotes the same holds and
+    fixes the pre-exit pass, not the hold. W1-T9097 sizes the lane count from learned tails and does not reclaim.
+    DROPPED FROM THE APPROVED SCOPE, ON EVIDENCE: sizing the WIP governor by the learned implement estimate instead
+    of `DEFAULT_ESTIMATE_MIB.implement`. The learned implement claim estimate (`memory_budget.shadow` claims,
+    19:44Z-00:49Z, 2,756 claims) was 3,243-3,799 MiB all day, above the 2,048 default, with a median (typical)
+    486-1,058 MiB. Swapping it in would have held more, not less: all three holds above stay held. W1-T9097 already
+    sizes refill from the learned tails through the shadow budget's model.
+  design: |
+    No new constant, interval, count or byte threshold. The floor (`memoryFloorMib`) and the W1-T8401 pacing stay.
+    1. RECLAIM BEFORE A HOST-SHORT HOLD. `reclaimBeforeHold` also acts on tier host-short: it asks the installed
+       reclaimer once, then decides on the fresh reading `reread` takes. For a host-short reading the moved figure
+       W1-T8401's pacing compares is the host's MemAvailable, not the container working set, so the reclaimer's
+       evidence pacing ("freed nothing measurable, wait for the reading to move") applies to the binding pool.
+    2. ONE RECLAIM PER READING. A reading that already reclaimed (a container-short first reading whose re-read came
+       back host-short) is not reclaimed again; its row carries the one reclaim it had.
+    3. The memory governor's host arm (`checkMemoryGovernor`'s callers) gets the same: reclaim once, re-read, then
+       decide. The tiers, the floor and the nothing-to-wait-for arm are unchanged.
+    4. The hold rows (`dispatch_deferred_wip`, `sweep.fix_capacity`, `dispatch_memory_observed`) carry
+       `reclaimLedgerFields` for a host-short reclaim exactly as for a container-short one.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Inject the readings, the reclaim
+    and the re-read; use the 00:23:20 row (host 4669 MiB, floor 3072) as the fixture.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts"
+    - claim: "a host-short reading invokes the reclaim once and admits when the re-read has room for one build"
+      proof: 'grep: test("W1-T9358: a host-short hold reclaims once and admits when the reclaim frees room" in test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts'
+    - claim: "a host-short reading still short after the reclaim defers, and the hold row names what the reclaim freed"
+      proof: 'grep: test("W1-T9358: a real host shortfall still defers and the row names the reclaim" in test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts'
+    - claim: "a reading that already reclaimed container-short is not reclaimed again when its re-read is host-short"
+      proof: 'grep: test("W1-T9358: one reclaim per reading" in test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts'
+    - claim: "the memory governor's host arm reclaims before it defers"
+      proof: 'grep: test("W1-T9358: the memory governor host arm reclaims before deferring" in test/a-host-short-hold-reclaims-the-daemons-slack-first.test.ts'
+  falsifier: |
+    Leave `reclaimBeforeHold` on container-short only: the 00:23:20 fixture (4669 MiB, short by 451) defers with no
+    reclaim call, and the first test fails. Reclaim on every re-read: the third test counts two reclaims.

@@ -39,7 +39,7 @@ import {
   escalateLifetimeCapExceeded,
   escalateCrashLoop,
 } from "../src/lib/escalation-catalogue.js";
-import { ESCALATION_JUDGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL } from "../src/lib/escalate.js";
+import { ESCALATION_JUDGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, configureEscalationTriage } from "../src/lib/escalate.js";
 import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "../src/lib/escalate.js";
 import type { Task } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
@@ -137,7 +137,7 @@ function recordingIssues(calls: Array<{ title: string; body: string; labels: str
 
 test("W1-T3401: a DEMOTE verdict moves the daemon's block escalation off needs-human onto fleet-notice", async () => {
   const judged: Escalation[] = [];
-  const { home, escalateBlock } = await wiredEscalateBlock(async (e) => {
+  const { home, root, escalateBlock } = await wiredEscalateBlock(async (e) => {
     judged.push(e);
     return { decision: "demote", reason: "A is retrying on its own; nothing for a human yet" };
   });
@@ -146,6 +146,8 @@ test("W1-T3401: a DEMOTE verdict moves the daemon's block escalation off needs-h
     { when: "label create", exit: 0 },
     { when: "issue comment", exit: 0 },
   ]);
+  // W1-T8868: triage ships in shadow (every outcome delivers); a demotion lands only in act mode.
+  configureEscalationTriage(() => ({ mode: "act" }));
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
   try {
@@ -153,6 +155,7 @@ test("W1-T3401: a DEMOTE verdict moves the daemon's block escalation off needs-h
       escalateBlock({ task: BLOCKED_TASK, result: blockedResult(), dependents: ["W1-T9002"] }),
     );
   } finally {
+    configureEscalationTriage(undefined);
     if (oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = oldPath;
     rmSync(home, { recursive: true, force: true });

@@ -181,6 +181,8 @@ export function defaultInstanceInboxSources(root: InstanceStateRoot, repository:
   const deps: PanelGraphDeps = {
     root: join(root.root, "repos", repository.split("/")[1] ?? repository), planPath: root.planPath, ledgerPath: root.ledgerPath,
     inboxRoot: root.root, github: { prView: () => null }, statusGithub: github, ratify: NO_INSTANCE_RATIFY, inboxFromSlowLane: true,
+    inboxSourceIdentity: { instance: root.instance, repository, root: join(root.root, "repos", repository.split("/")[1] ?? repository),
+      planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root },
   };
   return [...buildPanelReadRoutes(deps).filter(r => INSTANCE_INBOX_SOURCE_PATHS.has(r.path)),
     buildInboxThreadReplyRoute(deps), buildInboxThreadReadRoute(deps),

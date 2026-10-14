@@ -511,6 +511,19 @@ function unseenBy(db: ReadModelDb, ids: readonly string[], rows: LegacyRows, fro
       if (!keys.has(`${String(row.ts_ms)}|${String(row.step)}`)) out.add(id);
     }
   }
+  // W1-T9356: a run's newest non-fact row is kept only in run_activity, which dates the task on the view's side;
+  // compaction prunes it from the live file like any other step, so legacy holding no row at its instant is unseen.
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_activity'").get() === undefined) return [...out];
+  const instants = new Map<string, Set<string>>();
+  for (let at = 0; at < ids.length; at += 400) {
+    const chunk = ids.slice(at, at + 400);
+    const sql = `SELECT task_id, ts_ms FROM run_activity WHERE task_id IN (${chunk.map(() => "?").join(",")}) AND ts_ms >= ? AND ts_ms <= ?`;
+    for (const row of db.prepare(sql).all(...chunk, fromMs, asOfMs)) {
+      const id = String(row.task_id);
+      const held = instants.get(id) ?? instants.set(id, new Set((rows[id] ?? []).map((key) => key.slice(0, key.indexOf("|"))))).get(id)!;
+      if (!held.has(String(row.ts_ms))) out.add(id);
+    }
+  }
   return [...out];
 }
 

@@ -21,6 +21,8 @@ import { isGhRateLimitError } from "./status.js";
 export type DraftLintViolation = RelintViolation;
 import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
+import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadStoreDeps } from "./inbox-thread.js";
+import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
@@ -934,6 +936,105 @@ export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: 
     else if (l.step === "panel.proposal_restored") declined.delete(l.task_id);
   }
   return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
+}
+
+/** W1-T9252: one operator action or fleet outcome, ready for `appendThreadEvent`. */
+export interface ThreadEventDraft {
+  proposalId: string;
+  event: ThreadEvent;
+  text: string;
+  /** The source row's time (epoch ms), so the event sorts where it happened. */
+  ts: number;
+}
+
+/** The ledger steps {@link threadEventsForRow} reads: a boot backfill filters its union read on these. */
+export const THREAD_EVENT_STEPS: readonly string[] = [
+  "ratify.reframed", "panel.proposal_declined", "panel.proposal_restored", "ratify.approved",
+  "ratify.approve_refused", "approve.shards_written", "inbox.drafted",
+];
+
+/** The tasks a shards path names: `plan/tasks.d/W1-T123-slug.yaml` → `W1-T123`. */
+function taskIdsOfPaths(paths: unknown): string[] {
+  if (!Array.isArray(paths)) return [];
+  const ids = paths.flatMap((path) => (typeof path === "string" ? [/(W\d+-T[A-Za-z0-9]+)/.exec(basename(path))?.[1]] : []));
+  return [...new Set(ids.filter((id): id is string => id !== undefined))];
+}
+
+/**
+ * W1-T9252 — what a ledger row means on an item's thread. PURE: the verb that writes the row, the daemon's
+ * live tail and the boot backfill all read a row through here, so they cannot disagree about its key
+ * (`run_id|step|ts`) or its text. `proposals` bounds the answer to the proposals the registry holds; absent,
+ * a row's own proposal is taken as given and a release has no known targets.
+ *
+ * A decline or restore the daemon's responder took (`origin: inbox-responder`) is NOT mapped: the
+ * responder writes its own `did` message, and a second event would echo the same action.
+ */
+export function threadEventsForRow(
+  row: Record<string, unknown>,
+  proposals?: ReadonlyArray<Pick<Proposal, "id" | "reframeHistory">>,
+): ThreadEventDraft[] {
+  const step = typeof row.step === "string" ? row.step : "";
+  const ts = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  if (!Number.isFinite(ts)) return [];
+  const key = `${typeof row.run_id === "string" ? row.run_id : ""}|${step}|${row.ts as string}`;
+  const known = (id: string) => proposals === undefined || proposals.some((p) => p.id === id);
+  const draft = (proposalId: string, kind: ThreadEventKind, text: string, keySuffix = ""): ThreadEventDraft[] =>
+    known(proposalId) ? [{ proposalId, event: { kind, key: key + keySuffix }, text, ts }] : [];
+  const taskId = typeof row.task_id === "string" ? row.task_id : undefined;
+  const clip = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 500) : fallback);
+  switch (step) {
+    case "ratify.reframed":
+      return taskId ? draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft.")) : [];
+    case "panel.proposal_declined":
+      return taskId && row.origin !== "inbox-responder" ? draft(taskId, "declined", clip(row.reason, "Declined.")) : [];
+    case "panel.proposal_restored":
+      return taskId && row.origin !== "inbox-responder" ? draft(taskId, "restored", clip(row.reason, "Brought back.")) : [];
+    case "ratify.approved": {
+      if (!taskId) return [];
+      if (row.released !== "verify-human") return draft(taskId, "approved", "Approved. The fleet will file it.");
+      const targets = (proposals ?? []).map((p) => p.id).filter((id) => {
+        const kind = inboxKind(id);
+        return (kind === "verify-human" || kind === "machine-judge") && deriveTaskReferent(id) === taskId;
+      });
+      const machine = row.author_class === "machine";
+      return targets.flatMap((id) => [
+        ...(machine ? [] : draft(id, "released", `Released ${taskId}.`)),
+        ...draft(id, "released_to_fleet", machine ? `The judge cleared ${taskId} for the fleet.` : `${taskId} is released and the fleet can now work on it.`, ":fleet"),
+      ]);
+    }
+    case "ratify.approve_refused":
+      return taskId ? draft(taskId, "refused", `The fleet did not file this: ${clip(row.reason, "it is not ready")}`) : [];
+    case "approve.shards_written": {
+      const ids = [...(typeof row.proposal_id === "string" ? [row.proposal_id] : []), ...(Array.isArray(row.proposal_ids) ? row.proposal_ids.filter((id): id is string => typeof id === "string") : [])];
+      const filed = taskIdsOfPaths(row.paths);
+      return ids.flatMap((id) => draft(id, "task_filed", filed.length > 0 ? `Filed ${filed.join(", ")} for the fleet.` : "Filed the drafted task for the fleet."));
+    }
+    case "inbox.drafted": {
+      const id = typeof row.proposal_id === "string" ? row.proposal_id : undefined;
+      const reframed = proposals?.find((p) => p.id === id)?.reframeHistory?.length ?? 0;
+      return id && row.lint_clean !== false && reframed > 0 ? draft(id, "redrafted", "A new draft is ready, written with your feedback.") : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/** Write one row's thread events; a store failure is reported through `log`, never thrown — the ledger row stays the record. */
+export function recordRowThreadEvents(
+  row: Record<string, unknown>,
+  proposals: ReadonlyArray<Pick<Proposal, "id" | "reframeHistory">> | undefined,
+  store: ThreadStoreDeps,
+  log?: (step: string, extra: Record<string, unknown>) => void,
+): number {
+  let appended = 0;
+  for (const draft of threadEventsForRow(row, proposals)) {
+    try {
+      if (appendThreadEvent(draft.proposalId, draft.event, draft.text, store, draft.ts) === "appended") appended += 1;
+    } catch (error) {
+      log?.("inbox.thread_event_failed", { proposal_id: draft.proposalId, kind: draft.event.kind, error: String((error as Error)?.message ?? error) });
+    }
+  }
+  return appended;
 }
 
 /** An operator's decline, or its reversal — the two verdicts that record a row and file nothing. */
@@ -3156,6 +3257,11 @@ export interface RatifyLedgerDeps {
   /** W1-T2455: already-filed task records to score this proposal's drafted slugs against, built by the caller.
    *  OMITTED or EMPTY means the check does not run — it never blocks on its own blindness. */
   duplicateCorpus?: readonly DuplicateCorpusEntry[];
+  /** W1-T9252: where to mirror an operator action onto the item's thread (the inbox thread store). Absent, the
+   *  verb writes its ledger row alone and the daemon's live tail mirrors it later. */
+  threadStorePath?: string;
+  /** Reports a thread-store write that failed; the verb never does. */
+  log?: (step: string, extra: Record<string, unknown>) => void;
 }
 
 /**
@@ -4043,13 +4149,16 @@ export function reframeProposal(
     ...proposal,
     reframeHistory: [...updatedHistory, { feedback }],
   };
-  appendLedger(deps.ledgerPath, {
+  const row = {
+    ts: systemClock.iso(),
     run_id: deps.runId,
     task_id: proposal.id,
     step: "ratify.reframed",
     feedback,
     ...(supersedes && supersedes.length > 0 ? { supersedes } : {}),
-  });
+  };
+  appendLedger(deps.ledgerPath, row);
+  if (deps.threadStorePath) recordRowThreadEvents(row, [reframedProposal], { threadStorePath: deps.threadStorePath }, deps.log);
   return { proposal: reframedProposal, drafts: invalidateDraft(drafts, proposal.id) };
 }
 

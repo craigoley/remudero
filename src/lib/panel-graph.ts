@@ -104,7 +104,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -140,6 +140,7 @@ import {
   parseProposalRegistry,
   parseProposalRegistryResult,
   applyProposalVerdict,
+  recordRowThreadEvents,
   type ProposalVerdictKind,
   refusalReason,
   type AnchorGrepCache,
@@ -152,6 +153,8 @@ import {
 } from "./inbox.js";
 
 export interface PanelGraphDeps {
+  inboxSourceIdentity?: InboxSourceIdentity;
+  inboxMayPersist?: () => boolean;
   /** Repo root — where plan/feedback/ lives. */
   /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
   projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
@@ -2501,10 +2504,14 @@ function inboxShapeOf(
 
 // ── W1-T4088: the inbox as threads ─────────────────────────────────────────────────────────────
 
+/** W1-T9252: this table is the thread routes' membership, so it must name every classification `inboxLanes` puts in
+ *  `needsYou`. `deferred_with_trigger` was missing: its item is listed under `notReady` (a deferred item waits
+ *  on a trigger, which is the fleet's next step) but its id was refused on every thread route as not found. */
 const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["state"]>> = {
   ready: "ready",
   drafting: "drafting",
   not_ready: "notReady",
+  deferred_with_trigger: "notReady",
   declined: "declined",
   retired: "retired",
 };
@@ -2729,7 +2736,10 @@ export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefin
   const held = slowLaneInboxes.get(deps);
   if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
   const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
-  const read = persisted && slowLaneInboxOf(deps, persisted);
+  const identity = deps.inboxSourceIdentity;
+  const sourceMatches = !identity || Object.entries(identity).every(([key, value]) =>
+    persisted?.sourceIdentity?.[key as keyof InboxSourceIdentity] === value);
+  const read = persisted && sourceMatches ? slowLaneInboxOf(deps, persisted) : undefined;
   slowLaneInboxes.set(deps, { stamp, read });
   return read;
 }
@@ -3045,7 +3055,8 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
       }
       const threads = readThreadsOr500(deps, res);
       if (!threads) return;
-      const lastSeq = threadDetailView(item, threads, {}).messages.at(-1)?.seq ?? 0;
+      // The newest message by seq: events are ordered by time, so the last one shown need not hold the highest seq.
+      const lastSeq = Math.max(0, ...threadDetailView(item, threads, {}).messages.map((message) => message.seq));
       if (input.seq > lastSeq) {
         sendJson(res, 409, { error: "seq_ahead", detail: "read mark exceeds the last observed message" });
         return;
@@ -3375,7 +3386,11 @@ function proposalVerdictResponse(
     classification: classifications.find((c) => c.proposalId === input.proposalId),
   };
   const origin = bearerTokenId(req);
-  const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => appendPanelLedger(deps.ledgerPath, step, id, origin, { reason }));
+  const outcome = applyProposalVerdict(kind, input, found, (step, id, reason) => {
+    const row = appendPanelLedger(deps.ledgerPath, step, id, origin, { reason });
+    // W1-T9252: the operator's action also lands on the item's thread; a store fault never fails the verb.
+    recordRowThreadEvents({ ...row, task_id: id, origin, reason }, [{ id }], { threadStorePath: inboxThreadStorePath(deps.inboxRoot) }, deps.logProjection);
+  });
   if (!outcome.ok) {
     sendJson(res, outcome.status, { error: outcome.error, detail: outcome.detail });
     return;

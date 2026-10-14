@@ -231,7 +231,7 @@ import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } fro
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
-import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
+import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
@@ -540,6 +540,9 @@ import {
   type GenerativeDigestItem,
 } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
+import { createDaemonClient, type DaemonClient } from "../packages/api-client/src/client.js";
+import { newTriagePass, parseEscalationTriagePolicy } from "./lib/escalation-triage.js";
+import { escalationClassSignal } from "./lib/escalation-precision.js";
 import {
   deliversRealtime,
   escalate,
@@ -548,6 +551,13 @@ import {
   escalateWithSummary,
   escalationCause,
   realEscalationJudge,
+  configureEscalationTriage,
+  triageExistingEscalation,
+  applyDefaultAnswer,
+  shouldApplyDefault,
+  defaultAnswerWindowMs,
+  type EscalateDeps,
+  type EscalateTriageSettings,
   escalationHeadSha,
   escalationContractRevision,
   findDuplicateEscalation,
@@ -897,6 +907,7 @@ import {
   proposalsNeedingDraft,
   ratifyTelemetry,
   reframeProposal,
+  recordRowThreadEvents,
   refusalReason,
   renderInbox,
   renderRatifyTelemetry,
@@ -1730,6 +1741,9 @@ import {
   type ClosedPrFact,
   type PrTerminalReconcileSummary,
   runEscalationReconcile,
+  runStaleEscalationRejudge,
+  buildStaleEscalationRejudgePrompt,
+  type StaleEscalationRejudgeCandidate,
   runPostFixReverification,
   runSweep,
   runSweepLightPass,
@@ -2487,6 +2501,7 @@ export function buildSweepEffects(
   | "repushAbsent"
   | "updateBranch"
   | "readyDraft"
+  | "draftRefusalAmendments"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "stackPrerequisite"
@@ -3189,6 +3204,7 @@ import {
   disposeSharedPauseRefresh,
   prepareSharedPause,
   clearKick,
+  requestKick,
   consumeDrainNow,
   clearPrAction,
   consumeStop,
@@ -3252,6 +3268,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -3262,6 +3279,126 @@ let composedRealGraph: ComposedRealGraph | undefined;
 function realDeps(): ComposedRealGraph {
   composedRealGraph ??= composeRealDeps({ repoRoot });
   return composedRealGraph;
+}
+
+/** Bind the closed executors to existing write ports. One factory owns one pass's budget. */
+export function buildEscalationTriageRuntime(
+  context: { root: string; config: Config; owner: string; repo: string },
+  io: {
+    readPolicy?: () => unknown;
+    readRows?: (ledgerPath: string) => Record<string, unknown>[];
+    clock?: Clock;
+    seenAt?: () => number | undefined;
+    windowMs?: () => number;
+    client?: () => Pick<DaemonClient, "submitFeedback" | "listFeedback">;
+    judge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+    amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
+    kick?: (e: Escalation) => void;
+  } = {},
+): (deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings {
+  const { root, config, owner, repo } = context;
+  let pass: ReturnType<typeof newTriagePass> | undefined;
+  const readRows = io.readRows ?? ((path) => readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true }).rows);
+  const clock = io.clock ?? systemClock;
+  const client = io.client ?? (() => {
+    const tokens = JSON.parse(readFileSync(serviceTokensPath(config.root), "utf8")) as { write?: unknown };
+    if (typeof tokens.write !== "string" || !tokens.write) throw new Error("service write token unavailable");
+    return createDaemonClient({ baseUrl: consoleUrl(config), token: tokens.write,
+      fetchImpl: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(10_000) }) });
+  });
+  const defaultOptions = () => {
+    const seen = io.seenAt ? io.seenAt() : (() => {
+      if (!existsSync(lastSeenPath(config.root))) return undefined;
+      const markers = JSON.parse(readFileSync(lastSeenPath(config.root), "utf8")) as Record<string, unknown>;
+      const times = Object.values(markers).map((value) => typeof value === "string" ? Date.parse(value) : NaN);
+      if (times.some((value) => !Number.isFinite(value))) throw new Error("unreadable seen marker");
+      return times.length ? Math.max(...times) : undefined;
+    })();
+    const windowMs = (io.windowMs ?? (() => defaultAnswerWindowMs(root)))();
+    if (!Number.isFinite(windowMs) || windowMs < 0 || (seen !== undefined && !Number.isFinite(seen)))
+      throw new Error("unreadable default window");
+    return { seenAtMs: seen, nowMs: clock.now(), windowMs };
+  };
+  const feedbackId = (e: Escalation) => {
+    const id = /\bfeedback#([^\s:]+)/.exec(e.summary)?.[1];
+    if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
+    return id;
+  };
+  return (deps) => {
+    const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => parseYaml(readFileSync(policyPath(root), "utf8"))))());
+    pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
+    const receipts = new Map<string, string>();
+    return {
+      mode: policy.mode, pass, asyncExecutors: true,
+      evidence: (e) => {
+        const history = readRows(deps.ledgerPath);
+        const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
+          row.head_sha === e.headSha && row.kind !== "proof_amendment");
+        const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
+          strike?.mode === "review" ? "review" : undefined;
+        const priorRekicks = history.filter((row) => row.step === "escalation.auto_resolve_attempted" &&
+          row.task_id === e.taskId && row.triage_action === "rekick_once" &&
+          ((e.headSha !== undefined && row.head_sha === e.headSha) ||
+           (e.contractRevision !== undefined && row.contract_revision === e.contractRevision))).length;
+        const born = [...history].reverse().find((row) => row.task_id === e.taskId && row.triage_subject && row.issue_url);
+        const opts = defaultOptions();
+        const seenAfterBirth = born && typeof born.ts === "string" && opts.seenAtMs !== undefined && opts.seenAtMs >= Date.parse(born.ts);
+        return {
+          classTier: escalationClassSignal(history, e.class).tier,
+          defaultApplies: !!seenAfterBirth && shouldApplyDefault(e, opts).applied,
+          rekick: { priorRekicks, newFailureSinceLastStrike: e.class === "BLOCKED" && !!e.headSha &&
+            !!previousCause && !!e.cause && previousCause !== e.cause },
+        };
+      },
+      judge: io.judge ?? (async (e) => realEscalationJudge({ mounts: loadMounts(mountsPath(root)),
+        cwd: root, settingsFile: join(resolveInstallRoot(config), "settings", "worker.json") })(e)),
+      execute: {
+        feedback_reply: async (e) => {
+          const id = feedbackId(e);
+          const result = await client().submitFeedback("file-as-task: the ALREADY_DECIDED citation did not resolve; file this request as a task", { replyTo: id });
+          if (!result.ok || result.entry.reply_to !== id) throw new Error("feedback reply was not recorded");
+          receipts.set(e.taskId, result.entry.id);
+          return `feedback#${result.entry.id} answers feedback#${id}; withdraw the reply to undo`;
+        },
+        plan_amendment_pr: async (e) => {
+          if (io.amend) return io.amend(e, deps);
+          const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+          const effects = buildSweepEffects({ owner, repo, config, ledgerPath: deps.ledgerPath, runId: deps.runId,
+            plan, policy: DEFAULT_SWEEP_POLICY, log: (step, extra = {}) => appendLedger(deps.ledgerPath,
+              { run_id: deps.runId, task_id: e.taskId, step, ...extra }) });
+          const [result] = await effects.draftRefusalAmendments!([{ taskId: e.taskId, runId: e.runId ?? deps.runId,
+            reportExcerpt: e.detail, refusals: [{ criterion: 1, refusalClass: "proof-unexecutable-at-head", detail: e.summary }] }]);
+          if (result === undefined || !result.prUrl) throw new Error(`amendment not opened: ${result?.outcome ?? "unavailable"}`);
+          return `${result.prUrl} proposes the proof amendment; decline the PR to undo`;
+        },
+        rekick_once: (e) => {
+          if (io.kick) io.kick(e);
+          else {
+            const task = loadPlan(join(root, "plan", "tasks.yaml")).byId.get(e.taskId);
+            if (!task || !taskAwaitsAmendment(task)) throw new Error("task is not dispatchable");
+            requestKick(config.root, e.taskId, "escalation-triage", repo);
+          }
+          return `one dispatch requested for ${e.taskId}; clear its kick marker to undo`;
+        },
+        apply_default: (e) => {
+          const result = applyDefaultAnswer(e, defaultOptions(), deps as EscalateDeps);
+          if (!result.applied || !result.answer) throw new Error("default no longer applies");
+          receipts.set(e.taskId, JSON.stringify(result.answer));
+          return `default recorded: ${JSON.stringify(result.answer)}; undoDefaultAnswer reverses this receipt`;
+        },
+      },
+      observe: async (e, action) => {
+        if (action === "feedback_reply") {
+          const inbox = await client().listFeedback();
+          const target = inbox.entries.find((entry) => entry.id === feedbackId(e));
+          return target?.status === "answered" && target.answered_by === receipts.get(e.taskId)
+            ? `feedback#${target.id} is answered by feedback#${target.answered_by}` : undefined;
+        }
+        if (action === "apply_default") return receipts.get(e.taskId);
+        return undefined; // A proposed amendment or a kick is not yet a resolved block.
+      },
+    };
+  };
 }
 
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
@@ -19676,6 +19813,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     endThrownRun(log, verdictWritten, "managed_checkout.refresh", e, costUsd);
     await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
+  }
+  // W1-T8776: a checkout now at main fills the shared child-entry store once per main revision, in a child process
+  // and unawaited, so every worktree cut at this source hash can copy the bundle instead of cold-starting tsx. A hash
+  // already stored is a no-op; a failed build is ledgered and changes nothing (children keep running tsx).
+  if (checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded") {
+    void buildIntoStore(repoDir, {
+      storeRoot: childEntryStoreRoot(config.root),
+      log,
+      liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
+    });
   }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
@@ -39863,6 +40010,8 @@ export async function daemonCommand(
           ledgerPath,
           readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath),
           reframe: (proposalId, feedback) => void fleetRatify.reframe(proposalId, feedback),
+          // W1-T9252: the boot backfill, then the live tail, of operator actions and fleet outcomes onto threads.
+          syncEvents: createThreadEventSync({ ledgerPath, threadStorePath: inboxThreadStorePath(config.root), stateDir: join(config.root, "state"), log }).sync,
           decide: inboxThreadDecider(config, log),
         },
         runPrAction: async (request) => {
@@ -46418,6 +46567,8 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const runId = `SWEEP-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
+  const triageRuntime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
+  configureEscalationTriage(triageRuntime);
 
   // The plan backs the fix rung's task lookup (title/acceptance/risk). Best-effort:
   // a repo without a readable plan can still arm/close/escalate; only fix needs it.
@@ -46513,6 +46664,8 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   // of the escalation lifecycle). Same level-triggered doctrine + cadence as the two rungs
   // above; bounded per cycle so a backlog drains gradually.
   const reconcileSummary = await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { dryRun });
+  await sweepEscalationTriage({ root: repoRoot, config, owner, repo, ledgerPath, runId }, openPrs, log,
+    { dryRun, runtime: triageRuntime });
 
   // W1-T175 — the worktree reaper rung: same level-triggered doctrine + cadence as the
   // rungs above, closing pruneStaleRuns' coverage holes (git-invisible dirs, detached-HEAD
@@ -46664,6 +46817,79 @@ export async function sweepEscalationReconcile(
   return intake
     ? { ...summary, issuesSeen: intake.issuesSeen, droppedNoTaskTrailer: intake.droppedNoTaskTrailer, droppedNoReferent: intake.droppedNoReferent }
     : summary;
+}
+
+/** Rejudge only observed open issues, using their recorded subjects and this sweep's referent state. */
+export async function sweepEscalationTriage(
+  context: { root: string; config: Config; owner: string; repo: string; ledgerPath: string; runId: string },
+  openPrs: readonly OpenPrView[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  io: {
+    dryRun?: boolean;
+    rows?: Record<string, unknown>[];
+    issues?: IssueGateway;
+    runtime?: ReturnType<typeof buildEscalationTriageRuntime>;
+    clock?: Clock;
+    relabel?: (url: string, label: string) => void | Promise<void>;
+    execAsync?: GhAsyncExecutor;
+  } = {},
+): Promise<void> {
+  try {
+    const { ledgerPath, runId, owner, repo } = context;
+    const history = io.rows ?? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows;
+    const issues = io.issues ?? ghIssueGateway(owner, repo);
+    const open = listRetirableEscalationIssues(issues);
+    const nowMs = (io.clock ?? systemClock).now();
+    const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
+    const deps = { issues, ledgerPath, runId };
+    const cfg = runtime(deps);
+    // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
+    const relabel = io.relabel ?? (async (url: string, label: string): Promise<void> => {
+      assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
+      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
+        "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], {}, io.execAsync);
+    });
+    const candidates: StaleEscalationRejudgeCandidate[] = [];
+    for (const issue of open) {
+      const birth = [...history].reverse().find((row) => row.issue_url === issue.url && row.triage_subject &&
+        ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"].includes(String(row.step)));
+      if (!birth || typeof birth.ts !== "string" || !Number.isFinite(Date.parse(birth.ts))) continue;
+      const subject = birth.triage_subject as Escalation;
+      if (!subject || !Array.isArray(subject.options)) continue;
+      const pr = openPrs.find((p) => p.taskId === subject.taskId || p.prNumber === prReferentFromIssueText(subject.detail + subject.summary));
+      const referentStateNow = pr ? JSON.stringify({ head: pr.headSha, review: pr.reviewState,
+        checks: pr.checksState, mergeable: pr.mergeable, mergeableState: pr.mergeableState }) : "referent state unavailable";
+      const siblingSummaries = open.filter((sibling) => sibling.url !== issue.url &&
+        sibling.body?.includes(`**Task:** ${subject.taskId}\n`)).map((sibling) => sibling.title ?? sibling.url).sort();
+      const stateKey = createHash("sha256").update(JSON.stringify([issue.url, issue.body, referentStateNow, siblingSummaries, cfg.mode])).digest("hex");
+      candidates.push({ issueUrl: issue.url, issueNumber: issue.number, escalation: subject,
+        ageMs: nowMs - Date.parse(birth.ts), referentStateNow, siblingSummaries, stateKey });
+    }
+    await runStaleEscalationRejudge(candidates, {
+      ledgerPath, runId, log, dryRun: io.dryRun,
+      alreadyJudgedStateKeys: new Set(history.filter((row) => row.step === "escalation.rejudged" &&
+        typeof row.state_key === "string").map((row) => String(row.state_key))),
+      judge: (candidate) => {
+        if (candidate.referentStateNow === "referent state unavailable")
+          return Promise.resolve({ decision: "deliver", reason: "referent state unavailable" });
+        return cfg.judge!({ ...candidate.escalation, detail: buildStaleEscalationRejudgePrompt(candidate) });
+      },
+      demote: async (url, reason) => { await issues.comment?.(url, reason); await relabel(url, "fleet-notice"); },
+      triage: {
+        mode: cfg.mode ?? "shadow", evidence: cfg.evidence,
+        autoResolve: async (candidate) => {
+          try {
+            await triageExistingEscalation(candidate.escalation, candidate.issueUrl, { ...deps, triage: cfg }, relabel);
+          } catch (err) {
+            await relabel(candidate.issueUrl, "needs-human");
+            throw err;
+          }
+        },
+      },
+    });
+  } catch (err) {
+    log("sweep.escalation_triage.failed", { reason: String(err) });
+  }
 }
 
 /**
@@ -47682,6 +47908,8 @@ export function buildSweepHook(
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
     const tickRead = await tickReadFor?.();
+    const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo });
+    if (!github) configureEscalationTriage(triageRuntime);
     try {
       await mainHealthRung?.();
     } catch (e) {
@@ -47797,6 +48025,8 @@ export function buildSweepHook(
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
       await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub, tickRead });
+      if (!github) await sweepEscalationTriage({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo, ledgerPath, runId },
+        openPrs, log, { runtime: triageRuntime });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
@@ -52210,6 +52440,9 @@ export function approveParkedTask(
     /** The operator's own release, kept where rotation cannot shed it until the machine-filing
      *  judge pins it on the record (operator ruling 2026-09-29). */
     recordDurableRelease?: (taskId: string) => void;
+    /** W1-T9252: told of the release row once it is written, so the release lands on every open ask about the
+     *  task; a failure here never fails the release. */
+    recordThreadRow?: (row: Record<string, unknown>) => void;
   },
 ): { code: number; message: string; released?: boolean } {
   const task = deps.plan.byId.get(taskId);
@@ -52249,13 +52482,15 @@ export function approveParkedTask(
         `false) — staged ${proposal.id} as a proposal instead of releasing ${taskId} directly`,
     };
   }
-  (deps.append ?? appendLedger)(deps.ledgerPath, {
+  const releaseRow = {
     run_id: deps.runId,
     task_id: taskId,
     step: RELEASE_LEDGER_STEP,
     released: "verify-human",
     ...(deps.provenance ?? {}),
-  });
+  };
+  (deps.append ?? appendLedger)(deps.ledgerPath, releaseRow);
+  deps.recordThreadRow?.(releaseRow);
   if (!deps.provenance) deps.recordDurableRelease?.(taskId);
   return { code: 0, released: true, message: `rmd approve: ${taskId} RELEASED — a verify:human task is now dispatch-eligible` };
 }
@@ -52294,7 +52529,12 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       return { exists: proposal !== undefined, classification };
     },
-    (step, id, reason) => appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason }),
+    (step, id, reason) => {
+      const row = appendPanelLedger(ledgerPath, step, id, "rmd-cli", { reason });
+      // W1-T9252: the action also lands on the item's thread; a store fault never fails the verb.
+      recordRowThreadEvents({ ...row, task_id: id, origin: "rmd-cli", reason }, [{ id }], { threadStorePath: inboxThreadStorePath(config.root) },
+        (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
+    },
   );
 }
 
@@ -52332,6 +52572,33 @@ export function approveCiNotGreenExit(
 export function commitThenLedgerSkillWrite(commit: () => void, ledger: () => void): void {
   commit();
   ledger();
+}
+
+/**
+ * `rmd approve`. W1-T9252: whatever the run ledgered for the proposals it named (approved, filed, refused) is
+ * also mirrored onto each proposal's thread, once the run ends — the ledger rows stay the record, and the
+ * mirror is keyed on them, so the daemon's live tail and boot backfill add nothing a second time.
+ */
+export async function approveCommandMirrored(rest: string[], deps: NonNullable<Parameters<typeof approveCommand>[1]> = {}): Promise<number> {
+  const startedAt = (deps.clock ?? systemClock).now();
+  const code = await approveCommand(rest, deps);
+  const ids = rest.filter((token) => !token.startsWith("--") && !namesATask(token));
+  if (ids.length === 0) return code;
+  try {
+    const config = deps.config ?? loadConfig();
+    const proposals = parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json")));
+    const named = new Set(ids);
+    for (const row of readLedgerLines(ledgerPathFor(config))) {
+      const rowIds = [row.task_id, row.proposal_id, ...(Array.isArray(row.proposal_ids) ? row.proposal_ids : [])];
+      if (typeof row.ts !== "string" || Date.parse(row.ts) < startedAt || !rowIds.some((id) => typeof id === "string" && named.has(id))) continue;
+      recordRowThreadEvents(row, proposals, { threadStorePath: inboxThreadStorePath(config.root) }, (step, extra) =>
+        console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`));
+    }
+  } catch (error) {
+    // deliberate: the thread mirror is a courtesy of the verb; the daemon's live tail mirrors what this missed.
+    console.error(`rmd approve: could not mirror the run onto its thread: ${String((error as Error)?.message ?? error)}`);
+  }
+  return code;
 }
 
 export async function approveCommand(
@@ -52375,6 +52642,14 @@ export async function approveCommand(
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
       recordDurableRelease: (taskId) => recordOperatorRelease(join(config.root, "state"), taskId, (deps.clock ?? systemClock).iso()),
+      recordThreadRow: (row) =>
+        void recordRowThreadEvents(
+          // The row as the ledger stamped it: the event's key is the stored row's `ts`, which this call never chose.
+          readLedgerLines(ledgerPathFor(config)).filter((line) => line.step === row.step && line.run_id === row.run_id && line.task_id === row.task_id).at(-1) ?? row,
+          parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          { threadStorePath: inboxThreadStorePath(config.root) },
+          (step, extra) => console.error(`rmd approve: ${step} ${JSON.stringify(extra)}`),
+        ),
     });
     console.log(outcome.message);
     // CHAINED ONLY ON SUCCESS: guidance attached to a refused release would describe a state the
@@ -53360,7 +53635,7 @@ export async function reframeCommand(rest: string[], deps: { config?: Config } =
   updateProposalRegistry(registryPath, (current) => {
     const freshProposal = current.find((p) => p.id === proposalId);
     if (!freshProposal) return null; // vanished concurrently — nothing left to reframe
-    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId }, supersedes);
+    reframed = reframeProposal(freshProposal, feedback, drafts, { ledgerPath, runId, threadStorePath: inboxThreadStorePath(config.root) }, supersedes);
     return current.map((p) => (p.id === proposalId ? reframed!.proposal : p));
   });
   if (!reframed) {
@@ -56494,6 +56769,7 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -57190,7 +57466,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
         console.error(USAGE);
         return 2;
       }
-      return await approveCommand(rest);
+      return await approveCommandMirrored(rest);
     },
   ],
   ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
@@ -57409,6 +57685,17 @@ export async function main(
   // process-boundary concerns the task record calls out: the freshness gate above, and the
   // exit code translation right here.
   realDeps();
+  if (!deps.dispatch) {
+    let runtime: ReturnType<typeof buildEscalationTriageRuntime> | undefined;
+    configureEscalationTriage((escalationDeps) => {
+      if (!runtime) {
+        const config = loadConfig();
+        const { owner, repo } = resolveOwnerRepo();
+        runtime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
+      }
+      return runtime(escalationDeps);
+    });
+  }
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
   await flushThenExit(

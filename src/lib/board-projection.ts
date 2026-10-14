@@ -60,6 +60,12 @@ export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot
  *  core's fact rows. They are never parsed; the newest `ts` among them rides a sentinel row, because
  *  `orphanedRunIds` reads the ledger's newest `ts` from every row. */
 export const BOARD_UNREAD_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary", "incident.event", "main.health.observed"]);
+/** W1-T9357: blob fields no reader of a projection row reads (a read census of the now view over 836,723 rows found
+ *  none): 36% of a core projection's kept field bytes. A row is kept without them for the life of the thread. */
+export const BOARD_ROW_UNREAD_FIELDS: ReadonlySet<string> = new Set([
+  "question", "benchmark_run", "stand_down_reason", "worker_assignment", "decision_verdict", "stderr_excerpt",
+  "review_input_digest", "proof_exec", "changed_paths", "evaluator_provenance", "reviewer_code_provenance",
+]);
 const LATEST_TS_META = "board.latest_ts_ms";
 /** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
 export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
@@ -165,6 +171,16 @@ export interface BoardProjectionOptions {
  * ever replaced by one equal to it; objects, arrays, numbers, booleans, null and longer strings are left as
  * parsed, no object is shared, and key order does not change (an existing key is reassigned in place).
  */
+/** `row` without {@link BOARD_ROW_UNREAD_FIELDS}, other keys in order; `row` itself when it holds none. A fresh
+ *  object, never `delete`: deleting leaves the row in dictionary mode, which kept MORE (525 MB vs 504 MB). */
+export function withoutUnreadFields(row: Row): Row {
+  const keys = Object.keys(row);
+  if (!keys.some((key) => BOARD_ROW_UNREAD_FIELDS.has(key))) return row;
+  const kept: Row = {};
+  for (const key of keys) if (!BOARD_ROW_UNREAD_FIELDS.has(key)) kept[key] = row[key];
+  return kept;
+}
+
 export function internRowStrings(row: Row, table: Map<string, string>): Row {
   for (const key of Object.keys(row)) {
     const value = row[key];
@@ -381,7 +397,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         latestTsMs = Math.max(latestTsMs, tsMs);
         continue;
       }
-      const parsed = JSON.parse(String(r.body)) as Row;
+      const parsed = withoutUnreadFields(JSON.parse(String(r.body)) as Row);
       const row = strings ? internRowStrings(parsed, strings) : parsed;
       let at = rows.length;
       if (bulk) outOfOrder ||= tsMs < rowTsMs[at - 1]!;
