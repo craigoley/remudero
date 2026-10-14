@@ -25848,7 +25848,7 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
  *  Exit 0 nothing red, 1 something red, 2 bad usage OR a failed read: a dead fetch is never "no red checks". */
 export function reportPrChecks(
   rest: string[],
-  deps: { fetch?: GhApiFetcher; self?: { owner: string; repo: string } } = {},
+  opts: { fetch?: GhApiFetcher; self?: { owner: string; repo: string } } = {},
 ): number {
   const prArg = rest[0];
   const badArg = prArg === undefined || prArg.startsWith("--") ? "rmd pr-checks: <pr-number> must come first"
@@ -25859,8 +25859,8 @@ export function reportPrChecks(
     return 2;
   }
   try {
-    const self = deps.self ?? resolveOwnerRepo();
-    const report = fetchPrChecks(self.owner, flagValue(rest, "--repo") ?? self.repo, prNumber, deps.fetch ?? ghJson);
+    const self = opts.self ?? resolveOwnerRepo();
+    const report = fetchPrChecks(self.owner, flagValue(rest, "--repo") ?? self.repo, prNumber, opts.fetch ?? ghJson);
     console.log(renderPrChecks(prNumber, report));
     return report.exitCode;
   } catch (e) {
