@@ -21,6 +21,13 @@ import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 export const OVER_CAPACITY_EXIT = 3;
 /** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
 export const AUTHOR_MAX_WORKERS = 4;
+/** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
+export const AUTHOR_DOCS_PRECHECK_MAX_MS = 30_000;
+/** Only docs-index inputs and its executable contract; deletion/rename sides remain in the diff. */
+export function authorDocsIndexInputs(changedFiles) {
+  return changedFiles.filter(path => (path.startsWith('docs/') && (path.endsWith('.md') || path === 'docs/docs-index.json')) ||
+    path.startsWith('scripts/generate-docs-index') || path === '.github/workflows/docs-index-check.yml' || path === 'package.json');
+}
 /** The share of the author step runtime one affected-test run may spend: the wall time an author waits. */
 export const AUTHOR_WALL_SHARE = 1 / 16;
 /** A suite is never priced below this, so an unmeasured file in an empty manifest is not free. */
@@ -200,9 +207,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}) => {
-    const runtimeLimitMs = deadline === undefined ? AUTHOR_STEP_RUNTIME_MS :
-      Math.min(AUTHOR_STEP_RUNTIME_MS, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS) => {
+    const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
+      Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
@@ -330,6 +337,21 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
+        const docsInputs = authorDocsIndexInputs(receipt.changedFiles);
+        receipt.docsIndexPrecheck = { required: docsInputs.length > 0, inputs: docsInputs };
+        if (docsInputs.length > 0) {
+          // Execute the SAME governed package commands as hosted docs-index-check,
+          // before claiming a heavyweight slot. Never fix generated output inside a gate.
+          for (const script of ['docs-index:check', 'docs-index:check-paths']) {
+            const name = `docs-index-precheck:${script}`, result = runStep(name, ['run', '--silent', script], 'npm', {}, AUTHOR_DOCS_PRECHECK_MAX_MS);
+            const ok = result.status === 0 && !result.signal && !result.error && result.outputComplete !== false;
+            report(name, result, ok, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
+            if (!ok) {
+              receipt.affectedTestsNotRunReason = `${name} did not succeed; no heavy slot/static/test phase was started`;
+              throw new Error(`changed docs inputs failed ${script}; regenerate/repair the index on a separate committed tree`);
+            }
+          }
+        }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
         const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });

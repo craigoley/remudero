@@ -13,6 +13,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
   verifiedSuites: (root: string, suites: string[]) => string[];
   completeTestResult: (result: { status: number | null; stdout?: string; signal?: string; error?: Error }) => boolean;
   authorEnvironment: (parent: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+  authorDocsIndexInputs: (changed: string[]) => string[];
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown; spawn?: typeof spawnSync }) => number;
 };
 
@@ -66,6 +67,39 @@ function fixture(baseline: Record<string, string> = {}) {
   git('commit', '-m', 'fix: change the leaf');
   return { root, git, receipt: () => JSON.parse(readFileSync(join(root, 'coverage/preflight-author.json'), 'utf8')) };
 }
+
+test('author docs freshness refuses stale generated metadata before a heavy slot and admits the corrected committed tree', () => {
+  const f = fixture(); mkdirSync(join(f.root, 'docs'));
+  writeFileSync(join(f.root, 'docs/fixture.md'), 'stale');
+  writeFileSync(join(f.root, 'package.json'), JSON.stringify({ scripts: {
+    'docs-index:check': 'node scripts/docs-fixture.mjs',
+    'docs-index:check-paths': 'node scripts/docs-fixture.mjs',
+  } }));
+  writeFileSync(join(f.root, 'scripts/docs-fixture.mjs'), "import {readFileSync} from 'node:fs'; console.log('positive docs corpus: fixture.md'); process.exitCode=readFileSync('docs/fixture.md','utf8')==='fresh'?0:1;\n");
+  writeFileSync(join(f.root, 'src/run-task.ts'), "import {writeFileSync} from 'node:fs'; writeFileSync('coverage/static-started','yes'); console.log('fixture static passed');\n");
+  f.git('add', '.'); f.git('commit', '-m', 'docs: add stale index inputs');
+  const select = () => ({ fullRun: false, suites: ['test/leaf.test.ts'], reasons: ['physical docs fixture'] });
+  assert.equal(mod.main([], { root: f.root, select }), 1);
+  const refused = f.receipt();
+  assert.deepEqual(refused.steps.map((row: { name: string }) => row.name), ['census-precheck','docs-index-precheck:docs-index:check']);
+  assert.equal(refused.steps.at(-1).exitCode, 1);
+  assert.equal(refused.testSlot, undefined); assert.equal(existsSync(join(f.root, 'coverage/static-started')), false);
+  assert.match(refused.affectedTestsNotRunReason, /no heavy slot/);
+  assert.equal(refused.phaseAccounting.trainingEligible, false);
+  writeFileSync(join(f.root, 'docs/fixture.md'), 'fresh'); f.git('add', '.'); f.git('commit', '-m', 'docs: repair index inputs');
+  assert.equal(mod.main([], { root: f.root, select }), 0);
+  const passed = f.receipt(); assert.equal(passed.verdict, 'passed');
+  assert.deepEqual(passed.steps.slice(0,3).map((row: { name: string }) => row.name),
+    ['census-precheck','docs-index-precheck:docs-index:check','docs-index-precheck:docs-index:check-paths']);
+  assert.equal(existsSync(join(f.root, 'coverage/static-started')), true);
+});
+
+test('author docs precheck follows real index inputs including deletions without taxing unrelated source or image changes', () => {
+  assert.deepEqual(mod.authorDocsIndexInputs(['src/leaf.ts','docs/image.png','README.md']), []);
+  const inputs=['docs/new.md','docs/deleted.md','docs/docs-index.json','scripts/generate-docs-index.mjs',
+    '.github/workflows/docs-index-check.yml','package.json'];
+  assert.deepEqual(mod.authorDocsIndexInputs(inputs), inputs);
+});
 
 test('author preflight runs real affected tests without coverage and records exact tree scope', () => {
   assert.equal(typeof mod.main, 'function', 'the shipped author gate must exist, including at the proof base');

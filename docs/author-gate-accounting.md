@@ -10,6 +10,14 @@ phases, including failures. The final receipt separates native work from selecti
 and admission overhead. Partial/over-capacity runs are ineligible for whole-gate
 training; Mac observations do not qualify Azure or a full model evaluation.
 
+When the committed diff changes docs-index inputs (including removed Markdown),
+the generator, its workflow or package scripts, the author gate first executes
+the same hosted freshness and path commands. Each has a 30-second backstop and
+closed diagnostics. A stale/unavailable result refuses before claiming a heavy
+slot or starting static/tests; the gate never regenerates or commits output.
+Unrelated source/image changes do not trigger these two extra checks. Their real
+cost remains included in phase accounting, not hidden as zero-cost cache work.
+
 No gate is removed, no cache result is trusted, no threshold or worker limit is
 changed. Source-mapped coverage and population/census obligations remain. Cache
 reuse and automated estimate promotion require a separate discriminating proof of
