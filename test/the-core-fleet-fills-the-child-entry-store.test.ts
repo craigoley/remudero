@@ -33,6 +33,7 @@ function populate(tree: string): void {
   for (const name of ["package.json", "package-lock.json"]) copyFileSync(join(REPO, name), join(tree, name));
   writeFileSync(join(tree, ENTRY), 'console.log(JSON.stringify({ marker: "W1-T9374-BUNDLE", execArgv: process.execArgv, args: process.argv.slice(2) }));\n');
   writeFileSync(join(tree, "src/run-task.ts"), 'export const fixture = "run-task";\n');
+  writeFileSync(join(tree, "src/run-child-main.ts"), 'export const fixture = "run-child";\n');
 }
 function tree(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-store-fill-tree-"));
