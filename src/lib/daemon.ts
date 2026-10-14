@@ -1220,6 +1220,10 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
+  /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits (`releaseLandedDispatchClaims`:
+   *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
+   *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
+  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** W1-T8676: every latch release the status projection derives (`independentFailureLatch`), by task id. Each
@@ -3357,6 +3361,7 @@ export async function runDaemon(
   // daemon-lifetime state: sweeps keep owning the open PR, and a restart may safely reconstruct the
   // same fact from the status projection rather than introducing another durable queue.
   const parkedBlockers = new Map<string, { prUrl?: string; dependents: string[] }>();
+  let landedClaimSweepInFlight = false;
   // Library fallback for callers that do not wire the status projection: independent failures are
   // still recorded in the ledger, but the same in-process loop must not re-spend on the id before a
   // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
@@ -5050,6 +5055,17 @@ export async function runDaemon(
       if (!reason) continue;
       parkedBlockers.delete(taskId);
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
+    }
+
+    // W1-T8616: a merged task's dispatch claim is released here, from the cycle's own `isMerged`.
+    if (deps.releaseLandedClaims && !landedClaimSweepInFlight) {
+      landedClaimSweepInFlight = true;
+      void deps
+        .releaseLandedClaims(isMerged)
+        .catch((e) => log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: String((e as Error)?.message ?? e).slice(0, 300) }))
+        .finally(() => {
+          landedClaimSweepInFlight = false;
+        });
     }
 
     // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.
