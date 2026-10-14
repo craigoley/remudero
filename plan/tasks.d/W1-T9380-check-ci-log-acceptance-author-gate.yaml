@@ -53,3 +53,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing reports recurring acceptance-author-gate rounds, but the supplied failure excerpt concerns an instance classification producer; it does not establish a common root cause or a preventive remedy in src/lib/ci-parity.ts.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration rather than executing a behavioral test, so it cannot verify the stated prevention outcome.; on the change's description/files alone, no diff was read — The escalation rule explicitly requires HIGH when the finding cannot be verified from what is shown; this filing requests structural repair without supplying a verified causal diagnosis."
+    judged_at: "2026-10-14T04:26:26.038Z"
+    pin: "810c3c3fae1e16d92ac4800eba39cdfe126d2cf83baa2f1a9144ff015098ae79"

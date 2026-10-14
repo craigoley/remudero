@@ -1,0 +1,24 @@
+- id: W1-T9391
+  title: "Prepare P25 briefing and governance alignment (ratification candidate groundwork)"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: "human"
+  risk: "low"
+  status: queued
+  attempts: 0
+  files:
+    - docs/ratification/p25_briefing.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: "The P25 briefing document exists with scope, criteria, and acceptance metrics."
+      proof: "grep: \"scope\" in docs/ratification/p25_briefing.md"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-05 follow-up on W1-T5689-1791183035928, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm the `DaemonDeps` literal and the
+    `build*DaemonHooks`/`buildSweepHook` seeds actually reach `syncPlanFromOrigin` and
+    `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
+    W1-T5689 (run W1-T5689-1791183035928)
