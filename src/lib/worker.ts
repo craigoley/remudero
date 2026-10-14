@@ -4657,9 +4657,8 @@ export function provisionWorktreeNodeModules(
   const root = configuredDependencySeedRoot();
   if (!root) return linkWorktreeNodeModules(repoDir, worktreePath, deps);
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
-  if (!source) return "no-source";
   try {
-    const result = materializeDependencySeed(worktreePath, { root, sourceDir: dirname(source) });
+    const result = materializeDependencySeed(worktreePath, { root, sourceDir: source ? dirname(source) : undefined });
     return result.status === "present" ? "already-present" : "linked";
   } catch (error) {
     (deps.warn ?? console.error)(`dependency seed provisioning refused: ${(error as Error).message}`);

@@ -128,6 +128,21 @@ test("hand-worktree refuses a relative parent and writes nothing", () => {
   assert.equal(f.core.git("worktree", "list"), before);
 });
 
+test("an enabled hand worktree primes a reusable seed without any installed donor", () => {
+  const f = fleet(), previous = process.env.RMD_DEPENDENCY_SEED_ROOT;
+  const store = join(realpathSync(f.parent), "seeds");
+  try {
+    process.env.RMD_DEPENDENCY_SEED_ROOT = store;
+    const result = created(createHandWorktree({ repoDir: f.core.dir, taskId: "unfiled", parent: f.parent, clock: fixedClock(NOW) }));
+    assert.equal(result.nodeModules.kind, "seeded");
+    assert.ok(existsSync(join(result.path, "node_modules", ".rmd-dependency-seed.json")));
+  } finally {
+    if (previous === undefined) delete process.env.RMD_DEPENDENCY_SEED_ROOT; else process.env.RMD_DEPENDENCY_SEED_ROOT = previous;
+    const writable = (path: string): void => { const s = lstatSync(path); if (s.isSymbolicLink()) return; chmodSync(path, s.mode | 0o700); if (s.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name)); };
+    if (existsSync(store)) { writable(store); rmSync(store, { recursive: true }); }
+  }
+});
+
 test("with no identical lockfile it reports npm ci and the free space instead of running it", () => {
   const f = fleet();
   donor(f, "stale", { lock: LOCK.replace("1.0.0", "2.0.0") });
