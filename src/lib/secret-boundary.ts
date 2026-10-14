@@ -31,6 +31,7 @@ import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "
 import { mintScopedToken } from "./github-app.js";
 import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "./short-path-root.js";
 import { setHarnessCredentialSocket } from "./worktree-git.js";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
 
 /** A fresh, unguessable stand-in for a real credential — never derived from the real value, so a
  *  worker holding one learns nothing about what it substitutes for. `label` is cosmetic (it
@@ -268,6 +269,14 @@ export interface CredentialHelperSocketHandle {
   close(): Promise<void>;
 }
 
+export const RUN_CHILD_DIR_ENV = "RMD_RUN_CHILD_DIR";
+export const RUN_CHILD_SOCKET_ENV = "RMD_RUN_CHILD_GIT_SOCKET";
+
+/** A child never falls back to the daemon's socket, including on a host using ambient credentials. */
+export function runChildCredentialSocket(daemonSocket?: string): string | undefined {
+  return process.env[RUN_CHILD_DIR_ENV] ? process.env[RUN_CHILD_SOCKET_ENV] : daemonSocket;
+}
+
 /** One mint outcome the socket server relays — never the failure's internals, only a named reason. */
 export type ScopedTokenMint = (repo: string) => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
 
@@ -451,6 +460,39 @@ function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL): 
     });
     worker.once("error", reject);
   });
+}
+
+/** The run directory owns this socket; an overlong path refuses rather than escaping that directory. */
+export async function startRunChildGitCredentialSocket(opts: {
+  runDir: string;
+  log: DaemonLog;
+  mint?: ScopedTokenMint;
+  threadUrl?: URL;
+}): Promise<CredentialHelperSocketHandle> {
+  const socketPath = join(resolve(opts.runDir), "git.sock");
+  if (Buffer.byteLength(socketPath) > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error("run credential socket path exceeds the unix socket limit");
+  }
+  let handle: CredentialHelperSocketHandle | undefined;
+  const close = async (): Promise<void> => {
+    try { await handle?.close(); }
+    finally { rmSync(socketPath, { force: true }); }
+  };
+  try {
+    chmodSync(opts.runDir, 0o700);
+    handle = opts.mint
+      ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: (row) => opts.log(row.step, rowFields(row)) })
+      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? bundledWorkerUrl(import.meta.url));
+    chmodSync(socketPath, 0o600);
+    setHarnessCredentialSocket(socketPath);
+    return { socketPath, close: async () => {
+      setHarnessCredentialSocket(undefined);
+      await close();
+    } };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
 /**

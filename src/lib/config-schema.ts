@@ -445,6 +445,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_RESOURCE_POLICY_CONTAINER", "Selects the container checked for deployed resource policy and mount drift.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESOURCE_POLICY_ROLE", "Selects the serve or build resource policy for deployment checks.", ["src/lib/deployer.ts"]),
+  envEntry("RMD_RUN_CHILD_DIR", "Marks a run child so credential readers never fall back to the daemon's socket.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
+  envEntry("RMD_RUN_CHILD_GIT_SOCKET", "Carries the run child's own git credential socket to its worker spawns.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),
