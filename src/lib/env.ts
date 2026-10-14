@@ -49,9 +49,9 @@ const ANTHROPIC_KEY = /^ANTHROPIC_/i;
 const SANCTIONED_KEY = "ANTHROPIC_API_KEY";
 
 /**
- * Build a child environment from an explicit allowlist plus caller-supplied vars — never
- * `process.env` wholesale. Throws if any `ANTHROPIC_*` key other than the sanctioned
- * `ANTHROPIC_API_KEY` overflow valve survives, so a leak fails loud here rather than on the invoice.
+ * Construct only allowlisted/caller-supplied env, never `process.env` wholesale. Origin is correlation only.
+ * Decoded ambient origin wins extras; malformed stays invalid. `ANTHROPIC_*` keys require the existing
+ * two-factor `ANTHROPIC_API_KEY` valve; every other survivor throws here rather than on the invoice.
  * INVARIANT: shell isolation mirrors that denial — `opts.home`/`shell`/`zdotdir` grant
  * HOME/CLAUDE_CODE_SHELL/ZDOTDIR so a worker's shell sources Remudero's own empty rc, never the
  * operator's `~/.zshrc`; see config.workerHomeDir/workerShell/workerZdotdir.
@@ -78,10 +78,6 @@ export function buildWorkerEnv(
   for (const [key, val] of Object.entries(extra)) {
     if (key !== GARDENER_ORIGIN_ENV) child[key] = val;
   }
-  // Correlation carries no authority. A present ambient parent (including invalid)
-  // wins over extras; absent parents retain validated explicit-extra compatibility.
-  // The decoder closes and bounds input before the serializer sees it. Never pass
-  // rejected bytes onward: "null" preserves the existing invalid-not-missing state.
   const gardenerOrigin = readGardenerOrigin(parent) ?? readGardenerOrigin(extra);
   if (gardenerOrigin !== undefined) {
     child[GARDENER_ORIGIN_ENV] = gardenerOrigin.state === "linked"
