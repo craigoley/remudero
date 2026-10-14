@@ -3074,7 +3074,7 @@ import {
   withAssignmentTrailer, resolveCommitAssignment,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
-  linkWorktreeNodeModules, resolveNodeModulesSource,
+  provisionWorktreeNodeModules as linkWorktreeNodeModules, resolveNodeModulesSource,
   worktreeAdd,
   worktreeAddAsync,
   worktreeLockIsPidAlive,

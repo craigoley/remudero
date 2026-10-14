@@ -1699,6 +1699,9 @@ if [ -n "$CLEANUP_PATH" ]; then
   current_cron="$(crontab_read)"
   janitor_cron="$(cron_lines_for_janitor "$current_cron")"
   if [ "$MODE" = "check" ]; then
+    if ! cmp -s "$SCRIPT_DIR/dependency-seed-guard.sh" "$(dirname "$CLEANUP_PATH")/dependency-seed-guard.sh"; then
+      echo "install-host-units: DRIFTED dependency seed guard"; drift=$(( drift + 1 ))
+    fi
     if [ ! -e "$CLEANUP_PATH" ]; then
       echo "install-host-units: MISSING $CLEANUP_PATH"; drift=$(( drift + 1 ))
     elif ! cmp -s "$CLEANUP_SRC" "$CLEANUP_PATH"; then
@@ -1732,6 +1735,7 @@ if [ -n "$CLEANUP_PATH" ]; then
     fi
   else
     mkdir -p "$(dirname "$CLEANUP_PATH")"
+    install -m 0755 "$SCRIPT_DIR/dependency-seed-guard.sh" "$(dirname "$CLEANUP_PATH")/dependency-seed-guard.sh"
     # keep the differing hand-installed host copy once: adoption must not destroy its values
     if [ -e "$CLEANUP_PATH" ] && ! cmp -s "$CLEANUP_SRC" "$CLEANUP_PATH" && [ ! -e "${CLEANUP_PATH}.pre-t4770" ]; then
       cp -p "$CLEANUP_PATH" "${CLEANUP_PATH}.pre-t4770"

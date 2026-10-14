@@ -109,6 +109,13 @@
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
+SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/dependency-seed-guard.sh"
+else
+  rmd_dependency_seed_risk() { echo 'dependency seed guard unavailable'; return 0; }
+fi
 
 FLOOR_MINUTES=360                        # 6 h: the protective floor for anything that could be live work
 IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: six hours (retention_window)
@@ -323,7 +330,8 @@ is_protected_worktree() {
 
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
-  local p="$1" idle_status
+  local p="$1" idle_status seed_reason
+  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   is_idle "$p"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -531,7 +539,8 @@ archive_orphan() {
   log "ARCHIVE-WORKTREE $wt orphan -> $dest"
 }
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 seed_reason
+  if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
@@ -874,7 +883,8 @@ lender_check() {
   [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
 }
 sweep_scratch_unit() {
-  local p="$1" status entries entry repo head bundles bytes
+  local p="$1" status entries entry repo head bundles bytes seed_reason
+  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).

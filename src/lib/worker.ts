@@ -95,6 +95,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { configuredDependencySeedRoot, materializeDependencySeed } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
@@ -4647,6 +4648,25 @@ export function linkWorktreeNodeModules(
   return "linked";
 }
 
+/** Enabled accounts give new checkouts private workspaces and caches backed by a durable generation. */
+export function provisionWorktreeNodeModules(
+  repoDir: string,
+  worktreePath: string,
+  deps: Parameters<typeof linkWorktreeNodeModules>[2] = {},
+): NodeModulesLinkOutcome {
+  const root = configuredDependencySeedRoot();
+  if (!root) return linkWorktreeNodeModules(repoDir, worktreePath, deps);
+  const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  if (!source) return "no-source";
+  try {
+    const result = materializeDependencySeed(worktreePath, { root, sourceDir: dirname(source) });
+    return result.status === "present" ? "already-present" : "linked";
+  } catch (error) {
+    (deps.warn ?? console.error)(`dependency seed provisioning refused: ${(error as Error).message}`);
+    return "failed";
+  }
+}
+
 /** W1-T4260: the untrappable bound on a satellite tree's `npm ci`, SIGKILL on expiry like review.ts `ensureDeps`. A BACKSTOP:
  * a healthy install ends on its own (a next/react/@clerk proxy measured ~10 s cold, 559 MiB), so this fires only on a wedged
  * one. The SAME 120 s as `ensureDeps`: runTask runs in the daemon's process, so this install blocks every lane while it runs. */
@@ -5580,8 +5600,8 @@ function finishWorktreeAdd(
   // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
   // before, through the unchanged call below (W1-T4260).
   const satelliteSource = satelliteNodeModulesSource(repoDir, worktreePath, deps);
-  if (satelliteSource) linkWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => satelliteSource });
-  else linkWorktreeNodeModules(repoDir, worktreePath);
+  if (satelliteSource) provisionWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => satelliteSource });
+  else provisionWorktreeNodeModules(repoDir, worktreePath);
   // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
   // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a
   // missing local tool is attributable to provisioning rather than misdiagnosed as the worker's own diff (W1-T4003).

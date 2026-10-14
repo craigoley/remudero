@@ -3,7 +3,7 @@
 // default seams are the ones exercised.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
@@ -87,7 +87,7 @@ test("hand-worktree creates run-<taskId>-<epochMs> at an absolute path with no u
   assert.ok(isAbsolute(path) && existsSync(join(path, "package.json")));
   assert.match(r.out, new RegExp(`path:   ${path}`));
   assert.match(r.out, new RegExp(`branch: run-W1-T9-${NOW}`));
-  assert.match(r.out, new RegExp(`hard-linked from ${lender}`));
+  assert.match(r.out, new RegExp(`hard-linked from ${realpathSync(lender)}`));
   const upstream = spawnSync("git", ["-C", path, "rev-parse", "--abbrev-ref", "@{u}"], { encoding: "utf8" });
   assert.notEqual(upstream.status, 0, "the branch must carry no upstream");
   assert.equal(f.core.git("rev-parse", `run-W1-T9-${NOW}`), f.core.git("rev-parse", "origin/main"));
