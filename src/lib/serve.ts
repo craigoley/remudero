@@ -42,6 +42,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
+import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -527,6 +528,9 @@ export interface ServeDeps {
   incidents?: Omit<IncidentsRouteInput, "stateDir"> & { stateDir?: string };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: {
+    /** Explicit caller opt-in only; no deployment/environment selection is activated here. */
+    selectedRegistry?: RegistrySelectionInput;
+    selectedRegistryIO?: RegistryFileIO;
     /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
     repoRegistryPath?: string;
     /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
@@ -1960,6 +1964,10 @@ export type HostRegistryState = InstancesHostRegistryState;
 export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode"> };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const selectedInput = deps.selectedRegistry === undefined ? undefined : {
+    ...deps.selectedRegistry,
+    ...(deps.selectedRegistry.requiredCapabilities ? { requiredCapabilities: [...deps.selectedRegistry.requiredCapabilities] } : {}),
+  };
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
@@ -1976,6 +1984,18 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: async (_req, res) => {
+      if (selectedInput !== undefined) {
+        const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
+        if (selected.kind === "unknown" || selected.kind === "refused") {
+          sendJson(res, 503, { error: "selected_registry_unavailable", reason: selected.reason });
+          return;
+        }
+        if (selected.kind === "ready") {
+          sendJson(res, 200, { ...selected.binding.publicProjection(), source: "selected",
+            publicationPermission: selected.binding.publicationPermission, generatedAt: clock.iso() });
+          return;
+        }
+      }
       const served = deps.readModel && viewMode(deps.readModel, INSTANCES_VIEW_NAME) === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
       const answer = served ? registryFromInstances(served.body.data as InstancesData)
         : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
