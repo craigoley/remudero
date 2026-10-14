@@ -530,6 +530,7 @@ test("registry writer checks regular file identity and revision before writes", 
 test("registry writer targets only chosen repo path and file SHA", async () => {
   for (const instance of ["widgets", "gadgets"]) {
     const f = selectedApi({ filePath: "private/registry-ü.yaml" }), deps = selectedDeps(f);
+    if (instance === "gadgets") deps.readRows = async () => (await threeRuns()).map(row => ({ ...row, pr_url: String(row.pr_url).replace("acme/widgets", "acme/gadgets") }));
     const receipt = await requestGoLive({ instance, actor: "owner" }, deps);
     const writes = f.calls.filter(c => c.method !== "GET");
     assert.deepEqual(writes.map(c => [c.method, c.path]), [["POST", "repos/acme/registry/git/refs"], ["PUT", f.contentPath], ["POST", "repos/acme/registry/pulls"]]);

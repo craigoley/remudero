@@ -187,7 +187,8 @@ function selectedTarget(value: unknown): RegistryWriteTarget {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new GoLiveError("registry_target_invalid", 503);
   const { repository, filePath } = value as Record<string, unknown>;
   if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
-    || typeof filePath !== "string" || filePath.length > 2048 || /[\x00-\x1f\x7f?#\\%:]/.test(filePath)) throw new GoLiveError("registry_target_invalid", 503);
+    || typeof filePath !== "string" || filePath.length > 2048 || /[\x00-\x1f\x7f?#\\%:]/.test(filePath)
+    || Buffer.from(filePath).toString("utf8") !== filePath) throw new GoLiveError("registry_target_invalid", 503);
   const parts = filePath.split("/");
   if (parts.length > 16 || parts.some(part => !part || part === "." || part === ".." || part.trim() !== part || part.normalize("NFC") !== part)) throw new GoLiveError("registry_target_invalid", 503);
   return Object.freeze({ repository, filePath });
@@ -216,16 +217,19 @@ function selectedRegistryText(text: string): void {
   if (text.includes("\0")) throw new GoLiveError("registry_target_unavailable", 503);
 }
 
-async function readSelectedRegistry(target: RegistryWriteTarget, api: GoLiveApi): Promise<SelectedRegistry> {
+async function readSelectedRegistry(target: RegistryWriteTarget, api: GoLiveApi, expected?: SelectedRegistry): Promise<SelectedRegistry> {
   try {
     const repo = `repos/${target.repository}`, metadata = record(await api("GET", repo));
     const repositoryId = Number(metadata.id);
     if (typeof metadata.id !== "number" || !Number.isSafeInteger(repositoryId) || repositoryId < 1
       || typeof metadata.full_name !== "string" || metadata.full_name.toLowerCase() !== target.repository.toLowerCase()) throw new GoLiveError("registry_target_unavailable", 503);
     const branch = stringField(metadata.default_branch);
+    if (expected && (repositoryId !== expected.repositoryId || branch !== expected.branch)) throw new GoLiveError("registry_target_stale", 409);
     const ref = record(record(await api("GET", `${repo}/git/ref/heads/${encodeURIComponent(branch)}`)).object);
     if (ref.type !== "commit") throw new GoLiveError("registry_target_unavailable", 503);
-    const baseSha = objectSha(ref.sha), commit = record(await api("GET", `${repo}/git/commits/${baseSha}`));
+    const baseSha = objectSha(ref.sha);
+    if (expected && baseSha !== expected.baseSha) throw new GoLiveError("registry_target_stale", 409);
+    const commit = record(await api("GET", `${repo}/git/commits/${baseSha}`));
     if (objectSha(commit.sha) !== baseSha) throw new GoLiveError("registry_target_unavailable", 503);
     let sha = objectSha(record(commit.tree).sha), mode = "";
     const parts = target.filePath.split("/");
@@ -247,11 +251,12 @@ async function readSelectedRegistry(target: RegistryWriteTarget, api: GoLiveApi)
     const bytes = Buffer.from(encoded, "base64");
     if (bytes.length < 1 || bytes.length > 256 * 1024 || file.size !== bytes.length || bytes.toString("base64") !== encoded
       || createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== sha) throw new GoLiveError("registry_target_unavailable", 503);
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     selectedRegistryText(text);
     return { repositoryId, branch, baseSha, fileSha: sha, mode, text, digest: createHash("sha256").update(bytes).digest("hex") };
-  } catch {
+  } catch (error) {
     // Transport, encoding and incomplete identity are unresolved evidence, never legacy fallback.
+    if (error instanceof GoLiveError && error.code === "registry_target_stale") throw error;
     throw new GoLiveError("registry_target_unavailable", 503);
   }
 }
@@ -266,8 +271,9 @@ async function requestSelectedGoLive(input: GoLiveInput, deps: GoLiveRequestOpti
   if (instance.mode !== "shadow") throw new GoLiveError("instance_not_shadow", 409);
   const evidence = await readShadowEvidence(stateDir, input.instance, readRows);
   if (evidence.runs < minimum) throw new GoLiveError("insufficient_shadow_runs", 409);
+  if (evidence.verdicts.some(row => row.pr_url.split("/").slice(3, 5).join("/").toLowerCase() !== instance.repo.toLowerCase())) throw new GoLiveError("shadow_evidence_invalid", 503);
   const content = liveRegistry(selected.text, input.instance);
-  const current = await readSelectedRegistry(target, api);
+  const current = await readSelectedRegistry(target, api, selected);
   if (current.repositoryId !== selected.repositoryId || current.branch !== selected.branch || current.baseSha !== selected.baseSha
     || current.fileSha !== selected.fileSha || current.mode !== selected.mode || current.digest !== selected.digest) throw new GoLiveError("registry_target_stale", 409);
   const binding: GoLiveBinding = Object.freeze({
