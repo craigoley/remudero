@@ -57,14 +57,14 @@ test(`${proof}: a verified matching donor is hard-linked without npm`, () => {
     const donorMarker = readFileSync(installHashMarkerPath(donor), "utf8");
     assert.equal(stagedInstall(target, options), "refreshed");
     const installed = statSync(join(target, "node_modules", "dep", "package.json"));
-    assert.equal(installed.ino, statSync(donorPackage).ino);
-    assert.ok(installed.nlink > 1);
+    if (process.platform === "darwin") assert.notEqual(installed.ino, statSync(donorPackage).ino);
+    else { assert.equal(installed.ino, statSync(donorPackage).ino); assert.ok(installed.nlink > 1); }
     assert.equal(existsSync(calls), false);
     assert.equal(existsSync(join(target, "node_modules", "old.txt")), false);
     assert.equal(readFileSync(installHashMarkerPath(target), "utf8"), hashInstallInputs(target));
     assert.equal(readFileSync(installHashMarkerPath(donor), "utf8"), donorMarker);
     assert.equal(statSync(installHashMarkerPath(donor)).nlink, 1, "install markers stay private");
-    assert.equal(rows.at(-1)?.method, "hard-linked");
+    assert.equal(rows.at(-1)?.method, process.platform === "darwin" ? "apfs-cloned" : "hard-linked");
     assert.equal(rows.at(-1)?.donor, donor);
   });
 });
@@ -135,7 +135,7 @@ test(`${proof}: sibling discovery reuses a donor without injected discovery`, ()
     stagedInstall(target, options);
     assert.equal(existsSync(calls), false);
     assert.equal(rows.at(-1)?.donor, donor);
-    assert.ok(statSync(join(target, "node_modules", "dep", "package.json")).nlink > 1);
+    assert.equal(statSync(join(target, "node_modules", "dep", "package.json")).nlink > 1, process.platform !== "darwin");
   });
 });
 
@@ -237,7 +237,7 @@ for (const targetIsDaemon of [false, true]) {
       stagedInstall(newTarget, options);
       assert.equal(existsSync(calls), false);
       assert.equal(rows.at(-1)?.donor, newDonor);
-      assert.ok(statSync(join(newTarget, "node_modules", "dep", "package.json")).nlink > 1);
+      assert.equal(statSync(join(newTarget, "node_modules", "dep", "package.json")).nlink > 1, process.platform !== "darwin");
     });
   });
 }
