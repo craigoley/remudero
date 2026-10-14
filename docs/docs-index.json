@@ -110,6 +110,12 @@
       "grepHint": "Audit fixtures"
     },
     {
+      "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
+      "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
+      "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",
+      "grepHint": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)"
+    },
+    {
       "path": "docs/audits/pr-5389-coverage-shard-classification.md",
       "title": "PR #5389 coverage-shard (1/4) failure — flake or regression? (W1-T4347)",
       "summary": "Scope: W1-T4347. Read-only forensic pass: one artifact, no source, script or test edited, no fix",
