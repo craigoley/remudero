@@ -8,11 +8,8 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 // @ts-expect-error — the trusted security metadata adapter is plain ESM.
-import {
-  publishSecurityMergeDecision,
-  readSecurityMergeDecision,
-  readSecurityMergeDecisionSync,
-} from "../src/lib/code-scanning-merge-adapter.mjs";
+import * as securityMergeAdapter from "../src/lib/code-scanning-merge-adapter.mjs";
+const { publishSecurityMergeDecision, readSecurityMergeDecision, readSecurityMergeDecisionSync } = securityMergeAdapter;
 import {
   buildSweepEffects, classifyMergeRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
 } from "./helpers/sweep-test.js";
