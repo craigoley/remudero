@@ -5149,12 +5149,7 @@ export type Disposition =
   // alone rather than the whole review.
   | "discriminate-only";
 
-/** W1-T9558 — the three dispositions whose action is a review job. `runSweep` already queues all three
- *  in one bounded pool (W1-T3798); the light pass, which has made 99.6% of review admissions since
- *  2026-10-11, selected only `post-review`. A `discriminate-only` or `review-reused` head was left to the
- *  full pass, whose review pool is reached only after the pass's wall-clock bound has closed admissions,
- *  so on 2026-10-13/14 six of seven such heads were never reviewed (waits 25-113 min, ended by a push). */
-export function isReviewLaneDisposition(disposition: Disposition): boolean {
+export function isReviewLaneDisposition(disposition: Disposition): boolean { // W1-T9558: every disposition whose action is a review job (see its shard)
   return disposition === "post-review" || disposition === "review-reused" || disposition === "discriminate-only";
 }
 
