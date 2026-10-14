@@ -107,6 +107,12 @@ function writeJsonAtomic(file: string, value: unknown): void {
   renameSync(stage, file);
 }
 
+function registerConsumer(seed: string, checkout: string, modules: string, key: string, method: SeedMethod): void {
+  writeJsonAtomic(join(modules, CONSUMER_MARKER), { version: VERSION, key, seed, checkout, method });
+  const consumer = createHash("sha256").update(checkout).digest("hex");
+  writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout });
+}
+
 function workspaceLinks(checkout: string, modules: string, workspace = ""): void {
   const lock = JSON.parse(readFileSync(join(checkout, "package-lock.json"), "utf8")) as { packages?: Record<string, { link?: boolean; resolved?: string }> };
   for (const [name, pkg] of Object.entries(lock.packages ?? {})) {
@@ -256,13 +262,12 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         else copyModules(source, localStage, method === "apfs-clone");
         setWritable(localStage, true);
         workspaceLinks(checkout, localStage, workspace);
+        registerConsumer(seed, join(checkout, workspace), localStage, meta.key, method);
         renameSync(localStage, local);
       } finally { if (existsSync(localStage)) { setWritable(localStage, true); rmSync(localStage, { recursive: true, force: true }); } }
     }
-    writeJsonAtomic(join(targetStage, CONSUMER_MARKER), { version: VERSION, key: meta.key, seed, checkout, method });
-    const consumer = createHash("sha256").update(checkout).digest("hex");
     // Register before publication, under the GC lock. A failed publication leaves a harmless stale reference.
-    writeJsonAtomic(join(seed, "consumers", `${consumer}.json`), { checkout });
+    registerConsumer(seed, checkout, targetStage, meta.key, method);
     writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);

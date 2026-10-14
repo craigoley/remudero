@@ -129,8 +129,11 @@ test("dependency seed workspace links resolve the consuming checkout rather than
   symlinkSync("../../packages/local", join(donor, "node_modules", "@fixture", "local"));
   mkdirSync(join(donor, "packages", "local", "node_modules", "nested"), { recursive: true });
   writeFileSync(join(donor, "packages", "local", "node_modules", "nested", "package.json"), '{"name":"nested"}');
-  materializeDependencySeed(checkout, { ...identityOptions, root: join(root, "seeds"), sourceDir: donor });
+  materializeDependencySeed(checkout, { ...identityOptions, root: join(root, "seeds"), sourceDir: donor, now: 0 });
   assert.equal(realpathSync(join(checkout, "node_modules", "@fixture", "local")), join(checkout, "packages", "local"));
+  assert.ok(existsSync(join(checkout, "packages", "local", "node_modules", "nested", "package.json")));
+  rmSync(join(checkout, "node_modules"), { recursive: true });
+  assert.equal(sweepDependencySeeds(join(root, "seeds"), { now: DEPENDENCY_SEED_MIN_IDLE_MS + 1, apply: true, isOpen: () => false })[0].reason, "referenced by checkout");
   assert.ok(existsSync(join(checkout, "packages", "local", "node_modules", "nested", "package.json")));
 }));
 
@@ -221,10 +224,11 @@ test("dependency seed account configuration is optional and invalid configuratio
 }));
 
 test("dependency seed real npm default primes an empty project without lifecycle execution", () => fixture((root, donor, checkout) => {
+  symlinkSync(join(root, "missing-npm-cache"), join(root, ".npm"));
   writeFileSync(join(checkout, "package.json"), '{"name":"empty","version":"1.0.0","scripts":{"prepare":"exit 99"}}');
   writeFileSync(join(checkout, "package-lock.json"), '{"name":"empty","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"empty","version":"1.0.0"}}}');
   const result = materializeDependencySeed(checkout, { root: join(root, "seeds"), proof: true,
-    env: { PATH: process.env.PATH, HOME: root, npm_config_cache: join(root, "npm-cache"), npm_config_offline: "true" } });
+    env: { PATH: process.env.PATH, HOME: root, npm_config_offline: "true" } });
   assert.equal(result.status, "materialized");
   if (result.status === "materialized") assert.equal(result.installed, true);
 }));
