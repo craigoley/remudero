@@ -66,6 +66,9 @@ import {
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
   laneDeliveryFailure,
+  type PriorityBackfillEstimates,
+  type PriorityDeferral,
+  type PriorityReservationRelease,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -220,9 +223,13 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 /** BACKSTOP: no-history fallback (W1-T5761); measured run lengths govern later phases (W1-T7697). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
-/** Pair starts and verdicts by run id; missing, torn or non-positive measurements contribute nothing. */
-export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: number; samples: number } {
-  const starts = new Map<string, number>();
+/** One measured run: its task (when the start row names one) and its length. */
+export interface MeasuredRun { taskId?: string; ms: number }
+
+/** Pair starts and verdicts by run id; missing, torn or non-positive measurements contribute nothing. Each
+ *  measured run is also appended to `runs` when given, so a caller can read per-task lengths (W1-T8514). */
+export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredRun[]): { totalMs: number; samples: number } {
+  const starts = new Map<string, { at: number; taskId?: string }>();
   let totalMs = 0;
   let samples = 0;
   for (const raw of rawLines) {
@@ -231,13 +238,14 @@ export function dispatchRunHistory(rawLines: readonly string[]): { totalMs: numb
     if (!row || typeof row.run_id !== "string" || typeof row.ts !== "string") continue;
     const at = Date.parse(row.ts);
     if (!Number.isFinite(at)) continue;
-    if (row.step === "run.start") starts.set(row.run_id, at);
+    if (row.step === "run.start") starts.set(row.run_id, { at, taskId: typeof row.task_id === "string" ? row.task_id : undefined });
     if (row.step !== "verdict") continue;
     const start = starts.get(row.run_id);
     starts.delete(row.run_id);
-    if (start === undefined || at <= start) continue;
-    totalMs += at - start;
+    if (start === undefined || at <= start.at) continue;
+    totalMs += at - start.at;
     samples++;
+    runs?.push({ ...(start.taskId !== undefined ? { taskId: start.taskId } : {}), ms: at - start.at });
   }
   return { totalMs, samples };
 }
@@ -3434,10 +3442,27 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  const measuredRuns: MeasuredRun[] = [];
+  const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
+  // W1-T8514: the measured run lengths behind a priority reservation's backfill release. The lane clock is the
+  // current dispatch phase's, bound once that phase exists; before it, no task is in flight.
+  let laneElapsedMs: (taskId: string) => number | undefined = () => undefined;
+  const priorityBackfill: PriorityBackfillEstimates = {
+    runLengthsMs: (taskId) => measuredRuns.filter((r) => r.taskId === taskId).map((r) => r.ms),
+    fleetRunLengthsMs: () => measuredRuns.map((r) => r.ms),
+    elapsedMs: (taskId) => laneElapsedMs(taskId),
+  };
+  const logPriorityDeferral = (d: PriorityDeferral): void => {
+    log("dispatch.deferred_for_priority", { task: d.task.id, priority: d.task.priority ?? null, waiting_task: d.waiting.id,
+      waiting_priority: d.waiting.priority ?? null, holders: d.holders, paths: d.paths,
+      expected_duration_ms: d.expectedDurationMs ?? null, expected_start_ms: d.expectedStartMs ?? null });
+  };
+  const logPriorityRelease = (r: PriorityReservationRelease): void => {
+    log("dispatch.priority_reservation_released", { task: r.task.id, waiting_task: r.waiting.id, reason: r.reason });
+  };
   // W1-T8235: the gap since the previous process's last idle record is charged to `restart` (this process's first
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
-  const runLengths = dispatchRunHistory(bootLedgerLines);
   let restartHistoryLines: readonly string[] = bootLedgerLines;
   try { restartHistoryLines = deps.readRestartHistory?.() ?? bootLedgerLines; }
   catch (error) {
@@ -5434,6 +5459,9 @@ export async function runDaemon(
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
       const dispatchOpts: NextRunnableOpts = {
+      priorityBackfill,
+      onDeferredForPriority: logPriorityDeferral,
+      onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
@@ -5988,6 +6016,10 @@ export async function runDaemon(
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const restartWait = { decidedAtMs: 0, reported: 0 };
     const laneStartedAtMs = new Map<string, number>();
+    laneElapsedMs = (taskId) => {
+      const startedAt = laneStartedAtMs.get(taskId);
+      return startedAt === undefined ? undefined : Math.max(0, daemonClock.now() - startedAt);
+    };
     const restartHoldouts = new Set<string>();
     const holdoutDeadlines = new Map<string, number>();
     const yieldAsked = new Set<string>();
@@ -6080,6 +6112,7 @@ export async function runDaemon(
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
         let next: Task | undefined;
+        const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
           const budget = laneDispatchBudget({
@@ -6094,6 +6127,7 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
@@ -6119,7 +6153,9 @@ export async function runDaemon(
             log("dispatch.lane_refill_held", {
               lane,
               finished_task: finished.id,
-              reason: reason ?? "no disjoint runnable task within the lane budget",
+              reason: reason ?? (refillDeferrals.length > 0
+                ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
+                : "no disjoint runnable task within the lane budget"),
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
               ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
             });
@@ -6336,7 +6372,7 @@ export async function runDaemon(
         return inFlightFreshness;
       } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
-        if (length > 0) { runLengths.totalMs += length; runLengths.samples++; }
+        if (length > 0) { runLengths.totalMs += length; runLengths.samples++; measuredRuns.push({ taskId: id, ms: length }); }
         return outcome;
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);

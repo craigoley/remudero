@@ -621,14 +621,24 @@ test("W1-T5349: the default reservation mints from the worktree's plan and reser
     mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
     writeFileSync(join(root, "plan", "tasks.yaml"), "tasks:\n  - id: W1-T10\n");
     writeFileSync(join(root, "plan", "tasks.d", "W1-T12-x.yaml"), "- id: W1-T12\n");
+    const tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const anchor = "d".repeat(40);
     const argv: string[][] = [];
     const id = sweep.reservePlanRepairTaskId(root, LANE_HEAD, (args) => {
       argv.push(args);
+      if (args[0] === "hash-object") return { status: 0, stdout: `${tree}\n`, stderr: "" };
+      if (args[0] === "commit-tree") return { status: 0, stdout: `${anchor}\n`, stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     });
     assert.match(id, /^W1-T\d+$/);
     assert.ok(Number(id.slice(4)) >= 13, `minted above the plan's ceiling: ${id}`);
     assert.ok(argv.length > 0, "the reservation went through git");
+    assert.deepEqual(argv.filter((args) => args[0] === "hash-object"), [["hash-object", "-t", "tree", "/dev/null"]]);
+    const commits = argv.filter((args) => args[0] === "commit-tree");
+    assert.equal(commits.length, 1, "the reservation creates one orphan anchor");
+    assert.deepEqual(commits[0]!.slice(0, 3), ["commit-tree", tree, "-m"]);
+    assert.ok(commits[0]![3]!.includes(`branch=${LANE_HEAD}`), "the anchor records the lane's holder branch");
+    assert.deepEqual(argv.filter((args) => args[0] === "push"), [["push", "origin", `${anchor}:refs/rmd-id/${id}`]]);
     // W1-T6133: the default runner goes through the leaf, which refuses a tree with no .git entry before
     // git runs; test/sweep-and-worker-git-calls-into-a-pr-head-tree-go-through-the-leaf.test.ts drives it for real.
     assert.throws(() => sweep.planRepairGitRun(root)(["--version"]), { name: "WorktreePointerRefusedError" });

@@ -211,6 +211,16 @@ test("W1-T7853: both CI runs that file fold debt upload it as an artifact", () =
   }
 });
 
+test("fold-debt collectors preserve NUL-delimited filenames without GNU-only cp options", () => {
+ for (const job of ["commitlint", "ci"]) {
+  const upload = step(job, s => s.with?.name === (job === "ci" ? FOLD_DEBT_MAIN_ARTIFACT : FOLD_DEBT_PR_ARTIFACT));
+  const collect = jobs[job]!.steps[upload.index - 1]!.run!;
+  assert.doesNotMatch(collect, /\bcp\s+-t\b/, "Mac author gates execute this exact Linux CI body too");
+  assert.match(collect, /read -r -d '' fold_debt_file/);
+  assert.match(collect, /cp -- "\$fold_debt_file" "\$RUNNER_TEMP\/fold-debt\/"/);
+ }
+});
+
 test("W1-T7853: a push-lane fold-debt artifact is written and landed", async () => {
   const debt = entry(44123);
   const gh = fakeGithub([{ id: 11, lane: "main", runId: 501, headSha: "m1", zip: artifactZip({ [`${debt.id}.yaml`]: debt.text }) }]);
