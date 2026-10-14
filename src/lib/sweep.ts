@@ -247,6 +247,7 @@ import {
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
+  prFilesRestArgs,
   rollupFromRest,
   needsWorkflowIdentity,
   runsForHeadRestArgs,
@@ -2047,6 +2048,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
+  | "mainInheritance"
   | "reconcileMainRunGaps"
   | "readFleetState"
   | "pullMutationVerdicts"
@@ -4346,6 +4348,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // lane may still use a valid SHA when the timestamp is absent; the newer lane cannot.
     readMainRepair,
     readMainTip: async () => (await readMainCommit())?.sha,
+    mainInheritance: restMainInheritanceReads(owner, repo, readJsonImpl),
 
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
@@ -8382,6 +8385,13 @@ export function mainRedSignaturesMatch(a: MainRedSignature, b: MainRedSignature)
   return same(a.checks, b.checks) && (a.detail === undefined || b.detail === undefined || same(a.detail, b.detail));
 }
 
+/** W1-T8042 — a PR-side red is part of `whole` when its checks are among whole's and its log detail too:
+ *  main's own red also names the aggregator (`ci`) and every shard's detail at once. */
+export function mainRedCovers(part: MainRedSignature, whole: MainRedSignature): boolean {
+  return part.checks.every((check) => whole.checks.includes(check)) &&
+    (part.detail === undefined || whole.detail === undefined || part.detail.every((line) => whole.detail!.includes(line)));
+}
+
 export function describeMainRed(red: MainRedSignature): string {
   return `${red.checks.join(", ")}${red.detail ? ` [${red.detail.join("; ") || "no gate or test named"}]` : " [no log read]"}`;
 }
@@ -8534,6 +8544,32 @@ export async function classifyMainInheritedReds(
     if (carried.length > 0 && [...own.keys].every((key) => carried.some((red) => red.key === key))) standDown.set(prNumber, carried);
   }
   return { reds, standDown };
+}
+
+/** One page of `pulls/N/files` holds at most this many rows; a full page may be truncated. */
+const PR_FILES_PAGE = 100;
+
+/** The production reads: one PR file list, and two `compare` reads (`main...head`, `ancestor...of`). */
+export function restMainInheritanceReads(
+  owner: string,
+  repo: string,
+  readJson: (args: string[]) => Promise<unknown>,
+): MainInheritanceReads {
+  const compare = async (base: string, head: string) =>
+    (await readJson(compareRestArgs(owner, repo, base, head))) as { status?: string; merge_base_commit?: { sha?: string } } | undefined;
+  return {
+    changedFiles: async (pr) => {
+      const rows = await readJson(prFilesRestArgs(owner, repo, pr.prNumber));
+      // A diff this reader cannot see whole is unreadable, never disjoint.
+      if (!Array.isArray(rows) || rows.length >= PR_FILES_PAGE) return undefined;
+      return rows.map((row: { filename?: unknown }) => row.filename).filter((f): f is string => typeof f === "string");
+    },
+    mergeBase: async (pr) => (await compare("main", pr.headSha))?.merge_base_commit?.sha,
+    contains: async (of, ancestor) => {
+      const status = (await compare(ancestor, of))?.status;
+      return status === "ahead" || status === "identical";
+    },
+  };
 }
 
 /** The handed-over and located reds main repair holds, by offending sha, with the PRs each was handed. */
@@ -15267,7 +15303,7 @@ export async function runSweep(
     }
     const held = mainRepairRedsFromLedger(ledgerLines);
     for (const red of mainInherited.reds) {
-      const owner = held.findLast((record) => !record.resolved && mainRedSignaturesMatch(record.red, red.red));
+      const owner = held.findLast((record) => !record.resolved && mainRedCovers(red.red, record.red));
       const joined = red.prs.filter((p) => !owner?.prs.has(p.prNumber));
       if (owner && joined.length === 0) continue;
       const seenAt = clockFromMillisFn(() => now).iso();

@@ -36,6 +36,8 @@ import {
   requeuedCheckKeysFromLedger,
   type CiFailure,
   describeMainRed,
+  MAIN_INHERITED_RED_STEP,
+  mainRedCovers,
   mainRedFields,
   mainRedOfRow,
   mainRedSignature,
@@ -614,6 +616,9 @@ export interface MainRepairRecord {
   /** W1-T7760: set when the merge was located by probing CI on the cancelled commits before it; the
    *  probe runs, not main's push run history, are then its proof. */
   bisected?: { parentSha: string; evidence: string; failingChecks: string[] };
+  /** W1-T8042: set when the sweep handed this red over from open PRs sharing it; `offendingSha` is then
+   *  the merge base every affected PR contains and no green one does. */
+  inherited?: { prs: number[]; testFiles: string[]; logExcerpt: string };
   resolved: boolean;
 }
 
@@ -631,6 +636,11 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     const sha = line.offending_sha;
     if (typeof line.step !== "string" || !line.step.startsWith("main.repair.") || typeof sha !== "string") continue;
     const record = records.get(sha);
+    if (line.step === MAIN_INHERITED_RED_STEP) {
+      // W1-T8042: an `advanced` row only adds PRs to the record its `opened` row started.
+      if (line.outcome === "opened" && (!record || record.resolved)) records.set(sha, inheritedRecordOf(sha, line));
+      continue;
+    }
     if (line.step === "main.repair.located") {
       if (!record || record.resolved) {
         const red = mainRedOfRow(line);
@@ -680,6 +690,24 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     else if (line.step === "main.repair.resolved") record.resolved = true;
   }
   return records;
+}
+
+function inheritedRecordOf(sha: string, line: Record<string, unknown>): MainRepairRecord {
+  const red = mainRedOfRow(line);
+  const rows = Array.isArray(line.inherited_prs) ? (line.inherited_prs as Array<Record<string, unknown>>) : [];
+  return {
+    offendingSha: sha,
+    failingChecks: red ? [...red.checks] : [],
+    ...(red ? { red } : {}),
+    fixDispatched: false,
+    attempts: [],
+    inherited: {
+      prs: rows.map((row) => row?.pr_number).filter((n): n is number => typeof n === "number"),
+      testFiles: Array.isArray(line.test_files) ? line.test_files.map(String) : [],
+      logExcerpt: typeof line.log_excerpt === "string" ? line.log_excerpt : "",
+    },
+    resolved: false,
+  };
 }
 
 function progressVerdictOfRow(line: Record<string, unknown>): FixProgressVerdict | undefined {
@@ -1259,6 +1287,34 @@ export function buildMainHealthRung(
     logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
     reason,
   });
+  /** W1-T8042 — the fix request for a red the sweep handed over, built from the PR evidence it carried. */
+  const inheritedFixRequest = async (
+    record: MainRepairRecord,
+    inherited: NonNullable<MainRepairRecord["inherited"]>,
+    sha: string,
+    branch: string,
+    why: string,
+  ): Promise<MainRepairFixRequest> => ({
+    branch,
+    headSha: sha,
+    offendingSha: record.offendingSha,
+    diffStat: await diffStatOf(record.offendingSha),
+    failingChecks: [...record.failingChecks],
+    failingTestTitles: (record.red?.detail ?? []).filter((line) => line.startsWith("not ok ")).map((line) => line.slice("not ok ".length)),
+    testFiles: [...inherited.testFiles],
+    logExcerpt: inherited.logExcerpt.slice(-MAIN_REPAIR_LOG_EXCERPT_CHARS),
+    reason:
+      `${why}; the same red is on open PRs ${inherited.prs.map((n) => `#${n}`).join(", ")}, whose own diffs touch none of ` +
+      `the files it names, and ${record.offendingSha.slice(0, 12)} is in every one's merge base and no green PR's (W1-T8042)`,
+  });
+  /** W1-T8042 — main's own runs concluded nothing, so a red the sweep handed over is this lane's only
+   *  evidence: dispatch its first fix. Once dispatched, the record advances like any other. */
+  const repairInheritedReds = async (lane: MainRepairLane, observation: MainHealthObservation, sha: string, branch: string): Promise<void> => {
+    for (const record of mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()) {
+      if (record.resolved || !record.inherited || record.fixDispatched || fixInFlight.has(record.offendingSha)) continue;
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, observation.reason), record.red);
+    }
+  };
   /** A stall reason once the same fix-PR marker has held for the tick and time windows, else undefined. */
   const stallOf = (sha: string, marker: string, atMs: number, what: string): string | undefined => {
     const prior = fixProgress.get(sha);
@@ -1408,6 +1464,10 @@ export function buildMainHealthRung(
     if (record.revertRefused) return false;
     if (record.revertPrUrl) return (await readRepairPr(record.revertPrUrl))?.state !== "closed";
     if (fixInFlight.has(record.offendingSha)) return true;
+    if (record.inherited && !record.fixDispatched) {
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, ctx.observation.reason), record.red ?? ctx.red);
+      return true;
+    }
     let stalled: string | undefined;
     let attemptEnded = false;
     if (record.fixPrUrl) {
@@ -1675,7 +1735,7 @@ export function buildMainHealthRung(
     const records = mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath));
     const first = observation.firstRedCommit;
     const active = [...records.values()].filter((record) => !record.resolved);
-    const owning = active.findLast((r) => r.red !== undefined && mainRedSignaturesMatch(r.red, red));
+    const owning = active.findLast((r) => r.red !== undefined && (r.inherited ? mainRedCovers(r.red, red) : mainRedSignaturesMatch(r.red, red)));
     const record = first ? (active.find((r) => r.offendingSha === first.headSha) ?? owning) : (owning ?? active[active.length - 1]);
     if (record) {
       if (first && record.offendingSha !== first.headSha) {
@@ -2298,6 +2358,7 @@ export function buildMainHealthRung(
       escalatedSignature = undefined;
       repairedSignature = undefined;
       if (observation.state !== "green") {
+        if (deps.repair) await repairInheritedReds(deps.repair, observation, sha, branch);
         resolvedSignature = undefined;
         lastSuccessfulObservationAtMs = startedAtMs;
         return;
