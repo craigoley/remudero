@@ -385,6 +385,19 @@ test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the mat
   }
 });
 
+test("GOLDEN — MUTATION-RATCHET LESSON: the cited incident executes and the mutation target's lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-mutation-ratchet-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["src/lib/classify.ts", "stryker.conf.json", "scripts/mutation-baseline.json"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "mutation-ratchet-refusal-repair-lane"), taskFile);
+  }
+});
+
 test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute from their active shards", () => {
   const { verdict, golden } = judgeCase("session-retro-learnings");
   assert.equal(golden.violation, "none");
