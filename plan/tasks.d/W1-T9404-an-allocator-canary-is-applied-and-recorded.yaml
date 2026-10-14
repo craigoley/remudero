@@ -1,0 +1,58 @@
+- id: W1-T9404
+  title: "THE MALLOC-ARENA HYPOTHESIS HAS NO EXPERIMENT AND ITS EVIDENCE COUNTS SWAP — Node on glibc (the image is node:24.21.0-bookworm-slim) may keep freed native memory in per-thread malloc arenas, but the reclaim row that suggested it (07:38:08Z: 5.12 GB 'freed outside heaps' while rss fell only 1.99 GB) counts VmSwap in freed_bytes and does not carry swap: the reclaim row carries its swap before and after, the registry gains a per-instance malloc_arena_max applied at container create, and daemon.alive records the arena setting in force, so one canary instance can be compared with itself"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — an allocator canary the ledger can compare: the knob and the fields that judge it; high because it changes the daemon container launcher
+  band_meaning: span
+  origin: "operator session 2026-10-14: daemon/serve memory investigation (operator approved filing a measured allocator experiment)"
+  plan_refs: [W1-T8401, W1-T9358, W1-T6782, W1-T7092, W1-T4198]
+  files: [deploy/recycle-container.sh, src/lib/daemon-memory-policy.ts, src/lib/daemon-memory-telemetry.ts, test/an-allocator-canary-is-applied-and-recorded.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main eb0c3a710 and the core ledger (read-only).
+    THE IMAGE IS GLIBC: deploy/Dockerfile is `FROM node:24.21.0-bookworm-slim` (Debian 12, glibc 2.36), so the arena
+    hypothesis applies; no jemalloc is installed (the apt lines name tini ca-certificates curl git bubblewrap socat procps
+    lsof jq), and nothing in deploy/ or src/ sets MALLOC_ARENA_MAX or LD_PRELOAD (grep: none).
+    THE EVIDENCE IS WEAKER THAN IT READS. The 07:38:08Z sweep.fix_capacity reclaim (pool host): rss 3,228,745,728 ->
+    1,235,169,280 (-1.99 GB), freed_bytes 5,303,271,424, freed_outside_heaps_bytes 5,121,421,455, host MemAvailable
+    3,545 -> 6,052 MiB. createDaemonSlackReclaimer computes freed = (rss + VmSwap) before - after, so about 3.3 GB of the
+    5.3 GB was SWAP; reclaimLedgerFields drops swap_before_bytes/swap_after_bytes although the record has them. And
+    "outside heaps" subtracts only the MAIN isolate's total_physical_size and external: the daemon's worker threads
+    (read-plane, ledger-union, secret-boundary, status prewarm) are inside it too.
+    WHAT THE NUMBER DOES SHOW: memory that a last-resort major GC on the main isolate let go. That is native memory owned
+    by garbage, which arenas do not explain; arenas explain memory that STAYS resident after it is freed. So the
+    canary's figure is the residual AFTER collection: daemon.alive's unattributed_bytes_approx (rss less every isolate's
+    physical heap and external, W1-T7092) and rss_after on reclaim rows, not freed_outside_heaps_bytes.
+    WHY A REGISTRY KEY: the daemon container's runtime env is fixed at create (resource policy applies only at create;
+    recycle-container.sh already applies the registry's max_old_space_mb into NODE_OPTIONS there, W1-T4198), so a
+    per-instance key lets ONE instance carry the setting with no image change and no fleet-wide flip.
+    THE EXPERIMENT (an operator step once this ships; not a gate):
+    1. Canary: the site daemon (smallest blast radius). Set `malloc_arena_max: 2` on its registry entry; it applies at
+       its next recycle.
+    2. Compare the canary with its own equal-length window before the change: daemon.alive rss_bytes, vm_swap_bytes and
+       unattributed_bytes_approx (p50/p90), reclaim rows' rss_after and freed figures, and throughput (run.start and
+       merged-PR counts, loop-stall rows). A difference inside the before-window's own successive spread is no effect.
+    3. Adopt for core/console only on a measured residual drop with no throughput cost; otherwise remove the key.
+       jemalloc (LD_PRELOAD of libjemalloc2, an image change) is a second experiment only if arenas show an effect.
+  design: |
+    1. reclaimLedgerFields (daemon-memory-policy.ts) carries reclaim_swap_before_bytes and reclaim_swap_after_bytes from
+       the record (absent when unread, never zero).
+    2. recycle-container.sh reads `malloc_arena_max` from the instance's registry entry beside max_old_space_mb, refuses a
+       malformed value by name as it does for max_old_space_mb, and sets MALLOC_ARENA_MAX in the created container's
+       env with source `registry`. An entry without the key changes nothing: no MALLOC_ARENA_MAX is set.
+    3. sampleDaemonMemory (daemon-memory-telemetry.ts) adds `mem_malloc_arena_max` to daemon.alive: the value of
+       process.env.MALLOC_ARENA_MAX, or "default" when unset, so every row says which arm it was.
+  acceptance:
+    - claim: "a registry malloc_arena_max reaches the created container's env, a malformed one is refused, and an entry without it sets nothing"
+      proof: 'grep: test("W1-T9404: a registry malloc_arena_max is applied at create" in test/an-allocator-canary-is-applied-and-recorded.test.ts'
+    - claim: "the reclaim row carries its swap before and after, and daemon.alive names the arena setting in force"
+      proof: 'grep: test("W1-T9404: the reclaim row carries swap and the daemon heartbeat names the arena setting" in test/an-allocator-canary-is-applied-and-recorded.test.ts'
+  falsifier: |
+    Drop the MALLOC_ARENA_MAX assignment: the fixture container's env lacks it and the first test fails. Drop the swap
+    fields from reclaimLedgerFields: the second test's row has no reclaim_swap_before_bytes and fails.
