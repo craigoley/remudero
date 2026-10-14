@@ -17,3 +17,11 @@
     - claim: "the janitor reaps rmd on azure with a rule that cites its origin host-resource:azure:rmd, so its growth rate stops being positive"
       proof: "grep: host-resource:azure:rmd in deploy/rmd-host-cleanup.sh"
   note: "Filed by the host-resource gardener (W1-T4804). BEFORE: rmd grew 256 MB/h over 33.1 h (5 samples) while the janitor ran 117 times. The gardener measures this consumer's growth rate again a week after filing and credits or debits the remedy by whether it stopped growing. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/rmd-host-cleanup.sh, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-14T15:48:37.584Z"
+    pin: "aafaea5fcaf812cb644f344c0d62cd806d57527fd8fddeddf254e03b6b03af4c"
