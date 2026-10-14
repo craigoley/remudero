@@ -38,6 +38,7 @@ import {
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { trailerTaskIds } from "./field-trials-github.js";
 import type { LedgerRecord } from "./retro.js";
+import type { PreventionSourceRegistration } from "./prevention-source-evidence.js";
 
 /**
  * CI friction is ranked by recency-weighted PR minutes, never fire count.
@@ -1298,7 +1299,7 @@ export interface CiFrictionCauseLine {
 
 export interface CiFrictionInventory {
   priced: CiFrictionCausePrice[];
-  preventionSources?: { registrations: import("./prevention-source-evidence.js").PreventionSourceRegistration[]; unavailable: number };
+  preventionSources?: { registrations: PreventionSourceRegistration[]; unavailable: number };
   /** The cause this pass would act on, if any. */
   next?: { price: CiFrictionCausePrice; origin: string; rung: number; decision: CiFrictionGardenAction["decision"] };
   /** Where each of the costliest causes stands. */

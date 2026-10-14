@@ -97,6 +97,7 @@
         "lint-plan-refuses-before-pr",
         "mutation-ratchet-refusal-repair-lane",
         "prompt-surface-gate-learning-path-evidence",
+        "proof-discrimination-refusal-repair-lane",
         "remudero-review-refusals-repaired-by-hand",
         "required-check-poster",
         "rerun-the-job-not-the-run",
@@ -156,6 +157,7 @@
         "src/lib/plan-pr-emitter.ts",
         "src/lib/policy.ts",
         "src/lib/proof-amendment.ts",
+        "src/lib/proof-grammar.ts",
         "src/lib/read-model-db.ts",
         "src/lib/read-model-worker.ts",
         "src/lib/review.ts",
@@ -169,7 +171,10 @@
         "test/setup/**"
       ],
       "symbols": [],
-      "error_signatures": []
+      "error_signatures": [
+        "executed_stale",
+        "proof-discrimination"
+      ]
     },
     "failures.yaml": {
       "entries": [

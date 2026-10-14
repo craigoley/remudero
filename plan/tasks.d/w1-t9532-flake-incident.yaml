@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a deterministic main red. #11758 and #11744 collided on test/the-core-fleet-fills-the-child-entry-store.test.ts (the store-fill fixture lacked src/run-child-main.ts), and #11782 (f19b8c887, main-repair) fixed it at 20:10Z, before its filing was judged at 20:54Z; its own evidence reads "0 recovered on retry, 3 also failed"; operator 2026-10-14
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/the-core-fleet-fills-the-child-entry-store.test.ts#W1-T9374: a filled store makes a fresh preflight tree launch the bundle"
@@ -24,3 +24,14 @@
     CI runs: 38621549967, 38622613135, 38623398070.
     Retry outcomes: 0 recovered on retry, 3 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The declared scope is one existing test file (test/the-core-fleet-fills-the-child-entry-store.test.ts). The harness confirmed that file exists at the base. Nothing in the description or files list touches secrets, auth, deploy, merge policy, or review policy."
+      - "The task adds a test and fixes a flaky test's cause. It deletes no data, branches, or history, and it takes no irreversible action. It asks for no operator-only decision."
+      - "The acceptance criteria can be checked mechanically (a unit test and a grep). The evidence cites 3 distinct PRs and CI run IDs, so the finding can be verified from what is shown."
+      - "The flake-incident family has 7 merged and 0 declined tasks (Beta mean 0.89). The gates state is clean, and the PR will still go through CI and review."
+    judged_at: "2026-10-14T20:54:27.046Z"
+    pin: "71305a6ce999d72a29ed9bac83e013b22842724a092a3cd3367d7bb435f498ae"

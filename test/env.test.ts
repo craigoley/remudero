@@ -1,6 +1,105 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildWorkerEnv, isBillingClean, billingMode, assertCleanBoot } from "../src/lib/env.js";
+import { LIVE_LEDGER_DENY_ROOT_ENV } from "../src/lib/live-write-guard.js";
+import { GARDENER_ORIGIN_ENV, GARDENER_ORIGIN_MAX_BYTES, gardenerOriginEnv, readGardenerOrigin } from "../src/lib/worker-containment.js";
+
+test("SDK gardener origin validation and parent precedence", () => {
+  const passA = "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1";
+  const passB = "e6921695-5c56-45c2-89f4-1f1e4d67c826";
+  const a = gardenerOriginEnv("plan", passA)!;
+  const b = gardenerOriginEnv("gate", passB)!;
+  const spacedA = JSON.stringify({ passId: passA, name: "plan", version: 1 }, null, 2);
+  const exactBound = a + " ".repeat(GARDENER_ORIGIN_MAX_BYTES - Buffer.byteLength(a));
+  assert.equal(Buffer.byteLength(exactBound), 256);
+  const malformed = [
+    "", "fixture-secret-not-json", "null", "[]", "1",
+    JSON.stringify({ version: 2, name: "plan", passId: passA }),
+    JSON.stringify({ version: 1, name: "plan", passId: passA, token: "fixture-secret-extra-key" }),
+    JSON.stringify({ version: 1, name: "Plan", passId: passA }),
+    JSON.stringify({ version: 1, name: "plan\nfixture-secret", passId: passA }),
+    JSON.stringify({ version: 1, name: "plan", passId: "not-a-uuid" }),
+    JSON.stringify({ version: 1, name: "plan", passId: passA.replace("4f50", "1f50") }),
+    exactBound + " ", "é".repeat(129),
+  ];
+  const cases: Array<{ ambient?: string; extra?: string; expected?: string }> = [
+    {}, { ambient: a, expected: a }, { ambient: spacedA, expected: a },
+    { ambient: exactBound, expected: a }, { extra: a, expected: a },
+    { extra: spacedA, expected: a }, { extra: b, expected: b },
+    { ambient: a, extra: b, expected: a },
+    ...malformed.flatMap(value => [
+      { ambient: value, expected: "null" },
+      { ambient: value, extra: b, expected: "null" },
+      { extra: value, expected: "null" },
+      { ambient: a, extra: value, expected: a },
+    ]),
+  ];
+  for (const [index, row] of cases.entries()) {
+    const parent = Object.freeze({ PATH: "/usr/bin", ...(row.ambient !== undefined ? { [GARDENER_ORIGIN_ENV]: row.ambient } : {}) });
+    const extra = Object.freeze({ ...(row.extra !== undefined ? { [GARDENER_ORIGIN_ENV]: row.extra } : {}) });
+    const before = JSON.stringify({ parent, extra });
+    const child = buildWorkerEnv(extra, parent);
+    assert.equal(child[GARDENER_ORIGIN_ENV], row.expected, `case ${index}: canonical bounded output`);
+    assert.equal(Object.hasOwn(child, GARDENER_ORIGIN_ENV), row.expected !== undefined);
+    assert.deepEqual(readGardenerOrigin(child), row.expected === undefined ? undefined : row.expected === "null"
+      ? { state: "invalid", reason: "malformed" }
+      : { state: "linked", version: 1, name: row.expected === b ? "gate" : "plan", passId: row.expected === b ? passB : passA });
+    assert(Buffer.byteLength(child[GARDENER_ORIGIN_ENV] ?? "") <= GARDENER_ORIGIN_MAX_BYTES);
+    assert.equal(JSON.stringify(child).includes("fixture-secret"), false);
+    assert.equal(JSON.stringify({ parent, extra }), before, "inputs are not modified");
+  }
+});
+
+test("SDK gardener origin billing and identity boundaries", () => {
+  const carrier = gardenerOriginEnv("plan", "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1")!;
+  const parent = Object.freeze({
+    PATH: "/usr/bin", HOME: "/private/fixture-parent", TMPDIR: "/private/fixture-tmp", LANG: "C",
+    USER: "fixture-user", CLAUDE_CODE_OAUTH_TOKEN: "fixture-oauth", GH_TOKEN: "fixture-gh",
+    ANTHROPIC_API_KEY: "fixture-api", ANTHROPIC_BASE_URL: "fixture-denied-parent",
+    SECRET_TOKEN: "fixture-denied-secret", AWS_SECRET_ACCESS_KEY: "fixture-denied-aws",
+    [LIVE_LEDGER_DENY_ROOT_ENV]: "/private/fixture-live-root",
+    REMUDERO_RUN_ID: "parent-cannot-authorize-run", REMUDERO_TASK_ID: "parent-cannot-authorize-task",
+  });
+  const extras: Array<Record<string, string>> = [{}, {
+    HOME: "/private/fixture-extra-home", GH_TOKEN: "fixture-explicit-gh", CLAUDE_CODE_SHELL: "/bin/sh",
+    ZDOTDIR: "/private/fixture-extra-zdot", REMUDERO_RUN_ID: "explicit-run", REMUDERO_TASK_ID: "W1-T1",
+    REMUDERO_WORKER_SCOPE: "explicit-scope", [LIVE_LEDGER_DENY_ROOT_ENV]: "/private/fixture-spoofed-root",
+  }];
+  for (const extra of extras) {
+    for (const allowApiKey of [false, true]) {
+      const opts = Object.freeze({ allowApiKey, home: "/private/fixture-worker-home", shell: "/bin/bash",
+        zdotdir: "/private/fixture-worker-zdot", xdgCacheHome: "/private/fixture-worker-cache" });
+      const baseline = buildWorkerEnv(extra, parent, opts);
+      for (const value of [carrier, "fixture-secret-invalid-origin"]) {
+        const child = buildWorkerEnv(extra, { ...parent, [GARDENER_ORIGIN_ENV]: value }, opts);
+        const { [GARDENER_ORIGIN_ENV]: metadata, ...otherKeys } = child;
+        assert.deepEqual(otherKeys, baseline, "only bounded correlation metadata changes");
+        assert.equal(metadata, value === carrier ? carrier : "null");
+        assert.equal(child[LIVE_LEDGER_DENY_ROOT_ENV], parent[LIVE_LEDGER_DENY_ROOT_ENV]);
+        assert.equal(child.SECRET_TOKEN, undefined);
+        assert.equal(child.AWS_SECRET_ACCESS_KEY, undefined);
+        assert.equal(child.ANTHROPIC_BASE_URL, undefined);
+        assert.equal(child.CLAUDE_CODE_OAUTH_TOKEN, parent.CLAUDE_CODE_OAUTH_TOKEN);
+        assert.equal(child.XDG_CACHE_HOME, opts.xdgCacheHome);
+        assert.equal(child.HOME, extra.HOME ?? opts.home);
+        assert.equal(billingMode(Object.keys(child)), allowApiKey ? "api" : "subscription");
+        assert.equal(isBillingClean(child), !allowApiKey);
+      }
+    }
+  }
+  for (const key of [undefined, ""]) {
+    const child = buildWorkerEnv({}, { ...parent, ANTHROPIC_API_KEY: key, [GARDENER_ORIGIN_ENV]: carrier }, { allowApiKey: true });
+    assert.equal(billingMode(Object.keys(child)), "subscription", "correlation never engages an empty valve");
+  }
+  for (const allowApiKey of [false, true]) {
+    assert.throws(() => buildWorkerEnv({ ANTHROPIC_BASE_URL: "fixture-secret-value", [GARDENER_ORIGIN_ENV]: carrier }, parent, { allowApiKey }), error => {
+      assert(error instanceof Error && error.message.includes("billing-boundary violation"));
+      assert.equal(error.message.includes("fixture-secret-value"), false);
+      return true;
+    });
+  }
+  assert.throws(() => buildWorkerEnv({ ANTHROPIC_API_KEY: "fixture-injected", [GARDENER_ORIGIN_ENV]: carrier }, parent), /billing-boundary violation/);
+});
 
 test("default (no key exported) ⇒ subscription-clean, exactly as before the valve", () => {
   const parent: NodeJS.ProcessEnv = {

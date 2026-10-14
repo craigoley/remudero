@@ -388,7 +388,9 @@ export function gardenChildNodeArgv(
  * skipped in the child: the parent already decided which code it runs. The child runs under
  * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists. In a
  * daemon-owned process each child also holds a "garden" host-memory reservation for its lifetime (about 1 GB each,
- * 2-3 at once, measured 2026-10-10 and unreserved until now), and under an enforced budget it waits its turn first.
+ * 2-3 at once, measured 2026-10-10 and unreserved until now). Under an enforced garden budget (operator 2026-10-14) a
+ * child that would not fit is DEFERRED, not waited for: no child starts, memory_budget.enforce_defer names it, the pass
+ * resolves null, and with no pacing recorded the garden stays due for its next tick.
  */
 export function childGardenPassSpawn(
   opts: {
@@ -422,7 +424,9 @@ export function childGardenPassSpawn(
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
   return async (name, args, signal) => {
-    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve }, opts.admission);
+    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve,
+      onShortfall: "defer" }, opts.admission);
+    if (admission.kind === "deferred") return null;
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.
