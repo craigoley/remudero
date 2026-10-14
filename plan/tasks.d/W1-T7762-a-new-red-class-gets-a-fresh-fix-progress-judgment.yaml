@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: main-red investigation, operator asked for flow improvements"
   plan_refs: [W1-T7096, W1-T5966]
   files: [src/lib/fix-progress-judge.ts, src/lib/sweep.ts, test/a-new-red-class-gets-a-fresh-fix-progress-judgment.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

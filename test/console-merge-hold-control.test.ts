@@ -47,7 +47,10 @@ test("standing fleet and PR holds ride the one atomic board snapshot and disappe
   const held = computeBoardSnapshot(prDeps);
   assert.equal(prDeps.reads.count, 1, "board and status-board projection share one parsed ledger read");
   assert.deepEqual(held.mergeHeld, [
-    { prNumber: 3708, taskId: "W1-T2719", by: "craig", reason: "read this head manually" },
+    {
+      prNumber: 3708, taskId: "W1-T2719", by: "craig", reason: "read this head manually",
+      claimMismatch: false, setter: "craig (actor unrecorded)",
+    },
   ]);
 
   const releasedDeps = boardDeps([
@@ -60,7 +63,9 @@ test("standing fleet and PR holds ride the one atomic board snapshot and disappe
   const fleetDeps = boardDeps([
     { step: "automerge.hold_engaged", task_id: "FLEET", by: "craig", reason: "incident freeze", authority: "console-confirmed" },
   ]);
-  assert.deepEqual(computeBoardSnapshot(fleetDeps).mergeHeld, [{ by: "craig", reason: "incident freeze" }]);
+  assert.deepEqual(computeBoardSnapshot(fleetDeps).mergeHeld, [
+    { by: "craig", reason: "incident freeze", claimMismatch: false, setter: "craig (actor unrecorded)" },
+  ]);
 });
 
 function rootFixture(): { root: string; ledgerPath: string; deps: ServeDeps } {

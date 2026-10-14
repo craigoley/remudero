@@ -1,0 +1,88 @@
+- id: W1-T9278
+  title: "A STALE PLAN PROOF RED TAKES THE PROOF-REPAIR ROUTE, NEVER A CODE FIX ROUND — #11417 (W1-T9225, run branch, no body trailer) went red only on proof-discrimination because a plan criterion graded executed_stale; the sweep escalated it, then the progress judge released the wait and the sweep queued it as \"ci-log fix, fix round 1\" for an hour (18 dispositions, 12 judge calls) until an operator plan amendment fixed it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 7.00
+  risk: high  # the sweep's routing of a metadata-only red after a judge release, and the task identity the stale-proof route reads; src/lib/sweep.ts and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: #11417 (W1-T9225) was routed to a code fix round for a red only a plan amendment could fix; the operator filed #11430 (kind: guard) and refreshed the branch by hand"
+  plan_refs: [W1-T5544, W1-T4943, W1-T4206, W1-T3434, W1-T7243, W1-T9225, W1-T9232]
+  files:
+    - src/lib/sweep.ts
+    - test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts
+  status: queued
+  priority: 2  # each occurrence holds a fix slot and an LLM judge call per pass, escalates twice, and ends in a hand amendment
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13 on the core host ledger (read-only, niced; rotations 16-10, 17-02, 17-53 plus the live file,
+    every row naming 11417 or W1-T9225):
+      - #11417 (head 3bfa18c, branch run-W1-T9225-1791907722564, author cao825, body with NO Remudero-Task trailer)
+        was red only on proof-discrimination: W1-T9225's first plan criterion is `unit test:` on a test file that
+        already exists at base, so it graded executed_stale.
+      - 16:49:44Z `sweep.disposed` "metadata-only red escalated: the body red has no deterministic acceptance repair;
+        scope or proof amendment is required; no fix worker dispatched", with an escalation issue. Correct so far.
+      - 16:56:55Z `fix.progress_judged` verdict continue, and from then until 17:48Z 17 more `sweep.disposed` rows
+        (18 with the escalation) classed it "ci-log fix, fix round 1 — judge: continue" (reason prefix
+        "proof-discrimination failed on 3bfa18c" or "required checks red"), blocker own-red, with 12
+        `fix.progress_judged` calls and 13 `sweep.base_reproduction` runs. No `fix.dispatch` row exists for
+        it: every pass stood down on host capacity, a light pass, or a clear base reproduction. 17:44Z `pr.stuck`
+        own-red and a second escalation issue.
+      - The fix was the operator's plan amendment #11430 (`kind: guard` on that criterion, merged as c6166e562) plus a
+        merge of main (b85f678, 17:48Z); review then passed and armed at 17:59Z.
+    WHY, READ on origin/main fe381f93b (symbols, not lines), src/lib/sweep.ts in `runSweep`'s blocked-fixable arm:
+      - The metadata-only branch (`metadataOnlyRed`, W1-T5544) finds the prior "escalated" disposition at this head,
+        asks the judge (`askProgress`), and on release sets `result = { notMetadata: true, reason: "progress judge
+        released the metadata wait" }` and `proofRepairRoute = proofRepairRouteEvidence(pr)`. With `notMetadata` set
+        the branch falls through, and with `proofRepairRoute` undefined `fixEvidence` becomes `{ ciFailures }`: a
+        ci-log CODE round for a red whose cause is plan text.
+      - `proofRepairRoute` was undefined because `proofRepairRouteEvidence` requires `carriesTaskTrailer(pr)`, which
+        reads only the BODY trailer. Its doc says "trailered exactly as the proof-discrimination gate reads it", but
+        since W1-T4206 the gate (scripts/acceptance-author-gate.mjs `resolveTaskIdentity`, used by
+        scripts/proof-discrimination-gate.mjs) also recovers the task from a run-shaped head ref, and it did here: the
+        plan criteria it graded came from W1-T9225's shard. The sweep and the gate disagree on whether this PR has a
+        task, so the stale-proof route is shut on exactly the PRs whose stale proofs are plan criteria.
+    The existing route already fits this case: W1-T5544's proof-repair round may edit tests or end in a
+    PROOF_AMENDMENT that `src/lib/proof-amendment.ts` (W1-T3434) validates and files on a plan-only branch, and the
+    ladder's second rung is W1-T4943's plan-shard flag. No new amendment grammar is needed.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 349 readable open origin heads for
+    `carriesTaskTrailer|proofRepairRouteEvidence` (main 1: W1-T5544, the route itself; one head adds
+    W1-T3455, a ratchet-admission shard that does not route reds), for "released the metadata wait|metadata red
+    already" (main 0, no head more), and read W1-T9232 (a head missing its own task RECORD, review side: disjoint) and
+    W1-T9250 (an operator plan PR red only because main is red: disjoint). Control: the sweep finds the W1-T3455
+    head-only shard above and `^- id: W1-T9237$` on main.
+  design: |
+    1. ONE IDENTITY WITH THE GATE. `carriesTaskTrailer` (or the stale-proof route's own identity read) recognises the
+       task the proof-discrimination gate recognised: the body trailer, then a run-<taskId>-<epochMs> head ref, the
+       same order as `resolveTaskIdentity` (W1-T4206), with a plan-only head still recovering nothing from its ref. So a
+       run-branch PR with no body trailer gets `proofRepairRouteEvidence`. Every caller of `carriesTaskTrailer` moves
+       with it; a PR with neither surface is unchanged.
+    2. A JUDGE RELEASE IS NOT A CODE ROUND. When the judge releases a metadata-only wait and the red set is
+       proof-discrimination alone with gate-log stale-proof evidence, the PR takes the W1-T5544 proof-repair ladder
+       (rung one, then W1-T4943's flag), never `{ ciFailures }`. When no stale-proof evidence can be read for such a red
+       (no task identity at all, so the body is authoritative, or an unreadable log), it is not handed to a ci-log code
+       round either: it stays parked on the escalation already delivered at this head, without another judge call
+       until the head or the red set changes (a shape, not a count).
+    3. THE FIRST-PASS AUTHOR RULE STAYS. W1-T5544's first pass still routes only fleet-App heads and escalates an
+       operator's head; this task changes only what happens after the judge releases that wait.
+    4. LEDGER: the `sweep.disposed` reason names the route ("proof-repair: plan criteria pass at base") instead of
+       "ci-log fix", so a reader can tell a plan-text red from a code red.
+    Tests go in test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts, driving `runSweep`
+    with fake deps over an `OpenPrView` shaped like #11417 (run-W1-T<n>-<epoch> head, body without a trailer, red only
+    on proof-discrimination whose log carries the gate's FAIL lines) and a ledger holding the prior escalated
+    disposition at the same head.
+  acceptance:
+    - claim: "a run-branch PR with no body trailer whose only red is a stale plan proof gets the proof-repair route's evidence"
+      proof: 'grep: test("W1-T9278: a run-branch head without a body trailer gets the stale-proof route" in test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts'
+    - claim: "after the judge releases an escalated metadata-only proof-discrimination wait, the sweep dispatches the proof-repair route, never a ci-log code round"
+      proof: 'grep: test("W1-T9278: a judge release of a stale-proof wait never dispatches a ci-log code round" in test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts'
+    - claim: "a stale-proof red with no readable evidence stays parked on its escalation without a code round or a repeated judge call at the same head"
+      proof: 'grep: test("W1-T9278: a stale-proof red with no evidence stays parked on its escalation" in test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-stale-plan-proof-red-takes-the-proof-repair-route-not-a-code-round.test.ts"
+  falsifier: |
+    Keep `carriesTaskTrailer` body-only: the run-branch fixture gets no route evidence and the first two tests fail.
+    Keep the release's fall-through to `{ ciFailures }`: the fake `dispatchFix` receives ci-log evidence and the second
+    test fails. Ask the judge on every pass at an unchanged head: the third test counts a second judge call and fails.

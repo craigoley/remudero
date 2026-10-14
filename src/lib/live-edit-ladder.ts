@@ -10,6 +10,7 @@ import type { AsyncGitRunner } from "./git-fetch-retry.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { asyncGit, parseAdvanceCommits } from "./self-sync.js";
+import type { RecoveryRecord } from "./recovery-refs.js";
 
 /**
  * 2026-10-10/11 -- TRACKED EDITS IN A LIVE CHECKOUT BLOCKED CORE FOR FIVE HOURS, AND NOTHING SAID SO.
@@ -77,6 +78,8 @@ export interface LiveEditState {
   confirmedTree?: string;
   patch?: string;
   ref?: string;
+  /** The preserved copy's record (recovery-refs.ts), relative to the state root: escalation and restore are noted there. */
+  record?: string;
   /** The tree whose preservation last failed: logged once per failing tree, not once per tick. */
   failedTree?: string;
   escalatedUrl?: string;
@@ -131,7 +134,7 @@ function readState(path: string): LiveEditState {
 }
 
 /** Read-merge-write, renamed into place: the other actor's fields survive a concurrent write. */
-function writeState(path: string, changes: Partial<Record<keyof LiveEditState, unknown>>): void {
+function writeState<K extends string = keyof LiveEditState>(path: string, changes: Partial<Record<K, unknown>>): void {
   const next: Record<string, unknown> = { ...readState(path), ...changes };
   for (const key of Object.keys(next)) if (next[key] === undefined) delete next[key];
   mkdirSync(dirname(path), { recursive: true });
@@ -210,7 +213,7 @@ async function recoveryRef(git: AsyncGitRunner, ref: string, head: string, tree:
 }
 
 /** Tier 1: preserve and confirm. Throws on any failure; the caller records it and confirms nothing. */
-async function preserve(d: LiveEditRungInput, git: AsyncGitRunner, snap: Snapshot): Promise<{ patch: string; ref: string }> {
+async function preserve(d: LiveEditRungInput, git: AsyncGitRunner, snap: Snapshot): Promise<{ patch: string; ref: string; record: string }> {
   const dir = join(d.stateDir, "recovery", "live-edits", d.tree);
   mkdirSync(dir, { recursive: true });
   const keep = join(dirname(dir), ".rmd-scratch-keep");
@@ -224,11 +227,20 @@ async function preserve(d: LiveEditRungInput, git: AsyncGitRunner, snap: Snapsho
   const ref = `${LIVE_EDIT_RECOVERY_REF_PREFIX}/${host}/${ts}`;
   await recoveryRef(git, ref, snap.head, snap.worktreeTree, `chore(recovery): preserve live edits in the ${d.tree}`);
   const headTree = (await git(["rev-parse", `${snap.head}^{tree}`])).trim();
+  const record: RecoveryRecord = { refs: [ref], files: [relative(d.stateDir, patch), relative(d.stateDir, join(dir, `${base}.json`))] };
   if (snap.indexTree !== headTree && snap.indexTree !== snap.worktreeTree) {
     await writeAndConfirmPatch(git, snap.head, snap.indexTree, join(dir, `${base}.index.patch`));
     await recoveryRef(git, `${ref}-index`, snap.head, snap.indexTree, `chore(recovery): preserve the staged edits in the ${d.tree}`);
+    record.refs.push(`${ref}-index`);
+    record.files.push(relative(d.stateDir, join(dir, `${base}.index.patch`)));
   }
-  return { patch: relative(d.stateDir, patch), ref };
+  writeState<keyof RecoveryRecord>(join(dir, `${base}.json`), record);
+  return { patch: relative(d.stateDir, patch), ref, record: relative(d.stateDir, join(dir, `${base}.json`)) };
+}
+
+/** Note an escalation or a restore on the preserved copy's record, which recovery-refs.ts tiers by. */
+function noteOnRecord(d: LiveEditRungInput, state: LiveEditState, changes: Partial<RecoveryRecord>): void {
+  if (state.record && existsSync(join(d.stateDir, state.record))) writeState<keyof RecoveryRecord>(join(d.stateDir, state.record), changes);
 }
 
 function escalation(d: LiveEditRungInput, r: { paths: string[]; patch?: string; ref?: string; behind: number; pressure: number; threshold: number; head: string; main: string }): Escalation {
@@ -309,7 +321,7 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
     if (state.confirmedTree !== key) {
       try {
         const kept = await preserve(d, git, snap);
-        writeState(statePath, { tree: key, confirmedTree: key, patch: kept.patch, ref: kept.ref, failedTree: undefined });
+        writeState(statePath, { tree: key, confirmedTree: key, patch: kept.patch, ref: kept.ref, record: kept.record, failedTree: undefined });
         log(LIVE_EDIT_STEPS.preserved, { paths: paths.slice(0, PATH_BOUND), path_count: paths.length, patch: kept.patch, ref: kept.ref, head, behind });
       } catch (e) {
         if (state.failedTree !== key) {
@@ -333,6 +345,7 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
       });
       if (url) {
         writeState(statePath, { escalatedUrl: url });
+        noteOnRecord(d, state, { escalatedUrl: url });
         log(LIVE_EDIT_STEPS.escalated, { issue_url: url, pressure, behind, path_count: paths.length });
       }
       state = readState(statePath);
@@ -361,6 +374,7 @@ async function ladder(d: LiveEditRungInput): Promise<LiveEditLadderResult> {
       `pressure ${pressure} (>= ${2 * threshold}) so it can fast-forward. Nothing was lost: patch \`<state root>/${state.patch}\`, ` +
       `recovery ref \`${state.ref}\`.`;
     writeState(statePath, { restoredAtMs: nowMs, noticePending: notice, restoreRefusedTree: undefined });
+    if (left.length === 0) noteOnRecord(d, state, { restoredAtMs: nowMs });
     log(LIVE_EDIT_STEPS.restored, { paths: paths.slice(0, PATH_BOUND), path_count: paths.length, patch: state.patch, ref: state.ref, pressure, head, behind, still_dirty: left.length });
     await deliverNotice(d, readState(statePath), statePath, log);
     state = readState(statePath);
@@ -405,6 +419,9 @@ export interface LiveEditLadderWiring {
   escalate?: (e: Escalation) => Promise<string>;
   comment?: (url: string, body: string) => Promise<void>;
   git?: (repoDir: string) => AsyncGitRunner;
+  /** The daemon's recovery-ref pass (recovery-refs.ts recoveryRefMaintainer): publishes each checkout's
+   *  refs/rmd-recovery/* to origin and applies the retention tiers. The host watchdog has no credential and passes none. */
+  recovery?: (repoDir: string, tree: LiveEditTree) => Promise<void>;
 }
 
 /** The daemon's freshness read with the ladder run beside it, for its own tree and the install tree.
@@ -421,8 +438,10 @@ export function withLiveEditLadders(read: () => Promise<DaemonFreshness>, w: Liv
       const shared = { stateDir: w.stateDir, host: w.host, escalate: w.escalate, comment: w.comment, git: w.git };
       const own = await runLiveEditLadder({ ...shared, tree: "daemon-checkout", repoDir: w.daemonRepoDir, clock: w.clock });
       if (own.restored) restoredSince = own.since;
+      await w.recovery?.(w.daemonRepoDir, "daemon-checkout");
       if (w.installRepoDir && resolve(w.installRepoDir) !== resolve(w.daemonRepoDir) && existsSync(w.installRepoDir)) {
         await runLiveEditLadder({ ...shared, tree: "install-checkout", repoDir: w.installRepoDir, clock: w.clock, fetch: true });
+        await w.recovery?.(w.installRepoDir, "install-checkout");
       }
     } finally {
       running = false;

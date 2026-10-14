@@ -47,6 +47,9 @@ export const ROUTE_MATCH = {
   // The CLI verbs and the console routes decide and record through the SAME applyProposalVerdict.
   decline: "POST /v1/inbox/decline",
   restore: "POST /v1/inbox/restore",
+  // W1-T8831: console-only triage verbs; they have no CLI twin, so the rows are inert like `note` above until one lands.
+  archive: "POST /v1/inbox/archive",
+  snooze: "POST /v1/inbox/snooze",
   peek: "GET /v1/peek",
   replay: "GET /v1/replay",
   skill: "GET /v1/skills",
@@ -116,6 +119,8 @@ export const CLI_ONLY = {
       "reap-branches",
       "ledger-compact",
       "ledger-grep",
+      // Explicit host-local state inspection; never a remote console mutation surface.
+      "inspect",
       // Phase 1 P1-04: rebuilds and swaps a host-local SQLite file and writes the kill-switch file on
       // the daemon host; the console reads the views it feeds, never the store itself.
       "read-model",
@@ -132,12 +137,18 @@ export const CLI_ONLY = {
       "host-alert",
       // W1-T4627: an operator measurement that spawns a sealed grader on the daemon host; not a console action.
       "impossible-canary",
+      // A held-out skill eval: spawns sealed paired attempts on the daemon host and writes its proposal registry there;
+      // a spend the operator confirms per invocation, not a console action.
+      "skill-eval",
       "benchmark-aa",
       "benchmark-paid-pilot",
       // W1-T4098: lints the operator's OWN Claude Code memory directory on the operator's machine —
       // not fleet state, and not reachable from the console's remote HTTP client.
       "memory-lint",
       "pr-owner",
+      // W1-T3083: a terminal exit-code verb over one PR head's rollup, scripted from a shell; the console
+      // reads the same rollup through its own cached board surface.
+      "pr-checks",
       "hand-runs",
       // W1-T4574: an operator snapshot joining a host-local ledger with GitHub history; its only
       // export is a reviewed candidate release file, never a live console read.

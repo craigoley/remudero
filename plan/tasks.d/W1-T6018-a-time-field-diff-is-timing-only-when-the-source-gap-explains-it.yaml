@@ -6,12 +6,12 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 2.00
-  risk: medium  # Rule 19: one concern — when the shadow comparator may call a time-leaf diff timing
-  band_meaning: blast-radius
+  risk: high  # Rule 19 span: the build widened this from view-shadow.ts to now-view.ts (#10833)
+  band_meaning: span
   origin: "2026-10-06 core-console architecture plan backlog E15 (shadow follow-up: the TIME_LEAF rule is weak)"
   plan_refs: [W1-T6017]
-  files: [src/lib/view-shadow.ts, test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts]
-  status: queued
+  files: [src/lib/view-shadow.ts, test/a-time-field-diff-is-timing-only-when-the-source-gap-explains-it.test.ts, "src/lib/now-view.ts"]
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

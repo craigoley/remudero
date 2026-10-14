@@ -163,10 +163,10 @@ test("W1-T1038: the probe reads meminfo not the cgroup limit", () => {
   );
   assert.equal(readAvailableMemoryMib(meminfoFixture), Math.floor(5_600_052 / 1024));
 
-  // A cgroup `memory.max` file carries a bare scalar — often literally the string "max" when the
-  // container is unlimited, exactly this fleet's own containers (this task's own rationale) — with
-  // no `MemAvailable` field at all. Pointing the probe at one must NOT silently produce a number:
-  // if it did, an unlimited container's cgroup read would authorise every dispatch silently.
+  // A cgroup `memory.max` file carries a bare scalar — the literal string "max" for an unlimited
+  // cgroup, as this fleet's containers were when this task was written (they carry limits since
+  // #10371/#10486) — with no `MemAvailable` field at all. Pointing the probe at one must NOT silently
+  // produce a number: if it did, an unlimited cgroup's read would authorise every dispatch silently.
   const cgroupFixture = join(dir, "memory.max");
   writeFileSync(cgroupFixture, "max\n");
   assert.throws(

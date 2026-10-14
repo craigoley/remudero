@@ -1,0 +1,69 @@
+- id: W1-T9374
+  title: "THE CORE FLEET FILLS THE CHILD-ENTRY STORE: W1-T8776 builds the store only when the managed checkout refreshes as current or fast_forwarded, but core's managed checkout has no node_modules, so the refresh answers unborrowed, no build ever runs, and every check-proof child stays on tsx"
+  repo: remudero
+  depends_on: [W1-T8776]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # one concern: which tree fills the shared child-entry store, and that the outcome is ledgered
+  band_meaning: span
+  origin: "operator session 2026-10-14: read-only host check of the W1-T8775/W1-T8776 memory cut after core booted 2581c1d51 at 01:46:29Z"
+  plan_refs: [W1-T8776, W1-T8775, W1-T9279, W1-T7813, W1-T4356]
+  files: [src/run-task.ts, src/lib/child-entry-store.ts, src/lib/plan-pr-emitter.ts, src/lib/pr-open.ts, test/the-core-fleet-fills-the-child-entry-store.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core host, read-only. Core booted at 01:46:29Z on 2581c1d51, which contains
+    W1-T8776 (#11515, 7ebd43e68) and W1-T9279 (#11480).
+      - The store directory `<config.root>/child-entries` (config.root is /home/node/Remudero in the container) does not exist.
+      - The ledger has no child_entry.* row since boot, although run-task dispatched three runs at 01:53Z
+        (W1-T3956, W1-T3829, W1-T4464) and the approve lane ran plan-PR preflights at 01:47-01:52Z.
+    READ at origin/main 187863ce6. In runTaskBody (src/run-task.ts), `void buildIntoStore(repoDir, ...)` runs only
+    when `checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded"`. `refreshManagedCheckout`
+    returns `unborrowed` at once when `repoDir` has no node_modules. That is the core fleet's case, as W1-T7813 already
+    records: the managed checkout /home/node/Remudero/repos/remudero has no node_modules, sits at 4d8decb1b (#10161)
+    and has no scripts/build-child-entries.mjs at all. Core worktrees link the install root instead, so on core the
+    hook can never fire.
+    A store that is never filled makes `materializeFromStore` answer `store-empty`, and childEntryArgv falls back to tsx.
+    The answer is not ledgered either. W1-T8776's design promises "Ledger `child_entry.store_hit` /
+    `child_entry.store_miss` with the reason, so the hit rate is measurable". Its own final checkpoint context says
+    "remaining: store hit/miss ledgering at the check-proof callers (plan-pr-emitter.ts)". No caller passes the store
+    `log`: plan-pr-emitter.ts checkProofLaunchArgv and pr-open.ts both call childEntryArgv without one. The plan-PR
+    launch line `plan_pr.check_proof_child kind=... reason=...` goes to stderr only, and a garden child's stderr is
+    discarded except for a heap-exhaustion tail (src/lib/garden-registry.ts). Because nothing reaches the ledger, nobody
+    noticed that the precompiled-entry chain (W1-T7729 -> W1-T8775 -> W1-T8776 -> W1-T9279) cuts no memory on core.
+    W1-T8775 and W1-T9279 switched the spawn sites and W1-T8776 built the store mechanism. This task makes the
+    store actually fill on core.
+    On 2026-10-13 at 20:43Z, a plan-PR check-proof child under tsx measured 100-117 MB RSS at birth.
+  design: |
+    1. Fill the store from a tree that holds main's source and a usable install, independent of the managed checkout's
+       borrow state. The fresh run worktree satisfies both: runTaskBody cuts it with worktreeAddAsync(..., "origin/main"),
+       and node_modules is linked from the install root. Call buildIntoStore on that tree once it exists. The existing
+       hook for the current and fast_forwarded kinds may remain. buildIntoStore already dedupes a stored hash
+       (`present`) and joins a build in flight, so one build per main revision still holds. The build runs in a child
+       process and is unawaited, never on the loop. It must not write into the worker's tree (it writes `--out` into the
+       store's temp directory).
+    2. Ledger every outcome. `skipped` and `present` are silent today, and so is the refresh kind that gated the build.
+       Ledger them, so "the store was never asked to build" is a row, not an absence.
+    3. Thread the lane's ledger log into childEntryArgv's `store.log` at the plan-PR preflight caller
+       (plan-pr-emitter.ts) and the pr-open caller (pr-open.ts). child_entry.store_hit and child_entry.store_miss
+       (with tree_reason and the store reason) then reach the ledger, so the hit rate is measurable, as W1-T8776 promised.
+       Record the launch kind and reason in the ledger too, not only on stderr.
+    4. Do not change the currency or integrity judgement, the build recipe, or the publication protocol. The concurrent
+       publication race in plan/feedback/fb-1791940627529-7d7b63.yaml is a separate concern. Make no measured memory
+       claim here; the paired RSS comparison is the operator's after deploy.
+  acceptance:
+    - claim: "a run whose managed checkout refreshes as unborrowed still fills the store from its fresh main worktree"
+      proof: 'grep: test("W1-T9374: an unborrowed managed checkout still fills the store from the run worktree" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+    - claim: "every store build outcome, including skipped and present, is ledgered with its reason"
+      proof: 'grep: test("W1-T9374: every store build outcome is ledgered" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+    - claim: "the plan-PR preflight and pr-open check-proof callers ledger the store hit or miss and the launch kind"
+      proof: 'grep: test("W1-T9374: the check-proof callers ledger the store answer and launch kind" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+    - claim: "after the store is filled, a fresh plan-PR preflight tree launches check-proof-main from the bundle without tsx"
+      proof: 'grep: test("W1-T9374: a filled store makes a fresh preflight tree launch the bundle" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+  falsifier: |
+    Keep the build gated on current or fast_forwarded only. With an unborrowed managed checkout the first test sees no
+    store build, and the fourth sees a tsx launch. Drop the log from either check-proof caller and the third test sees
+    no child_entry.store_hit or store_miss row. Leave `skipped` and `present` unlogged and the second test fails.

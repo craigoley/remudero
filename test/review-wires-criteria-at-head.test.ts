@@ -245,8 +245,8 @@ test("an untrailered body is unchanged — still resolves from its own PR body A
   const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   assert.match(
     runTaskSrc,
-    /if\s*\(taskId\)\s*{\s*const resolved = resolvePlanCriteriaAtHead\(body, subjectRepoDir, /,
-    "resolvePlanCriteriaAtHead must be gated on a resolved taskId, never called for an untrailered body",
+    /if\s*\(taskId\)\s*{\s*const resolved = await resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, /,
+    "resolvePlanCriteriaAtHeadAsync must be gated on a resolved taskId, never called for an untrailered body",
   );
 
   // BEHAVIOURAL: a deliberately UNREACHABLE headRefOid (never a real git object anywhere) proves
@@ -301,11 +301,13 @@ test("the swap costs no second network fetch and stays synchronous — one fetch
   // in the same synchronous block, exactly claim 5 requires ("resolving and judging in the same
   // tick").
   const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  // W1-T7743: the review command awaits the AWAITED form (its git runs off the loop); the sync form is never awaited.
   assert.doesNotMatch(
     runTaskSrc,
-    /await\s+resolvePlanCriteriaAtHead/,
-    "resolvePlanCriteriaAtHead must be called synchronously, never awaited",
+    /await\s+resolvePlanCriteriaAtHead\(/,
+    "the sync resolvePlanCriteriaAtHead must never be awaited",
   );
+  assert.match(runTaskSrc, /await\s+resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir/);
 
   // BEHAVIOURAL: driving a REAL trailered review — against a task (W1-T2432) actually committed
   // with real acceptance criteria at this checkout's own HEAD — touches `fetchView` (the ONLY

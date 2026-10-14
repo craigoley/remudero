@@ -1,0 +1,24 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -502,0 +503,18 @@
++- id: head-identity-gate-pre-push-identity
++  subsystem: ci
++  lifecycle: active
++  files: ["scripts/head-identity-gate.mjs", "hooks/pre-push", "src/run-task.ts", "test/**", "plan/tasks.d/**"]
++  fact: >-
++    Before the first push of a branch, give its head an identity the head-identity gate accepts: a
++    run-shaped ref (`run-<taskId>-<epochMs>` for a filed task, `run-unfiled-<epochMs>` for unfiled
++    work), or an anchored `Remudero-Task: <id>` trailer on the head commit. A branch shaped
++    codex/ or claude/ is refused at push, and the gate names the rename, which only works while the
++    branch is still free. Once a pull request is open its head ref cannot be renamed, so the repair
++    is a new head commit carrying the trailer (`git commit --allow-empty`), never an amend or a new PR.
++  evidence: >-
++    The head-identity gate refused pull requests #10671 and #10760 in one window, and each was
++    repaired after the refusal. The gate's refusal text (scripts/head-identity-gate.mjs) names both
++    run-branch forms and the trailer route, and it refuses at push before a pull request exists. The
++    root cause of each refusal was not read from the PR diffs or the gate's logs, so this entry names
++    the identity step a fix lane must take before pushing, not a verified per-PR cause.
++  src: "ci-learning:10671:head-identity-gate"
++  cited: "2026-10-11"

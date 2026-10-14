@@ -10,6 +10,7 @@
  * with the clock shifted past the crossing, and files only when the shift alone turns it red.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -229,8 +230,10 @@ test("W1-T6036: a finding an open filing already covers is deferred without runn
 
 test("W1-T6036: the default runner really spawns the file under the shifted clock and the repo's test setup", async () => {
   // Stamps are placed against the REAL clock, because the spawned suite reads it: the gardener's
-  // census clock is pinned to the same instant so its shift lands just past each crossing.
-  const at = Date.now();
+  // census clock is pinned to the same instant so its shift lands just past each crossing. Read from
+  // a child, as the suite's own: a clock-shift probe moves this process alone (scripts/clock-shift.mjs TRAP).
+  const at = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(Date.now()))"], { encoding: "utf8" }));
+  assert.ok(Number.isSafeInteger(at) && at > 0, `child clock read: ${at}`);
   const stamp = new Date(at - (STALE_DAYS - 3) * DAY).toISOString();
   const head = `import assert from "node:assert/strict";\nimport { test } from "node:test";\n`;
   const g = garden({
@@ -255,4 +258,53 @@ test("W1-T6036: the default runner throws, rather than reading red, when the run
   const runSuiteShifted = (gardener as unknown as { runSuiteShifted: (root: string, file: string, days: number) => boolean }).runSuiteShifted;
   assert.equal(typeof runSuiteShifted, "function");
   assert.throws(() => runSuiteShifted(join(ROOT, "no-such-checkout"), FILE, 2), /ENOENT/);
+});
+
+
+test("W1-T7812: the default shifted runner rejects incomplete TAP and mismatched end tallies", () => {
+  const testFile = "test/measured.test.ts";
+  const g = garden({ files: { [testFile]: 'import { test } from "node:test";\ntest("measured", () => {});\n' } });
+  const incomplete = [
+    "# Subtest: measured",
+    "# tests 2",
+    "# pass 1",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+  ].join("\n");
+  const complete = [
+    "# Subtest: measured",
+    "# tests 1",
+    "# pass 1",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+  ].join("\n");
+  const fakeExec = (output: string, tally: { tests: number; failed: number }) =>
+    (_command: string, args: string[], _options: { env: NodeJS.ProcessEnv }): string => {
+      const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg.endsWith("tally.json"));
+      assert.ok(destination);
+      writeFileSync(destination.slice(destination.indexOf("=") + 1), JSON.stringify({
+        summary: tally, fileSummaries: [testFile],
+      }));
+      return output;
+    };
+  try {
+    assert.throws(
+      () => gardener.runSuiteShiftedMeasured(g.repo.dir, testFile, 2, {
+        execFile: fakeExec(incomplete, { tests: 2, failed: 0 }),
+      }),
+      /incomplete TAP verdict/,
+    );
+    assert.throws(
+      () => gardener.runSuiteShiftedMeasured(g.repo.dir, testFile, 2, {
+        execFile: fakeExec(complete, { tests: 2, failed: 0 }),
+      }),
+      /TAP counts disagree with the end-of-run tally/,
+    );
+  } finally {
+    g.repo.cleanup();
+  }
 });

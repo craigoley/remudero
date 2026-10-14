@@ -1,0 +1,75 @@
+id: fb-1791856366577-09684b
+ts: 2026-10-13T01:52:46.578Z
+raw: >-
+  NANOCLAW COMPARISON 2026-10-13 (nanocoai/nanoclaw at ab09973a (2026-10-12),
+  read-only clone).
+
+  OPERATOR RULED 2026-10-13, answering a grill in an interactive session: "File,
+  pilot proof-preflight". File a design task for skill steps the harness runs
+  itself, piloted on proof-preflight, before the 2026-09-29 miner trigger fires.
+  The 2026-09-29 retirement of the outcome-only skill stands; this ships no new
+  skill.
+
+
+  WHAT NANOCLAW DOES (OBSERVED in its source): a SKILL.md is prose plus fenced
+  nc: directives. A deterministic engine (scripts/skill-apply.ts) runs the
+  fences it understands. Anything it cannot run becomes an agent task carrying
+  the prose beside that step. Two invariants: with the fences stripped the skill
+  still reads as a complete procedure, and a step the engine cannot do degrades
+  to the agent, never a crash or a silent drop (docs/skill-directives.md:9-16).
+  Success is one predicate: nothing deferred and nothing bounced (fullyApplied,
+  scripts/skill-apply.ts:353-355).
+
+
+  WHAT REMUDERO HAS (OBSERVED at origin/main efd226b50):
+
+  - .claude/skills/proof-preflight/SKILL.md is seven prose steps. Steps 2, 5 and
+  6 ("Run the exact reachable proof before editing", "Rerun the exact proof
+  after editing", "Run the test-tier check after editing") are deterministic:
+  the harness already knows the task's proofs and files.
+
+  - Usage is self-reported: workers print SKILLS_USED, ledgered as skills.used
+  (logSkillsUsed, src/run-task.ts:37876). For the retired
+  implement-clean-single-strike skill that was 8 of 114 rows against 399
+  injections (DECISIONS.md, 2026-09-29).
+
+  - So buildSkillEffectivenessReport (src/lib/skill-workshop.ts:770) measures
+  injection and self-claims, not execution.
+
+
+  ASK:
+
+  1. A small fenced step syntax inside SKILL.md (for example rmd:proof before,
+  rmd:proof after, rmd:check <command>). With the fences stripped the prose must
+  still read as a complete skill.
+
+  2. The harness runs proof-preflight's deterministic steps itself around the
+  worker, puts the before and after results in the prompt, and ledgers one
+  skill.step row per step (skill, step, phase, outcome; harness-observed, never
+  self-reported).
+
+  3. buildSkillEffectivenessReport reads skill.step rows when they exist, so
+  effectiveness is measured on executed steps.
+
+  4. A step the harness cannot run falls back to the prose. It never crashes and
+  never drops silently.
+
+  Out of scope: mining, new skills, and the 2026-09-29 retirement.
+
+
+  FALSIFIER: remove the harness step runner. A proof-preflight run then writes
+  no skill.step row and its prompt carries no before or after proof result.
+
+
+  Draft one bounded task through the normal triage and machine-filing judge.
+  Establish executable acceptance before filing, and re-verify every cited line
+  at current main first (they were read at origin/main efd226b50).
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: nanoclaw-2026-10-13/harness-run-skill-steps
+thread_id: null

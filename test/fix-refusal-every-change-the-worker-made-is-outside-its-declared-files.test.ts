@@ -5,20 +5,21 @@ import { test } from "node:test";
 import { ciLogNamedSourcePaths, runFixRung } from "./helpers/run-task-test.js";
 import type { Config } from "../src/lib/config.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const inherited = "src/inherited.ts";
 const rogue = "src/rogue.ts";
 const mount = { model: "sonnet", effort: "medium" as const, maxTurns: 20, contextBudget: 120000 };
 
-async function repair(baseline: "known" | "absent" | "failed", edit: string, mixed = false) {
+async function repair(baseline: "known" | "absent" | "failed", edit: string, mixed = false, evidence: { named?: boolean; failLog?: boolean } = {}) {
   const repo = gitRepo({ kind: "w1-t5385" });
   repo.git("config", "user.name", "fixture");
   repo.git("config", "user.email", "fixture@example.invalid");
   mkdirSync(join(repo.dir, "src"));
   writeFileSync(join(repo.dir, "src/declared.ts"), "export const declared = 1;\n");
-  repo.git("add", "src/declared.ts");
+  if (evidence.named) writeFileSync(join(repo.dir, "src/named.ts"), "export const named = 1;\n");
+  repo.git("add", "src");
   repo.git("commit", "-qm", "seed declared surface");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   writeFileSync(join(repo.dir, inherited), "export const inherited = 1;\n");
@@ -44,10 +45,16 @@ async function repair(baseline: "known" | "absent" | "failed", edit: string, mix
     settingsFile: join(repo.dir, "settings.json"),
     config: { root: repo.dir, workerProviders: { harnessCommitsFix: true } } as Config,
     budgetUsd: 10, strikeCap: 2, initialReview: review,
+    ...(evidence.named ? { ciFailures: [{ name: "unit", logTail: "at f (src/named.ts:1:1)" }] } : {}),
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
     deps: {
-      spawn: async () => {
+      spawn: async (args) => {
         spawns++;
+        if (evidence.named) args.onSelectionAssignment?.({ version: 1, id: "component-assignment", phase: "pre-execution",
+          requested: { model: "sonnet", effort: "medium", maxTurns: 20 },
+          selected: { provider: "claude", model: "sonnet", effort: "medium" },
+          routing: { mode: "claude-only", policy: { preference: "balanced", reservePercent: 10, provenance: "default" } }, candidates: [],
+        } as unknown as WorkerSelectionAssignment);
         writeFileSync(join(repo.dir, edit), "export const repaired = 2;\n");
         if (mixed) writeFileSync(join(repo.dir, rogue), "export const rogue = 2;\n");
         return {
@@ -72,7 +79,10 @@ async function repair(baseline: "known" | "absent" | "failed", edit: string, mix
       push: () => { pushes++; },
       issues: { create: () => { throw new Error("unexpected escalation"); }, listOpen: () => [], comment: () => {} },
       ledgerPath: join(repo.dir, "ledger.ndjson"),
-      log: (step, extra) => rows.push({ step, ...extra }), say: () => {}, account: (result) => result,
+      log: (step, extra) => {
+        if (evidence.failLog && step === "fix.remedy_path_execution") throw new Error("observation sink unavailable");
+        rows.push({ step, ...extra });
+      }, say: () => {}, account: (result) => result,
     },
   });
   return { repo, before, outcome, rows, spawns, pushes, waits };
@@ -232,4 +242,26 @@ test("a scope amendment for a file main is repairing is refused as main-owned, n
   assert.equal(amendment?.reason, "main-owned");
   assert.match(String(amendment?.detail), /main changed src\/shared\.ts since this PR's merge base/);
   assert.equal(round.repo.git("rev-parse", "HEAD"), round.before);
+});
+
+
+test("the real named CI guard carries one invocation into its actual fix assignment and attempt", async (t) => {
+  const result = await repair("known", "src/named.ts", false, { named: true }); t.after(() => result.repo.cleanup());
+  assert.equal(result.outcome.outcome, "fixed"); assert.equal(result.spawns, 1);
+  const source = result.rows.find(row => row.step === "fix.remedy_path_execution")!.prevention_execution;
+  assert.ok(source, "the actual decision boundary records its invocation");
+  assert.equal((source as { identity: { recorder: { state: string } } }).identity.recorder.state, "observed");
+  assert.deepEqual((source as { inputs?: unknown }).inputs, { failingChecks: 1, matchedPaths: 1, reachablePaths: 1, ownership: "compared" });
+  const a = result.rows.find(row => row.step === "worker.assignment")!, end = result.rows.find(row => row.step === "worker.attempt")!;
+  assert.deepEqual(a.prevention_execution, source); assert.deepEqual(end.prevention_execution, source);
+  assert.equal(a.worker_run_id, end.worker_run_id); assert.equal(a.repair_round_id, end.repair_round_id);
+  assert.equal(end.selection_assignment_id, "component-assignment"); assert.equal(end.success, true);
+});
+
+test("a component observation sink failure preserves the actual fix and its worker receipts", async (t) => {
+  const result = await repair("known", "src/named.ts", false, { named: true, failLog: true }); t.after(() => result.repo.cleanup());
+  assert.equal(result.outcome.outcome, "fixed"); assert.equal(result.spawns, 1);
+  assert.equal(result.rows.some(row => row.step === "fix.remedy_path_execution"), false);
+  assert.ok(result.rows.find(row => row.step === "worker.assignment")?.prevention_execution);
+  assert.ok(result.rows.find(row => row.step === "worker.attempt")?.prevention_execution);
 });

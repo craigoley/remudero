@@ -1,0 +1,45 @@
+- id: W1-T9357
+  title: "SERVE'S HEAVY VIEW LANE HOLDS ~1.4 GB, AND ITS LARGEST PART IS THE BOARD PROJECTION KEEPING EVERY FACT ROW WHOLE — createBoardProjection keeps each ingested row as its full parsed object for the life of the thread, including blobs no derivation reads (question, benchmark_run, stand_down_reason, worker_assignment, decision_verdict and six more, 36% of kept field bytes); replayed on snapshot b, dropping them keeps 82 MB less after GC (504 → 422 MB) for one core now view with byte-identical bodies: the projection rebuilds each row without those fields as it ingests it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — which fields of an ingested fact row the board projection keeps
+  band_meaning: span
+  origin: "operator session 2026-10-14: serve memory investigation (operator: 'go with all … find ways to reduce memory consumption')"
+  plan_refs: [W1-T6467]
+  files: [src/lib/board-projection.ts, test/the-board-projection-keeps-no-unread-blob.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 at origin/main, the serve.memory rows and the private snapshot rm-snapshot-20261007b (read-only).
+    OBSERVED, serve.memory since 10-13 12:00Z (256 samples): worker-heap read-model-worker:spawnHeavyViews is resident
+    95% of the time, 1,417 MB when present; the main heap is ~0.6 GB.
+    OBSERVED, offline replay of main's now view (core, 836,723 fact rows):
+    - One build KEEPS ~504 MB after GC (82 MB before any build), cold build 80 s, warm 0.5-0.7 s.
+    - Sampling heap profiler: board-projection.ts `ingest` 244 MB self / 304 MB inclusive of 419.5 MB live.
+    - A row-read census (a recording Proxy on every projection row, four builds): 0 rows ever enumerated; 39
+      non-identity fields read in all. The 11 fields below are never read and are 87.8 MB of 246.7 MB of kept JSON.
+    - `delete` of those fields keeps MORE (525 MB): it puts each row in dictionary mode. Rebuilding each row without
+      them keeps 422 MB. Every body hashed identically across all builds (3e88fd61ee9fb0f8).
+    WHY THE FIELDS ARE SAFE, AND WHAT CHECKS IT: a static check cannot prove it (the derivation's import closure is
+    540 files, and every field is named there by the code that writes it). Instead: the census above; the single
+    caller (now-view.ts) is a read-only view; and the now view's shadow compares the view with legacy's board built
+    from FULL live-file rows, so a field this drops that a derivation reads shows as a `real` diff.
+  design: |
+    1. BOARD_ROW_UNREAD_FIELDS names the 11 fields: question, benchmark_run, stand_down_reason, worker_assignment,
+       decision_verdict, stderr_excerpt, review_input_digest, proof_exec, changed_paths, evaluator_provenance,
+       reviewer_code_provenance.
+    2. ingest builds each row as a fresh object holding every other field, before interning. It never uses `delete`,
+       which leaves the object in dictionary mode and grows it.
+    3. A row that names none of them is kept as parsed.
+  acceptance:
+    - claim: "an ingested fact row is kept without the unread blob fields and with every other field, and the projected board is identical to one built from whole rows"
+      proof: 'grep: test("W1-T9357: the board projection keeps no unread blob" in test/the-board-projection-keeps-no-unread-blob.test.ts'
+    - claim: "the projection names the fields it drops"
+      proof: 'grep: export const BOARD_ROW_UNREAD_FIELDS in src/lib/board-projection.ts'
+  falsifier: |
+    Keep rows whole: the fixture's rows() still carries benchmark_run and question, and the test fails.

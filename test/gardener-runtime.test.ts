@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import { createGardenerRuntimeWriter, GARDENER_RUNTIME_FILE, GARDENER_RUNTIME_MAX_BYTES, parseGardenerRuntime,
   readGardenerRuntime, type GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
@@ -116,4 +116,60 @@ test("gardener status refuses missing unreadable wrong-repo and future receipts 
   const future = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot",
     clock: fixedClock(clock.now() + 61_000), gardens: inventory, log: () => {} }); await future.flush();
   assert.equal((await invoke(route)).body.reason, "clock_skew");
+});
+
+async function opportunityRouteFixture(t: TestContext) {
+  const stateDir = await mkdtemp(join(tmpdir(), "rmd-gardener-opportunity-route-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "boot", clock,
+    gardens: inventory, log: () => {} }); await writer.flush();
+  const route = buildGardenersRoute({ stateDir, repository: "acme/app", clock });
+  return { path: join(stateDir, "opportunity-outcomes.json"), read: async () => {
+    const result = await invoke(route); assert.equal(result.status, 200); return result.body;
+  } };
+}
+const opportunityRouteRow = (key = "debt", state = "pending") => ({
+  candidate: { repo: "acme/app", key, observedAt: "2026-10-06T12:00:00.000Z" },
+  key: `acme/app/${key}`, proposalId: "proposal", sourceIds: ["source"], at: "2026-10-06T12:00:00.000Z", state,
+  reason: "PRIVATE reason", privatePath: "/private/operator/root",
+});
+
+test("gardener process status exposes saved opportunity classifications with separate reconciliation timestamps", async (t) => {
+  const f = await opportunityRouteFixture(t);
+  const states = ["pending", "filed", "merged", "deployed", "measured-helped", "measured-hurt", "expired", "unavailable"];
+  await writeFile(f.path, JSON.stringify(states.map((state, i) => opportunityRouteRow(`key-${i}`, state))));
+  const body = await f.read();
+  assert.equal(body.opportunityEvidence.total, 8);
+  assert.deepEqual(body.opportunityEvidence.counts, Object.fromEntries(states.map((state) => [state, 1])));
+  assert.equal(body.opportunityEvidence.readAt, stamp);
+  assert.equal(body.opportunityEvidence.latestReconciledAt, "2026-10-06T12:00:00.000Z");
+  assert.equal(body.opportunityEvidence.countSemantics, "reported_states_not_verified_outcomes");
+  assert.equal(body.spend, null); assert.equal(body.outcomeAssessment, "not_collected");
+  assert.ok(!JSON.stringify(body).includes("PRIVATE")); assert.ok(!JSON.stringify(body).includes("/private/operator"));
+});
+
+test("gardener process status retains valid runtime when opportunity evidence is missing invalid or oversized", async (t) => {
+  const f = await opportunityRouteFixture(t);
+  const valid = (await f.read()).gardens;
+  assert.equal((await f.read()).opportunityEvidence.reason, "not_collected");
+  for (const [text, reason] of [["[truncated", "malformed"], ["x".repeat(512 * 1024 + 1), "oversized"]]) {
+    await writeFile(f.path, text!); const body = await f.read();
+    assert.equal(body.opportunityEvidence.reason, reason); assert.deepEqual(body.gardens, valid);
+    assert.equal(body.opportunityEvidence.total, undefined);
+  }
+  await rm(f.path); await mkdir(f.path);
+  assert.equal((await f.read()).opportunityEvidence.reason, "unreadable");
+});
+
+test("gardener process status refuses mixed duplicate and future opportunity rows rather than certifying partial totals", async (t) => {
+  const f = await opportunityRouteFixture(t);
+  for (const [rows, reason] of [
+    [[opportunityRouteRow(), opportunityRouteRow()], "malformed"],
+    [[{ ...opportunityRouteRow(), key: "acme/other/debt", candidate: { ...opportunityRouteRow().candidate, repo: "acme/other" } }], "repository_mismatch"],
+    [[{ ...opportunityRouteRow(), at: "2026-10-07T12:01:01.000Z" }], "clock_skew"],
+  ] as const) {
+    await writeFile(f.path, JSON.stringify(rows)); const body = await f.read();
+    assert.equal(body.opportunityEvidence.reason, reason); assert.equal(body.opportunityEvidence.total, undefined);
+    assert.equal(body.gardens.length, 2);
+  }
 });

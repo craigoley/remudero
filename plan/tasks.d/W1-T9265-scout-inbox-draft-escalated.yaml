@@ -1,0 +1,34 @@
+- id: W1-T9265
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — inbox.draft_escalated landed 172 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.55
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:inbox.draft_escalated"
+  files:
+    - test/scout-inbox-draft-escalated.test.ts
+  acceptance:
+    - claim: "inbox.draft_escalated stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9265: inbox.draft_escalated no longer recurs\" in test/scout-inbox-draft-escalated.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step inbox.draft_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 54 in the older half, 118 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files list contains only a single new test file (test/scout-inbox-draft-escalated.test.ts), which does not exist at the base. That is a low-footprint, additive change."
+      - "The description and acceptance criteria (a grep proof for a test name) do not indicate that the task touches secrets, credentials, auth, permissions, merge/deploy/infrastructure/review policy, or deletes data or history."
+      - "The task does not ask for an operator-only decision. It asks that a recurring ledger symptom be fixed at its cause, and the filed plan says that cause must be located first."
+      - "The family track record is empty (0 merged, 0 declined), so there is no evidence of failure. The task is also machine-authored, and its PR still has to pass CI and review."
+      - "The rows name no file, so the real fix may touch code outside the declared files list. This is a scope-drift concern worth watching in review, but the description alone does not show it reaching an escalation category."
+    judged_at: "2026-10-13T19:06:42.910Z"
+    pin: "e9c741803374b2dead9796742fa1768776cba290513403defd81d98c232ae9a4"

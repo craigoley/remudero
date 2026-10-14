@@ -88,7 +88,7 @@ test("CRITERION 1: a head sha absent from local objects no longer resolves to ze
 test("CRITERION 2: the fetch that makes the head sha readable runs BEFORE criteria are resolved from it", () => {
   const src = readSource();
   const fetchAt = src.indexOf("fetchHead(subjectRepoDir, view.number);");
-  const resolveAt = src.indexOf("resolvePlanCriteriaAtHead(body, subjectRepoDir,");
+  const resolveAt = src.indexOf("resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir,");
   assert.ok(fetchAt > 0, "reviewCommand must call the hoisted fetch");
   assert.ok(resolveAt > 0, "and must still resolve criteria at the head sha");
   assert.ok(

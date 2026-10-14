@@ -1,0 +1,33 @@
+- id: W1-T8169
+  title: "THE DENY-FLOOR CADENCE COMMENT CITES A CLAUDE.md LINE THAT NO LONGER EXISTS — hooks/deny-floor.sh rule 10 says CLAUDE.md carries \"CADENCE IS THE BUDGET, NOT INTENT\", but #10917 rewrote that headline and the text now lives only in doctrine/ci-and-merging/gh-read-cadence.md"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: off}
+  budget_usd: 1.00
+  risk: low  # Rule 19: one concern — one comment points at where the cadence rule now lives
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (\"go with your recommendations\"): stale doctrine pointer found while filing"
+  plan_refs: [W1-T3275]
+  files: [hooks/deny-floor.sh]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ on origin/main 233304449:
+      - hooks/deny-floor.sh:1258, in rule 10's header comment: "CLAUDE.md has carried \"CADENCE IS THE BUDGET, NOT
+        INTENT\" since the ninety-minute lockout; prose did not bind it."
+      - `grep -c 'CADENCE IS THE BUDGET' CLAUDE.md` is 0. c96eb21b4 (#10917) rewrote every CLAUDE.md headline to state
+        its instruction. The phrase now appears only in doctrine/ci-and-merging/gh-read-cadence.md:5.
+    A reader who follows the comment finds nothing. It is a comment-only change and needs no test.
+  design: |
+    Change the sentence at hooks/deny-floor.sh:1258 to name doctrine/ci-and-merging/gh-read-cadence.md as where the
+    cadence rule lives (its body still quotes "CADENCE IS THE BUDGET, NOT INTENT"), and keep the point that prose did
+    not bind it. Change no code. test/gh-read-cadence-floor.test.ts and the deny-floor suites stay green.
+  acceptance:
+    - claim: "the rule-10 comment names the doctrine body that now carries the cadence rule"
+      proof: 'grep: doctrine/ci-and-merging/gh-read-cadence\.md in hooks/deny-floor.sh'
+  falsifier: |
+    Leave the comment as it is. hooks/deny-floor.sh then names no doctrine/ci-and-merging/gh-read-cadence.md path,
+    the grep reads 0, and the criterion fails.

@@ -32,6 +32,11 @@ export function resolveHeadroomEnabled(
   return config.headroom?.enabled ?? true;
 }
 
+/** Startup-only opt-in. The existing explicit env override wins; neither source creates a directory. */
+export function resolveHeavyReadyDirectory(config: Pick<Config, "heavyReadyDirectory">, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.RMD_HEAVY_READY_DIR ?? config.heavyReadyDirectory;
+}
+
 /**
  * The closed set of worker-provider ids.  Keep runtime validation and the exported union derived
  * from this one value: a new provider must not be accepted by mounts/policy in one path while a

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: core daemon loop-stall investigation (daemon.loop_lag 07:50-09:57Z), operator asked for flow improvements"
   plan_refs: [W1-T5718, W1-T4041, W1-T4075, W1-T5689]
   files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-lag-row-names-the-caller-behind-the-leaf.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

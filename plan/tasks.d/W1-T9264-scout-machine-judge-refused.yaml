@@ -1,0 +1,30 @@
+- id: W1-T9264
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — machine_judge.refused landed 183 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.27
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:machine_judge.refused"
+  files:
+    - test/scout-machine-judge-refused.test.ts
+  acceptance:
+    - claim: "machine_judge.refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9264: machine_judge.refused no longer recurs\" in test/scout-machine-judge-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step machine_judge.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 14 in the older half, 169 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed rationale reports refusal counts but supplies no refusal reasons or identified cause; the finding that these refusals require correction cannot be verified from what is shown, meeting the explicit escalation condition.; on the change's description/files alone, no diff was read — The record asks the builder to locate the emitter and fix an unspecified cause, while declaring only a new test file. Its grep acceptance checks for test text rather than demonstrating that the cause is fixed or recurrence stops."
+    judged_at: "2026-10-13T19:06:33.830Z"
+    pin: "20eec50112fded0331f32c1a153e8ec72ce91e328b3ed4455fad7a245d95b92d"

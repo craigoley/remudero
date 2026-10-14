@@ -122,8 +122,9 @@ jobs:
     name: coverage-nightly
     runs-on: ubuntu-latest
     needs: [shards]
-    # ci.yml's aggregator measured a 7m merge and sits at 20m (PR #8080); same bound here.
-    timeout-minutes: 20
+    # ci.yml's aggregator measured a 7m merge and sits at 20m (PR #8080); this job adds the impact-map
+    # build's own 10m bound below, so a slow map can never cancel the floor ratchet (run 38514060349).
+    timeout-minutes: 30
     # The ratchet's own outcome, so `notify` can say the FLOOR failed rather than only "merge red".
     outputs:
       floor: ${{ steps.ratchet.outcome }}
@@ -179,6 +180,31 @@ jobs:
             coverage-nightly-artifact/coverage-nightly-summary.json
           retention-days: 14
           if-no-files-found: error
+      # W1-T6107: the test impact map ci.yml's coverage shards hand their shadow selector, built from the
+      # same compact shards (compaction keeps each report's suite; a ci.yml PR shard's premapped upload
+      # does not). Shadow evidence: an install or builder failure, or a build past its 10m bound, is
+      # reported and never fails this job.
+      - name: Build the test impact map from the compact shards (W1-T6107, shadow evidence)
+        run: |
+          if npm ci && timeout 10m node --import tsx scripts/coverage-merge-ratchet.mjs --impact-map test-impact-map.json \
+            --sha "$GITHUB_SHA" --shard-count 8 \
+            coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
+            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
+            coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
+            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw; then
+            echo "- W1-T6107: built the test impact map for ${GITHUB_SHA}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f test-impact-map.json
+            echo "::warning::W1-T6107: the impact-map build failed or passed its 10m bound; no map is uploaded and PR shadow selection falls back."
+            echo "- W1-T6107: the impact-map build FAILED or passed its 10m bound; no map uploaded (shadow evidence only; the floor verdict is unaffected)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the test impact map
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-impact-map
+          path: test-impact-map.json
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Coverage ratchet (main's absolute floor)
         id: ratchet
         run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json

@@ -1,0 +1,30 @@
+- id: W1-T9427
+  title: Investigate access to predecessor transcripts outside worktree
+  repo: remudero
+  depends_on:
+    - W1-T105
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: blast-radius
+  status: queued
+  attempts: 0
+  files:
+    - scripts/fetch-transcripts.sh
+    - src/lib/transcript.ts
+    - src/lib/plan.ts
+  acceptance:
+    - claim: "Architect can locate and read predecessor transcripts from external storage"
+      proof: "grep: external transcript paths in scripts/fetch-transcripts.sh"
+    - claim: "Transcript module is imported and used by plan code"
+      proof: "grep: importTranscript( in src/lib/plan.ts"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-07 follow-up on https://github.com/craigoley/remudero/pull/9724, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: I could not read the predecessor transcripts because they sit
+    outside the worktree. I did not verify whether an earlier round had a reason to put this suite
+    on the roster. — from unfiled (run DAEMON-1791333830491,
+    https://github.com/craigoley/remudero/pull/9724)

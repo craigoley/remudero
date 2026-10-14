@@ -1,0 +1,52 @@
+- id: W1-T9055
+  title: "A HEAD-IDENTITY RED IS REPAIRED WITH ONE TRAILER COMMIT ON THE PR'S OWN BRANCH — head-rehome closes the PR and opens a replacement, losing its history, against the gate's own refusal text, which says to push one new head commit carrying Remudero-Task: PR-<n> and never open a new pull request"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how rmd repairs a head-identity-only red; it writes a commit to a branch the fleet did not open
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: #11194 repaired by hand with a trailer commit; operator ruling the same day (trailer commit, drop the replacement PR)"
+  plan_refs: [W1-T7448, W1-T3388, W1-T3745]
+  files: [src/lib/head-rehome.ts, src/lib/sweep.ts, src/lib/ledger.ts, src/lib/authority.ts, test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13: #11194 (operator, branch `codex/heavy-ready-core-config-1791849000000`) went red only on
+    head-identity-gate. Its gate text prescribes "push a NEW head commit … carrying `Remudero-Task: PR-<n>` … never an
+    amend, a force-push or a new pull request". One empty commit carrying `Remudero-Task: PR-11194` cleared it, and the
+    PR merged.
+    VERIFIED on origin/main:
+    - W1-T7448's `headRehomePlan` (src/lib/head-rehome.ts) instead creates `run-<task|unfiled>-<ms>`, opens a replacement
+      PR and closes the original. That loses PR-keyed history (strikes, review attempts, links), and later pushes land
+      silently on a closed PR.
+    - W1-T7448's rationale ("no commit can change a branch name") predates the `PR-<n>` trailer exemption (#10450), which
+      its own NARROWED note records. head-identity-gate CI accepts any anchored trailer on the newest first-parent,
+      non-merge commit (`readHeadCommitMessage`, `hasValidTaskTrailer`).
+    OPERATOR RULING 2026-10-13: repair with a trailer commit on the PR's own branch and drop the replacement-PR route.
+  design: |
+    1. `headRehomePlan` returns `{action: "trailer", trailer}`. Use `PR-<n>` by default. Re-assert an earlier commit's
+       filed trailer only when that task is filed and unmerged. Never a mention-derived id: a trailer credits at squash.
+    2. A new port, `appendIdentityCommit(pr, observedSha, message)`, goes through the existing transport:
+       - read the observed head's tree;
+       - create a commit with that tree and `parents: [observedSha]`, with a commitlint-valid message;
+       - fast-forward `refs/heads/<ref>` only if it still equals `observedSha`, using GraphQL
+         `createCommitOnBranch(expectedHeadOid)` if it accepts an empty change set, else REST with `force: false` plus a
+         fresh head read;
+       - confirm the PR's head is the new sha.
+    3. Keep every existing guard: same repository, head-moved refusal, quietness, the dry-run and light-pass deferral, and
+       head-identity as the only red with checks finished.
+    4. New ledger steps `pr.identity_trailer.started` and `pr.identity_trailered`, kept by ledger retention. An authority
+       row with boundary `git-push` replaces the replacement-PR and close-original rows.
+  acceptance:
+    - claim: "a head-identity-only red gains one trailer commit on its own head and no replacement PR"
+      proof: "grep: test(\"W1-T9055: a head-identity-only red gains one trailer commit on its own head and no replacement PR\" in test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts"
+    - claim: "a head that moved after observation is refused, never overwritten"
+      proof: "grep: test(\"W1-T9055: a head that moved after observation is refused, never overwritten\" in test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts"
+  falsifier: |
+    Replay #11194: an open same-repo PR on a codex/ branch, every check green except head-identity-gate, quiet. At
+    origin/main the plan is `rehome` (new branch, replacement PR, original closed); with the change it is one
+    `Remudero-Task: PR-11194` commit on the original head, and the PR stays open.

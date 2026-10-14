@@ -1,0 +1,9 @@
+- id: head-identity-gate-pre-push-identity
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/head-identity-gate.mjs", "hooks/pre-push", "src/run-task.ts", "test/**", "plan/tasks.d/**"]
+  fact: >-
+    Before the first push of a branch, give its head an identity the head-identity gate accepts: a
+    run-shaped ref or an anchored Remudero-Task trailer on the head commit.
+  src: "ci-learning:10671:head-identity-gate"
+  cited: "2026-10-11"

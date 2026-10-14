@@ -1,0 +1,78 @@
+- id: W1-T9281
+  title: "THE GH READ FLOOR JUDGES ONLY A gh COMMAND, NOT THE WORD gh IN AN ARGUMENT — deny-floor's invokes_gh strips quoted text one LINE at a time, so a multi-line `git commit -m \"... gh read floor ...\"` and a plain `echo the gh read floor` are refused as a read-shaped gh call; a filing agent's commit was refused this way on 2026-10-13"
+  repo: remudero
+  depends_on: [W1-T5670, W1-T9238]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # one concern: the gh-word match in one hook moves to program position; hooks/deny-floor.sh and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-13: a filing agent's `git commit -m` naming the gh read floor was refused as \"a read-shaped gh call 37s after the last\""
+  plan_refs: [W1-T3275, W1-T1066, W1-T5670, W1-T9238, W1-T4915]
+  files:
+    - hooks/deny-floor.sh
+    - test/the-gh-read-floor-judges-only-a-gh-command.test.ts
+  status: queued
+  priority: 2  # every session that writes about the floor in a commit message trips it, and a refused line still costs the caller a turn
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-13 on origin/main fe381f93b by piping the PreToolUse JSON the Bash tool sends into
+    `bash hooks/deny-floor.sh`, with RMD_GH_CACHE_HOME pointed at a scratch dir holding a fresh `gh-last-read` stamp:
+      - `git commit -m "fix: pace reads<newline><newline>the gh read floor refuses a second read"`   exit 2
+      - `git commit -m "$(cat <<'EOF'<newline>fix: pace reads<newline>...the gh read floor...<newline>EOF<newline>)"` exit 2
+      - `echo the gh read floor`                                                                 exit 2
+      - `git commit -m "the gh read floor refuses reads"` (one line)                             exit 0
+      - `grep -n "gh read" hooks/deny-floor.sh`                                                   exit 0
+      - `gh pr view 1` (control)                                                                  exit 2
+      - `bash -c 'gh pr view 1'`                                                                  exit 0 (a real read the
+        quote strip hides: the floor misses it today)
+    The filing agent for this task was itself refused twice while writing it: once for a probe loop whose single-quoted
+    test strings named gh, and once for a `python3 - <<'EOF'` edit whose heredoc body named a gh command (W1-T5670's case).
+    Each refusal read "deny-floor: blocked - a read-shaped `gh` call Ns after the last one (floor 180s, W1-T3275)".
+    WHY, READ on origin/main (symbols, not lines), hooks/deny-floor.sh `invokes_gh`: after the raw `$( gh` / backtick
+    substitution check it runs `sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g'` and greps `(^|[^A-Za-z0-9_/.-])gh[[:space:]]`.
+    sed works per line, so a quoted argument that spans lines keeps its middle lines, and an unquoted word `gh` in any
+    argument position counts. Both callers inherit it: the read floor (rule 7, W1-T3275) and the gh poll refusal.
+    The hook already has two segment parsers that know program position: `cov_segments` (W1-T4915, joins a quoted span
+    across lines and drops heredoc bodies) and `hr_tokens`/`hr_segment` (rule 16, walks wrappers and recurses into
+    `bash -c` and ssh). `invokes_gh` uses neither.
+    SEQUENCED, NOT DUPLICATED: W1-T5670 (queued, P3, three unmerged run-W1-T5670-* branches and no PR) moves
+    `invokes_gh` onto `cov_segments` so a heredoc BODY naming gh is not a call, keeping a heredoc fed to a shell or ssh.
+    That alone would also clear the multi-line `-m` case (cov_segments joins it), but not `echo the gh read floor`,
+    and its tests do not pin either. This task builds on it: the gh word counts only in program position. W1-T9238
+    (queued) changes rule 16's host walk in the same file, so this task waits for both.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 349 readable open origin heads for `invokes_gh` (main 1:
+    W1-T5670; no head more) and "read-shaped" (main 7: W1-T3275, W1-T3297, W1-T4085, W1-T5670, W1-T7740, W1-T7957 and
+    one feedback record, none about argument text; no head more). Control: the sweep finds `^- id: W1-T9237$` on main
+    and a head-only shard on plan/W1-T3455-log-proven-ratchet-admission.
+  design: |
+    1. PROGRAM POSITION ONLY. `invokes_gh` returns true only when a simple command's program word is `gh` (or a path
+       ending in `/gh`), after leading assignments (`GH_TOKEN=x gh`), shell keywords (`do`, `then`, `!`, `{`) and the
+       wrappers the hook already skips elsewhere (`env`, `nice`, `nohup`, `time`, `timeout`, `command`, `exec`,
+       `xargs`). Segments come from the hook's existing parser (`cov_segments` as W1-T5670 leaves it, or `hr_tokens`);
+       no third tokenizer.
+    2. CODE STAYS CODE. A gh command counts when it is reached through a command substitution (the raw check stays),
+       a heredoc fed to a shell or ssh (W1-T5670's rule), or a `bash -c` / `sh -c` / `eval` string. The last one
+       ESCAPES the floor today (its quotes are stripped as data); judging it is part of the same move, not new scope.
+    3. ARGUMENTS ARE DATA. The word gh inside any argument, quoted or not, single or multi-line, is never a call:
+       `git commit -m` (one or many lines, or a `$(cat <<'EOF' ... EOF)` body), `echo`, `printf`, `grep`.
+    4. Both callers (the read floor and the poll refusal) use the one function; no change to the floor window, the
+       app-token bucket, the exemptions or the write list.
+    Tests go in test/the-gh-read-floor-judges-only-a-gh-command.test.ts, driving the hook as
+    test/gh-read-cadence-floor.test.ts does (RMD_GH_CACHE_HOME at a temp dir with a fresh stamp), each allowed
+    argument case paired with a refused gh command of the same shape.
+  acceptance:
+    - claim: "a multi-line commit message naming the gh read floor, including a cat heredoc inside the -m quotes, is not refused by the read floor"
+      proof: 'grep: test("W1-T9281: a multi-line commit message naming gh is not a gh call" in test/the-gh-read-floor-judges-only-a-gh-command.test.ts'
+    - claim: "an unquoted gh word in an argument (echo, printf, grep) is not a gh call"
+      proof: 'grep: test("W1-T9281: an unquoted gh argument is not a gh call" in test/the-gh-read-floor-judges-only-a-gh-command.test.ts'
+    - claim: "gh in program position, behind a wrapper, in a substitution, a bash -c string or a heredoc fed to bash is refused inside the floor"
+      proof: 'grep: test("W1-T9281: a gh command in program position is still refused" in test/the-gh-read-floor-judges-only-a-gh-command.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-gh-read-floor-judges-only-a-gh-command.test.ts"
+  falsifier: |
+    Restore the per-line quote strip: the multi-line commit message is refused and the first test fails. Match the
+    word gh anywhere in a segment: `echo the gh read floor` is refused and the second test fails. Drop the substitution
+    or `bash -c` recursion: `x=$(gh pr view 1)` or `bash -c 'gh pr view 1'` runs inside the floor and the third test
+    fails.

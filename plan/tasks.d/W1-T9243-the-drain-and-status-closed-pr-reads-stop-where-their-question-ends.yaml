@@ -1,0 +1,77 @@
+- id: W1-T9243
+  title: "THE DRAIN'S AND STATUS.TS'S CLOSED-PR READS STOP WHERE THEIR QUESTION ENDS, NOT AT A FIXED PAGE CAP — readRunBranchClosedPrsOutput walks up to RUN_BRANCH_CLOSED_PR_MAX_PAGES 8 pages on every drain pass, and ghGateway's listMergedHeadBranches reads listPullsByState(\"closed\", 1000), silently dropping every merged PR past the newest 1000 of about 11,300 closed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the two fixed-cap closed reads take derived bounds; it spans the drain's reader (run-task.ts), the unbatched gateway (status.ts) and one new test, and the drain read decides whether a duplicate build starts
+  band_meaning: span
+  origin: "operator session 2026-10-13: W1-T9113 and W1-T9100 both name these two fixed caps as follow-ups and file neither"
+  plan_refs: [W1-T9113, W1-T9100, W1-T9121, W1-T1207, W1-T2323, W1-T257, W1-T916]
+  files:
+    - src/run-task.ts
+    - src/lib/status.ts
+    - test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts
+  status: queued
+  priority: 2  # the drain read costs up to 8 REST pages a pass; the status cap is a silent truncation, not an outage
+  attempts: 0
+  rationale: |
+    READ on origin/main 646a7d706 (symbols, not lines):
+      - src/run-task.ts `RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8` bounds `readRunBranchClosedPrsOutput`, the drain's W1-T1207
+        read behind `DrainDeps.readClosedRunBranchPrs`. Every drain pass walks `pulls?state=closed&sort=updated`
+        newest-first, 100 a page, until a short page or 8 pages, with no cursor and no snapshot.
+      - src/lib/status.ts `ghGateway`'s `listPullsByState(state, maxItems)` walks the same list until `maxItems`;
+        `listMergedHeadBranches` calls it as `listPullsByState("closed", 1000)` (10 pages) and `listOpenHeadBranches` as
+        `listPullsByState("open", 1000)`. W1-T9113 measured the closed set at about 11,300 PRs (113 pages) on 10-13, so
+        this gateway's merged list ends at the newest 1000 closed rows and drops the rest without saying so. Its batched
+        twin (`buildBatchedGithub`, W1-T257) reads the whole merged index.
+      - W1-T9113 (queued) and W1-T9100 (queued) both list these two reads under "follow-ups, not this task": "Both are
+        bounded, but by fixed caps. Candidate follow-up: answer both from the board's incremental closed index."
+        W1-T9121 (queued) only adds a ledger row to full board walks. None of the three changes either cap.
+    WHAT EACH READ ACTUALLY NEEDS, which is where the bound should come from:
+      - The drain asks "did the PR of a PUSHED run-* branch close unmerged?". A run branch's name embeds the epoch ms it
+        was pushed at (`run-<taskId>-<epochMs>`), and a PR for it cannot have been updated before that. The same pass
+        already reads the pushed run-* refs (`readPushedRunBranchesOutput`), so the oldest pushed run branch's epoch is
+        the point past which no closed row can answer the question.
+      - The status gateway's merged list is a population read; the board snapshot cache already holds that population
+        with an incremental closed walk (W1-T2323's delta: stop at the first row already held with the same `updated_at`).
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 342 open origin heads for RUN_BRANCH_CLOSED_PR_MAX_PAGES
+    (main 2: W1-T9100, W1-T9113, notes only), listPullsByState and readRunBranchClosedPrsOutput (main 3: those two and
+    W1-T9121, notes only); no head reads more than main. Control: `acceptance-author-gate` reads 93 shards on main and on
+    every head.
+  design: |
+    No page cap, no row cap and no new number in either read.
+    1. THE DRAIN READ STOPS AT ITS OLDEST CANDIDATE. `readRunBranchClosedPrsOutput` takes the pass's pushed run-*
+       branch names (already read once per pass), derives the oldest embedded epoch (a helper named
+       `oldestPushedRunBranchEpoch`), and walks newest-updated-first until
+       a page's last row was updated before that epoch, or a short page. No pushed run branch means no read at all. A
+       branch name with no parseable epoch makes the walk run to the end of the list for that pass (the safe direction
+       for a guard deciding whether a duplicate build starts) and is named in the result. Remove
+       `RUN_BRANCH_CLOSED_PR_MAX_PAGES`. The fail-toward-blocking contract on a throw is unchanged.
+    2. THE STATUS GATEWAY READS THE WHOLE LIST, INCREMENTALLY. `listPullsByState` loses `maxItems`: it walks to the short
+       page (complete, like the batched twin). Where a board snapshot cache is available to the gateway (the shared reader
+       `createBoardSnapshotReader`), the closed walk is the board's delta (stop at the first held row with the same
+       `updated_at`, merge, return the held population) and pages only what changed since the snapshot's asOf; with
+       none, it is a full walk, which W1-T9121's row (when landed) attributes. The open list is bounded by its own short
+       page and needs no cap either.
+    3. Whichever of this task, W1-T9113 and W1-T9121 lands later rebases; they share run-task.ts and status.ts but no
+       function.
+    Tests go in test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts with fake page fetchers
+    that count calls.
+  acceptance:
+    - claim: "the drain's closed read stops at the first page older than the oldest pushed run branch, and makes no call when none is pushed"
+      proof: 'grep: test("W1-T9243: the drain closed read stops at the oldest pushed run branch" in test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts'
+    - claim: "an unparseable run branch epoch makes the drain read walk to the short page, never stop early"
+      proof: 'grep: test("W1-T9243: an unparseable run branch walks to the short page" in test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts'
+    - claim: "the status gateway's merged list returns merged rows past the old 1000-row cap, and with a snapshot pages only the delta"
+      proof: 'grep: test("W1-T9243: the status merged list is complete and reads only the delta" in test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts'
+    - claim: "the fixed drain page cap is gone"
+      proof: "grep: oldestPushedRunBranchEpoch in src/run-task.ts"
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-drain-and-status-closed-pr-reads-stop-where-their-question-ends.test.ts"
+  falsifier: |
+    Keep the 8-page cap: a fixture whose oldest pushed run branch sits on page 9 is not found, and the first test fails.
+    Stop on an unparseable epoch: the second test's closed row on the last page is missed. Keep `maxItems` 1000: the
+    third test's merged row 1,001 is missing.

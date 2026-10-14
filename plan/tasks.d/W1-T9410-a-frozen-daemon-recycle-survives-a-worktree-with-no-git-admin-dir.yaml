@@ -1,0 +1,64 @@
+- id: W1-T9410
+  title: "A FROZEN-DAEMON RECYCLE DIES ON A WORKTREE WHOSE GIT ADMIN DIR IS GONE — holder_worktrees in deploy/recycle-container.sh runs sed on a missing gitdir HEAD under set -euo pipefail; on 2026-10-14 the 08:12Z STALLED recycle exited rc=2 mid-reclaim, never moved the frozen daemon's lock, and left its PAUSE behind"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a missing optional file never aborts the frozen-daemon reclaim
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: root cause of the 08:12Z core recycle abort (rc=2, pid 405262)"
+  plan_refs: [W1-T6597, W1-T9409, W1-T5281]
+  files: [deploy/recycle-container.sh, test/a-frozen-daemon-recycle-survives-a-worktree-with-no-git-admin-dir.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on host remudero, read-only:
+      - The host watchdog ran deploy/recycle-container.sh on a STALLED verdict (progressAgeMs=1946078). The
+        script proved the daemon frozen (W1-T6597) and printed
+        "RECLAIMING .../inflight/W1-T7898.lock — the frozen daemon's own". Its output ends there, at 08:12:25Z.
+        The host revival log reads "watchdog-recycle result=refused rc=2 reason= }".
+      - inflight/reclaimed/W1-T7898.lock.recycle-405262.reason exists (mtime 08:12:25.050Z). It holds the
+        "reclaimed by", "verdict:" and "holder:" lines and stops there: no worktree line and no "kept:" line.
+        The lock itself was never moved (no W1-T7898.lock.recycle-405262 file).
+      - In ~/rmd-state2/worktrees, 6 of the 6 entries with a .git file point at a gitdir with no HEAD file, for
+        example plan-garden-1790850882168 -> ~/rmd-state2/remudero/.git/worktrees/plan-garden-1790850882168.
+        These are worktree directories whose git admin dirs were pruned.
+      - GNU sed on the host exits 2 on a missing input file.
+    READ on origin/main 2f5051b02: the script runs `set -euo pipefail`. In `holder_worktrees`,
+    `ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed ...)"` is a plain
+    assignment (ref is declared local separately). A missing HEAD therefore fails the pipeline with sed's 2,
+    and `set -e` exits the script from inside the `{ ... } > "${reclaimed_path}.reason"` group, before `mv`.
+    `lock_host_field` guards the same shape with `|| true`, but `holder_worktrees` does not. The W1-T6597
+    test fixtures always write a HEAD, so this path was never run.
+    REPRODUCED 2026-10-14 on the Mac. I copied test (i) of
+    test/a-stall-recycle-reclaims-only-what-a-frozen-daemon-holds.test.ts and added one worktree whose .git
+    names a missing gitdir. That copy fails: the recycle exits 1 (BSD sed) right after RECLAIMING. The
+    unmodified test passes 1/1.
+    EFFECT: while any such worktree directory exists, every frozen-daemon reclaim aborts. The frozen daemon is
+    never recycled, and the recycle's PAUSE stays (W1-T9409 covers the PAUSE side).
+  design: |
+    1. `holder_worktrees` reads each worktree best-effort, as `lock_host_field` does. An unreadable `.git` file,
+       or a gitdir with no HEAD, gives an empty ref and the worktree is skipped for matching. That read never
+       ends the script. Guard each pipeline with `|| true`, or test `-f "${gitdir}/HEAD"` before reading it.
+    2. Walk the rest of the reclaim path the same way (`reclaim_frozen_daemon_holdings`, `pid_ledger_activity`,
+       the `.reason` group) and guard every command-substitution pipeline that reads optional state. A missing
+       file is an outcome, never an abort.
+    3. Move the lock before writing its `.reason` file, or write the reason to a temp file and rename it, so a
+       failed reason write cannot leave a half-written reason beside a lock that was never moved.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Reuse the stub-docker
+    fixture from test/a-stall-recycle-reclaims-only-what-a-frozen-daemon-holds.test.ts and add a worktree whose
+    .git points at a gitdir that does not exist.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-frozen-daemon-recycle-survives-a-worktree-with-no-git-admin-dir.test.ts"
+    - claim: "a worktree with no git admin dir does not abort the frozen-daemon reclaim, and the lock is moved"
+      proof: 'grep: test("W1-T9410: a worktree with no git admin dir does not abort the frozen-daemon reclaim" in test/a-frozen-daemon-recycle-survives-a-worktree-with-no-git-admin-dir.test.ts'
+    - claim: "the matching worktree is still named in the reason file beside the stray one"
+      proof: 'grep: test("W1-T9410: the reason file still names the holder worktree beside a stray one" in test/a-frozen-daemon-recycle-survives-a-worktree-with-no-git-admin-dir.test.ts'
+  falsifier: |
+    Against main, add to the W1-T6597 fixture one worktree whose .git names a missing gitdir. Run the STALLED
+    recycle with GNU sed. It exits 2 right after the RECLAIMING line, the lock is not moved, and the PAUSE stays.
+    On macOS, BSD sed exits 1 for the same missing file, so the abort happens there too.

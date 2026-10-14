@@ -25,6 +25,8 @@ import { runDaemon, v8HeapStatistics, type DaemonDeps } from "../src/lib/daemon.
 import { activeWorkerCount } from "../src/lib/worker.js";
 import { drainInFlightReviews, inFlightReviewCount, trackInFlightReview } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { createDaemonFootprint } from "../src/lib/daemon-footprint.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { sampleCgroupMemory, sampleDaemonMemory, type DaemonMemorySources, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -244,4 +246,30 @@ test("the sampler module references no heap snapshot, inspector or gc entry poin
   }
   // The control: the same scan is live, not vacuous.
   assert.match(text, /process\.memoryUsage\(\)/);
+});
+
+// The memory budget's daemon split reads this footprint (daemon-footprint.ts); the heartbeat's reading is its sample.
+test("the production reader records each heartbeat's rss+swap into the daemon footprint", () => {
+  const written: string[] = [];
+  const footprint = createDaemonFootprint("footprint.json", {
+    readFile: () => { throw Object.assign(new Error("none yet"), { code: "ENOENT" }); },
+    writeFile: (_path, content) => void written.push(content),
+  });
+  const readMemoryTelemetry = daemonMemoryTelemetryReader(SHA, { footprint, clock: fixedClock(1_791_730_000_000) });
+  const row = readMemoryTelemetry();
+  const [kept] = footprint.samples();
+  assert.ok(kept, "one heartbeat, one sample");
+  assert.equal(kept.at, 1_791_730_000_000);
+  assert.equal(kept.pid, process.pid);
+  assert.equal(kept.bytes, (row.rss_bytes as number) + ((row.vm_swap_bytes as number | undefined) ?? 0), "the row's own rss+swap");
+  assert.equal(written.length, 1, "persisted on the same heartbeat");
+  assert.equal(row.footprint_persist, undefined);
+
+  const unwritable = createDaemonFootprint("footprint.json", {
+    readFile: () => "{\"samples\":[]}",
+    writeFile: () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); },
+  });
+  const failed = daemonMemoryTelemetryReader(SHA, { footprint: unwritable })();
+  assert.equal(failed.footprint_persist, "error:ENOSPC", "a failed persist rides the row; the heartbeat is still written");
+  assert.equal(unwritable.samples().length, 1, "and the sample is kept in memory");
 });

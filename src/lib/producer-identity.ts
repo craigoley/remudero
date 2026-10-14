@@ -103,6 +103,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "coverage-nightly": producer("coverage-nightly", "Nightly Coverage"),
   "hand-run-census": producer("hand-run-census", "Hand-Run Census"),
   "knowledge-measurement": producer("knowledge-measurement", "Knowledge Measurement"),
+  "RECOVERY-REFS": producer("recovery-refs", "Recovery Refs"),
 });
 
 /**

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-07: serve CPU and memory plan (item C4); measuring a change's live benefit needs total build cost, not a censored sample"
   plan_refs: [W1-T5885, W1-T5896, W1-T5066]
   files: [src/lib/read-model-worker.ts, test/every-view-build-is-counted.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

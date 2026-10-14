@@ -216,7 +216,9 @@ test("an approved draft with any other lint violation is refused before a PR ope
     "- id: W1-T903", "  title: high risk without meaning", "  repo: remudero", "  type: implement",
     "  origin: architect", "  risk: high", "  files: [src/lib/inbox.ts]", "",
   ].join("\n"));
-  assert.throws(() => missingBand.run(), /\[sizing\].*band_meaning/);
+  // W1-T8714: an already-high draft with no band is repaired to band_meaning: span at approve, so it is refused only
+  // for the violation it really carries (no acceptance criterion), never for the band.
+  assert.throws(() => missingBand.run(), (e: Error) => /\[shard-shape\]/.test(e.message) && !/band_meaning/.test(e.message));
   assert.equal(missingBand.prCalls(), 0);
 });
 

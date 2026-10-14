@@ -1,0 +1,122 @@
+- id: W1-T9113
+  title: "THE RETRO'S SHIPPED-SINCE READ PAGES ONLY WHAT CHANGED SINCE THE BOARD'S DURABLE SNAPSHOT — retroShippedGithubGatewayAsync loads a missed board page with fetchBoardPrsRestAsync(..., undefined, half), and its sync twin builds a cold buildBatchedGithub, so every retro trigger check and every retro run walks all 91 closed-PR pages (about 9,100 PRs at 100 a page) from page 1"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the retro's two shipped-since gateways seed their closed half from the board snapshot; it spans the gateways (run-task.ts) and the new test
+  band_meaning: span
+  origin: "found 2026-10-13 by an operator session that saw `pulls?state=closed&sort=updated…&page=90` in the core daemon container at 11:58Z, right after the 11:53Z boot; operator standing direction: fix at root, lean into automation and efficiency"
+  plan_refs: [W1-T2873, W1-T2323, W1-T5649, W1-T5792, W1-T9100, W1-T2981, W1-T4664]
+  files:
+    - src/run-task.ts
+    - test/the-retro-shipped-read-pages-only-what-changed.test.ts
+  status: queued
+  priority: 1.5  # operator session 2026-10-13: 91 REST pages (about 150 MB) per retro check, inline in the daemon tick before the dispatch pick, once ledger pressure stops deferring the check
+  attempts: 0
+  rationale: |
+    READ ON origin/main 535a172e6 (symbols, not lines).
+      - THE ASYNC GATEWAY. `retroTriggerCheckAsync` (src/run-task.ts) builds `retroShippedGithubGatewayAsync()` on
+        every call. That gateway answers `headRefName` and `findMergedByTrailer` by replaying a fresh
+        `buildBatchedGithub` over the `gh` answers it holds. Its `answers` map lives only as long as the one check. On a
+        miss, `load` calls `fetchBoardPrsRestAsync(owner, repo, ..., undefined, half)`: `known` is `undefined`, so
+        `boardPrsWalk` runs in `full` mode at `BOARD_FULL_PAGE_SIZE` (100) from page 1 until a short page. The replayed
+        gateway is built with no `snapshotCache`, so it also starts cold and asks for the same full-mode argv.
+      - THE SYNC GATEWAY. `retroShippedGithubGateway` builds `buildBatchedGithub(owner, repo, { exec,
+        commitTrailerIndex })`, again with no `snapshotCache`. `retroCommand` uses it for the real retro's shipped
+        union, and `retroTriggerPrelude` constructs it for the sync check.
+      - WHO REACHES IT. `retroTriggerConclude` runs `shippedSinceAsync`, which calls the gateway for each candidate
+        run. With the marker at 2026-10-06T10:45:50Z (state/last-retro.json on the host), every run started since then
+        is a candidate, so a check that is not deferred always reads the board, and so walks the whole closed half.
+      - WHERE IT RUNS. `buildRetroDaemonHooks` wires `checkRetroTrigger` to `retroTriggerCheckAsync`. The daemon tick
+        (src/lib/daemon.ts, "Retro cadence trigger") AWAITS it once per tick, after headroom and before the dispatch
+        pick. Every page goes through `ghTextAsync`, so it does not block the event loop, but the tick waits for the
+        whole walk, and each page takes a slot of the shared read cadence (`applyGhReadCadenceAsync`).
+      - WHAT THE BOARD ALREADY HAS. W1-T2873 made the closed index durable: `createBoardSnapshotCache(config.root,
+        owner, repo)` (src/lib/board-snapshot-cache.ts) and its `closedSeed()`, which the daemon board gateway passes
+        to `buildBatchedGithub` as `snapshotCache`. On the host that file (state/cache/board/, one .ndjson per
+        repository) holds 11,286 rows and was rewritten at 13:16Z.
+    MEASURED 2026-10-13 (host remudero read-only and niced; one GitHub read):
+      - SIZE OF THE WALK. `pulls?state=closed&sort=updated&direction=desc&per_page=100&page=90` at 13:17Z returned 100
+        rows, and its Link header names page 91 as `last`. So a cold closed walk is 91 pages today. Page 90 is its
+        second-to-last page, so the 11:58Z sighting was a full walk near its end. Serve's one full closed read today
+        moved 11.5 MB in 7 pages, so 91 pages are about 150 MB.
+      - THE DAEMON BOARD GATEWAY IS NOT IT. The 2026-10-13 ledger union (13 rotations plus the live file) holds 35
+        `board_gateway.fetch_bytes` rows for the closed half. 34 are `delta` with `restCalls: 1`. The one `full` row is
+        serve's (`SERVE-1791854579198`, 02:34Z, 7 calls).
+      - THE RETRO CHECK IS DORMANT TODAY, SO IT IS NOT THE 11:58Z SIGHTING. Over 2026-10-10..13 (81 rotations plus the
+        live file) the union holds 109 `daemon.tick_phases` rows (one per tick that reaches the dispatch pick, after
+        the retro point) and 111 `daemon.retro_trigger.deferred_ledger_pressure` rows ("over bound — 513 archive(s) >
+        400"). It holds no `retro_triggered`, `daemon.retro_trigger.declined`, `.backoff` or `.check_failed` row,
+        although the marker is 7 days old. Control: 83 `daemon.boot` and 180 `daemon.tick` rows in the same pass. So
+        every tick that reached the retro point deferred it. In the 11:53:18Z boot, the tick began at 11:53:33Z, the
+        retro was deferred at 12:01:35Z, and `daemon.alive` at 11:59:01Z reads `phase: "sweep"` with 67 s of
+        synchronous spawns. The page=90 walk ran inside the sweep phase, from a reader this record does not name.
+      - SO THIS IS LATENT, AND WORSE ONCE IT WAKES. Once compaction brings the archive count under its bound, every
+        tick runs the check, and every check walks 91 pages inline before the dispatch pick. Nothing in the ledger
+        records that walk: the replayed gateway is built with no `log`, so it writes no `board_gateway.fetch_bytes`
+        row.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for retroShippedGithubGatewayAsync, fetchBoardPrsRestAsync,
+    retroShippedGithubGateway, readRunBranchClosedPrsOutput, listPullsByState and "cold closed". W1-T9100 names this
+    reader only as a candidate follow-up in its note. W1-T5792 (blocked) changes `findMergedByTrailer`'s fallback,
+    not the board read. W1-T2873 (merged) made the snapshot and wired the board gateway, not the retro.
+    Open heads: all 347 live origin heads were swept, whole-tree for six of these names (main reads 72 hits, and no
+    head reads more), then by each head's own changed files. The one head that adds a hit, run-W1-T5792-1791539568631,
+    adds only a test of the commit-trailer fallback and no board read.
+  design: |
+    No page cap, no TTL and no timer. The retro reads the same durable closed index the board gateway keeps.
+    1. ONE SEED PER GATEWAY. `retroShippedGithubGatewayAsync` and `retroShippedGithubGateway` read the board
+       snapshot once when built: `createBoardSnapshotCache(loadConfig().root, owner, repo).closedSeed()`, behind an
+       injectable `snapshotFor(owner, repo)` option so tests pass a fixture. The seed is captured once and reused for
+       the gateway's life.
+    2. THE LOAD AND THE REPLAY ASK FOR THE SAME PAGES. The async `load` passes the seed as `known` to
+       `fetchBoardPrsRestAsync`, so the closed half runs in `delta` mode and stops at the first held row with the same
+       `updated_at`. The replayed `buildBatchedGithub` and the sync gateway get a `snapshotCache` whose `closedSeed()`
+       returns that same seed, so their walk asks for exactly the delta argv the load fetched, and the replay never
+       misses on a page the load did not read. The open half is unchanged (no seed, as W1-T2323 requires).
+    3. READ-ONLY. The retro's `snapshotCache` makes `commitClosed`, `commitIssues` and `commitOpen` no-ops. The board
+       gateway stays the snapshot's only writer, so a retro never races it.
+    4. NO SNAPSHOT MEANS TODAY'S WALK. A missing or unreadable snapshot gives no seed, and the gateway walks in full,
+       exactly as it does today.
+    5. A ROW PER LOAD. Each async `load` of a board half appends `retro_trigger.shipped_read` with `half`, `mode`
+       (`delta` or `full`), `calls` and `seeded` (the seed's row count, or 0), from `BoardFetchResult`. The sync
+       gateway's walk is the CLI retro's and stays unlogged.
+    Tests go in test/the-retro-shipped-read-pages-only-what-changed.test.ts, with `test(` titles verbatim as in the
+    proofs below. Drive `retroShippedGithubGatewayAsync` with an injected `execAsync` that serves numbered pages and
+    records every argv, and with a fixture `snapshotFor`. Drive `retroShippedGithubGateway` with an injected `exec`.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-retro-shipped-read-pages-only-what-changed.test.ts"
+    - claim: "a seeded async retro read loads the closed half in one delta page and answers headRefName from it"
+      proof: 'grep: test("W1-T9113: a seeded retro read pages only what changed" in test/the-retro-shipped-read-pages-only-what-changed.test.ts'
+    - claim: "the sync retro gateway reads the same seed and walks the same delta pages"
+      proof: 'grep: test("W1-T9113: the sync retro gateway reads the board snapshot" in test/the-retro-shipped-read-pages-only-what-changed.test.ts'
+    - claim: "with no snapshot the retro read walks the closed half in full, as today"
+      proof: 'grep: test("W1-T9113: with no snapshot the retro read walks in full" in test/the-retro-shipped-read-pages-only-what-changed.test.ts'
+    - claim: "a retro read never writes the board snapshot"
+      proof: 'grep: test("W1-T9113: a retro read never writes the board snapshot" in test/the-retro-shipped-read-pages-only-what-changed.test.ts'
+    - claim: "each async board load is ledgered with its mode and page count"
+      proof: 'grep: retro_trigger\.shipped_read in src/run-task.ts'
+  falsifier: |
+    Keep `undefined` as `known` in `load`, and the seeded test records every page the fake serves at per_page=100
+    instead of one at per_page=30. Seed the load but not the replayed gateway, and the replay asks for a full-mode
+    page the load never fetched, so the test sees a second load. Let the retro's snapshotCache commit, and the
+    no-write test finds the fixture snapshot rewritten.
+  note: |
+    EFFECT, measured after the merge sha deploys and once the retro check stops being deferred, from the core ledger
+    union, with no numeric pass mark: `retro_trigger.shipped_read` rows (healthy shape: `mode: "delta"` with a
+    handful of calls; a `full` row only after a missing snapshot); `daemon.tick_phases` `ms_to_admission` on ticks that
+    run the retro check (healthy shape: no step change from the ticks that defer it).
+    THE 11:58Z SIGHTING IS STILL UNATTRIBUTED. It ran in the first tick's sweep phase while the retro was deferred.
+    Candidates: the `buildBatchedGithub` gateways built with no `snapshotCache` that can read the closed half, namely
+    `creditProjectionWithReadState`, `defaultBoardReviewItems`, `defaultWipeTestMergedState`, `buildSweepHook`,
+    `buildCreditCandidates`, `buildEscalationReconcileCandidates` and `inboxCommand` (src/run-task.ts), and any `rmd`
+    child the sweep spawns in that container. The cheapest next step is a row naming the caller of every full-mode
+    closed walk in `fetchBoardPrsRest`.
+    OTHER CLOSED-PR READERS, BOUNDED BY FIXED CAPS, ARE FOLLOW-UPS, NOT THIS TASK:
+      - `readRunBranchClosedPrsOutput` (src/run-task.ts), the drain's W1-T1207 read, walks up to
+        `RUN_BRANCH_CLOSED_PR_MAX_PAGES` (8) pages of 100 on every drain pass.
+      - status.ts `listPullsByState("closed", 1000)`, behind `listMergedHeadBranches`, walks up to 10 pages of 100.
+      Both could be answered from the board's incremental closed index instead of a fixed number of pages.

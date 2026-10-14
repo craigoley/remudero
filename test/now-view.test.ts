@@ -338,6 +338,8 @@ test("the open snapshot refuses what it cannot keep and says why on read", (t) =
   writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x", rows: [{ number: 1 }] }));
   assert.match((readOpenBoardSnapshot(root, "o", "r") as { reason: string }).reason, /invalid row/);
   writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x" }));
+  assert.deepEqual(readOpenBoardSnapshot(root, "o", "r"), { ok: false, reason: "open snapshot is incomplete" }, "missing rows is not a complete empty page");
+  writeFileSync(path, JSON.stringify({ type: "board-open-snapshot", schema: 1, repository: "o/r", savedAt: "x", rows: [] }));
   assert.deepEqual(readOpenBoardSnapshot(root, "o", "r"), { ok: true, snapshot: { repository: "o/r", savedAt: "x", rows: [] } });
 });
 
@@ -804,7 +806,10 @@ test("a task whose newest row is a step the fact store skips sorts by that row o
   assert.equal(body.data.board.groups.queued[0], "W1-T5", "a task with only machine_judge rows sorts by them");
   const diffs = compareNow(view, core, body, T0 + 50_000);
   assert.deepEqual(diffs.filter((d) => d.path.startsWith("board.groups")), [], JSON.stringify(diffs));
-  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  // The view omits lastActivityAt for this skipped event although its sort key uses it. That is a real
+  // data mismatch: the event predates both reads, so a timestamp leaf alone cannot call it timing.
+  assert.deepEqual(diffs.filter((d) => d.classification === "real").map((d) => d.path),
+    ["board.tasks[taskId=W1-T5].lastActivityAt"], JSON.stringify(diffs));
 });
 
 test("a running order no sort-key row explains is still a real now diff", (t) => {

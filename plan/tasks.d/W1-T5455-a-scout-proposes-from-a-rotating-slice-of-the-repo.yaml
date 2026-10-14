@@ -68,8 +68,8 @@
       proof: 'grep: test("W1-T5455: a reverted change debits the class and filing respects the shared queue bound" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
     - claim: "the scout gardener calls the slice picker"
       proof: 'grep: pickScoutSlice( in src/lib/scout-gardener.ts'
-    - claim: "the daemon's garden builder still constructs the scout spec this class extends"
-      proof: 'grep: scoutGardenSpec( in src/run-task.ts'
+    - claim: "the daemon's garden builder passes the slice model seam into the scout spec"
+      proof: 'grep: sliceModel: productionScoutSliceModel( in src/run-task.ts'
   falsifier: |
     File a finding whose cited line no longer holds the claimed text, file one that duplicates a queued task,
     or credit a change that was reverted inside the window. The affected proof must fail. CLOSE THIS TASK

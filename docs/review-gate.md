@@ -68,6 +68,24 @@ was built and unit-tested by W1-T1C but **nothing called it** until now. In
 The reviewer NEVER edits code and exposes no write path (`review.ts` is read-only
 + `gh` by construction).
 
+## Caller audit advisory
+
+The `callers-audited` rubric names untouched sibling calls when a definition changes
+or a called name appears on both deleted and added lines in the same file. Adding
+library calls in new code does not make those libraries changed symbols. Changing
+a call's arguments still names untouched sibling calls, including the W1-T3239
+shared-reader case. This rubric is advisory; the required review verdict remains
+owned by the deterministic judge.
+
+## Concern companions
+
+The shared companion policy counts `test/setup/` and `test/helpers/` implementation
+files as concerns. Behavior-named suites accompany those helpers, just as they
+accompany product source. Files ending in `.test.*` or `.spec.*` remain suites,
+including suites inside helper directories. A diff containing only suites still
+counts each suite stem, and two distinct helper or product stems remain two concerns.
+The review rubric and task linter read the same policy.
+
 ## Required contexts
 
 ```

@@ -1,3 +1,5 @@
+import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
+import { childEntryArgv } from "./child-entry-argv.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
  * `rmd approve`). Two flows once reinvented commit and PR-body hygiene independently and both tripped the
@@ -16,6 +18,7 @@
 
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -507,7 +510,6 @@ export { inTreeCheckBudgetMs };
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
 const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
-const RUN_TASK_ENTRY = "src/run-task.ts";
 /** `--require-open-prs` refuses an unreadable open-PR list or base; that is a check that could not run, not a red. */
 export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could not read declared plan ids at base/;
 /** check-proof exits that make a PR-body proof red (fail, refused, no match, passes at base too). */
@@ -518,20 +520,20 @@ const LINT_PLAN_ARGV = [LINT_PLAN_SCRIPT];
 const TASK_ID_ARGV = [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"];
 const taskIdArgv = (headRef?: string): string[] => (headRef ? [...TASK_ID_ARGV, "--head-ref", headRef] : TASK_ID_ARGV);
 const SHARD_CENSUS_ARGV = ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST];
-const checkProofArgv = (proof: string): string[] => ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"];
 
 function inTreeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
   delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
   return env;
 }
-function inTreeCommand(cwd: string, relPath: string, argv: string[]) {
+function inTreeCommand(cwd: string, relPath: string, argv: string[], judged?: JudgedRun) {
   const env = inTreeEnv();
   if (relPath !== SHARD_CENSUS_TEST) return { file: process.execPath, args: argv, env };
   delete env.RMD_SELF_SYNC_DONE;
   const setup = "./test/setup/tmp-hygiene.ts";
-  const args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
-  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env };
+  let args = existsSync(join(cwd, setup)) ? [...argv.slice(0, 2), "--import", setup, ...argv.slice(2)] : argv;
+  if (judged) args = loadCensusJudge().judgedNodeTestArgs(args, judged.args);
+  return { ...lowPriorityCommand(process.execPath, testRunArgv(args, 1)), env: { ...env, ...judged?.env } };
 }
 const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
 const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
@@ -539,10 +541,50 @@ const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
+interface JudgedRun {
+  args: string[];
+  env: Record<string, string>;
+  read(): { tallyText: string; markerText: string };
+  cleanup(): void;
+}
+interface CensusJudge {
+  prepareJudgedRun(): JudgedRun;
+  judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  judgeRun(files: readonly string[], opts: { status: number; pool: boolean; root: string; tallyText: string; markerText: string }): { complete: boolean; status: number };
+  describeJudgedRun(role: string, verdict: { complete: boolean }, opts: { prefix: string }): string;
+}
+const loadCensusJudge = (): CensusJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as CensusJudge;
+
+function judgedCensusReading(cwd: string, judged: JudgedRun, r: PlanPrPreflightReading): PlanPrPreflightReading {
+  if (r.status !== 0 || r.timedOutMs !== undefined) return r;
+  const judge = loadCensusJudge();
+  const verdict = judge.judgeRun([SHARD_CENSUS_TEST], { status: 0, pool: false, root: cwd, ...judged.read() });
+  if (verdict.complete) return r;
+  return { status: verdict.status, output: `${judge.describeJudgedRun("shard census", verdict, { prefix: "test-judge" })}\n${r.output}` };
+}
+function runShardCensus(cwd: string, budgetMs: number): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
+}
+async function runShardCensusAsync(cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(cwd, SHARD_CENSUS_TEST))) return absentFromTree(SHARD_CENSUS_TEST);
+  const judged = loadCensusJudge().prepareJudgedRun();
+  try {
+    return judgedCensusReading(cwd, judged, shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs, judged)));
+  } finally {
+    judged.cleanup();
+  }
+}
+
 /** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
-function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number): PlanPrPreflightReading {
+function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): PlanPrPreflightReading {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
   const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   if ((r.error as NodeJS.ErrnoException | undefined)?.code !== "ETIMEDOUT") return { status: r.status, output };
@@ -568,34 +610,45 @@ async function runChildAsync(file: string, args: string[], cwd: string, env?: No
     return { status: null, output, timedOutMs: budgetMs };
   }
 }
-async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number): Promise<PlanPrPreflightReading> {
+async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): Promise<PlanPrPreflightReading> {
   if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
-  const { file, args, env } = inTreeCommand(cwd, relPath, argv);
+  const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   return runChildAsync(file, args, cwd, env, budgetMs);
 }
 
 const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
+
+export type CheckProofChildLog = (step: string, extra?: Record<string, unknown>) => void;
+const CHECK_PROOF_CHILD_NAME = "check-proof-main";
+const stderrChildLog: CheckProofChildLog = (step, extra) => {
+  process.stderr.write(`${step} ${Object.entries(extra ?? {}).map(([k, v]) => `${k}=${String(v)}`).join(" ")}\n`);
+};
+function checkProofLaunchArgv(cwd: string, proof: string, log: CheckProofChildLog = stderrChildLog): string[] {
+  const launch = childEntryArgv(cwd, CHECK_PROOF_CHILD_NAME, CHECK_PROOF_CHILD_ENTRY, [proof, "--base", "origin/main"]);
+  log("plan_pr.check_proof_child", { kind: launch.kind, reason: launch.reason });
+  return launch.argv;
+}
 
 /** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited, budgeted. */
 const defaultPreflightChecks = {
   lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
     taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
-  checkProof: (cwd: string, proof: string, budgetMs: number): ProofCheckStatus => proofCheckStatus(runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
+  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog): ProofCheckStatus =>
+    proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log), budgetMs)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
-export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number };
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number; log?: CheckProofChildLog };
 const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
   taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
     taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
-  shardCensus: async (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> =>
-    shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV, budgetMs)),
-  checkProof: async (cwd: string, proof: string, budgetMs: number): Promise<ProofCheckStatus> =>
-    proofCheckStatus(await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof), budgetMs)),
+  shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
+  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log), budgetMs)),
 };
-export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number };
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number; log?: CheckProofChildLog };
 
 const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
 const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -776,7 +829,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
   };
   read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
   read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log)));
   read("pr-title", () => prTitleReading(input.title));
   read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
@@ -801,7 +854,7 @@ export async function planPrPreflightAsync(
   };
   await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
   await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs())));
+  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log)));
   await read("pr-title", () => prTitleReading(input.title));
   await read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
   return tally.result();
@@ -879,8 +932,13 @@ export function planPrPreflightAtCommit(
     borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
-    const removed = spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", "--force", realTree], { stdio: "pipe" }); // twice: a killed add leaves it locked
-    if (removed.status !== 0 && existsSync(join(tree, ".git"))) {
+    let removed = true;
+    try {
+      hostWorktreeGit(repoDir, ["worktree", "remove", "--force", "--force", realTree]); // twice: a killed add leaves it locked
+    } catch {
+      removed = false; // the orphaned-admin fallback below decides what is left
+    }
+    if (!removed && existsSync(join(tree, ".git"))) {
       const common = hostWorktreeGit(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
       dropOrphanedWorktreeAdmin(tree, realTree, common);
     }

@@ -28,10 +28,11 @@ raw: "THE RATIFY WORKER OPENS PLAN FILINGS THAT FAIL lint-plan, AND ON FOUR
   approved proposal id, never from model output."
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

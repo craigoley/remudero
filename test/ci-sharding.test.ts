@@ -119,6 +119,8 @@ test('coverage sharding: every declared lossless V8 bundle is required before No
   const runs = runBodies('coverage-ratchet-required');
   assert.match(runs, /expected compact V8 coverage for shard/);
   assert.match(runs, /node --expose-internals scripts\/coverage-merge-ratchet\.mjs --output coverage\/lcov\.info/);
+  assert.match(runs, /--line-lcov coverage-shards\/coverage-shard-1\/lcov\.info/);
+  assert.match(runs, /missing its independently generated lcov line evidence/);
   assert.match(runs, /scripts\/diff-coverage\.mjs --lcov coverage\/lcov\.info/);
   assert.match(runs, /scripts\/coverage-ratchet\.mjs --lcov coverage\/lcov\.info/);
 });
@@ -134,25 +136,27 @@ test('hosted coverage admission accepts legacy bundles and bounded manifests but
   const guard = step.slice(start, end);
   const root = mkdtempSync(join(tmpdir(), 'rmd-hosted-corpus-admission-'));
   try {
-    for (const [kind, name, accepted] of [
-      ['legacy', 'coverage-bundle-1-0000000000000-0.json', true],
-      ['bounded', 'coverage-corpus-1-0000000000000.json', true],
-      ['premapped', 'coverage-premapped-1-0000000000000.json', true],
-      ['partial', 'coverage-reports-1-0000000000000-00000000.json', false],
-      ['missing', undefined, false],
+    for (const [kind, name, accepted, expectedFailure] of [
+      ['legacy', 'coverage-bundle-1-0000000000000-0.json', true, undefined],
+      ['bounded', 'coverage-corpus-1-0000000000000.json', true, undefined],
+      ['premapped', 'coverage-premapped-1-0000000000000.json', true, undefined],
+      ['partial', 'coverage-reports-1-0000000000000-00000000.json', false, /expected compact V8 coverage for shard 1/],
+      ['missing', undefined, false, /expected compact V8 coverage for shard 1/],
+      ['missing-lcov', 'coverage-premapped-1-0000000000000.json', false, /missing its independently generated lcov/],
     ] as const) {
       const directory = join(root, kind); mkdirSync(directory);
       for (let shard = 1; shard <= CI_SHARD_COUNT; shard++) {
         const raw = join(directory, 'coverage-shards', `coverage-shard-${shard}`, 'raw');
         mkdirSync(raw, { recursive: true });
+        if (kind !== 'missing-lcov') writeFileSync(join(raw, '..', 'lcov.info'), 'TN:\n');
         if (name) writeFileSync(join(raw, name), '{}');
       }
       const run = () => execFileSync('bash', ['-e', '-c', guard], { cwd: directory, encoding: 'utf8', stdio: 'pipe' });
       if (accepted) assert.doesNotThrow(run);
       else assert.throws(run, (error: unknown) => {
-        const failure = error as { status: number; stdout: string };
-        assert.equal(failure.status, 1);
-        assert.match(failure.stdout, /expected compact V8 coverage for shard 1/);
+        const errorData = error as { status: number; stdout: string };
+        assert.equal(errorData.status, 1);
+        assert.match(errorData.stdout, expectedFailure!);
         return true;
       });
     }

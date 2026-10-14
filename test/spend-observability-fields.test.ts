@@ -214,7 +214,7 @@ test("W1-T2383 (rank 1): a caller that wires NO collector ledgers the row byte-i
     },
   );
   const row = rows.find((r) => r.step === "risk_judge.decision")!;
-  assert.deepEqual(Object.keys(row).sort(), ["action", "confidence", "reason", "reasons", "step", "verdict"]);
+  assert.deepEqual(Object.keys(row).sort(), ["action", "confidence", "evidence_tier", "reason", "reasons", "step", "verdict"]);
 });
 
 // ══ RANK 2 — the fix rung records the cap it ran under ═════════════════════════════════════════

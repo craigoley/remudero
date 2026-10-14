@@ -12,6 +12,10 @@
 // HOW MANY RUNS: no constant. The screen spends the time the pull request already waits for its
 // slowest required lane: the coverage makespan the committed ledgers predict, from the packer the
 // coverage shards use. A fast file repeats hundreds of times, a slow one a few, each at least once.
+// That window opened when the JOB did (the admission step's started_ms output, handed in as
+// RMD_JOB_STARTED_MS; never GITHUB_ENV, which a suite replaying that step rewrites), so whatever shard 1 ran
+// first — the ~14-minute guard mutation on a ci.yml diff — is paid out of it. Measured from the
+// screen's own start, the two summed past the 35-minute cap and cancelled #11308's shard 1.
 // HOW MUCH LOAD: twice availableParallelism() copies at once. MEASURED on a 10-core Mac at #10660's
 // tree: 8 copies passed 197 runs in a row; 16 and 20 copies failed it in 9-20 s, 4 trials of 4.
 //
@@ -24,6 +28,7 @@ import { availableParallelism } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainModule, parseArgv } from "./lib/argv.mjs";
+import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from "./pure-test-pool.mjs";
 import {
   COVERAGE_SHARD_WORKERS,
   DEFAULT_CI_SHARD_COUNT,
@@ -53,17 +58,30 @@ export function screenBudgetMs(root = ROOT) {
   return Math.max(0, ...shards.map((files) => predictMakespanMs(files, manifest, COVERAGE_SHARD_WORKERS)));
 }
 
-/** One `node --test` run of `file`, with the same preloads the suite runs under. */
+/** Milliseconds this job has spent since `startedMs` (ci.yml's RMD_JOB_STARTED_MS), or `undefined`
+ *  when the stamp is absent or unreadable — the caller then says it is screening the full window. */
+export function jobSpentMs(startedMs, nowMs) {
+  const started = Number(startedMs);
+  if (!startedMs || !Number.isFinite(started) || started <= 0) return undefined;
+  return Math.max(0, nowMs - started);
+}
+
+/** One `node --test` run of `file`, with the same preloads the suite runs under. Judged
+ *  (scripts/pure-test-pool.mjs): a run whose file exits 0 before its own summary is a failed run. */
 export function runTestFile(file, root = ROOT) {
   return new Promise((done) => {
-    const args = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", file];
+    const judged = prepareJudgedRun();
+    const args = judgedNodeTestArgs(["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", file], judged.args);
     // A run under a parent `node --test` inherits NODE_TEST_CONTEXT and reports to it, exiting 0 on a failure.
     const { NODE_TEST_CONTEXT: _parent, ...env } = process.env;
-    const child = spawnChild(process.execPath, args, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnChild(process.execPath, args, { cwd: root, env: { ...env, ...judged.env }, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
-    child.on("close", (code) => done({ ok: code === 0, output }));
+    child.on("close", (code, signal) => {
+      const judge = closeJudgedRun(judged, [file], { status: code ?? (signal ? 1 : 0), root, role: "screen", prefix: "flake-screen", log: () => {} });
+      done({ ok: judge.status === 0, output: `${output}\n${judge.line}\n` });
+    });
   });
 }
 
@@ -106,9 +124,14 @@ export async function main(argv, deps = {}) {
     log(`flake-screen: shard ${values.shard ?? "?"} — ${files.length} added test file(s); shard 1 screens them.`);
     return 0;
   }
-  const budgetMs = deps.budgetMs ?? screenBudgetMs(root);
+  const makespanMs = deps.budgetMs ?? screenBudgetMs(root);
+  const spentMs = jobSpentMs(env.RMD_JOB_STARTED_MS, (deps.now ?? Date.now)());
+  const budgetMs = Math.max(0, makespanMs - (spentMs ?? 0));
   const concurrency = deps.concurrency ?? 2 * availableParallelism();
-  log(`flake-screen: ${files.length} added test file(s), ${concurrency} at a time, for ${Math.round(budgetMs / 1000)}s (the predicted coverage makespan).`);
+  const windowText = spentMs === undefined
+    ? "the predicted coverage makespan; no RMD_JOB_STARTED_MS, so none of it is counted as spent"
+    : `the predicted coverage makespan of ${Math.round(makespanMs / 1000)}s, less ${Math.round(spentMs / 1000)}s this job already ran`;
+  log(`flake-screen: ${files.length} added test file(s), ${concurrency} at a time, for ${Math.round(budgetMs / 1000)}s (${windowText}).`);
   const { passes, failure } = await screen({
     files,
     budgetMs,

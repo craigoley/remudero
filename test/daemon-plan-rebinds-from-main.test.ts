@@ -15,7 +15,7 @@ function planYaml(ids: string[]): string {
 }
 
 // daemon plan reload reads origin/main without checkout mutation.
-test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts", () => {
+test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds-from-main.test.ts", async () => {
   const repo = gitRepo({ kind: "plan-main-ref" });
   try {
     const planPath = join(repo.dir, "plan", "tasks.yaml");
@@ -36,9 +36,9 @@ test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds
     const beforeHead = repo.git("rev-parse", "HEAD");
     const reload = planReloader({ isSelf: true, planPath }, false, () => {});
     assert.ok(reload);
-    assert.equal(reload!(), null, "the boot sha is recorded without a duplicate reload");
+    assert.equal(await reload!(), null, "the boot sha is recorded without a duplicate reload");
     repo.git("update-ref", "refs/remotes/origin/main", newHead);
-    const fresh = reload!();
+    const fresh = await reload!();
     assert.deepEqual(fresh?.tasks.map((task) => task.id), ["NEW-FROM-MAIN"]);
     assert.equal(repo.git("rev-parse", "HEAD"), beforeHead, "reload does not move HEAD");
     assert.equal(readFileSync(planPath, "utf8"), beforeWorkingTree, "reload leaves the checkout untouched");
@@ -47,7 +47,7 @@ test("daemon plan reload reads the observed main ref in test/daemon-plan-rebinds
   }
 });
 
-test("daemon plan reload retries an unreadable main ref in test/daemon-plan-rebinds-from-main.test.ts", () => {
+test("daemon plan reload retries an unreadable main ref in test/daemon-plan-rebinds-from-main.test.ts", async () => {
   let sha = "boot-sha";
   let attempts = 0;
   const reload = planReloader(
@@ -64,10 +64,10 @@ test("daemon plan reload retries an unreadable main ref in test/daemon-plan-rebi
     },
   );
   assert.ok(reload);
-  assert.equal(reload!(), null);
+  assert.equal(await reload!(), null);
   sha = "moved-sha";
-  assert.throws(() => reload!(), /temporarily unreadable/);
-  const fresh = reload!();
+  await assert.rejects(() => reload!(), /temporarily unreadable/);
+  const fresh = await reload!();
   assert.equal(fresh?.tasks[0]?.id, "RETRIED", "the same ref is retried after a transient failure");
   assert.equal(attempts, 2);
 });

@@ -1,0 +1,112 @@
+- id: W1-T9324
+  title: "THE BAND REPLAY JUDGES A RE-DRAFT THAT NEVER GOT AN OUTCOME — replayPass re-lints only entries that carry an outcome, so 10 of the 18 approved band proposals whose re-draft the draft rung called clean, and which today's lint calls dirty, sit with no outcome, no re-draft and no escalation; and a re-offered proposal waits out the fleet lane's one-day hold from a decision made on the draft the replay dropped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the band replay does with a re-draft; it spans the replay (inbox-replay.ts) and the fleet lane pass that calls it and holds what it files (fleet-lane.ts)
+  band_meaning: span
+  origin: "operator-session investigation 2026-10-13 (~22:35Z): why 14 band replay proposals sat with no outcome for ~22 h"
+  plan_refs: [W1-T8714, W1-T9041, W1-T9039, W1-T9065, W1-T4089]
+  files:
+    - src/lib/inbox-replay.ts
+    - src/lib/fleet-lane.ts
+    - test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts
+  status: merged
+  priority: 1  # 18 proposals the operator approved have not filed in ~22 h; 10 of them can never move, and nothing tells anyone
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 ~22:40Z on host remudero (~/rmd-state2/state), read niced, copied to the Mac. The store
+    state/inbox-replay-band-meaning.json (seeded 00:10:45Z, last written 17:08:15Z) holds 38 proposals: 20
+    skipped_superseded, 2 refused, 2 redraft_not_ready, 14 with NO outcome, 0 refiled. Control: the ledger union
+    (26 archives from 2026-10-12T2x plus the live file) holds 67 `inbox.replay*` rows, one per stored transition, and 4
+    `inbox.replay_escalated` rows, each delivered (issues #11373, #11422, #11423, #11431). The last replay row is
+    17:08:20Z. The daemon runs origin/main 9daab6370 (restarted 22:19Z), which carries W1-T9039 and W1-T9041.
+    THE 14 NO-OUTCOME ENTRIES ARE NOT WAITING ON A CADENCE. Every one has `invalidatedAt` and a cached re-draft. Re-linted
+    in-process with today's `lintDraftedFragment` (after `composeStampLine`, as `relintCached` does), 10 are dirty:
+    call-site 10, proof-grep-already-true 3 (classify.ts MAX_STRIKES, ledger.ts ledgerRowActor, DAEMON-1789186992579,
+    DAEMON-1789296090167, DAEMON-1789651008429, DAEMON-1789659915335, DAEMON-1791039063857, W1-T3109, W1-T5689,
+    verify-human-automate:W1-T216). Serve's classification agrees: all 10 read `not_ready` on `lint_clean`. 4 are clean
+    and classified ready (burnRatePredicate, managedReposPath, DAEMON-1789594936651, DAEMON-1790255312892).
+    WHY THE 10 NEVER MOVE, read on origin/main bbab8894f (symbols, not lines). In `replayPass` (src/lib/inbox-replay.ts)
+    an entry with no outcome reaches only `ledgerOutcome`, which answers `refused` on a fresh `approve.error` and
+    `redraft_not_ready` on an `inbox.drafted` row with `lint_clean: false`. Otherwise the loop does
+    `if (entry.invalidatedAt === undefined) toInvalidate.push(id); continue;`. W1-T9041's re-lint (`relintCached`,
+    `reofferReason`) runs only `if (entry.outcome)`. So an entry with no outcome is never re-linted. Two routes put the
+    10 there:
+      - its re-draft was written as `inbox.drafted` with `lint_clean: true` before W1-T9039 (#11338, merged 15:35Z,
+        live in the draft rung by 16:50Z) added call-site and proof-grep-already-true to the draft lint: 00:16Z to
+        00:57Z for MAX_STRIKES, ledgerRowActor, DAEMON-1789296090167, DAEMON-1789659915335 and W1-T5689; and after a
+        W1-T9041 "violations changed" re-offer, 14:45Z to 16:02Z for DAEMON-1789186992579, DAEMON-1791039063857 and
+        W1-T3109;
+      - W1-T9041's "cleared by a lint change" re-offer at 14:25:09Z deleted the outcome without dropping the draft
+        (DAEMON-1789651008429, verify-human-automate:W1-T216), and W1-T9039 then made that draft dirty again.
+    The approve that does reach one of them writes `ratify.approve_refused` with `state: not_ready` (W1-T216 at
+    15:41:52Z, DAEMON-1789296090167 at 18:15:32Z, both [call-site]), which `ledgerOutcome` does not read. The draft rung
+    re-drafts only an absent or anchor-stale draft (`proposalsNeedingDraft`), never a lint-dirty one. Nothing else
+    moves them, and nothing escalates them.
+    THE 4 CLEAN ONES WAIT ON THE FLEET LANE'S HOLD. `triageFleetLaneSteps` (src/lib/fleet-lane.ts) skips a proposal with
+    a `file` decision in the last day. burnRatePredicate was decided 14:57:55Z, managedReposPath 15:02:03Z and
+    DAEMON-1790255312892 14:38:34Z. Each approve failed (worktree race and push preflight, both since fixed by
+    W1-T9161 and W1-T9039), and the replay re-drafted all three at 16:18:54Z. The re-drafts are clean and classified
+    ready, but the lane holds them until 2026-10-14T14:38Z to 15:02Z on a decision made about the draft the replay
+    dropped. The pace was not the limit: 167 `file` decisions in the day against 272 first-parent merges.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 348 origin heads for "band replay", inbox-replay,
+    replayBandMeaning, inbox.replayed and redraft_not_ready (control: main reads 7 shards, no head reads more), and
+    for heads touching src/lib/inbox-replay.ts or src/lib/fleet-lane.ts (only three stale merge-queue refs from
+    #9390 to #9392, before the replay existed). W1-T9041 re-offers entries WITH an outcome. W1-T9065 frees only a
+    hand-off that left no outcome row, and keeps the day hold for one that did.
+  design: |
+    No new bound and no timer. Both changes are moved only by a change in what the lint says, or by the replay's own
+    re-offer, on the fleet lane pass that already calls the replay.
+    1. AN ENTRY WITH NO OUTCOME IS JUDGED ON ITS CACHED RE-DRAFT. In `replayPass`, when `ledgerOutcome` and the
+       superseded check give nothing for an entry that already has `invalidatedAt`, re-lint its cached draft with
+       `relintCached`. No cached draft means the re-draft is still due, so it waits as today. Clean: leave it to the
+       fleet lane, as today. Dirty:
+       a. its judgement (checks plus guidance fingerprint) differs from the stored `offered`, or none is stored: drop
+          the draft and attempt key through the same `invalidateDrafts` call the open-outcome path uses, set `offered`
+          to this judgement and write `inbox.replayed` outcome `reoffered` with the reason "violations changed" or
+          "guidance changed", once per change;
+       b. it equals `offered`: the re-draft under today's lint and guidance came back dirty, so record
+          `redraft_not_ready` with `judged` and the violation messages as `unresolved_violations`, and escalate through
+          the existing `escalate` path (one delivery per proposal per violation set).
+       From then on the existing open-outcome path owns it.
+    2. A RE-OFFER RELEASES THE LANE'S HOLD FROM THE DRAFT IT REPLACED. In `triageFleetLaneSteps`, a `file` decision
+       whose `ts` is older than the replay entry's latest `reofferedAt` or `invalidatedAt` (read with
+       `readBandMeaningReplayStore`) does not hold the proposal. That decision judged a draft the replay dropped. A
+       decision made after the re-offer holds exactly as today. Proposals outside the replay store are untouched.
+    Tests go in the new file test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts, with `test(`
+    titles verbatim as in the proofs below. Drive `replayBandMeaningRefusals` over a fixture state dir with an injected
+    `lint`: a store entry with `invalidatedAt` and no outcome whose cached draft is dirty with no `offered`; one dirty
+    with an equal `offered`; one clean. Drive `triageFleetLane` with a decision store holding a `file` decision older
+    than the entry's `reofferedAt`, and one newer.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts"
+    - claim: "a no-outcome re-draft that lints dirty on a new judgement is re-drafted once"
+      proof: 'grep: test("W1-T9324: a no-outcome re-draft that lints dirty on a new judgement is re-drafted once" in test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts'
+    - claim: "a no-outcome re-draft dirty on the judgement it was offered on is recorded not ready and escalated once"
+      proof: 'grep: test("W1-T9324: a no-outcome re-draft dirty on its offered judgement escalates once" in test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts'
+    - claim: "a no-outcome re-draft that lints clean is left to the fleet lane"
+      proof: 'grep: test("W1-T9324: a no-outcome re-draft that lints clean is left to the fleet lane" in test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts'
+    - claim: "a file decision older than the replay's re-offer does not hold the proposal, and a newer one still does"
+      proof: 'grep: test("W1-T9324: a re-offer releases the fleet lane hold from the draft it replaced" in test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts'
+    - claim: "the fleet lane reads the replay store for its hold"
+      proof: 'grep: readBandMeaningReplayStore( in src/lib/fleet-lane.ts'
+  falsifier: |
+    Keep the `if (entry.invalidatedAt === undefined) toInvalidate.push(id); continue;` exit as the only path for an
+    entry with no outcome, and the dirty fixture with no `offered` is never re-drafted and the pass writes no row, as
+    the 10 live entries show. Escalate on the first dirty read instead of comparing with `offered`, and a draft that
+    the lint change alone made dirty escalates before it was ever re-drafted under today's guidance. Release every
+    `file` decision instead of only those older than the re-offer, and a proposal the lane just handed over is handed
+    over again on the next pass.
+  note: |
+    EFFECT, measured after the merge sha deploys, from the core ledger union with no numeric pass mark: for the 10
+    entries above, `inbox.replayed` rows with outcome `reoffered` and then either a `ratify.approved` row or an
+    `inbox.replay_escalated` row; and the replay store's no-outcome entries each either re-drafting or classified
+    ready. Healthy shape: no entry with `invalidatedAt` sits with no outcome and a dirty cached draft across a pass.
+    SEPARATE, NOT IN THIS TASK: a draft can lint clean and still be refused at the push for a slug-dependent sizing
+    span (followup:DAEMON-1790001204828, filed beside this as W1-T9327). `ratify.approve_refused` with
+    `state: not_ready` for a reason other than the lint (deps, anchors, conflicts) is still not a replay outcome.

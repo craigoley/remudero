@@ -1,0 +1,42 @@
+name: Security merge policy
+
+# Trusted metadata producer: no PR source, dependency install, artifact download or model call.
+# Staged producer only. Requiring its context is a separate, verified activation boundary.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+  workflow_run:
+    workflows: [CodeQL]
+    types: [requested, in_progress, completed]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Exact open PR to backfill after trusted main adoption
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: security-policy-producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Publish exact-head policy from trusted metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/security-merge-producer.mjs

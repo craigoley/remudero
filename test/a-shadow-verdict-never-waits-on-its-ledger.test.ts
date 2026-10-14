@@ -66,6 +66,9 @@ function ports(over: Partial<ShadowMemoryPorts>, rows: LedgerLine[] = [], stderr
     policy: () => POLICY,
     write: (_path, row) => void rows.push(row),
     stderr: (line) => void stderr.push(line),
+    // The default reads <test slot dir>/host-memory/review-demand, ONE dir per process: in the pure-test pool a
+    // sibling file's sweep publishes demand there and a verdict reads would-yield-to-review (#10829).
+    readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     ...over,
   };
 }
@@ -241,7 +244,7 @@ test("an unreadable ledger tail names the daemon growth and the serve scenario a
     ].join("\n"),
   }).outcome);
   assert.equal(torn.scenario, "serve-steady", "the torn line did not discard the intact serve row");
-  assert.match((uncertainty(torn, "daemon-growth-unmeasured").detail ?? []).join(" "), /0 daemon\.alive row\(s\)/);
+  assert.match((uncertainty(torn, "daemon-growth-unmeasured").detail ?? []).join(" "), /0 daemon sample row\(s\)/);
 });
 
 test("defaultReadTail returns the whole file when it fits and only whole trailing lines when it does not", () => {

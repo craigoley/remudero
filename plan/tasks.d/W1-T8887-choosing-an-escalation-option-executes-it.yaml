@@ -1,0 +1,46 @@
+- id: W1-T8887
+  title: "AN OPERATOR ANSWER FROM THE CONSOLE CLOSES THE ISSUE AND CHANGES NOTHING — /now posts a disposition to /v1/escalation/mark-handled, which closes the issue and ledgers panel.escalation_marked_handled with no effect on the daemon, because no producer emits an executable option (14 operator-only, 0 executable) and no route executes a chosen option: escalation options carry the action they stand for, and choosing one executes it"
+  repo: remudero
+  depends_on: [W1-T8868]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — a chosen escalation option executes its action through one audited route; console rendering is a CONSOLE task
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: improve the communication mechanism and the console; it is not fully functional yet"
+  plan_refs: [W1-T2273, W1-T4677, W1-T8511, W1-T8868]
+  files: [src/lib/escalate.ts, src/lib/panel-actions.ts, src/lib/now-decisions.ts, test/choosing-an-escalation-option-executes-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8 (core) and remudero-console origin/main 1b5b2ee (10-10, local ref).
+    OBSERVED:
+    - The console /now `DecisionAnswerForm` → `answerNowDecision` → POST /v1/escalation/mark-handled {taskId, issueUrl,
+      class, disposition}. Core closes the issue and ledgers `panel.escalation_marked_handled`. Nothing in the daemon acts.
+    - The operator picks a disposition (acted / false_positive / ...), not one of the escalation's options.
+      now-decisions.ts notes /v1/escalation/reply "steers nothing yet".
+    - W1-T2273 wired `kind: {type: "executable"}` options (buttons and signed one-tap links), but no production producer
+      sets one: 14 operator-only, 0 executable.
+    - `recordRiskOverride` (panel-actions.ts) has no caller, and `riskOverrideFromLedger` has no reader outside ledger.ts.
+    OWNERSHIP: W1-T8511 (queued) carries GitHub replies into the feedback record. No shard makes options executable.
+  design: |
+    1. Producers with an existing executor emit executable options naming it, from the same closed action set as
+       W1-T8868: feedback_reply, plan_amendment_pr, rekick_once, apply_default, merge_hold_release (confirm-nonce
+       HIGH tier), risk_override (wires `recordRiskOverride`; HIGH tier).
+    2. POST /v1/escalation/choose {issueUrl, optionId}:
+       - validates the option exists on that issue;
+       - runs its executor through the same code path the triage uses;
+       - ledgers `escalation.option_chosen` with the actor;
+       - comments the effect on the issue;
+       - closes the issue only once the effect is observed.
+       HIGH-tier options require the confirm nonce.
+    3. /now decisions carry the options. mark-handled stays for "acted outside the fleet", relabelled as such.
+    4. The console renders options as buttons: a CONSOLE task filed separately against this route.
+  acceptance:
+    - claim: "choosing an executable escalation option runs its executor, ledgers the choice and closes the issue only after the effect is observed, HIGH-tier options require the confirm nonce, and the risk override has a route"
+      proof: 'grep: test("W1-T8887: choosing an escalation option executes it" in test/choosing-an-escalation-option-executes-it.test.ts'
+  falsifier: |
+    Route /v1/escalation/choose to mark-handled's close-only path: the fixture's feedback_reply option closes the issue
+    without a feedback entry, and the test fails.

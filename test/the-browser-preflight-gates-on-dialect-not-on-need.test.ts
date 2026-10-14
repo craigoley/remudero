@@ -10,6 +10,7 @@ import {
   type BrowserPreflightRunner,
   type ProofSpawner,
 } from "../src/lib/review.js";
+import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 
 const PASSING_TAP = "ok 1 - fixture passes\n# tests 1\n# pass 1\n# duration_ms 1\n";
 
@@ -33,10 +34,10 @@ function runProof(proof: string, cwd: string): {
   let preflights = 0;
   let spawns = 0;
   let args: readonly string[] = [];
-  const spawn: ProofSpawner = (_command, spawnedArgs) => {
+  const spawn: ProofSpawner = (_command, spawnedArgs, spawnCwd) => {
     spawns += 1;
     args = spawnedArgs;
-    return PASSING_TAP;
+    return PASSING_TAP + inlineJudgedTally(spawnedArgs, spawnCwd);
   };
   const preflightBrowsers: BrowserPreflightRunner = () => {
     preflights += 1;

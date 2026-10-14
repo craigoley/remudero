@@ -170,7 +170,7 @@ test("the daemon's growth is measured from its own /proc status, with no daemon.
     ports(fallback, { daemonPid: () => undefined }));
   const unmeasured = (fallback[0]!.uncertainty as Uncertainty).find((u) => u.kind === "daemon-growth-unmeasured");
   assert.equal(unmeasured?.marginMib, POLICY.daemonGrowthUnmeasuredMib);
-  assert.match(JSON.stringify(fallback[0]!.daemon_growth), /no daemon pid in this process; 1 daemon.alive row/);
+  assert.match(JSON.stringify(fallback[0]!.daemon_growth), /no daemon pid in this process; 1 daemon sample row/);
   resetShadowMemoryStateForTests();
   const unreadable: LedgerLine[] = [];
   recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
@@ -180,7 +180,7 @@ test("the daemon's growth is measured from its own /proc status, with no daemon.
   const partial: LedgerLine[] = [];
   recordShadowMemoryVerdict({ workerClass: "implement", reservationId: "start", root: "/home/node/Remudero" },
     ports(partial, { readFile: hostFiles({ "/proc/777/status": "VmRSS:\t 1 kB\n" }) }));
-  assert.match(JSON.stringify(partial[0]!.daemon_growth), /proc 777: no VmHWM\/VmRSS; 1 daemon.alive row/);
+  assert.match(JSON.stringify(partial[0]!.daemon_growth), /proc 777: no VmHWM\/VmRSS; 1 daemon sample row/);
 });
 
 test("the daemon process publishes its pid, so every process it starts can read the daemon's growth", () => {

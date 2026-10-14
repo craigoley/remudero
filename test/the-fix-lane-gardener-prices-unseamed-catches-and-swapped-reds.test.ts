@@ -136,8 +136,8 @@ test("the native evidence reader uses the async transport at the exact recorded 
       { id: 2, name: "coverage-ratchet", conclusion: "failure", details_url: "https://github.com/acme/remudero/actions/runs/1/jobs/45" },
       { id: 1, name: "coverage-ratchet", conclusion: "failure", details_url: "https://github.com/acme/remudero/actions/runs/1/jobs/44" },
       { id: 3, name: "ci", conclusion: "failure" },
-    ] }, { check_runs: [{ id: 4, name: "diff-coverage", conclusion: "failure", external_id: "46" },
-      { id: 5, name: "coverage-ratchet-success", conclusion: "success" }, { id: 47, name: "diff-coverage-other", conclusion: "failure" }] }]) },
+    ] }, { check_runs: [{ id: 4, name: "diff-coverage", conclusion: "failure", external_id: "not-a-job", details_url: "https://github.com/acme/remudero/actions/runs/1/job/46" },
+      { id: 5, name: "coverage-ratchet-success", conclusion: "success" }, { id: 47, name: "diff-coverage-other", conclusion: "failure", app: { slug: "github-actions" } }] }]) },
     { when: "actions/jobs/45/logs", stdout: coverage }, { when: "actions/jobs/46/logs", stdout: "diff-coverage: OK" },
     { when: "actions/jobs/47/logs", stdout: "diff-coverage: OK" },
   ]);

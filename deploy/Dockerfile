@@ -205,6 +205,12 @@ RUN export npm_config_cache=/tmp/npm-build-cache \
 
 COPY --chown=node:node . .
 
+# W1-T7729: after `COPY . .` (bundles THIS source), before `USER node`; no bundle fails the build.
+# Why: docs/adr/0006-precompiled-daemon-child-entries.md.
+RUN node scripts/build-child-entries.mjs \
+ || { echo "BUILD ASSERTION FAILED (W1-T7729): the daemon child-entry bundles could not be built."; exit 1; } \
+ && chown -R node:node dist
+
 # ── REQ 15: the image must be able to say which commit built it ──────────────────────────────
 # A file, not only a label: the question is asked from inside a running container by an agent with
 # no docker CLI, and `az acr build` strips `.git`. The LABEL stays for host-side readers, and

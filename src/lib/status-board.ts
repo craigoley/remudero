@@ -90,7 +90,7 @@ import {
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
 import { readOperatorReleases } from "./machine-filing-judge.js";
-import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
+import { automergeHoldFromLedger, describeHoldSetter, holdClaimMismatch, type AutomergeHold, type MergeHoldActor } from "./review.js";
 import {
   buildLedgerIndex,
   type LedgerIndex,
@@ -489,6 +489,12 @@ export interface MergeHeldRow {
   /** Why — {@link AutomergeHold.reason}, carried through unchanged; never a reason this board invents from a check or
    *  review field. */
   reason: string;
+  /** W1-T7721 — the writer-gathered actor ({@link AutomergeHold.actor}); absent on rows older than the field. */
+  actor?: MergeHoldActor;
+  /** W1-T7721 — true when the actor contradicts the claimed `by` (an agent wrote a row naming someone else). */
+  claimMismatch?: boolean;
+  /** W1-T7721 — `by` plus who really set it, e.g. "Craig Oley (claimed); written by agent session …". */
+  setter?: string;
 }
 
 /** THE FLEET IS RUNNING ON THE FALLBACK TOKEN RIGHT NOW — the newest `github_app.token_refresh_failed` is newer than
@@ -2102,6 +2108,16 @@ function latestHoldTaskId(lines: ReadonlyArray<Record<string, unknown>>, prNumbe
 /** W1-T1000003 — the hold row(s) this board renders, keyed on {@link automergeHoldFromLedger} ALONE, never re-derived
  *  from check or review fields. One row per PR a hold ever named, present only while still held; a fleet-wide hold
  *  renders one row naming no PR. */
+function mergeHeldFields(hold: AutomergeHold): Pick<MergeHeldRow, "by" | "reason" | "actor" | "claimMismatch" | "setter"> {
+  return {
+    by: hold.by,
+    reason: hold.reason,
+    ...(hold.actor ? { actor: hold.actor } : {}),
+    claimMismatch: holdClaimMismatch(hold),
+    setter: describeHoldSetter(hold),
+  };
+}
+
 function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHeldRow[] {
   const prNumbers = new Set<number>();
   for (const l of lines) {
@@ -2112,13 +2128,13 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
   for (const prNumber of [...prNumbers].sort((a, b) => a - b)) {
     const hold = automergeHoldFromLedger(lines, prNumber);
     if (!hold) continue;
-    rows.push({ prNumber, taskId: latestHoldTaskId(lines, prNumber), by: hold.by, reason: hold.reason });
+    rows.push({ prNumber, taskId: latestHoldTaskId(lines, prNumber), ...mergeHeldFields(hold) });
   }
   if (prNumbers.size === 0) {
     // No PR-scoped hold row was ever recorded, so a currently-standing hold can only be fleet-scoped. A real PR number
     // always accompanies a PR-scoped row, so a sentinel no PR is ever numbered can only match a fleet-wide row.
     const fleetHold = automergeHoldFromLedger(lines, MERGE_HELD_FLEET_SENTINEL_PR);
-    if (fleetHold) rows.push({ by: fleetHold.by, reason: fleetHold.reason });
+    if (fleetHold) rows.push(mergeHeldFields(fleetHold));
   }
   return rows;
 }
@@ -2845,7 +2861,7 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   }
   for (const r of n.mergeHeld) {
     const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";
-    out.push(`merge held : ${target} — held by ${r.by}: ${r.reason}`);
+    out.push(`merge held : ${target} — held by ${r.setter ?? r.by}: ${r.reason}`);
   }
   // W1-T2392: names the task, the PR and WHICH prose surface carried the id, and says what to do — a warning nobody can
   // act on is noise.

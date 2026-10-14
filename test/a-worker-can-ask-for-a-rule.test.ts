@@ -162,3 +162,50 @@ test("W1-T4094: every live doctrine id agrees with the canonical id", () => {
     assert.equal(result?.id, canonicalId, rule.headline);
   }
 });
+
+// ── 2026-10-11: AN ID A FOLD RETIRED STILL REACHES ITS RULE ──────────────────────────────────────
+// A frozen W1-T3323 row leaves the index by moving verbatim into a live rule's body, its id aliased
+// in `doctrine/merged-rules.json`. The lookup matched only ids still IN the index, so a worker (or a
+// brief) quoting a retired id was told "No rule matches" about a rule that is still there.
+
+test("a worker asking for a retired rule id gets the live rule that carries its frozen bullet", (t) => {
+  const root = fixture(t);
+  const read = (path: string) => readFileSync(join(root, path), "utf8");
+  writeFileSync(join(root, "doctrine", "ledger.md"),
+    "- **Keep every fetch visible.**\nMeasured ledger evidence.\n\n- **AN OLD FROZEN LINE ENDING ON A COLON:**\nits verbatim body.\n");
+  const source = read("CLAUDE.md");
+  assert.equal(lookupWorkerRule("an-old-frozen-line-ending-on-a-colon", source, read, []), undefined,
+    "CONTROL: with no registry, the retired id is not in the index");
+  writeFileSync(join(root, "doctrine", "merged-rules.json"),
+    JSON.stringify([{ canonicalId: "keep-every-fetch-visible", aliasIds: ["an-old-frozen-line-ending-on-a-colon"] }]));
+  const found = lookupWorkerRule("an-old-frozen-line-ending-on-a-colon", source, read, []);
+  assert.equal(found?.id, "keep-every-fetch-visible");
+  assert.match(found?.text ?? "", /AN OLD FROZEN LINE ENDING ON A COLON:\*\*\nits verbatim body\./);
+  assert.equal(lookupWorkerRule("never-merged-anywhere", source, read, []), undefined, "an unrelated id still misses");
+});
+
+test("a worker asking for a retired rule id — every alias in the real registry reaches its carrier", () => {
+  const root = process.cwd();
+  const read = (path: string) => readFileSync(join(root, path), "utf8");
+  const source = read("CLAUDE.md");
+  const groups = JSON.parse(read("doctrine/merged-rules.json")) as Array<{ canonicalId: string; aliasIds: string[] }>;
+  const aliases = groups.flatMap((g) => g.aliasIds.map((alias) => ({ alias, canonicalId: g.canonicalId })));
+  assert.ok(aliases.length >= 5, `positive control: the registry must carry the retired ids; got ${aliases.length}`);
+  for (const { alias, canonicalId } of aliases) {
+    assert.equal(lookupWorkerRule(alias, source, read, [])?.id, canonicalId, alias);
+  }
+});
+
+test("a worker asking for a retired rule id — a broken registry is an error, never a silent miss", (t) => {
+  const root = fixture(t);
+  const source = readFileSync(join(root, "CLAUDE.md"), "utf8");
+  const reader = (registry: () => string) => (path: string) =>
+    path === "doctrine/merged-rules.json" ? registry() : readFileSync(join(root, path), "utf8");
+  assert.throws(() => lookupWorkerRule("retired-id", source, reader(() => "{not json"), []), /is not JSON/);
+  assert.throws(() => lookupWorkerRule("retired-id", source, reader(() => "{}"), []), /is not an array/);
+  assert.throws(() => lookupWorkerRule("retired-id", source, reader(() => {
+    throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+  }), []), /is unreadable/);
+  // A phrase that matches never consults the registry, so a broken registry cannot break it.
+  assert.match(lookupWorkerRule("installed schema", source, reader(() => "{not json"), [])?.text ?? "", /Measured schema evidence/);
+});

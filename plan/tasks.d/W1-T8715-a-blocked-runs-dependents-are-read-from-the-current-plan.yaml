@@ -1,0 +1,92 @@
+- id: W1-T8715
+  title: "A BLOCKED RUN'S DEPENDENTS ARE READ FROM THE CURRENT PLAN, NOT ITS ADMISSION SNAPSHOT — at 13:22:55Z on 2026-10-12 the daemon ruled W1-T8502's failure independent, because the plan it was admitted under at 12:44:37Z predates W1-T8514, filed in #11080 at 12:39:28Z and depending on it, and the plan reload at 12:45:41Z that added W1-T8514 was not consulted"
+  repo: remudero
+  depends_on: []  # W1-T8676 (queued, P1) also edits src/lib/daemon.ts, at the receipt fold and the in-process latch hold, not processDispatchResult's block reasoning; overlap packing serializes them
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator request 2026-10-12 (parallel work); found while freeing W1-T8502"
+  plan_refs: [W1-T8502, W1-T8514, W1-T8676, W1-T46, W1-T174, W1-T340, W1-T4416, W1-T7533]
+  files: [src/lib/daemon.ts, test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    WHAT "INDEPENDENT" MEANS, READ on origin/main 40b391682 (symbols, not lines). It means no dependents. It does not
+    mean a failure unrelated to the task. `reasonAboutBlock` (src/lib/block-reason.ts, W1-T46) returns
+    `independent_failure` exactly when `transitiveDependents(plan, taskId)` (src/lib/plan.ts) is empty. The daemon's
+    comment at that branch gives the safety argument: "nothing in the plan transitively depends on this task, so skipping
+    it cannot leave a dependent building on a gap". A non-empty set gives `genuine_blocker` instead. `processDispatchResult`
+    (src/lib/daemon.ts) then writes `daemon.blocked` with the dependents, calls `escalateBlock`, and parks the task. The
+    next tick re-arms the park on `no-open-pr`. An independent failure instead writes `dispatch.blocked_independent`. The
+    W1-T7533 latch then holds the task behind a back-off, and nothing is escalated.
+    THE PLAN IT ASKS IS THE ADMISSION SNAPSHOT. `processDispatchResult` is called with `snapshot.plan`, the
+    `planForBatch` (or lane-refill snapshot) captured when the lane was admitted (W1-T340, W1-T4416). A run can last
+    longer than several plan reloads. The dependents question is then answered against a plan that main has already
+    replaced.
+    OBSERVED 2026-10-12 in the core daemon's ledger on host remudero (~/rmd-state2/state), read niced:
+      - 12:37:56Z `daemon.boot` run DAEMON-1791808652580, head_sha 8cfb1a25b (#11079, 12:31:26Z). That tree holds no
+        W1-T8514 shard.
+      - 12:39:28Z ecd3f9790 (#11080) lands on origin/main, filing W1-T8514 with `depends_on: [W1-T8502]`.
+      - 12:44:37Z `dispatch.concurrent_set` [W1-T7735, W1-T8502, W1-T8484]. Run W1-T8502-1791809077557 is minted in
+        the same millisecond. The process wrote no `daemon.plan_reloaded` row between boot and this admission.
+      - 12:45:41Z and 12:45:43Z `daemon.plan_reloaded tasks 3677`. 3677 is the count of `- id:` entries on
+        origin/main at ecd3f9790. It is 3676 at 8cfb1a25b, so this reload is the first to hold W1-T8514. 13:06:42Z
+        reloads again, tasks 3680, matching 3e83724a2.
+      - 13:17:56Z verdict failed (error_codex, see W1-T8677). 13:22:55Z `dispatch.blocked_independent` verdict failed,
+        then `daemon.block.independent_failure`. No `daemon.blocked` row and no escalation named W1-T8514 (P1).
+    MEASURED over the whole ledger union: 495 .ndjson.gz rotations plus the live file. The `dispatch.blocked_independent`
+    rows were deduplicated by ts, task and run: 2777 raw rows became 280, from 2026-09-08T18:14Z to 2026-10-12T14:16Z.
+    Each row's task was checked against the plan on origin/main's first-parent commit at the row's ts, reading the
+    tasks.d `depends_on` lists and plan/tasks.yaml over 185 commits. Positive control: this walk finds W1-T8514 for
+    W1-T8502's row. 4 of the 280 rows had a dependent on main when they were written:
+      - W1-T3389, 2026-09-13T09:27Z, blocked_ci. W1-T3506 was filed at 09:23Z, after the run started at 08:32Z.
+      - W1-T5332, 2026-10-02T23:30Z, blocked_containment (environmental). Seven dependents, W1-T5340 among them, filed
+        at 22:35Z, after the run started at 22:15Z.
+      - W1-T7837, 2026-10-11T05:00Z, no_pr. W1-T7850 was filed at 04:16Z, after the run started at 04:12Z.
+      - W1-T8502, as above.
+    In every case the dependent reached main after the admitting process last read the plan. The cause is the same in
+    all four.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and on all 308 origin heads for transitiveDependents,
+    reasonAboutBlock, planForBatch, blocked_independent beside dependents, and verify-human-automate. Control: main
+    reads 31 hits, and no head reads more than main. W1-T2910 kept a block across a plan reload. W1-T976 made the
+    verdict the block's input. W1-T7533 and W1-T8676 decide when a latch re-offers. None asks which plan the
+    dependents question reads.
+  design: |
+    No new bound and no timer. The fix only widens the safety set.
+    1. DEPENDENTS ARE READ FROM BOTH PLANS. In `processDispatchResult`, the dependents behind the block disposition are
+       the union of `transitiveDependents` over the admission snapshot and over the daemon's current plan binding
+       (`plan`, which `reloadPlanBinding` refreshes at each tick and lane refill). This adds no git read of its own. A
+       union can turn an independent failure into a genuine blocker and never the reverse, so the "never continue into
+       the gap" rule cannot weaken. Every other judgement in the lane still reads its admission snapshot, as W1-T340
+       requires. This one question asks about the DAG the next dispatch will act on.
+    2. THE ROW NAMES THE PLAN IT ASKED. `dispatch.blocked_independent` and `daemon.blocked` carry `snapshot_plan_tasks`
+       and `current_plan_tasks` (task counts). `daemon.blocked` also carries `late_dependents`, the dependents only the
+       current plan named, so a reader can see when the admission snapshot was stale.
+    Tests go in a new file, test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive the daemon loop with fakes, as the existing block-path suites do. Admit a task
+    under a plan with no dependent. Have `reloadPlan` return a plan that adds one before the run settles, and settle the
+    run `failed`.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts"
+    - claim: "a failed run whose dependent arrived in a plan reload after admission is a genuine blocker, escalated and parked"
+      proof: 'grep: test("W1-T8715: the dependent filed after admission makes the failure a genuine blocker" in test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts'
+    - claim: "a failed run with no dependent in either plan is still an independent failure"
+      proof: 'grep: test("W1-T8715: no dependent in either plan stays an independent failure" in test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts'
+    - claim: "the block rows name both plans' task counts and the late dependents"
+      proof: 'grep: test("W1-T8715: the block rows name the plans they asked" in test/a-blocked-runs-dependents-are-read-from-the-current-plan.test.ts'
+    - claim: "the daemon writes the late dependents on its block row"
+      proof: "grep: late_dependents in src/lib/daemon.ts"
+  falsifier: |
+    Leave `processDispatchResult` reading only the admission snapshot, and the first test writes
+    `dispatch.blocked_independent` for a task the reloaded plan names a dependent of, as the daemon did for W1-T8502 at
+    13:22:55Z.
+    Treat every reload as a dependent, and the second test escalates a
+    self-contained task.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark. Count `daemon.blocked` rows with a
+    non-empty `late_dependents`. Re-run this rationale's walk on `dispatch.blocked_independent` rows written after the
+    merge sha deploys. Healthy shape: none whose task had a dependent on main at the row's ts.

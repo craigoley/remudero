@@ -10,8 +10,8 @@
   risk: high
   band_meaning: blast-radius
   origin: "Owner chose close-and-escalate for outside contributions while external admission is closed; 2026-10-10 authorized filing and implementation, not live settings or infrastructure changes."
-  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/action-executor.ts, src/lib/feedback.ts, src/run-task.ts, test/close-and-escalate-external-prs.test.ts]
-  status: queued
+  files: [src/lib/contributor-admission.ts, src/lib/sweep.ts, src/lib/action-executor.ts, src/lib/feedback.ts, src/run-task.ts, test/close-and-escalate-external-prs.test.ts, src/lib/config-schema.ts, test/a-wall-clock-bound-declares-itself.test.ts]
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

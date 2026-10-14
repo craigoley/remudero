@@ -27,7 +27,7 @@ const {
   renderedSizeVerdict: (
     rendered: string,
     sourceText: string,
-  ) => { ok: boolean; renderedBytes: number; sourceBytes: number; limitBytes: number };
+  ) => { ok: boolean; reason?: string; renderedBytes: number; sourceBytes: number; limitBytes: number; headerBytes: number };
 };
 
 function runCheck(source: string, out: string) {
@@ -113,18 +113,50 @@ test("W1-T3267: committed AGENTS.md is a fresh generated index carrying every CL
   assert.ok(sourceHeadlines.length > 0, "the source fixture must actually contain rule headlines");
 });
 
-test("W1-T3267: generated AGENTS.md is materially smaller than committed CLAUDE.md by live byte counts", () => {
+test("W1-T3267: generated AGENTS.md carries only its header and headlines, and is smaller than committed CLAUDE.md", () => {
   const source = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
   const committed = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
   const verdict = renderedSizeVerdict(committed, source);
-  assert.ok(
-    verdict.ok,
-    `AGENTS.md must fit the material-size bound: ${verdict.renderedBytes} bytes <= ${verdict.limitBytes} bytes`,
-  );
+  assert.ok(verdict.ok, `AGENTS.md must fit the headline-only bound: ${verdict.reason}`);
   assert.ok(
     verdict.renderedBytes < verdict.sourceBytes,
     `AGENTS.md (${verdict.renderedBytes}) must be smaller than CLAUDE.md (${verdict.sourceBytes})`,
   );
+  // POSITIVE CONTROL: the bound is measured over the real corpus, not an empty headline set.
+  assert.ok(verdict.limitBytes - verdict.headerBytes > 5_000, `headline bytes measured: ${verdict.limitBytes - verdict.headerBytes}`);
+});
+
+// The bound used to be AGENTS.md <= 0.7 x CLAUDE.md. Once the bodies moved to doctrine/ (W1-T3323),
+// cutting a pointer or preamble byte from CLAUDE.md pushed that ratio UP, so the check refused the
+// compression its source asks for. These two pin the replacement from both sides.
+function bulletSource(headlines: string[], pointer: (i: number) => string): string {
+  return `# rules\n\nA preamble the index never carries.\n\n## S\n\n${headlines.map((h, i) => `- **${h}**${pointer(i)}`).join("\n")}\n`;
+}
+const HEADLINES = Array.from({ length: 40 }, (_, i) => `Rule ${i}: state the instruction this headline carries, in full`);
+
+test("W1-T3267: a CLAUDE.md compressed to headlines and short pointers still renders an index that passes the size check", () => {
+  // Short pointers: the source is barely bigger than its headlines, so a ratio bound refuses it.
+  const source = bulletSource(HEADLINES, (i) => ` → doctrine/s/r${i}.md`);
+  const rendered = renderAgentsMd(source);
+  const verdict = renderedSizeVerdict(rendered, source);
+  assert.ok(verdict.renderedBytes / verdict.sourceBytes > 0.7, `fixture must sit above the old 0.7 ratio: ${verdict.renderedBytes}/${verdict.sourceBytes}`);
+  assert.equal(verdict.reason, undefined);
+  assert.equal(verdict.ok, true);
+});
+
+test("W1-T3267: a render that leaks pointers, bodies or preamble into the index is refused", () => {
+  // The regression the ratio was written for: the index carrying rule prose, not just headlines.
+  const source = bulletSource(HEADLINES, (i) => ` → doctrine/s/r${i}.md`);
+  const fresh = renderAgentsMd(source);
+  const leakedPointers = fresh.replace(/^(- \*\*Rule (\d+):.*\*\*)$/gm, "$1 → doctrine/s/r$2.md");
+  assert.notEqual(leakedPointers, fresh, "fixture must actually inject the pointers");
+  assert.match(renderedSizeVerdict(leakedPointers, source).reason ?? "", /carries more than its headlines/);
+  const leakedPreamble = fresh.replace("## Rule Headlines", "A preamble the index never carries.\n\n## Rule Headlines");
+  assert.match(renderedSizeVerdict(leakedPreamble, source).reason ?? "", /carries more than its headlines/);
+  // …and the real corpus rendered as WHOLE bullets (pointer included) is refused the same way.
+  const real = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+  const whole = renderAgentsMd(real).replace(/^## Rule Headlines\n\n[\s\S]*$/m, `## Rule Headlines\n\n${parseRuleHeadlines(real).map((r) => `- **${r.headline}**${r.body}`).join("\n")}\n`);
+  assert.equal(renderedSizeVerdict(whole, real).ok, false);
 });
 
 test("W1-T3267: generate-agents-md --check turns a stale headline red and names the changed headline", () => {
@@ -188,7 +220,7 @@ test("W1-T3267: the same size check refuses an oversized generated fixture", () 
     const gen = runGenerate(source, out);
     const output = gen.stdout + gen.stderr;
     assert.notEqual(gen.status, 0, output);
-    assert.match(output, /is not materially smaller/);
+    assert.match(output, /is not smaller than its source/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -9,7 +9,8 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const REPO_ROOT = join(import.meta.dirname, "..");
 const HOOK = readFileSync(join(REPO_ROOT, "hooks", "pre-push"), "utf8");
 const TIER_SCRIPT = readFileSync(join(REPO_ROOT, "scripts", "test-tier-manifest.mjs"), "utf8");
-const BEGIN = "# W1-T3205: BEGIN test-tier admission";
+const POOL_SCRIPT = readFileSync(join(REPO_ROOT, "scripts", "pure-test-pool.mjs"), "utf8");
+const BEGIN ="# W1-T3205: BEGIN test-tier admission";
 const END = "# W1-T3205: END test-tier admission";
 
 /** W1-T4430 flipped what the tier admission refuses: a new test file with NO manifest row is the
@@ -22,6 +23,8 @@ function fixture(t: TestContext, opts: { ghostRow: boolean } = { ghostRow: true 
   mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "test"), { recursive: true });
   writeFileSync(join(root, "scripts", "test-tier-manifest.mjs"), TIER_SCRIPT);
+  // W1-T6085: the manifest script imports its sibling pool module, so the fixture carries it too.
+  writeFileSync(join(root, "scripts", "pure-test-pool.mjs"), POOL_SCRIPT);
   const files = opts.ghostRow ? { "test/deleted.test.ts": 1234 } : {};
   writeFileSync(join(root, "scripts", "test-tier-manifest.json"), `${JSON.stringify({ thresholdMs: 5000, files })}\n`);
   writeFileSync(join(root, "test", "new.test.ts"), "// deliberately absent from the manifest\n");

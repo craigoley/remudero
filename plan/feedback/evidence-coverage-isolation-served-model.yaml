@@ -16,10 +16,22 @@ raw: >-
   gardener updates this entry in place while the gap persists.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/11217
+summary:
+  headline: Restore isolation servedModel evidence or document why it is missing
+  what_happened: Only 102 of 115 isolation worker calls included servedModel over
+    the past seven days (88.7%), below the 90% floor. The gap has persisted
+    since September 28, 2026.
+  decision: Restore servedModel at the isolation lane’s ledger write site, or
+    record why this lane legitimately lacks it.
+  options:
+    - label: Restore the field
+      consequence: Add servedModel where isolation writes its ledger evidence.
+    - label: Document the gap
+      consequence: Record why isolation legitimately lacks servedModel.
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

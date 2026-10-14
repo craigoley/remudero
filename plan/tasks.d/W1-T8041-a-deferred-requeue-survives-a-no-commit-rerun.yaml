@@ -1,0 +1,66 @@
+- id: W1-T8041
+  title: "A DEFERRED REQUEUE IS NEVER RETRIED WHEN A NO-COMMIT FIX ROUND SITS AT THE SAME HEAD — on 2026-10-11 PR #10829's ci-shard (7/8)|(8/8) requeues were deferred at 13:11Z (already_running); the next full pass, at 13:47Z, took the no-commit rerun branch, which answered unavailable (no completed failed workflow run), consumed its one-shot and broke out before the deferred retry"
+  repo: remudero
+  depends_on: [W1-T8040]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a deferred job requeue is retried once its run completes
+  band_meaning: span
+  origin: "operator approval 2026-10-11: file the fix-lane follow-ups from the PR #10829 / #10852 ci-shard (7/8)|(8/8) timeouts after the W1-T6085 pure-test pool (#10834)"
+  plan_refs: [W1-T5920, W1-T5953, W1-T6353, W1-T1223, W1-T8040]
+  files: [src/lib/sweep.ts, test/a-deferred-requeue-survives-a-no-commit-rerun.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 in the core daemon's live ledger (/mnt/rmd/state2/state/ledger.ndjson on the host), PR #10829
+    (W1-T7899), head 3c92df1a4f10:
+      - 13:11:01Z sweep.check_requeued then sweep.check_requeue.deferred (refusal already_running, "The workflow
+        run containing this job is already running (HTTP 403)") for ci-shard (7/8) and ci-shard (8/8). ci-gate
+        was running until about 13:19Z.
+      - 13:11:39Z the same pass dispatched ci-log fix round 1 for the `ci` aggregator. 13:14:41Z fix.done
+        NEEDS_DESIGN with no commit; its follow-up asked for exactly the re-run that was deferred.
+      - 13:41:10Z and 13:45:05Z: light passes, "deferred to full sweep (light pass)".
+      - 13:47:29Z, the first full pass: sweep.disposed {no_commit_rerun_attempted: true}. 13:47:32Z stand-down:
+        "no-commit CI fix: failed-job rerun unavailable — no completed failed workflow run at this head".
+      - 13:48:29Z a distance-baseline update-branch moved the head. No sweep.check_requeued row for #10829
+        exists after 13:11Z, so the deferred requeue was never retried at 3c92df1.
+    READ on origin/main 90034ae2d, src/lib/sweep.ts:
+      - runSweep's W1-T6353 no-commit block (`noCommitRound !== undefined && !rerunAttempted`) runs BEFORE the
+        W1-T1223 cancelled-check arm and the W1-T5920 deferredFailures arm. It ledgers its receipt (the
+        one-shot) and then `break`s on every outcome, including "unavailable".
+      - The real rerunFailedChecks gateway collects only runs with `status === "completed" &&
+        conclusion === "failure"`. A run whose red is cancelled shards may conclude "cancelled". It then
+        finds nothing, and the outcome is "unavailable" for a head that is plainly red.
+      - requeueCheckJob and deferredRequeueTarget already know how to retry a deferral once its run completes
+        (W1-T5920/W1-T5953). That code was never reached.
+    DEPENDS ON W1-T8040: both edit runSweep's red-CI arms in src/lib/sweep.ts. With W1-T8040, a deterministic
+    timeout is no longer re-queued at all. This task is about every other deferral.
+  design: |
+    No new constant or count.
+    1. ORDER. A pending deferral at this head comes first. That is a sweep.check_requeue.deferred row with
+       outcome "deferred", not voided by a later sweep.check_requeued. Its requeueCheckJob retry runs before
+       the no-commit block, on the first full pass where deferredRequeueTarget reports its run complete.
+       While the run is still in flight the pass holds, as today.
+    2. UNAVAILABLE IS NOT AN ANSWER. When rerunFailedChecks returns "unavailable", the pass keeps its receipt
+       but does not `break`. It falls through to the cancelled-check and deferred-failure arms in the same pass.
+    3. GATEWAY. rerunFailedChecks also counts a completed run concluded "cancelled" or "timed_out" when the
+       head's rollup shows a red required check from that run. Before relying on GitHub's
+       `rerun-failed-jobs` re-running cancelled jobs, the builder confirms it in GitHub's REST docs. If it does
+       not, such a run is left to step 2's fall-through, and the per-job requeue handles it.
+    Tests go in a new file, test/a-deferred-requeue-survives-a-no-commit-rerun.test.ts, with `test(` titles
+    verbatim as in the proofs below. Replay #10829's ledger rows (deferrals at the head, a NEEDS_DESIGN
+    no-commit round) against a fresh rollup whose run has completed. Use a recording requeueCheck and a
+    rerunFailedChecks fake that answers "unavailable".
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-deferred-requeue-survives-a-no-commit-rerun.test.ts"
+    - claim: "a deferred requeue is retried once its run completes even when a no-commit fix round sits at the same head"
+      proof: 'grep: test("W1-T8041: a deferred requeue is retried before the no-commit rerun once its run completes" in test/a-deferred-requeue-survives-a-no-commit-rerun.test.ts'
+    - claim: "an unavailable no-commit rerun falls through to the requeue arms in the same pass"
+      proof: 'grep: test("W1-T8041: an unavailable failed-job rerun falls through to the requeue arms" in test/a-deferred-requeue-survives-a-no-commit-rerun.test.ts'
+  falsifier: |
+    Leave the no-commit block ahead of the deferral and breaking on "unavailable". The #10829 replay's
+    recording requeueCheck then receives nothing, and both tests fail. That is the 13:47Z pass.

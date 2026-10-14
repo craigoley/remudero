@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewDefinition, type ViewSource } from "./views.js";
+import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -407,6 +407,30 @@ function classifyList(legacy: readonly unknown[], view: readonly unknown[], ev: 
   return { classification: top, reason: `every listed id differing or moved is explained (${breakdown})` };
 }
 
+/** An instant from an ISO string or an epoch-ms number; null for anything else. */
+function instantMs(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Whether the sources' as-of gap explains a time leaf's two values: both are instants (or both are
+ * ages/durations in ms) and either sit within the gap of each other, or the side read LATER holds the newer
+ * value and it was stamped inside the gap (after the earlier read, by the later one): a reading rewritten
+ * between the two reads (a value the earlier read lacked, as `explainOrder` treats a missing row, is older
+ * than any). A time value days wrong, or one that is not a time at all, is not explained.
+ */
+function timeDiffWithin(legacy: unknown, view: unknown, legacyAsOfMs: number, viewAsOfMs: number): boolean {
+  const lacks = (value: unknown): boolean => value === null || value === undefined;
+  const [a, b] = [lacks(legacy) ? Number.NEGATIVE_INFINITY : instantMs(legacy), lacks(view) ? Number.NEGATIVE_INFINITY : instantMs(view)];
+  if (a === null || b === null || (a === b)) return false;
+  if (Math.abs(a - b) <= Math.abs(legacyAsOfMs - viewAsOfMs)) return true;
+  const [lateSeen, earlySeen, early, late] = legacyAsOfMs > viewAsOfMs ? [a, b, viewAsOfMs, legacyAsOfMs] : [b, a, legacyAsOfMs, viewAsOfMs];
+  return lateSeen > earlySeen && lateSeen > early && lateSeen <= late;
+}
+
 /**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
  * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
@@ -434,8 +458,10 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   }
   const agesDiffer = ev.legacyAsOfMs !== null && ev.viewAsOfMs !== null && ev.legacyAsOfMs !== ev.viewAsOfMs;
   const leaf = diff.path.split(/[.[]/).at(-1) ?? "";
-  if (agesDiffer && (TIME_LEAF.test(leaf) || any(ev.namedInGap))) {
-    return { classification: "timing", reason: `sources ${Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!)} ms apart; ${ev.rowsInGap} row(s) landed between` };
+  if (agesDiffer) {
+    const gapMs = Math.abs(ev.legacyAsOfMs! - ev.viewAsOfMs!);
+    const explained = any(ev.namedInGap) || (TIME_LEAF.test(leaf) && timeDiffWithin(legacy, view, ev.legacyAsOfMs!, ev.viewAsOfMs!));
+    if (explained) return { classification: "timing", reason: `sources ${gapMs} ms apart; ${ev.rowsInGap} row(s) landed between` };
   }
   if (ev.legacyHorizonMs !== undefined && any(ev.namedBeforeHorizon)) {
     return { classification: "legacy_horizon", reason: "a row older than the legacy horizon names it (ruling Q1: the view is right)" };
@@ -485,6 +511,19 @@ function unseenBy(db: ReadModelDb, ids: readonly string[], rows: LegacyRows, fro
       if (!keys.has(`${String(row.ts_ms)}|${String(row.step)}`)) out.add(id);
     }
   }
+  // W1-T9356: a run's newest non-fact row is kept only in run_activity, which dates the task on the view's side;
+  // compaction prunes it from the live file like any other step, so legacy holding no row at its instant is unseen.
+  if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_activity'").get() === undefined) return [...out];
+  const instants = new Map<string, Set<string>>();
+  for (let at = 0; at < ids.length; at += 400) {
+    const chunk = ids.slice(at, at + 400);
+    const sql = `SELECT task_id, ts_ms FROM run_activity WHERE task_id IN (${chunk.map(() => "?").join(",")}) AND ts_ms >= ? AND ts_ms <= ?`;
+    for (const row of db.prepare(sql).all(...chunk, fromMs, asOfMs)) {
+      const id = String(row.task_id);
+      const held = instants.get(id) ?? instants.set(id, new Set((rows[id] ?? []).map((key) => key.slice(0, key.indexOf("|"))))).get(id)!;
+      if (!held.has(String(row.ts_ms))) out.add(id);
+    }
+  }
   return [...out];
 }
 
@@ -526,6 +565,8 @@ export function readShadowEvidence(
 
 /** The legacy computation of one sampled request, projected to the view's `data` shape. */
 export interface ShadowLegacy {
+  /** Trusted identity of the producer that computed this side; absent on older producers. */
+  qualificationGeneration?: string;
   data: unknown;
   asOfMs: number | null;
   /** The oldest row legacy's read could see (its retention horizon), when it has one. */
@@ -653,6 +694,11 @@ function classifyDerived(inputs: readonly string[], judged: ReadonlyArray<{ path
 }
 
 export interface ViewShadowState {
+  /** Qualified states coexist with the untouched, older per-view counters in the same native store. */
+  view?: string;
+  qualificationGeneration?: string;
+  /** A mismatched producer blocks current qualification without erasing any measured streak. */
+  qualificationRefusal?: string;
   requests: number;
   firstRequestMs: number | null;
   samples: number;
@@ -671,7 +717,7 @@ export interface ViewShadowState {
   summary?: { sinceMs: number; samples: number; skipped: number; diffs: Record<ShadowClassification, number> };
 }
 
-export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary"> {
+export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary" | "view" | "qualificationRefusal"> {
   view: string;
   /** How many keys the streak sampled: each owes the cadence's full day of samples. */
   keys: number;
@@ -712,8 +758,22 @@ function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewS
 }
 
 /** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
-export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number): ShadowReadiness[] {
-  return Object.entries(storedShadowStates(path, db)).sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, nowMs));
+export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>> = {}): ShadowReadiness[] {
+  return activeReadiness(new Map(Object.entries(storedShadowStates(path, db))), qualifications, nowMs);
+}
+
+const qualifiedStateKey = (view: string, generation: string | undefined): string => generation === undefined ? view : `\u0000qualification:${JSON.stringify([view, generation])}`;
+
+/** Only the required generation is current; archived generations remain stored, never added or reset. */
+function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number): ShadowReadiness[] {
+  const views = new Set([...states].map(([key, state]) => state.view ?? key));
+  return [...views].sort().flatMap((view) => {
+    const generation = qualifications[view];
+    const stored = states.get(qualifiedStateKey(view, generation));
+    const state = generation === undefined || stored?.qualificationGeneration === generation ? stored : undefined;
+    if (state === undefined && generation === undefined) return [];
+    return [shadowReadiness(view, state ?? { ...emptyState(), qualificationGeneration: generation }, now)];
+  });
 }
 
 const noDiffs = (): Record<ShadowClassification, number> => ({ legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 });
@@ -730,7 +790,7 @@ function emptyState(): ViewShadowState {
  * (the rule of three), so a busy view needs more evidence than the cadence gives it.
  */
 export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number): ShadowReadiness {
-  const { streakKeys, summary: _summary, ...s } = state;
+  const { streakKeys, summary: _summary, view: _storedView, qualificationRefusal, ...s } = state;
   const keys = Math.max(1, streakKeys?.length ?? 0);
   const spanMs = s.firstRequestMs === null ? 0 : nowMs - s.firstRequestMs;
   const requestsPerDay = spanMs >= DAY_MS ? (s.requests * DAY_MS) / spanMs : null;
@@ -740,7 +800,8 @@ export function shadowReadiness(view: string, state: ViewShadowState, nowMs: num
   if (streakMs < DAY_MS) reason = s.lastRealMs === null ? "zero real diffs, but for under a day" : "a real diff within the last day";
   else if (s.streakSamples < requiredSamples) reason = `${s.streakSamples} of ${requiredSamples} samples since the last real diff (a day at one per minute for ${keys} key(s))`;
   else reason = `zero real diffs in ${s.streakSamples} samples over ${Math.floor(streakMs / DAY_MS)} day(s)`;
-  const ready = streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  const ready = qualificationRefusal === undefined && streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  if (qualificationRefusal !== undefined) reason = qualificationRefusal;
   if (!ready && s.skipped) reason += `; ${s.skipped} sample(s) skipped while a side was not ready (last: ${s.lastSkipReason})`;
   return { view, ...s, keys, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
 }
@@ -750,6 +811,8 @@ export interface ViewShadowOptions {
   log: (step: string, extra: Record<string, unknown>) => void;
   evidence: (input: Parameters<typeof readShadowEvidence>[1] & { view: string }) => ShadowEvidence;
   store?: ShadowStore;
+  /** Current producer identities; earlier generations' receipts cannot qualify these projections. */
+  qualifications?: Readonly<Record<string, string>>;
 }
 
 export interface ShadowComparison {
@@ -761,7 +824,7 @@ export interface ShadowComparison {
 }
 
 export interface ViewShadow {
-  compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null; sources?: readonly ViewSource[] } }): ShadowComparison;
+  compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null; sources?: readonly ViewSource[] }; qualificationGeneration?: string }): ShadowComparison;
   readiness(): ShadowReadiness[];
 }
 
@@ -769,7 +832,11 @@ export interface ViewShadow {
 export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
-  const stateOf = (view: string): ViewShadowState => states.get(view) ?? states.set(view, emptyState()).get(view)!;
+  const qualifications = opts.qualifications ?? {};
+  const stateOf = (view: string): ViewShadowState => {
+    const generation = qualifications[view], key = qualifiedStateKey(view, generation);
+    return states.get(key) ?? states.set(key, { ...emptyState(), ...(generation === undefined ? {} : { view, qualificationGeneration: generation }) }).get(key)!;
+  };
   /** Adds one sample to the view's summary window, and writes the window's row once it spans an hour. */
   const summarize = (view: string, state: ViewShadowState, now: number, sample: { skipped?: boolean; diffs?: ReadonlyArray<{ classification: ShadowClassification }> }): void => {
     const w = state.summary ??= { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
@@ -778,21 +845,26 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     for (const d of sample.diffs ?? []) w.diffs[d.classification]++;
     if (now - w.sinceMs < VIEW_SHADOW_SUMMARY_MS) return;
     const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now);
-    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...w, streakSamples, streakSinceMs, lastRealMs, ready });
+    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready });
     state.summary = { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
   };
   return {
-    compare({ view, key, requests, legacy, body }) {
+    compare({ view, key, requests, legacy, body, qualificationGeneration }) {
       const now = clock.now();
       const state = stateOf(view);
       state.requests += requests;
       state.firstRequestMs ??= now;
       const viewUnready = unreadySources(body.sources);
-      const unready = legacy.unready !== undefined ? `legacy ${legacy.unready}` : viewUnready === undefined ? undefined : `view ${viewUnready}`;
+      const required = qualifications[view];
+      const generationUnready = required !== undefined && (qualificationGeneration !== required || legacy.qualificationGeneration !== required)
+        ? `current generation ${required} requires both matched producers (legacy ${legacy.qualificationGeneration ?? "unknown"}, body ${qualificationGeneration ?? "unknown"})` : undefined;
+      if (generationUnready === undefined) delete state.qualificationRefusal;
+      else state.qualificationRefusal = generationUnready;
+      const unready = generationUnready ?? (legacy.unready !== undefined ? `legacy ${legacy.unready}` : viewUnready === undefined ? undefined : `view ${viewUnready}`);
       if (unready !== undefined) {
         Object.assign(state, { skipped: (state.skipped ?? 0) + 1, lastSkippedMs: now, lastSkipReason: unready });
         summarize(view, state, now, { skipped: true });
-        opts.store?.save(view, state);
+        opts.store?.save(qualifiedStateKey(view, required), state);
         return { view, key, diffs: [], skipped: unready };
       }
       state.samples++;
@@ -827,13 +899,13 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
           const d = raw.find((r) => r.path === path)!;
           return { legacy: excerpt(d.legacy), view: excerpt(d.view) };
         };
-        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
+        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      opts.store?.save(view, state);
+      opts.store?.save(qualifiedStateKey(view, required), state);
       return { view, key, diffs };
     },
-    readiness: () => [...states.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, clock.now())),
+    readiness: () => activeReadiness(states, qualifications, clock.now()),
   };
 }
 
@@ -871,6 +943,8 @@ export interface ShadowRequest {
   key: string;
   requests: number;
   legacy?: ShadowLegacy;
+  /** The heavy unit's matched inputs, returned to the one fast-lane comparator without changing its sample count. */
+  paired?: { body: ViewBody; legacy: ShadowLegacy; qualificationGeneration?: string };
 }
 
 /** Legacy bodies serve's main thread already knows how to compute, rendered for a sampled request. */

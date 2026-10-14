@@ -90,8 +90,10 @@ with time to act, and WARN above that again.
 ### Base lines 154-161 — MEMORY AND SWAP — the one genuinely…
 
 MEMORY AND SWAP — the one genuinely new reader in the list, and it reads `/proc/meminfo`,
-NEVER THE CGROUP LIMIT. This container is unlimited, so `memory.max` reads the literal string
-`max` and would report unbounded headroom on a host that had already frozen. The measured freeze
+NEVER THE CGROUP LIMIT. The freeze it guards against was the HOST's. Each daemon container has carried
+`memory.max` and `memory.high` since #10371/#10486, but one container's headroom cannot show a host
+that has already frozen; the dispatch floor reads the container's own headroom beside the host's
+(#10860). The measured freeze
 was ~4% available with ZERO swap, and because a reclaim livelock never arms the OOM killer,
 nothing was logged and no other signal existed — which is why swap being absent is part of the
 judgement rather than a footnote.

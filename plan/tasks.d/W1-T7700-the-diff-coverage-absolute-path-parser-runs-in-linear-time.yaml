@@ -1,0 +1,102 @@
+- id: W1-T7700
+  title: "THE SWEEP'S ABSOLUTE-PATH DIFF-COVERAGE PARSER BACKTRACKS EXPONENTIALLY — code-scanning alert #345 (js/redos, error) on src/lib/sweep.ts: a 59-character CI log line takes 6.7 s to reject and each further `!/` pair roughly doubles it, inside the daemon's sweep"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the one absolute-path regex in diffCoverageReport matches in linear time; no other parser changes
+  band_meaning: span
+  origin: "operator session 2026-10-10: code-scanning alert #345 triage (operator packet item 5)"
+  plan_refs: []
+  files: [src/lib/sweep.ts, test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    CURRENT 2026-10-11 actual guarded boundary16:54:07.924/result16:54:14.160 pins mainb33d60b8,
+    sweep blob965a3eb759056a4be47e45dd1383ea07c6810309. The SAME ambiguous repeated group remains
+    in the actual exported production diffCoverageReport at20361. The complete open-head/file census
+    and merged body/branch credit window find no owner or implementation credit for W7700; actual
+    refs/rmd-dispatch positive controls find none for it. Its original reservation5f79ff6e remains held
+    for file-alert345-audit-1791636134649. This is a source/ownership observation, not a new alert GET.
+    Primary CodeQL js/redos guidance recommends removing repetition ambiguity. The fix preserves the
+    recognized language and capture semantics rather than hiding the problem behind a line-length cap.
+    CANDIDATE REFINEMENT 2026-10-10 22:01Z, source pin 09d195c9e, sweep blob 8058c9047. A bounded
+    syntactic diagnostic extracts the actual regex: deleting its redundant repeated directory group yields
+    identical full matches and captures on 4,613 small controls (1,802 accepted), and a 20,000-repetition
+    rejection completes in about 0.092 ms. The separator-free proposal below is superseded: it changes
+    1,117 captures in that corpus, including leading repeated separators and /a/.ts. This is candidate
+    syntax evidence only, NOT execution of diffCoverageReport, an implementation test, or a live fix.
+    The first diagnostic failed before comparison because the monolith exceeded the default output buffer;
+    the corrected bounded source read and receipt absolute-path-candidate-controls-v2.json remain separate.
+    SOURCE REFRESH 2026-10-10 21:23Z on immutable main f3a246295: actual exported diffCoverageReport at
+    src/lib/sweep.ts:19917 still contains the SAME vulnerable absolute-path expression at 19925. The four
+    existing tests still import the REAL sweep module; no parser implementation or new test has run.
+    The 21:07:13 complete four-open-PR/head/file census has no pause/security parser owner. That is a source
+    and ownership checkpoint, NOT a new alert GET or evidence of runtime exploitation. Retain priority 1.
+    The unit proof is the literal unique prefix of the future test title, within the existing narrative
+    length bound. The whole acceptance claim is unchanged; the future proof has NOT executed.
+    READ 2026-10-10 at origin/main dbca9031a; source rechecked on immutable ab7884b5a at 20:10Z.
+    The latest guarded alert GET has boundary 20:12:56.076Z and result 20:12:58.148Z: alert #345 is STILL
+    OPEN/high, js/redos, with location src/lib/sweep.ts:19911 on b659ed784. That is the alert-analysis commit,
+    not this session's source pin. Actual exported diffCoverageReport at ab7884b5a:19903 still has the same
+    expression, and the existing real sweep test still covers absolute paths. No implementation or live fix
+    is credited from either observation. Refresh open-head subject scope and claims before publication.
+    The governed 17:49:20.843Z API read still reports alert #345 OPEN/high on 574ca98d8, with the
+    same vulnerable expression now at src/lib/sweep.ts:19841. The line number moved; the defect did not.
+    The 18:28:46.253Z guarded main fetch pins 88e6de314. Its actual exported diffCoverageReport is at 19896
+    and both production callers remain at 5037 and 5060. Source evidence is refreshed separately from the
+    17:49 API alert state; no later alert-state observation is implied. The complete ten-open-PR/file census
+    at 18:25:38Z found no parser/alert-345 owner. Recheck subject, credits and actual reservation before push.
+    THE ALERT, as GitHub reports it (read 12:32:52Z): #345 is open, js/redos, security severity high, rule severity
+    error. It was created 2026-10-09T23:06:37Z on refs/heads/main at dbca9031a, location src/lib/sweep.ts:19326
+    cols 58-65: "This part of the regular expression may cause exponential backtracking on strings starting with
+    '- /' and containing many repetitions of '!/'."
+    THE CODE. `diffCoverageReport` (src/lib/sweep.ts:19318) scans every line of a failing check's logTail with
+      /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)(?:[^\s:]+[\\/])*[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/
+    The segment class `[^\s:]` itself contains `/` and `\`, so `(?:[^\s:]+[\\/])*` can split a run of `x/x/x/...`
+    in exponentially many ways before failing. It arrived with d40ff98d2 (#10479, 2026-10-09 22:59Z, "retain
+    absolute diff coverage paths"). The shared parser it delegates to, src/lib/diff-coverage-targets.ts:29, uses a
+    single class and is not affected.
+    REPRODUCED in isolation (node 24.21.0, nice 19, cores 4-7, the regex copied verbatim, the witness
+    "- /" + "!/".repeat(n), which never matches):
+
+    | n | length | time |
+    |---|---|---|
+    | 20 | 43 | 20.7 ms |
+    | 24 | 51 | 385 ms |
+    | 26 | 55 | 1.62 s |
+    | 28 | 59 | 6.73 s |
+
+    That is about 2x per extra `!/` pair, so an ~80-character line runs for hours. A positive control (a legitimate
+    absolute path of the same depth, "- /src/" + "a/".repeat(n) + "x.ts:12") matches in under 0.15 ms at every n.
+    REACH. The callers are the daemon sweep's diff-coverage handling, src/lib/sweep.ts:4928 and :4951, on any
+    failing check whose logTail carries the diff-coverage BLOCKED sentence (DIFF_COVERAGE_BLOCK_RE). A CI log is
+    PR-author-controlled text: one printed line can hold the sweep, which runs on the daemon's event loop, so
+    every lane stalls with it.
+    OWNERSHIP. No plan shard names diffCoverageReport or this regex; W1-T388 (ledger-grep ReDoS) is a different
+    surface. The open-PR scan at filing is recorded in the filing PR.
+    TEST HOME. The current existing test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts imports the
+    REAL production sweep module and already checks absolute log paths. Extend that suite rather than adding
+    a second high-reach importer. Keep the reach baseline unchanged; do not disguise an import or replace the
+    real production reader with a copied regex. No new implementation test or reach result is claimed yet.
+  design: |
+    Remove only the redundant repeated directory group from the actual absolute-path expression:
+      /^\s*-\s+((?:[A-Za-z]:[\\/]|\/)[^\s:]+\.[cm]?[jt]sx?):(\d+)(?:\s|$)/
+    The final stem's class already includes both separators. Choosing zero repeated directory components
+    therefore accepts every string the original repetition accepts, with the same captures. Eliminating
+    that ambiguous repetition avoids exponential partitions WITHOUT changing leading/repeated separators,
+    dot-prefixed names, Windows drives, glosses, malformed-path rejection, or Unicode.
+    The real production-reader regression must exercise those shapes; a copied-regex diagnostic is not
+    acceptance evidence. Keep the existing real sweep suite and importer/reach baselines unchanged.
+    Do not cap the line length as the fix: a cap hides the shape. Keep the parse result identical for every
+    current fixture in the sweep's diff-coverage tests.
+  acceptance:
+    - claim: "diffCoverageReport rejects the alert's witness line in linear time and still returns every absolute path it returned before"
+      proof: 'unit test: the absolute-path diff-coverage parser rejects a long "- /!/!/" line in linear time'
+  falsifier: |
+    Restore the old repeated directory group: the witness line ("- /" + "!/".repeat(40), inside a log tail that carries
+    the diff-coverage BLOCKED sentence) no longer returns within the test's bound, and the test fails. Run the test under
+    a child-process timeout so the falsified run fails instead of hanging the suite.

@@ -1,5 +1,6 @@
 import { systemClock, type Clock } from "./clock.js";
 import { parseGardenerRuntime, readGardenerRuntime, type GardenerRuntimeSnapshot } from "./gardener-runtime.js";
+import { readGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
 import { sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 
@@ -31,7 +32,8 @@ export function buildGardenersRoute(input: {
       sendJson(res, 503, { error: "gardeners_unavailable", reason: "clock_skew" });
       return;
     }
-    sendJson(res, 200, { ...snapshot, generatedAt: clock.iso(),
+    const opportunityEvidence = await readGardenerOpportunityEvidence(input.stateDir, input.repository, clock);
+    sendJson(res, 200, { ...snapshot, generatedAt: clock.iso(), opportunityEvidence,
       coverage: "registered-off-loop", counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
   } };
 }

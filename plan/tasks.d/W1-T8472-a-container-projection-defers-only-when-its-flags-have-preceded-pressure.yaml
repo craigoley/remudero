@@ -1,0 +1,65 @@
+- id: W1-T8472
+  title: "THE CONTAINER PROJECTION DEFERS ONLY WHEN ITS FLAGS HAVE PRECEDED PRESSURE — live on core after #11004 the memory budget's container arm flagged 49% of starts, yet the container came under its own memory pressure within 5 minutes after 84% of flagged starts and 86% of unflagged ones; judge the projection by its lift over the base rate, as #11004 judges swap-in"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium # shadow-only verdicts; nothing admits, defers or refuses work while hostMemoryBudget.mode is shadow
+  band_meaning: span
+  origin: "operator session 2026-10-12: the live memory-budget read after #11004 (eacc28b41)"
+  plan_refs: [W1-T7093, W1-T7094]
+  files: [src/lib/host-memory-shadow.ts, test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-12, read-only, core instance: 436 `memory_budget.shadow` rows from 04:31Z to 07:52Z, after three
+    boots on heads containing #11004 (eacc28b41). Serve was running. No OOM kills.
+      - Would-defer 65%. The container arm (`container-ceiling`) fired on 215 rows (49%), and on 43 of them it was the
+        only reason. The swap-in arm fell to 7.6%, as #11004 intended.
+      - The arm has no lift. Within 5 minutes, the container's own pressure (`containerPressed`: its memory.pressure
+        or its swap-in past the policy thresholds) followed 84% of flagged rows and 86% of unflagged rows. A crossing
+        of memory.high during a stall (`containerSighted`, 4 rows) followed 10% of flagged rows and 26% of unflagged.
+      - The projection is not double counting: each claim already subtracts its tree's `residentMib`. The container is
+        simply busy: a median of 5 own claims, mostly implement and test, so the typical claim rose to a median of
+        1,761 MiB from 567 MiB overnight, and the projection's median (8,322 MiB) sits at memory.high (8,379 MiB).
+      - Per-class peaks are already learned (host-memory-learning.ts, #10730/#10763: a decayed p90 estimate and a
+        median typical per class), so learning them again would not help. memory.peak cannot be reset inside the
+        container (its cgroup is mounted read-only, #11004), so transient spikes stay invisible to the projection.
+    #11004 fixed the same shape for swap-in: the arm counts only when the instance's own history shows swap-in followed
+    by stall more often than any verdict, by more than twice the sampling noise (`swapStallRelationOf`, `swapInBasis`).
+    The container projection needs the same test. A container AT its ceiling now (`pressure.sighted`) is a measurement,
+    not a prediction, and keeps deferring.
+  design: |
+    1. Record each verdict's projection flag and the container's outcome in the instance's existing pressure store
+       (`CONTAINER_PRESSURE_FILE`, beside `swap`): when, whether the projection was over its onset
+       (`containerProjected > onset.mib`), and whether the container was under its own pressure (`pressure.pressed`).
+       Keep the same history span and cap as the swap-in history; never a second store file.
+    2. A pure `containerLiftOf(history, now)` mirrors `swapStallRelationOf`: over the closed windows, the share of
+       flagged verdicts followed by own pressure within the window, against the share of all verdicts, with twice the
+       flagged share's sampling noise. Too few flagged verdicts with a closed window is `unlearned`.
+    3. In `evaluateShadowMemory`, a projection over its onset adds `container-ceiling` only while the lift exceeds the
+       noise, or while the relation is unlearned (the rate alone, as swap-in does). `pressure.sighted` still adds it
+       unconditionally.
+    4. Every row records `numbers.containerBasis` naming the decision: "projection predicts pressure: A% of N flagged
+       verdicts were followed by it, against B% of all (noise C%)", "does not predict", or "the projection alone: …".
+    No new policy value and no fixed threshold: the same window, history span and minimum count the swap-in relation
+    uses. Mode stays shadow. Do not touch any memory limit, plan/policy.yaml's hostMemoryBudget, or
+    host-memory-learning.ts.
+  acceptance:
+    - claim: "a projection over its onset whose flagged verdicts were followed by own pressure no more often than all verdicts adds no container-ceiling reason, and the row's containerBasis says it does not predict pressure"
+      proof: 'grep: test("W1-T8472: a container projection without lift adds no container-ceiling reason" in test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts'
+    - claim: "a projection over its onset whose flagged verdicts were followed by own pressure beyond the noise adds container-ceiling, and the basis names the shares"
+      proof: 'grep: test("W1-T8472: a container projection with lift adds container-ceiling and names its shares" in test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts'
+    - claim: "a container at its ceiling now defers whatever its lift reads"
+      proof: 'grep: test("W1-T8472: a container at its ceiling now defers whatever its lift reads" in test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts'
+    - claim: "each verdict appends its projection flag and own-pressure outcome to the pressure store's history"
+      proof: 'grep: test("W1-T8472: each verdict records its projection flag and outcome in the pressure store" in test/a-container-projection-defers-only-when-its-flags-have-preceded-pressure.test.ts'
+  falsifier: |
+    Build a history where flagged verdicts are followed by own pressure at the same rate as all verdicts (the live
+    84% against 86%) and evaluate a start whose projection is over its onset. At origin/main the row carries
+    `container-ceiling` and no `containerBasis`; with the change it carries neither the reason nor a "predicts" basis.
+    Flip the history so flagged verdicts are followed far more often and the reason returns. Remove the
+    `pressure.sighted` branch's precedence and the at-ceiling test reds.

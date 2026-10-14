@@ -1,0 +1,34 @@
+- id: W1-T9391
+  title: "Prepare P25 briefing and governance alignment (ratification candidate groundwork)"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  risk: "low"
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=69f0b80d6c299e69
+  attempts: 0
+  files:
+    - docs/ratification/p25_briefing.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: "The P25 briefing document exists with scope, criteria, and acceptance metrics."
+      proof: "grep: \"scope\" in docs/ratification/p25_briefing.md"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-05 follow-up on W1-T5689-1791183035928, ratified via rmd approve:
+  
+    follow-up harvest [research]: confirm the `DaemonDeps` literal and the
+    `build*DaemonHooks`/`buildSweepHook` seeds actually reach `syncPlanFromOrigin` and
+    `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
+    W1-T5689 (run W1-T5689-1791183035928)
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed title and acceptance concern a P25 governance briefing, while the rationale requests research confirming named daemon hooks reach syncPlanFromOrigin and sweepLandingSteps; the supplied record does not connect these objectives.; on the change's description/files alone, no diff was read — The sole proof checks for \"scope\" in the briefing; it does not verify the requested hook reachability, governance alignment, criteria, or acceptance metrics. The finding therefore cannot be verified from what is shown, meeting the stated escalation condition."
+    judged_at: "2026-10-14T06:48:34.512Z"
+    pin: "7a2e8cb1404388628b11394393a578211aec56f1e90424e2cbdd02a756aaeca8"

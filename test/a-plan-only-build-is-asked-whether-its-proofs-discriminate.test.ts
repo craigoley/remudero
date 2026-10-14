@@ -178,7 +178,7 @@ test("W1-T4921: rmd preflight --proofs answers a grep proof in-process and still
   const { dir, base } = twoCommitRepo();
   const asked: string[] = [];
   const spawn = (_file: string, args: string[]) => {
-    asked.push(args[args.indexOf("check-proof") + 1]);
+    asked.push(args[args.indexOf("--base") - 1]);
     return { status: 0, stdout: "", stderr: "" };
   };
   const git = (args: readonly string[]) => (args[0] === "merge-base" ? base : args[0] === "log" ? "feat: x\n\nRemudero-Task: W1-T1\n" : "headsha\n");

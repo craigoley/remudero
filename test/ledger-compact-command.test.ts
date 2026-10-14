@@ -275,18 +275,51 @@ test("ledger-compact never admits the live ledger into an operator compaction wi
   assert.equal(selected.eligibleCount, 1);
 });
 
-test("ledger-compact refuses an output collision with an unselected archive before writing or removing", () => {
+test("ledger-compact progresses through output collisions without touching unselected archives", () => {
   const selectedName = compactedArchiveName("2026-08-01T00:00:00.000Z");
   const collidingName = compactedArchiveName("2026-09-01T00:00:00.000Z");
   const memory = memoryFs({
     [join(STATE_DIR, selectedName)]: gzipRows([row("2026-09-01T00:00:00.000Z", "FROM-OLD-FILE")]),
     [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows([row("2026-09-01T00:00:00.000Z", "FROM-SECOND-OLD-FILE")]),
     [join(STATE_DIR, collidingName)]: gzipRows([row("2026-09-01T00:00:00.000Z", "UNSELECTED")]),
+    [join(STATE_DIR, collidingName.replace(".ndjson.gz", "-part-000001.ndjson.gz"))]:
+      gzipRows([row("2026-09-01T00:00:00.000Z", "UNSELECTED-PART")]),
   });
   const before = snapshot(memory.files);
+  const rowsBefore = corpusRows(memory.files);
+  const unselectedBytes = memory.files.get(join(STATE_DIR, collidingName));
+
+  const preview = command(["--dry-run", "--max-sources", "2"], memory);
+  assert.equal(preview.code, 0, preview.errors.join("\n"));
+  assert.deepEqual(snapshot(memory.files), before);
+  assert.deepEqual(memory.writes, []);
+  assert.deepEqual(memory.removals, []);
 
   const result = command(["--max-sources", "2"], memory);
 
+  assert.equal(result.code, 0, result.errors.join("\n"));
+  assert.deepEqual(corpusRows(memory.files), rowsBefore);
+  assert.deepEqual(memory.files.get(join(STATE_DIR, collidingName)), unselectedBytes);
+  const outputName = collidingName.replace(".ndjson.gz", "-part-000002.ndjson.gz");
+  assert.deepEqual(memory.writes, [join(STATE_DIR, outputName)]);
+  assert.equal(memory.removals.length, 2);
+  assert.equal(memory.files.size, 3, "four archives become three without losing a distinct row");
+  assert.equal(JSON.parse(preview.out[0]!).archiveName, outputName);
+  assert.equal(JSON.parse(result.out[0]!).archiveName, outputName);
+});
+
+test("ledger-compact still refuses a late output collision before any writes or removals", () => {
+  const a = row("2026-08-01T00:00:00.000Z", "A");
+  const memory = memoryFs({
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: gzipRows([a]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T02:00:00.000Z"))]: gzipRows([a]),
+  });
+  const before = snapshot(memory.files);
+  const target = join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"));
+  let checks = 0;
+  const exists = memory.fs.existsSync;
+  memory.fs.existsSync = path => path === target ? ++checks > 1 : exists(path);
+  const result = command([], memory);
   assert.equal(result.code, 1);
   assert.match(result.errors.join("\n"), /refusing to overwrite unselected archive/);
   assert.deepEqual(snapshot(memory.files), before);

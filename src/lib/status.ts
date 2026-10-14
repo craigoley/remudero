@@ -43,6 +43,7 @@ import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
+import { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -1432,10 +1433,7 @@ export function seedCountFromCircuitBreak(
   // The ONE helper reading `task` as well as `task_id` — see {@link LedgerIndex} for why the bucket is keyed on
   // both, which is what keeps this scan's row set unchanged.
   for (const line of indexedTaskRows(lines, taskId, index)) {
-    if (
-      line.task_id === taskId &&
-      (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released")
-    ) {
+    if (line.task_id === taskId && isDispatchStreakReset(line)) {
       seed = undefined; // forward progress — the same reset the counter itself applies
       continue;
     }
@@ -1447,41 +1445,16 @@ export function seedCountFromCircuitBreak(
   return seed;
 }
 
-/** Infrastructure refusals did not give this task a chance to open a PR. Match the run's terminal
- * verdict, which is already present in historical ledger rows, rather than a newer write-time flag. */
-const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
-  "blocked_containment",
-  "blocked_isolation",
-  "blocked_toolchain",
-  "blocked_transient",
-  "task_already_merged",
-]);
+export { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal };
 
-/** These also consume no task attempt for lifetime judgment, but the existing dispatch breaker
- * counts them. Keep the two decisions separate so a new terminal verdict cannot reset its streak. */
-const LIFETIME_ONLY_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
-  "blocked_git_fetch", "blocked_inflight", "handed_off",
-]);
+/** The ledger step of the dispatch-break judge's ruling ({@link judgeDispatchBreak}, stall-verifier.ts). */
+export const DISPATCH_BREAKER_JUDGED_STEP = "dispatch.breaker_judged";
 
-/** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
- *  refused before any worker ran — 10 lock-contention refusals tripped W1-T4684's breaker on 2026-09-29. */
-const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
-  "managed_checkout.refresh",
-  "worktree.node_modules",
-  "preflight.containment",
-  "preflight.isolation",
-]);
-
-export function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
-  if (typeof line.verdict !== "string") return undefined;
-  if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
-  if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
-  return undefined;
-}
-
-export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
-  return infrastructureRefusal(line) ??
-    (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
+/** Rows that end a streak: a new owned PR, a merge credit, an operator's `rmd release` (W1-T4691), or the
+ *  dispatch-break judge ruling the attempts so far are worth continuing (W1-T7742). */
+export function isDispatchStreakReset(line: Record<string, unknown>): boolean {
+  return line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released" ||
+    (line.step === "dispatch.breaker_judged" && line.decision === "continue");
 }
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
@@ -1597,6 +1570,8 @@ interface DispatchStreakTally {
   count: number;
   excludedDispatches: number;
   excludedByReason: Record<string, number>;
+  /** The newest reset row's identity: a count that dropped when it changed is that reset, not a rotation. */
+  lastReset?: string;
 }
 
 /** `taskId`'s rows in timestamp order. A rotation union is live-first, then newest-first
@@ -1637,25 +1612,21 @@ function dispatchStreakTally(
   // A run's terminal verdict follows its start, so collect exclusions before counting starts.
   const refusalByRunId = new Map<string, string>();
   for (const line of rows) {
-    if (
-      line.task_id === taskId &&
-      line.step === "verdict" &&
-      infrastructureRefusal(line) !== undefined &&
-      typeof line.run_id === "string"
-    ) {
-      refusalByRunId.set(line.run_id, infrastructureRefusal(line)!);
-    }
+    const refusal = line.task_id === taskId && line.step === "verdict" ? streakRefusal(line) : undefined;
+    if (refusal !== undefined && typeof line.run_id === "string") refusalByRunId.set(line.run_id, refusal);
   }
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
   let count = 0;
   let excludedDispatches = 0;
   let excludedByReason: Record<string, number> = {};
+  let lastReset: string | undefined;
   for (const line of rows) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened" || isMergeCreditLine(line) || line.step === "dispatch.breaker_released") {
-      count = 0; // forward progress — a new PR, a credited merge, or an operator release resets the streak
+    if (isDispatchStreakReset(line)) {
+      count = 0; // forward progress — a new PR, a credited merge, an operator release, or a judge's continue
       excludedDispatches = 0;
       excludedByReason = {};
+      lastReset = `${String(line.step)}|${String(line.run_id)}|${String(line.ts)}`;
     } else if (line.step === "run.start") {
       const reason = typeof line.run_id === "string"
         ? refusalByRunId.get(line.run_id) ?? (orphanRunIds.has(line.run_id) ? "orphaned_run" : undefined)
@@ -1669,7 +1640,7 @@ function dispatchStreakTally(
       count++;
     }
   }
-  return { count, excludedDispatches, excludedByReason };
+  return { count, excludedDispatches, excludedByReason, lastReset };
 }
 
 export function dispatchesWithoutNewOwnedPr(
@@ -1885,10 +1856,12 @@ export function isOrphanFaultTripped(
 export interface DispatchBreakerCache {
   /** @internal highest per-task `dispatchesWithoutNewOwnedPr` count observed while the ledger was readable. */
   lastCounts: Map<string, number>;
+  /** @internal the newest streak-reset row each `lastCounts` entry was observed under (W1-T7742). */
+  lastResets?: Map<string, string | undefined>;
 }
 
 export function createDispatchBreakerCache(): DispatchBreakerCache {
-  return { lastCounts: new Map() };
+  return { lastCounts: new Map(), lastResets: new Map() };
 }
 
 /**
@@ -1947,7 +1920,8 @@ export function evaluateDispatchBreakerDetailed(
   const lines = opts.snapshot?.lines ?? readLedgerLines(ledgerPath, ledgerFs);
   // R-23: ONE pass to bucket, then per-task lookups — the helpers below otherwise walk the whole array each.
   const index = opts.snapshot?.index ?? buildLedgerIndex(lines);
-  const { count: freshCount, excludedDispatches, excludedByReason } = dispatchStreakTally(lines, taskId, index);
+  const { count: freshCount, excludedDispatches, excludedByReason, lastReset } = dispatchStreakTally(lines, taskId, index);
+  const resetKeys = (cache.lastResets ??= new Map());
   let priorCount = cache.lastCounts.get(taskId);
   // W1-T2425: FIRST OBSERVATION OF THIS TASK IN THIS PROCESS — seed the baseline from the breaker's own on-disk
   // record so the regression arm below is reachable across a restart. Only ever on a MISS (a live process's own
@@ -1962,12 +1936,15 @@ export function evaluateDispatchBreakerDetailed(
   const hasNewOwnedPr = lastPrOpened(lines, taskId, index) !== undefined;
   const base = { freshCount, excludedDispatches, excludedByReason, maxDispatches, priorCount, hasNewOwnedPr };
 
-  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr) {
+  // W1-T7742: a reset written since the prior observation (a release, a judge's continue) explains the drop.
+  const resetSincePrior = resetKeys.has(taskId) && resetKeys.get(taskId) !== lastReset;
+  if (priorCount !== undefined && freshCount + excludedDispatches < priorCount && !hasNewOwnedPr && !resetSincePrior) {
     // count regressed with nothing in the ledger to explain it — runs now excluded as infrastructure DO explain it
     return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
   cache.lastCounts.set(taskId, freshCount);
+  resetKeys.set(taskId, lastReset);
   const ledgerState: DispatchBreakerState = freshCount >= maxDispatches ? "tripped" : "clear";
   if (ledgerState !== "tripped" || !("openHeadBranches" in opts)) {
     return { ...base, state: ledgerState, ledgerState };
@@ -3442,10 +3419,15 @@ export const INDEPENDENT_BLOCK_RELEASED_STEP = "dispatch.independent_block_relea
 export interface IndependentBlockRelease {
   blockingRunId: string;
   blockedAt: string;
-  evidence: "main_moved" | "contract_revised";
+  evidence: "main_moved" | "contract_revised" | "provider_recovered";
   /** For `main_moved`: the first merge credit (any task) dated after the block. */
   mergedTaskId?: string;
   mergedAt?: string;
+  /** W1-T8676, for `provider_recovered`: the failed worker's provider and its first later clean result row. */
+  provider?: string;
+  recoveredAt?: string;
+  recoveredTaskId?: string;
+  recoveredStep?: string;
   /** Consecutive `failed`/`no_pr` latches on this task, this one included. */
   latchCount: number;
   /** The back-off served: the base doubled for each earlier consecutive latch. */
@@ -3472,6 +3454,39 @@ function firstMergeAfter(
     first = { taskId, ts: line.ts, ms };
   }
   return first;
+}
+
+/** W1-T8676: the rows a worker writes when its call ends, each naming its `provider` and `subtype`. */
+const WORKER_RESULT_STEPS: ReadonlySet<string> = new Set(["recon.done", "implement.done", "implement.continued", "fix.done"]);
+/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. */
+const WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/;
+
+/** W1-T8676: the first worker result row (any task) from `provider` that ended clean strictly after `afterMs`. */
+function firstCleanWorkerResultAfter(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  provider: string,
+  afterMs: number,
+  index: LedgerIndex | undefined,
+): { taskId: string; ts: string; step: string; ms: number } | undefined {
+  let first: { taskId: string; ts: string; step: string; ms: number } | undefined;
+  const rows = index?.rows === lines ? [...WORKER_RESULT_STEPS].flatMap((step) => indexedStepRows(lines, step, index)) : lines;
+  for (const line of rows) {
+    if (typeof line.step !== "string" || !WORKER_RESULT_STEPS.has(line.step) || line.provider !== provider ||
+      line.subtype !== "success" || line.api_error === true || typeof line.ts !== "string") continue;
+    const ms = Date.parse(line.ts);
+    if (!Number.isFinite(ms) || ms <= afterMs || (first && ms >= first.ms)) continue;
+    first = { taskId: typeof line.task_id === "string" ? line.task_id : "", ts: line.ts, step: line.step, ms };
+  }
+  return first;
+}
+
+/** W1-T8676: every task's projected latch release, read off one status projection for the daemon to ledger. */
+export function independentBlockReleasesFrom(
+  projection: ReadonlyMap<string, StatusProjection> | undefined,
+): ReadonlyMap<string, IndependentBlockRelease> {
+  const releases = new Map<string, IndependentBlockRelease>();
+  for (const [taskId, p] of projection ?? []) if (p.independentBlockRelease) releases.set(taskId, p.independentBlockRelease);
+  return releases;
 }
 
 /** The latest durable independent-failure block if no later dispatch superseded it.
@@ -3507,7 +3522,9 @@ export function latestIndependentFailureBlock(
 
 /** W1-T7533: a `failed`/`no_pr` latch blocked the run.start that alone could clear it. It now releases
  * once main moved (a merge credit after the block) or the task's contract revision changed, AND the block
- * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules. */
+ * is older than a back-off doubling per consecutive latch. Other verdict classes keep their own rules.
+ * W1-T8676: a `failed` latch from a worker error releases at once when the same provider later ends a worker
+ * call clean, for any task: the task did nothing wrong, and that row is the evidence the provider is back. */
 export function independentFailureLatch(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -3530,8 +3547,11 @@ export function independentFailureLatch(
   // W1-T7533: the latest `failed`/`no_pr` latch, how many consecutive runs latched that way, and the
   // contract revision each run's verdict saw. A run that ends without any block resets the streak.
   const revisionByRun = new Map<string, unknown>();
+  // W1-T8676: each run's worker-error verdict (when, and which provider), and the provider its worker rows name.
+  const workerErrorByRun = new Map<string, { ms: number; provider: unknown }>();
+  const providerByRun = new Map<string, string>();
   const releasedRuns = new Set<string>();
-  let failureLatch: { runId: string; ts: string; ms: number } | undefined;
+  let failureLatch: { runId: string; ts: string; ms: number; verdict: unknown } | undefined;
   let failureStreak = 0;
   let runOpen = false;
   let runLatched = false;
@@ -3545,9 +3565,14 @@ export function independentFailureLatch(
       runOpen = true;
       runLatched = false;
     }
+    if (typeof line.step === "string" && WORKER_RESULT_STEPS.has(line.step) && typeof line.run_id === "string" &&
+      typeof line.provider === "string") providerByRun.set(line.run_id, line.provider);
     if (line.step === "verdict" && typeof line.run_id === "string") {
       stageByRun.set(line.run_id, line.stage);
       revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
+      const verdictMs = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (line.verdict === "failed" && typeof line.reason === "string" && WORKER_ERROR_REASON.test(line.reason) &&
+        Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
@@ -3593,7 +3618,7 @@ export function independentFailureLatch(
       if (last === "blocked" && !environmental && (line.verdict === "failed" || line.verdict === "no_pr") &&
         runId && typeof line.ts === "string" && Number.isFinite(ms)) {
         if (!runLatched) failureStreak += 1;
-        failureLatch = { runId, ts: line.ts, ms };
+        failureLatch = { runId, ts: line.ts, ms, verdict: line.verdict };
       } else {
         failureLatch = undefined;
       }
@@ -3616,6 +3641,14 @@ export function independentFailureLatch(
   if (last === "blocked" && failureLatch !== undefined && failureLatch.runId !== categorizedRefusalRunId) {
     const now = nowMs ?? (index?.rows === lines ? index.latestTsMs : latestLedgerTsMs(lines)) ?? failureLatch.ms;
     const latchCount = Math.max(1, failureStreak);
+    const workerError = failureLatch.verdict === "failed" ? workerErrorByRun.get(failureLatch.runId) : undefined;
+    const provider = typeof workerError?.provider === "string" ? workerError.provider : providerByRun.get(failureLatch.runId);
+    const recovered = workerError && provider ? firstCleanWorkerResultAfter(lines, provider, workerError.ms, index) : undefined;
+    if (recovered) {
+      return { blocked: false, release: { blockingRunId: failureLatch.runId, blockedAt: failureLatch.ts, latchCount, backoffMs: 0,
+        receiptRecorded: releasedRuns.has(failureLatch.runId), evidence: "provider_recovered", provider,
+        recoveredAt: recovered.ts, recoveredTaskId: recovered.taskId, recoveredStep: recovered.step } };
+    }
     const backoffMs = INDEPENDENT_BLOCK_BASE_BACKOFF_MS * 2 ** (latchCount - 1);
     if (now - failureLatch.ms >= backoffMs) {
       const seenRevision = revisionByRun.get(failureLatch.runId);

@@ -82,8 +82,18 @@ export interface RouteReadTotals { reads: number; lastAt: string | null }
 /** Upper bounds (ms) of the handler-time buckets; a percentile reads as its bucket's bound, capped at the max. */
 export const ROUTE_LATENCY_BUCKETS_MS: readonly number[] = [0.25, 0.5, 1, 2, 3, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000];
 const OVERFLOW = "+Inf";
-export interface RouteLatency { n: number; maxMs: number; buckets: Record<string, number> }
-export interface RouteLatencyReading extends RouteLatency { p50Ms: number | null; p99Ms: number | null }
+/** A response's status class: the key a route's handler time is split by, so a fast 500 never lowers the p50 of the 200s. */
+export type StatusClass = "2xx" | "304" | "4xx" | "5xx" | "other";
+export const statusClassOf = (status: number): StatusClass =>
+  status === 304 ? "304" : status >= 200 && status < 300 ? "2xx" : status >= 400 && status < 500 ? "4xx" : status >= 500 && status < 600 ? "5xx" : "other";
+/** Routes that hold a response open for as long as the client listens: never timed (their "handler time" is the connection's life). */
+export const STREAM_ROUTE_PATHS: ReadonlySet<string> = new Set(["/v1/views/events"]);
+export interface RouteLatency { n: number; maxMs: number; buckets: Record<string, number>; statusClass?: Partial<Record<StatusClass, RouteLatency>> }
+export interface RouteLatencyReading extends Omit<RouteLatency, "statusClass"> {
+  p50Ms: number | null;
+  p99Ms: number | null;
+  statusClass?: Partial<Record<StatusClass, RouteLatencyReading>>;
+}
 
 /** Why a stale view source is not fresh, worst last; `none` is a stale source that names no phase. */
 export const STALE_PHASE_ORDER: readonly (SourcePhase | "none")[] = ["warming", "refreshing", "catching_up", "behind", "elsewhere", "failed", "none"];
@@ -167,6 +177,11 @@ const bucketOf = (ms: number): string => String(ROUTE_LATENCY_BUCKETS_MS.find((b
 function addLatency(into: RouteLatency | undefined, from: RouteLatency): RouteLatency {
   const out: RouteLatency = { n: (into?.n ?? 0) + from.n, maxMs: Math.max(into?.maxMs ?? 0, from.maxMs), buckets: { ...into?.buckets } };
   for (const [bucket, n] of Object.entries(from.buckets)) out.buckets[bucket] = (out.buckets[bucket] ?? 0) + n;
+  if (into?.statusClass || from.statusClass) {
+    const classes: Partial<Record<StatusClass, RouteLatency>> = { ...into?.statusClass };
+    for (const [cls, l] of Object.entries(from.statusClass ?? {}) as Array<[StatusClass, RouteLatency]>) classes[cls] = addLatency(classes[cls], l);
+    out.statusClass = classes;
+  }
   return out;
 }
 
@@ -182,7 +197,9 @@ function percentile(latency: RouteLatency, q: number): number | null {
 }
 
 export function readLatency(latency: RouteLatency): RouteLatencyReading {
-  return { ...latency, p50Ms: percentile(latency, 0.5), p99Ms: percentile(latency, 0.99) };
+  const { statusClass, ...totals } = latency;
+  return { ...totals, p50Ms: percentile(latency, 0.5), p99Ms: percentile(latency, 0.99),
+    ...(statusClass ? { statusClass: Object.fromEntries(Object.entries(statusClass).map(([cls, l]) => [cls, readLatency(l)])) as Partial<Record<StatusClass, RouteLatencyReading>> } : {}) };
 }
 
 export function worstPhase(counts: StaleSourceCounts): SourcePhase | "none" {
@@ -297,8 +314,11 @@ export function createRouteReadRollup(opts: {
   tickMs?: number;
   /** A monotonic millisecond reading for handler times; the default is `performance.now`. */
   elapsed?: () => number;
+  /** Routes registered as streams: never timed, and left out of `viewLatency`. Default `STREAM_ROUTE_PATHS`. */
+  streamPaths?: ReadonlySet<string>;
 } = {}): RouteReadRollup {
   const clock = opts.clock ?? systemClock;
+  const streamPaths = opts.streamPaths ?? STREAM_ROUTE_PATHS;
   const elapsed = opts.elapsed ?? (() => performance.now());
   const file = opts.stateDir === undefined ? undefined : join(opts.stateDir, ROUTE_READS_FILE);
   let state = emptyState();
@@ -447,7 +467,7 @@ export function createRouteReadRollup(opts: {
       const timed = merged.latency?.[path];
       return { path, kind, layers: legacyLayersOf(path), zeroConsoleDays: streak(totals.console?.lastAt ?? null), ...(timed ? { latency: readLatency(timed) } : {}), ...totals };
     });
-    const viewLatency = readLatency(Object.entries(merged.latency ?? {}).filter(([path]) => routeReadKind(path) === "view")
+    const viewLatency = readLatency(Object.entries(merged.latency ?? {}).filter(([path]) => routeReadKind(path) === "view" && !streamPaths.has(path))
       .reduce<RouteLatency>((sum, [, l]) => addLatency(sum, l), { n: 0, maxMs: 0, buckets: {} }));
     const stale = merged.staleness ?? emptyStaleness();
     const layers = Object.keys(LEGACY_CACHE_LAYERS).map((layer): RouteReadLayerSummary => {
@@ -464,12 +484,12 @@ export function createRouteReadRollup(opts: {
       streams: { views: { ...(merged.streams?.views ?? emptyStream()), subscribers: live.views }, status: { ...(merged.streams?.status ?? emptyStream()), subscribers: live.status } } };
   };
 
-  const time = (path: string, raw: number): void => {
+  const time = (path: string, raw: number, status: number): void => {
     rollTo(clock.now());
     const ms = Math.round(raw * 1000) / 1000;
     const bucket = bucketOf(ms);
-    const prior = latency.get(path) ?? { n: 0, maxMs: 0, buckets: {} };
-    latency.set(path, { n: prior.n + 1, maxMs: Math.max(prior.maxMs, ms), buckets: { ...prior.buckets, [bucket]: (prior.buckets[bucket] ?? 0) + 1 } });
+    const sample: RouteLatency = { n: 1, maxMs: ms, buckets: { [bucket]: 1 } };
+    latency.set(path, addLatency(latency.get(path), { ...sample, statusClass: { [statusClassOf(status)]: sample } }));
   };
 
   const rollup: RouteReadRollup = {
@@ -507,7 +527,8 @@ export function createRouteReadRollup(opts: {
         rollup.count(route.path, routeReadCaller(req));
         const started = elapsed();
         res.once("finish", () => {
-          if (!String(res.getHeader("content-type") ?? "").startsWith("text/event-stream")) time(route.path, elapsed() - started);
+          if (streamPaths.has(route.path)) return;
+          if (!String(res.getHeader("content-type") ?? "").startsWith("text/event-stream")) time(route.path, elapsed() - started, res.statusCode);
         });
         return route.handler(req, res, ctx);
       },

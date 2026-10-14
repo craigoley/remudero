@@ -1,0 +1,41 @@
+- id: W1-T8946
+  title: "A CANCELLED LIGHT GATE IS POSTED AS CANCELLED, NOT FAILURE — ci.yml's commitlint-job reporter maps every step outcome other than success/skipped to a `failure` check run, so a cancelled rule-checks step reads as a red the fix lane spends a ci-log round on instead of a re-run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high # .github/workflows/ci.yml's gate reporter posts the required check runs
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-13: PR-flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-13/rc-out.txt); operator: go with all of your recommendations"
+  plan_refs: [W1-T4399, W1-T5858, W1-T5802, W1-T2283]
+  files: [.github/workflows/ci.yml, test/a-cancelled-light-gate-is-posted-as-cancelled-not-failure.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-08..12 (PR-flow re-measure): of 110 rule-checks check runs posted on failing build PRs, 11 rows
+    on 9 PRs (#9948, #10221, #10344, #10350, #10482, #10628, #10948, #11049, #11176) carry the summary
+    "W1-T4399: reported by this job's rule-checks step(s) (outcome(s): cancelled)" with conclusion failure
+    (e.g. gh api commits/3153f3ebf/check-runs?check_name=rule-checks → "failure … (outcome(s): cancelled)").
+    The cause is the reporter step of ci.yml's commitlint job (W1-T4399, `report()`): any constituent outcome other
+    than success or skipped sets conclusion="failure". GitHub's own `cancelled` conclusion is lost, so the sweep's
+    cancelledRequiredChecks (src/run-task.ts, which already reads a posted gate's run-scoped job id, W1-T5802) never
+    sees a cancellation it would re-queue, and fetchCiFailures hands a ci-log fix round a "red" that has no failing
+    test. Doctrine already treats CANCELLED as not-red (cancelled-is-not-red); the reporter erases it.
+  design: |
+    In ci.yml's commitlint-job reporter `report()`: a constituent outcome of `cancelled` (and no constituent `failure`)
+    posts conclusion `cancelled`; any `failure` still posts `failure`; success/skipped unchanged; a failed setup still
+    fails every gate (W1-T5858 unchanged). The output title names the cancelled step. ci-gate keeps treating a
+    cancelled REQUIRED check as not-passing (no merge-gate change).
+  acceptance:
+    - claim: "a cancelled gate step is posted as a cancelled check run, not a failure"
+      proof: 'grep: test("W1-T8946: a cancelled gate step posts a cancelled check run" in test/a-cancelled-light-gate-is-posted-as-cancelled-not-failure.test.ts'
+    - claim: "a failed constituent still posts failure even beside a cancelled one"
+      proof: 'grep: test("W1-T8946: a failed constituent still posts failure beside a cancelled one" in test/a-cancelled-light-gate-is-posted-as-cancelled-not-failure.test.ts'
+  falsifier: |
+    Run the reporter step's real bash body (the harness test/a-failed-gate-setup-fails-every-gate-it-reports.test.ts
+    already uses: parse ci.yml, stub node, gh shim recording posts) with OUTCOME_RULE_CHECKS=cancelled and a
+    successful setup. At origin/main the rule-checks post has conclusion failure; with the change, cancelled. With
+    outcomes "a=cancelled" "b=failure" the post is failure at both.

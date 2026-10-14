@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
-import { checkProofCommand, CHECK_PROOF_EXIT, COMMANDS } from "../src/run-task.js";
+import { COMMANDS } from "../src/run-task.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 
 // ── W1-T387: check-proof and the reviewer's executor CANNOT be two different programs ───────────
 //
@@ -200,7 +201,7 @@ test("ACCEPTANCE #2: check-proof still prints parse kind, resolved candidates, t
 });
 
 test("ACCEPTANCE #2: diagnostics also survive on the pass path (a proof that genuinely holds)", () => {
-  const { code, out } = runCheckProof([`grep: export function checkProofCommand in src/run-task.ts`]);
+  const { code, out } = runCheckProof([`grep: export function checkProofCommand in src/lib/check-proof.ts`]);
   assert.equal(code, CHECK_PROOF_EXIT.pass);
   assert.match(out, /^parse:\s+OK — kind=grep\s*$/m);
   assert.match(out, /^argv:\s+grep -arn --/m);
@@ -213,7 +214,7 @@ test("ACCEPTANCE #2: diagnostics also survive on the pass path (a proof that gen
 
 test("ACCEPTANCE #3: no-match and fail are DIFFERENT exit codes — the no-match fixture and a genuinely failing proof must never collide", () => {
   const noMatch = runCheckProof(["unit test:", NAME_FILTERED_FIXTURE]);
-  const fail = runCheckProof([`grep: this-string-does-not-exist-anywhere-xyzzy-387 in src/run-task.ts`]);
+  const fail = runCheckProof([`grep: this-string-does-not-exist-anywhere-xyzzy-387 in src/lib/check-proof.ts`]);
 
   assert.equal(noMatch.code, CHECK_PROOF_EXIT.noMatch);
   assert.equal(fail.code, CHECK_PROOF_EXIT.fail);

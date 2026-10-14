@@ -79,6 +79,7 @@ function remoteFacts(mergeableState: string, behindBy = 0) {
       mergedTree: { state: "loads" },
     }),
     stackPrerequisite: () => ({ state: "unstacked" as const, parentNumbers: [] }),
+    closingReferences: () => ({ state: "clean" as const, defused: [] }),
     mergeQueue: () => false,
     sleep: () => {},
     say: (msg: string) => void said.push(msg),

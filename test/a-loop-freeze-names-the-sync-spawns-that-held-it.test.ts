@@ -37,12 +37,14 @@ test("with an injected slow execFileSync, a 3 s gh call and a 2.5 s git call app
     assert.ok(!JSON.stringify(sample).includes("SECRET"), "no argument beyond the first is recorded");
 
     call("git", ["a"], 2100); call("git", ["b"], 2200); call("git", ["c"], 2300); call("git", ["d"], 2400);
-    assert.equal(telemetry.sample.peek()?.first_arg, "d");
+    const lag = telemetry.sample.takeLagInterval("t");
+    assert.equal(lag.top?.first_arg, "pr", "a consumer's first reading covers everything since the sampler started");
+    assert.equal(lag.sync_spawn_ms, 15500);
     const capped = telemetry.sample();
     assert.deepEqual(capped.sync_spawn_top.map((e) => e.first_arg), ["d", "c", "b"]);
 
     assert.deepEqual(telemetry.sample().sync_spawn_top, []);
-    assert.equal(telemetry.sample.peek(), undefined);
+    assert.deepEqual(telemetry.sample.takeLagInterval("t"), { top: undefined, sync_spawn_ms: 0 });
   });
 });
 

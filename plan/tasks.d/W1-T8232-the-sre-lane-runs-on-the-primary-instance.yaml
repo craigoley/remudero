@@ -1,0 +1,65 @@
+- id: W1-T8232
+  title: "THE SRE LANE RUNS NOWHERE — it starts only when RMD_SRE_LANE=1, no container is given that variable, so 284 incident events on 2026-10-11 (cost anomalies, runs running long) reached nobody and the four runbooks never ran; start it on the registry's primary instance"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which instance runs the SRE lane
+  band_meaning: blast-radius
+  origin: "operator rulings 2026-09-23 (SRE gardener: own lane, broad runbooks behind an independent governor) + 2026-10-11 detection research"
+  plan_refs: [W1-T4385, W1-T4386, W1-T4390, W1-T4527, W1-T7727, W1-T4417]
+  files: [src/lib/sre-lane.ts, src/run-task.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, read-only, 2026-10-11:
+      - Host `remudero`: none of remudero-daemon, remudero-site-daemon, remudero-console-daemon or remudero-serve has
+        RMD_SRE_LANE in its environment. Positive control: the same inspect lists ten other RMD_* names on
+        remudero-daemon (RMD_RESTART_THROTTLE_S, RMD_FRESHNESS_RESTART_MAX, ...). The core state dir has no
+        sre-lane-decisions.json, so the lane has never filed.
+      - Core ledger union 2026-10-10T20:00Z..2026-10-11T19:38Z: zero `sre_lane.*` and zero `sre.runbook` rows, against
+        284 `incident.event` rows (167 cost.anomaly:src, 67 run.running_long:src, 50 cost.anomaly:docs). W1-T4417's
+        own header says "a finding nobody sees is not a report". Every one of these had no reader.
+    CURRENT CODE, origin/main 25067fc89:
+      - src/run-task.ts:39824 builds the lane, then drops it with `.filter(() => process.env.RMD_SRE_LANE === "1")`.
+        The comment above it says "Only on the SRE registry instance has no selector yet", and that is why the
+        opt-in exists.
+      - deploy/recycle-container.sh `RMD_DAEMON_RUNTIME_ENV_VARS` does not carry RMD_SRE_LANE, so no recycle passes it.
+      - The selector now exists. W1-T4527 added `primary?: boolean` to `RegistryInstance`
+        (src/lib/instance-registry.ts:84) for "the one live instance that decides a release". W1-T7727's
+        `instanceForStateRoot` resolves which registry row a daemon is.
+    Every detector this filing adds feeds the SRE lane (incident -> runbook -> feedback -> triage -> task, with
+    W1-T4387's incident lifecycle measuring the fix). Without this task they would ledger into the same void.
+  design: |
+    1. ONE PREDICATE. sre-lane.ts exports a pure `sreLaneEnabled({ instance, env })`. It returns true when the
+       daemon's own registry row (resolved with `instanceForStateRoot(config.root)`, the match W1-T7727 uses) is live
+       and `primary: true`. `RMD_SRE_LANE=0` turns it off explicitly. `RMD_SRE_LANE=1` still turns it on anywhere,
+       for existing hand setups. An unresolvable instance is off, and the lane start row says why.
+    2. run-task.ts replaces the env-only filter with `sreLaneEnabled(...)`. `state/SRE_LANE_OFF` stays the pause
+       switch, and the core daemon's per-tick governor (`stepSreGovernor`) is untouched.
+    3. SAFE START. Nothing in the runbook path changes. The governor (sre-governor.ts) keeps a runbook with no live
+       record in `shadow`, so the lane's first passes record what they would do without doing it. Filing keeps its
+       existing pace (never more filings a day than the fleet merged).
+    4. ANSWERABLE FROM THE LEDGER. When the lane starts it ledgers one `sre_lane.started` {instance, enabled_by:
+       primary|env} row, and when it stays off it ledgers one `sre_lane.disabled` {instance, reason} row, so "is the
+       SRE lane running" is a ledger read and not a container inspect.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-sre-lane-runs-on-the-primary-instance.test.ts"
+    - claim: "the daemon decides the lane with the shared predicate"
+      proof: 'grep: sreLaneEnabled( in src/run-task.ts'
+    - claim: "the SRE lane starts on the primary instance with no env opt-in"
+      proof: 'grep: test("W1-T8232: the SRE lane starts on the primary instance with no env opt-in" in test/the-sre-lane-runs-on-the-primary-instance.test.ts'
+    - claim: "the SRE lane stays off on a non-primary instance"
+      proof: 'grep: test("W1-T8232: the SRE lane stays off on a non-primary instance" in test/the-sre-lane-runs-on-the-primary-instance.test.ts'
+    - claim: "RMD_SRE_LANE=0 keeps it off on the primary"
+      proof: 'grep: test("W1-T8232: RMD_SRE_LANE=0 keeps it off on the primary" in test/the-sre-lane-runs-on-the-primary-instance.test.ts'
+    - claim: "the lane's start and its absence are each ledgered"
+      proof: 'grep: test("W1-T8232: the lane ledgers whether it started" in test/the-sre-lane-runs-on-the-primary-instance.test.ts'
+  falsifier: |
+    Keep the env-only filter. A primary instance with RMD_SRE_LANE unset then gets no SRE lane, so the first test
+    fails, and no `sre_lane.started` or `sre_lane.disabled` row is written.

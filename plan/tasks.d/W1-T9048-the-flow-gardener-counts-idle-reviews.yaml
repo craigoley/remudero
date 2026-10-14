@@ -1,0 +1,42 @@
+- id: W1-T9048
+  title: "THE FLOW GARDENER COUNTS REVIEWS SPENT ON AN UNCHANGED PR — a review re-run on a head reached only by a base merge, with the same own diff and no fix push in between, is an idle review no stage measures today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-13: gardener loop audit"
+  plan_refs: [W1-T5904, W1-T7735, W1-T8167]
+  files: [src/lib/flow-gardener.ts, test/the-flow-gardener-counts-idle-reviews.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED: #10339 was reviewed 11 times, #10600 8 times and #10783 85 times (W1-T8167, W1-T8267). #10848 cycled for
+    hours on 2026-10-12. No gardener reads any of these: the flow gardener's `FLOW_STAGES` time a PR's stages but never
+    count reviews spent on a PR whose own change did not move. A refresh-driven review loop is only visible when a
+    person reads a PR's timeline.
+    VERIFIED: every input exists in the ledger the flow gardener already reads.
+    - `review.posted` (head_sha, own_diff_digest, merge_base_sha, review_contract_digest)
+    - `sweep.post_review.attempt` (review_mode, review_input_digest)
+    - `branch.update_requested` / `sweep.update_branch.updated` (expected_head_sha, via)
+    - `fix.done.pushed_head_sha`
+  design: |
+    1. A new count stage `idle_reviews`. A review is idle when both hold:
+       - its contract digest equals the previous review's, and its head was reached only by a branch update whose
+         `expected_head_sha` was the previously reviewed head (or its own-diff digest is unchanged);
+       - no `fix.done` push and no non-fleet push came in between.
+       A repeated `post_review.attempt` on the same head and input digest also counts.
+    2. Attribute each idle review to the `via` that made the update, so a regression names the refresh path that caused it.
+    3. Regress against the stage's own baseline exactly like the existing stages; file through the existing flow path.
+  acceptance:
+    - claim: "idle_reviews counts reviews across base merges with an unchanged own diff, attributed to the refresh path"
+      proof: "grep: test(\"W1-T9048: idle_reviews counts reviews across base merges with an unchanged own diff\" in test/the-flow-gardener-counts-idle-reviews.test.ts"
+    - claim: "a review after a fix push is not idle"
+      proof: "grep: test(\"W1-T9048: a review after a fix push is not idle\" in test/the-flow-gardener-counts-idle-reviews.test.ts"
+  falsifier: |
+    Ledger three `review.posted` rows for one PR whose heads differ only by base merges with the same own-diff digest.
+    At origin/main the flow report has no stage that counts them; with the change `idle_reviews` counts 2, attributed to
+    the update's `via`.

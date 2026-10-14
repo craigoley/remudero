@@ -151,7 +151,7 @@ test("drift exits non-zero — the ci-parity shape, not a note in passing", () =
     if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : "origin/main\ta1\t1\norigin/some-infra-branch\tb2\t1\n";
     if (args[0] === "merge-base") throw new Error("not an ancestor");
     if (args[0] === "rev-parse") return "b2b2b2\n";
-    if (args[0] === "grep" && args.includes("-F")) return "src/lib/somewhere.ts:1:some-infra-branch\n";
+    if (args[0] === "grep" && (args.includes("-F") || args.includes("-P"))) return "src/lib/somewhere.ts:1:some-infra-branch\n";
     if (args[0] === "grep") return "src/lib/somewhere.ts\n"; // named in source, undeclared
     if (cmd === "gh") return "[]";
     return "";

@@ -298,6 +298,7 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
   let stop = false;
   let reads = 0;
   let nowMs = Date.now();
+  const boundaries = new Map<string, () => unknown>();
   const run = runDaemon(plan(["A", "B", "C"], "lane-pool-await"), {
     refreshMerged: () => () => false,
     checkStop: () => (stop ? "fixture cleanup" : undefined),
@@ -316,8 +317,9 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
     sweepLight: async () => {},
     runInstall: () => steps.push({ step: "install" }),
     log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
-    runOne: async (id: string) => {
+    runOne: async (id: string, options?: { restartAtWorkerBoundary: () => unknown }) => {
       started.push(id);
+      if (options) boundaries.set(id, options.restartAtWorkerBoundary);
       if (started.length === 2) ready.resolve();
       await gates.get(id)?.promise;
       return okResult(id);
@@ -333,6 +335,8 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
       advance = value;
     },
     release: (id: string) => gates.get(id)?.resolve(),
+    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
+    boundary: (id: string) => boundaries.get(id)?.(),
     wake: () => sleeps.shift()?.resolve(),
     advanceClock: (ms: number) => { nowMs += ms; },
     finish: async () => {
@@ -365,6 +369,8 @@ async function lanePoolRestart(awaited: boolean) {
   assert.equal(release?.extra?.reason, "window_quiet");
   assert.equal(release?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);
   const decidedWhileInFlight = h.steps.some((row) => row.step === "daemon.freshness_decision" && row.extra?.action === "restart");
+  // W1-T7806: A was in flight at the latch, so it holds refill open until it reaches a boundary (or settles).
+  assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
   h.release("B");
   for (let i = 0; i < 3; i++) await flush();
   const startedBeforeA = [...h.started];

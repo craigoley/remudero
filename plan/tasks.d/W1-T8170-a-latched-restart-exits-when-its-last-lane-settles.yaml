@@ -1,0 +1,69 @@
+- id: W1-T8170
+  title: "A LATCHED RESTART EXITS WHEN ITS LAST LANE SETTLES — after `dispatch.settled_set` the stale exit still runs a fresh bounded full pass before its drain, a pass the background sweep already ran during the lane wait and the next boot's first pass runs again, so on 2026-10-11 every lane idled 2-10 min in 8 freshness exits (163 lane-min)"
+  repo: remudero
+  depends_on: [W1-T7806]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the stale exit does not repeat a full pass the lane wait already ran
+  band_meaning: span
+  origin: "operator approval 2026-10-11 (Craig: go with your recommendations): restart-churn measurement, ~/Remudero-notes/restart-churn-2026-10-11"
+  plan_refs: [W1-T1272, W1-T4998, W1-T5720, W1-T5721, W1-T7806, W1-T7697]
+  files: [src/lib/daemon.ts, test/a-latched-restart-exits-when-its-last-lane-settles.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-11 (core daemon ledger, copied read-only to ~/Remudero-notes/restart-churn-2026-10-11/ledger-copy;
+    episodes.txt). 17 boots in about 20 h cost 880 idle lane-min, 25% of core capacity. 163 lane-min of it is
+    "finished, not exiting": the last lane settled and the daemon had not started its drain yet. Eight freshness exits
+    show it, from the `dispatch.settled_set` row to `daemon.freshness_drain.started` (or the restart row where there
+    was nothing to drain): 03:52:54 -> 04:02:18, 05:00:35 -> 05:09:55, 08:26:39 -> 08:30:39, 09:55:41 -> 09:57:35,
+    12:47:28 -> 12:56:42, 13:51:24 -> 14:00:45, 16:01:52 -> 16:04:00, 17:14:14 -> 17:19:22. The rows inside each gap
+    are a whole sweep pass (05:03:58 sweep.pass, review admitted 05:04:00, fix rung, merge 05:05:37, review posted
+    05:05:53, merge_probe 05:06:08 ... sweep.pass 05:09:53).
+    READ on origin/main 233304449 (src/lib/daemon.ts):
+      - The dispatch phase logs `dispatch.settled_set` (:5767), then the tick processes the lanes and, with a latched
+        restart, returns `stopForFreshness(inFlightFreshness)` (:5924).
+      - stopForFreshness (:3437) awaits a background pass if one is running (:3448), otherwise starts a fresh
+        `runGatedSweep` (:3452), and only then calls `drainBeforeRestart("daemon.freshness_drain")` (:3456). The
+        comment cites W1-T1272: "Every stale exit reaches the same bounded full-pass gate before returning."
+      - W1-T1272 added that pass because the freshness early-return once made the full sweep unreachable after a
+        boot's first iteration. Since then W1-T4998 runs the full pass in the background every tick, and W1-T5720's
+        boot gate runs a first full pass on every boot before dispatch. The lane wait before these exits ran them:
+        46 `sweep.summary` rows between the 04:48 latch and the 05:00:35 settle, 80 between 12:36 and 12:47, 118
+        between 16:50 and 17:14. So the pre-exit pass repeats work the wait already did, and the next boot repeats it
+        again while every lane idles.
+    DEPENDENCY: W1-T7806 (queued, in flight on run-W1-T7806-1791732012710) rewrites the restart latch in runDaemon's
+    dispatch block, which owns `inFlightFreshness` and the `stopForFreshness(inFlightFreshness)` return. Serialized
+    after it (parallel builds on one file broke main, #10349 and #10353).
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait or count below), lean into automation.
+    1. RECORD WHEN A FULL PASS LAST COMPLETED. The daemon already tracks sweep liveness; keep the completion time of the
+       newest full pass (background or gated) where stopForFreshness can read it.
+    2. A STALE EXIT AFTER THE LAST LANE SETTLES skips the fresh `runGatedSweep` when a full pass completed after the
+       restart latched. It still awaits a background pass that is RUNNING (it may be mid-merge), and it still runs the
+       gated pass when no full pass completed since the latch, so W1-T1272's guarantee holds: no stale exit leaves
+       the full sweep unreached.
+    3. The exit starts its drain at once after that. `daemon_selfrestart_for_freshness` carries
+       `pre_exit_pass: "skipped_ran_since_latch" | "awaited_in_flight" | "ran"` so the gap is attributable.
+    4. Exits that are not dispatch-phase latches (the idle and reviewer-idle freshness exits, :4322 and :5330) keep
+       today's pass; they have no lane wait that already ran one.
+    Tests (new file, `test(` titles verbatim as in the proofs below) drive runDaemon with an injected runOne, sweep,
+    checkFreshness and fake clock, as test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts does.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-latched-restart-exits-when-its-last-lane-settles.test.ts"
+    - claim: "with a full pass completed after the latch, the exit starts no new full pass after the last lane settles"
+      proof: 'grep: test("W1-T8170: a pass since the latch is not repeated at exit" in test/a-latched-restart-exits-when-its-last-lane-settles.test.ts'
+    - claim: "with no full pass since the latch, the exit still runs the bounded full pass before its drain"
+      proof: 'grep: test("W1-T8170: an exit with no pass since the latch still runs one" in test/a-latched-restart-exits-when-its-last-lane-settles.test.ts'
+    - claim: "a background pass still running at exit is awaited"
+      proof: 'grep: test("W1-T8170: a running background pass is awaited at exit" in test/a-latched-restart-exits-when-its-last-lane-settles.test.ts'
+    - claim: "the restart row names which pre-exit pass arm ran"
+      proof: 'grep: test("W1-T8170: the restart row names its pre-exit pass" in test/a-latched-restart-exits-when-its-last-lane-settles.test.ts'
+  falsifier: |
+    Keep stopForFreshness as on main: in the first test the injected sweep is called once more after the last lane
+    settles although a pass completed after the latch. Skip the pass unconditionally: the second test sees a stale
+    exit with no full pass since the latch and no sweep call.

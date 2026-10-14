@@ -1,0 +1,40 @@
+- id: W1-T9050
+  title: "THE CENSUS RECOGNIZER ADMITS A SUITE BY WHAT IT EXECUTES, NOT BY WHAT IT MENTIONS — censusCandidateWalks matches ls-files, readdirSync or globSync anywhere in the text, including comments and fixture strings, and its src/ clause filters nothing because every test imports ../src/"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-13: gardener loop audit (PR #10787 token dodge)"
+  plan_refs: [W1-T6092, W1-T6087]
+  files: [src/lib/ci-parity.ts, test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main (src/lib/ci-parity.ts `censusCandidateWalks` / `discoverCensusCandidates`):
+    - The recognizer is a text heuristic over the whole suite. It counts `ls-files|readdirSync|globSync` in comments and
+      fixture strings, and treats a `src/` mention as scope although every test imports `../src/`.
+    - `CENSUS_POPULATION` carries 38 `refusedForPredicate` hand exclusions against 8 admitted members, nearly all
+      "ls-files only in a comment / fixture / test/ only".
+    - Three suites dodge it by building the token at runtime (`["ls", "files"].join("-")`): a-suite-that-lists-only-its-
+      fixtures-is-not-a-tree-walker, a-fix-round-checks-its-edits-from-a-harness-git-snapshot, and
+      the-gate-admission-population-is-checked-from-one-scan.
+    W1-T6092 fixed the parallel recognizer in scripts/diff-class.mjs, but not this one.
+  design: |
+    1. Strip comments and string/template literal contents before matching, then require the walk token in executable
+       code with a repo-wide root. Drop the `src/` clause.
+    2. Remove every `refusedForPredicate` entry the new recognizer no longer admits, and the three runtime token dodges.
+       Cite each removal in the PR body. The parity baseline only shrinks.
+    3. A suite that really shells `git ls-files` over the tree stays a candidate.
+  acceptance:
+    - claim: "a suite that names ls-files only in a comment or fixture string is not a census candidate"
+      proof: "grep: test(\"W1-T9050: a suite that names ls-files only in a comment or fixture string is not a census candidate\" in test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts"
+    - claim: "a suite that shells git ls-files over the tree is still a candidate"
+      proof: "grep: test(\"W1-T9050: a suite that shells git ls-files is still a candidate\" in test/the-tree-walk-recognizer-admits-by-what-a-suite-executes.test.ts"
+  falsifier: |
+    Run the recognizer over a fixture suite whose only `ls-files` is inside a template string. At origin/main it is a
+    candidate; with the change it is not. A suite with `execFileSync("git", ["ls-files", "--", "src/"])` stays a
+    candidate either way.

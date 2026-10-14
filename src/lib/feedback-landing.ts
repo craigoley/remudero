@@ -39,6 +39,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord } from "./feedback-record-merge.js";
+import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./contributor-admission.js";
 import {
   PlanPrPreflightRefusedError,
   planPrPreflightAtCommit,
@@ -142,6 +143,7 @@ export interface LandingIdentity {
 }
 
 export interface LandFeedbackOpts {
+  publication?: FeedbackPublicationContext;
   /** Injectable `git` exec — real callers omit it; tests can force specific failure paths. */
   git?: GitExec;
   /** Injectable `gh` exec (the `ghGateway` pattern, lib/status.ts) — tests fake it; never real GitHub. */
@@ -763,6 +765,11 @@ function decideFeedbackStage(git: GitExec, remoteSha: string, localBytes: string
   return mergeFeedbackRecord(upstreamBytes, localBytes);
 }
 
+function hasFeedbackLineage(git: GitExec, blob: string): boolean {
+  try { return parseYaml(git(["cat-file", "-p", blob]))?.contribution != null; }
+  catch { /* Presence is not authority: unreadable bytes get an independent unknown publication receipt. */ return false; }
+}
+
 /**
  * Whatever `kind.ownedDir` content `origin/<branch>` currently carries — the union half of the
  * writer (W1-T3560 design (i)): every owner's still-pending records, not just this call's own,
@@ -814,7 +821,8 @@ function* readBranchPending(
  *  identical on `origin/main` (already merged for real) and any whose blob won't resolve (the
  *  ref moved between the `ls-tree` and this per-file read — dropped, never fatal; this is the
  *  W1-T191 regression lock, unchanged by this task). */
-function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], env: NodeJS.ProcessEnv): void {
+function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], env: NodeJS.ProcessEnv, scratchDir: string): FeedbackRefusal[] {
+  const refused: FeedbackRefusal[] = [];
   for (const f of files) {
     let pendingBlob: string;
     try {
@@ -829,8 +837,19 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
       mainBlob = null;
     }
     if (pendingBlob === mainBlob) continue; // already merged into main for real
+    if (mainBlob !== null && isFeedbackRecordPath(kind, f) && hasFeedbackLineage(git, mainBlob)) {
+      const decision = decideFeedbackStage(git, mainBlob, git(["cat-file", "-p", pendingBlob]));
+      if (decision.kind === "refuse") { refused.push({ path: f, reason: decision.reason }); continue; }
+      if (decision.kind === "keep-upstream") continue;
+      if (decision.content !== undefined) {
+        const source = join(scratchDir, `carried-${files.indexOf(f)}`);
+        writeFileSync(source, decision.content);
+        pendingBlob = git(["hash-object", "-w", source], { env }).trim();
+      }
+    }
     git(["update-index", "--add", "--cacheinfo", `100644,${pendingBlob},${f}`], { env });
   }
+  return refused;
 }
 
 function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | "treeSha">): LandingContent {
@@ -962,6 +981,27 @@ function* finishLanding(
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
   const bodyOf = (b: LandingTreeBuild): string => kind.prBody(b.unlanded, landingTreeContent(git, b));
+  const observePublication = function* (b: LandingTreeBuild): Generator<LandingAsk, void, AskReply> {
+    if (kind.family !== "feedback" || opts.publication === undefined) return;
+    const contributions: unknown[] = [];
+    try {
+      const paths = git(["diff", "--name-only", b.mainSha, b.treeSha, "--", kind.ownedDir]).trim().split("\n")
+        .filter(path => path.endsWith(".yaml"));
+      const content = landingTreeContent(git, b);
+      for (const path of paths.slice(0, 9)) {
+        try { contributions.push((parseYaml(content.head(path) ?? "") as { contribution?: unknown } | null)?.contribution); }
+        catch { contributions.push({ kind: "unresolved", reason: "lineage-bytes-unreadable" }); }
+      }
+    } catch { contributions.push({ kind: "unresolved", reason: "landing-tree-unreadable" }); }
+    const steps = feedbackPublicationSteps(opts.publication, contributions,
+      kind.targetRepository === undefined ? undefined : repoKey(kind.targetRepository), "landing-publication");
+    let next = steps.next();
+    while (!next.done) {
+      try { next = steps.next({ status: 200, body: JSON.parse(yield* net.gh(["api", next.value])) }); }
+      catch (error) { next = steps.throw(error); }
+    }
+  };
+  yield* observePublication(build);
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
     const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(build), requestReview);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
@@ -1015,6 +1055,7 @@ function* finishLanding(
     } catch (e) {
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
+    yield* observePublication(retried);
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(retried), requestReview);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
@@ -1105,9 +1146,10 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
     // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
     // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
     // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
-    const scanLocalUnlanded = (): { files: string[]; sources: Map<string, string>; refused: FeedbackRefusal[] } => {
+    const scanLocalUnlanded = (env?: NodeJS.ProcessEnv): { files: string[]; sources: Map<string, string>; contents: Map<string, string>; refused: FeedbackRefusal[] } => {
       const files: string[] = [];
       const sources = new Map<string, string>();
+      const contents = new Map<string, string>();
       const refused: FeedbackRefusal[] = [];
       const candidates: Array<[string, string]> = [
         ...listDirtyRelFiles(root, kind.ownedDir, git).map((rel): [string, string] => [rel, join(root, rel)]),
@@ -1115,13 +1157,28 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
       ];
       for (const [rel, abs] of candidates) {
         const localSha = git(["hash-object", abs]).trim();
+        let mainSha: string | null = null;
+        if (env) {
+          try { mainSha = git(["rev-parse", `origin/main:${rel}`]).trim(); }
+          catch { /* Still pending: absence on main is not absence from the landing index. */ }
+          if (mainSha === localSha) continue;
+        }
         let remoteSha: string | null;
         try {
-          remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
+          remoteSha = git(["rev-parse", env ? `:${rel}` : `origin/main:${rel}`], env ? { env } : undefined).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
-        if (remoteSha === localSha) continue;
+        if (remoteSha === localSha) {
+          if (env) {
+            if (!sources.has(rel)) files.push(rel);
+            sources.set(rel, abs);
+          }
+          continue;
+        }
+        if (env && remoteSha !== null && remoteSha !== mainSha && isFeedbackRecordPath(kind, rel)) {
+          if (!hasFeedbackLineage(git, remoteSha)) remoteSha = mainSha;
+        }
         if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
           const decision = decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8"));
           if (decision.kind === "refuse") {
@@ -1129,11 +1186,13 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          if (decision.content !== undefined) contents.set(rel, decision.content);
+          else contents.delete(rel);
         }
         if (!sources.has(rel)) files.push(rel);
         sources.set(rel, abs); // a queued decision, listed last, wins over a disk copy of its path
       }
-      return { files, sources, refused };
+      return { files, sources, contents, refused };
     };
     const initialScan = scanLocalUnlanded();
     if (initialScan.files.length === 0) {
@@ -1158,10 +1217,17 @@ function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpt
       const pending = yield* readBranchPending(git, net, kind);
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
-      if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const { files: unlanded, sources, refused } = scanLocalUnlanded();
+      const carriedRefused = pending.tipSha ? stageBranchPending(git, kind, pending.files, env, scratchDir as string) : [];
+      const { files: unlanded, sources, contents, refused } = scanLocalUnlanded(env);
+      refused.push(...carriedRefused);
       for (const rel of unlanded) {
-        const blobSha = git(["hash-object", "-w", sources.get(rel) as string], { env }).trim();
+        let source = sources.get(rel) as string;
+        const content = contents.get(rel);
+        if (content !== undefined) {
+          source = join(scratchDir as string, `lineage-${unlanded.indexOf(rel)}`);
+          writeFileSync(source, content);
+        }
+        const blobSha = git(["hash-object", "-w", source], { env }).trim();
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = git(["write-tree"], { env }).trim();
@@ -1343,7 +1409,7 @@ function* landContentSteps(
       // criterion 2, extended by W1-T3560 to the disk-scanning sibling too): this content-only
       // path has no disk to re-scan the way {@link landPending} does, so without this a second
       // call would drop the first call's content entirely.
-      if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
+      const carriedRefused = pending.tipSha ? stageBranchPending(git, kind, pending.files, env, scratchDir as string) : [];
 
       const unlanded: string[] = [];
       // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
@@ -1352,20 +1418,29 @@ function* landContentSteps(
       // `isFeedbackRecordPath`) — it must obey the same monotonic predicate {@link landPending}'s
       // disk scan does, per the task's design point (v), rather than the bare
       // `remoteSha === blobSha` identity check this loop used before.
-      const refused: FeedbackRefusal[] = [];
+      const refused: FeedbackRefusal[] = [...carriedRefused];
       let i = 0;
-      for (const { relPath, content } of inputs) {
+      for (const { relPath, content: inputContent } of inputs) {
+        let content = inputContent;
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
         writeFileSync(tmpFile, content);
-        const blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+        let blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+        let mainSha: string | null;
+        try { mainSha = git(["rev-parse", `origin/main:${relPath}`]).trim(); }
+        catch { /* Preserve pending staging when main is unreadable; publication evidence is rechecked separately. */ mainSha = null; }
         let remoteSha: string | null;
         try {
-          remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
+          remoteSha = git(["rev-parse", `:${relPath}`], { env }).trim();
         } catch {
           remoteSha = null; // not on origin/main at all yet
         }
-        if (remoteSha === blobSha) continue; // already identical upstream — nothing to land
+        if (remoteSha === blobSha) {
+          if (mainSha !== blobSha) unlanded.push(relPath);
+          continue;
+        }
+        if (remoteSha !== null && remoteSha !== mainSha && isFeedbackRecordPath(kind, relPath)
+          && !hasFeedbackLineage(git, remoteSha)) remoteSha = mainSha;
         if (remoteSha !== null && isFeedbackRecordPath(kind, relPath)) {
           const decision = decideFeedbackStage(git, remoteSha, content);
           if (decision.kind === "refuse") {
@@ -1373,6 +1448,11 @@ function* landContentSteps(
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
+          if (decision.content !== undefined) {
+            content = decision.content;
+            writeFileSync(tmpFile, content);
+            blobSha = git(["hash-object", "-w", tmpFile], { env }).trim();
+          }
         }
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${relPath}`], { env });
         unlanded.push(relPath);

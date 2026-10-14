@@ -1,0 +1,44 @@
+- id: W1-T8830
+  title: "A PARKED MACHINE FILING IS ASKED AGAIN WHEN ITS EVIDENCE MOVES — an escalated ruling is pinned to the record and never re-judged unless the record is edited, so 18 gardener filings (some parked since 2026-10-03) wait on the operator forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # changes when the risk judge re-asks; the pinned-on-the-record guarantee must survive
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-12: console inbox review (18 machine-judge items parked, some since 2026-10-03)"
+  plan_refs: [W1-T2977, W1-T5359, W1-T5406]
+  files: [src/lib/machine-filing-judge.ts, test/a-parked-machine-filing-is-asked-again-when-its-evidence-moves.test.ts, test/the-machine-filing-judge-releases-or-escalates.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-12 22:05Z: the console inbox holds 18 `machine-judge:` items the risk judge escalated (6 ready with
+    drafts, 12 not ready), some from 2026-10-03, nothing grouping or retiring them.
+    VERIFIED on origin/main e0dde45ac (src/lib/machine-filing-judge.ts): an escalate ruling is pinned ON THE RECORD
+    (`risk_ruling`, lines ~6-16: "A pinned ruling rides git; it cannot age out, and an edit to the record changes its pin,
+    which re-opens the question"). That pin is deliberate — ledger release rows were being shed by compaction (75 of 151
+    on 2026-09-29) — and must stay. But the only re-open is an edit to the record, so an escalation whose evidence later
+    changes (the family's earned confidence bar moved, the cost it targets fell or rose, its dependencies merged) is never
+    asked again.
+  design: |
+    1. Keep the pin on the record. Add a re-ask condition beside it: an escalated record is re-judged when the judge's
+       INPUTS have moved since `judged_at` — its family's earned confidence bar, the cost evidence its origin names, or its
+       depends_on set merging — computed from the same sources the judge is shown.
+    2. With no input movement, re-ask on a learned, backing-off cadence: start from the family's observed re-judge flip rate
+       and lengthen the interval each time a re-ask returns the same verdict; shorten it when re-asks flip. No fixed cap or
+       floor (operator ruling: tiered, self-healing responses, never a hard threshold).
+    3. A re-ask that returns the same verdict rewrites nothing (no plan PR); one that changes lands through the existing
+       single judge PR path, re-pinned. Each re-ask is ledgered with which input moved or that the cadence was due.
+  acceptance:
+    - claim: "an escalated record is re-judged once an input the judge reads has moved"
+      proof: 'grep: test("W1-T8830: an escalation is asked again when its evidence moves" in test/a-parked-machine-filing-is-asked-again-when-its-evidence-moves.test.ts'
+    - claim: "with nothing moved, the re-ask interval lengthens after each unchanged verdict and shortens after a flip"
+      proof: 'grep: test("W1-T8830: the re-ask cadence backs off on a repeat and recovers on a flip" in test/a-parked-machine-filing-is-asked-again-when-its-evidence-moves.test.ts'
+    - claim: "an unchanged re-ask writes nothing and the pin still survives ledger rotation"
+      proof: 'grep: test("W1-T8830: an unchanged re-ask writes nothing and keeps the pin" in test/a-parked-machine-filing-is-asked-again-when-its-evidence-moves.test.ts'
+  falsifier: |
+    Pin an escalate ruling on a ci-friction record, then raise that family's earned confidence bar. At origin/main the
+    record is never offered to the judge again; with the change the next pass re-judges it and ledgers the moved input.

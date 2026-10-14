@@ -17,6 +17,7 @@ type RunResult = { ok: boolean; output: string };
 type Screen = {
   addedTestFiles(base: string, opts?: { cwd?: string }): string[];
   screenBudgetMs(root?: string): number;
+  jobSpentMs(startedMs: string | undefined, nowMs: number): number | undefined;
   screen(opts: { files: string[]; budgetMs: number; concurrency: number; runFile: (f: string) => Promise<RunResult>; now?: () => number }): Promise<{
     passes: Map<string, number>;
     failure?: { file: string; passesBefore: number; output: string };
@@ -170,4 +171,49 @@ test("every ci shard runs the flake screen after its tests, and shard 1 installs
   assert.equal(ci.steps[at]!.if, undefined, "a skipped screen would read as a passed one");
   const admission = ci.steps.find((s) => s.id === "admission")!.run!;
   assert.match(admission, /"\$\{\{ matrix\.shard \}\}" = "1" \] && \[ -n "\$\(node scripts\/flake-screen\.mjs --list[^\n]*\n\s*BROWSER="true"/);
+});
+
+test("the screen spends only what is left of the makespan after the job's earlier steps, and still runs each added file once", async () => {
+  const repo = addingBranch();
+  try {
+    const lines: string[] = [];
+    const log = (l: string) => void lines.push(l);
+    const runAt = (startedMs: string | undefined) => {
+      const runs = fakeRuns(10);
+      const env = { GITHUB_BASE_REF: "main", ...(startedMs === undefined ? {} : { RMD_JOB_STARTED_MS: startedMs }) };
+      return flake.main(["--shard", "1"], { env, root: repo.dir, log, budgetMs: 50, concurrency: 1, runFile: runs.runFile, now: () => 1_000 + runs.now() });
+    };
+    assert.equal(await runAt("970"), 0);
+    assert.match(lines.join("\n"), /less 0s this job already ran[\s\S]*test\/fresh\.test\.ts passed 2 run\(s\)/, "30 of 50 ms were spent before the screen");
+    lines.length = 0;
+    assert.equal(await runAt("900"), 0);
+    assert.match(lines.join("\n"), /test\/fresh\.test\.ts passed 1 run\(s\)/, "a job already past the makespan still screens each added file once");
+    lines.length = 0;
+    assert.equal(await runAt(undefined), 0);
+    assert.match(lines.join("\n"), /no RMD_JOB_STARTED_MS, so none of it is counted as spent[\s\S]*passed 5 run\(s\)/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("an absent or unreadable job-start stamp reads as unknown, never as nothing spent", () => {
+  for (const stamp of [undefined, "", "soon", "0", "-5"]) assert.equal(flake.jobSpentMs(stamp, 5_000), undefined, String(stamp));
+  assert.equal(flake.jobSpentMs("4000", 5_000), 1_000);
+  assert.equal(flake.jobSpentMs("6000", 5_000), 0, "a stamp ahead of this clock spends nothing, never a negative");
+});
+
+test("shard 1 runs the guard mutation before the flake screen, and the job stamps its start before either", () => {
+  const text = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  const ci = parse(text).jobs.ci as { steps: { name?: string; id?: string; run?: string; env?: Record<string, string> }[] };
+  const at = (needle: string) => ci.steps.findIndex((s) => s.run?.includes(needle));
+  const stamp = ci.steps.findIndex((s) => s.id === "admission");
+  assert.equal(ci.steps[stamp]!.run!.split("\n")[0]!, `echo "started_ms=$(node -p 'Date.now()')" >> "$GITHUB_OUTPUT"`);
+  // A step OUTPUT, never GITHUB_ENV: the guard mutation replays the admission body inside the real job,
+  // and each replay appended its own stamp to the job's GITHUB_ENV, so the screen read the last one (#11308).
+  assert.doesNotMatch(text, /RMD_JOB_STARTED_MS=/, "no step writes the stamp where a later step can rewrite it");
+  const screenStep = ci.steps.find((s) => s.run?.trim() === "node scripts/flake-screen.mjs --shard ${{ matrix.shard }}")!;
+  assert.equal(screenStep.env?.RMD_JOB_STARTED_MS, "${{ steps.admission.outputs.started_ms }}");
+  assert.ok(stamp < at("node scripts/workflow-guard-mutation-ratchet.mjs"), "the stamp opens the window before the guard mutation spends from it");
+  const screen = ci.steps.findIndex((s) => s.run?.trim() === "node scripts/flake-screen.mjs --shard ${{ matrix.shard }}");
+  assert.ok(at("node scripts/workflow-guard-mutation-ratchet.mjs") < screen, "the screen runs last, on what is left");
 });

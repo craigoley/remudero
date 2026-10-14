@@ -57,8 +57,10 @@ function harness(staleFiles: string[] | undefined) {
   let nowMs = Date.now();
   const sleeps: Array<ReturnType<typeof deferred<void>>> = [];
   const startedWhileARan: string[] = [];
-  const runOne = (id: string): Promise<RunResult> => {
+  const boundaries = new Map<string, () => unknown>();
+  const runOne = (id: string, options?: { restartAtWorkerBoundary: () => unknown }): Promise<RunResult> => {
     started.push(id);
+    if (options) boundaries.set(id, options.restartAtWorkerBoundary);
     if (!aSettled && id !== "A") startedWhileARan.push(id);
     if (started.includes("A") && started.includes("B")) bothStarted.resolve();
     if (id === "A" || id === "B") return release[id].promise;
@@ -97,6 +99,8 @@ function harness(staleFiles: string[] | undefined) {
       await drainMicrotasks();
     },
     advanceClock: (ms: number) => { nowMs += ms; },
+    /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
+    boundary: (id: string) => boundaries.get(id)?.(),
     settleA: () => {
       aSettled = true;
       release.A.resolve(okResult("A"));
@@ -132,12 +136,15 @@ test("W1-T5083: an advance that would restart the daemon still holds the freed l
   assert.equal(coalesced?.extra?.held_ms, 0);
   assert.equal(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"), false);
   h.advanceClock(FRESHNESS_COALESCE_WINDOW_MS.value);
+  await h.tick(); // past the window: the dispatch tick decides to restart
+  assert.ok(h.steps.some((l) => l.step === "daemon.freshness_decision" && l.extra?.action === "restart"));
+  // W1-T7806: a lane in flight at the latch holds refill open until it reaches a boundary or settles.
+  assert.ok(h.boundary("A"), "A reaches a worker boundary and reads the latched restart");
   h.release.B.resolve(okResult("B"));
   await drainMicrotasks();
   assert.deepEqual(h.startedWhileARan, ["B"], "nothing admitted onto B's freed lane");
   const held = h.steps.find((l) => l.step === "dispatch.lane_refill_held");
   assert.equal(held?.extra?.reason, "stale code");
-  assert.equal(held?.extra?.freshness_action, "restart");
   const released = h.steps.filter((l) => l.step === "daemon.freshness_coalesced").at(-1);
   assert.equal(released?.extra?.reason, "window_quiet");
   assert.equal(released?.extra?.held_ms, FRESHNESS_COALESCE_WINDOW_MS.value);

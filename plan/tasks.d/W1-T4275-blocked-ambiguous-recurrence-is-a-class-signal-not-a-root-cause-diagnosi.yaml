@@ -27,11 +27,12 @@
       proof: "grep: #3030/#3039/#3043 in CLAUDE.md"
     - claim: "the rule requires a bounded observation proposal before a class-wide repair is prescribed, while leaving each PR's existing disposition intact"
       proof: "grep: preserve the per-PR disposition and file a bounded observation proposal in CLAUDE.md"
-  risk: low
+  risk: high  # Rule 19 span: widened to agents, claude by a scope amendment for #11531
+  band_meaning: span
   origin: "feedback#FD-2026-09-03-fb-repair-blocked-ambiguous-2956"
   plan_refs: ["§7B", "§5D", "P25"]
-  files: [CLAUDE.md]
+  files: [CLAUDE.md, "AGENTS.md"]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=ae649c01e31358f7
   attempts: 0

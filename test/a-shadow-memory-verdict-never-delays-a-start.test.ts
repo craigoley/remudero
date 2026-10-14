@@ -13,7 +13,9 @@ import test from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
 import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
+import { publishHostServeEvidence, readHostServeEvidence } from "../src/lib/host-serve-evidence.js";
 import {
+  defaultShadowMemoryPorts,
   emptyShadowTally,
   evaluateShadowMemory,
   loadHostMemoryBudgetPolicy,
@@ -132,6 +134,9 @@ function ports(over: Partial<ShadowMemoryPorts> & { rows?: LedgerLine[] } = {}):
     policy: () => POLICY,
     write: (_path, row) => void rows.push(row),
     stderr: () => undefined,
+    // The default reads <test slot dir>/host-memory/review-demand, ONE dir per process: in the pure-test pool a
+    // sibling file's sweep publishes demand there and this start reads would-yield-to-review (#10829).
+    readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
     ...over,
   };
 }
@@ -346,4 +351,53 @@ test("the policy mode accepts only off, shadow or enforce, and ships shadow", ()
   const off = recordShadowMemoryVerdict({ workerClass: "review", root: "/state/remudero" }, ports({ rows, policy: () => ({ ...POLICY, mode: "off" }) }));
   assert.equal(off.kind, "off");
   assert.deepEqual(rows, [], "off writes nothing");
+});
+
+test("unit test: default host serve publication and shadow gathering preserve nonblocking starts", async () => {
+  const root = fixtureRoot("rmd-shadow-host-serve-");
+  const shared = { location: () => ({ dir: join(root, "host-memory"), scope: "host" as const }), hostBoot: () => "boot-1", clock: fixedClock(NOW) };
+  try {
+    // The actual default assembly carries the shared reader, not only an injected seam.
+    assert.equal(typeof defaultShadowMemoryPorts().readHostServe, "function");
+
+    const published = publishHostServeEvidence({ scenario: "serve-steady" }, {
+      ...shared, instance: () => ({ name: "serve-core", hostUnique: true }), process: () => ({ pid: 4242, start: "proc:4242" }),
+      generationStartedAt: () => NOW - 3_600_000,
+    });
+    assert.equal(published.state, "published");
+    // This instance's ledger holds daemon rows and NO serve row for 90 minutes: the old reading said serve-stopped.
+    const silent = [...Array(8).keys()].map((i) => alive(NOW - 90 * 60_000 + i * 60_000, 4000)).join("\n");
+    const hostReader = (now: number) => readHostServeEvidence({ ...shared, clock: fixedClock(now) });
+
+    const outcomes: Record<string, { queried: number; result: unknown; rows: LedgerLine[] }> = {};
+    const cases: Record<string, Partial<ShadowMemoryPorts>> = {
+      local: { readTail: () => `${silent}\n${JSON.stringify({ ts: new Date(NOW - 60_000).toISOString(), step: "serve.memory" })}` },
+      host: { readTail: () => silent, readHostServe: hostReader },
+      silentNoReader: { readTail: () => silent },
+      unreadable: { readTail: () => silent, readHostServe: () => { throw new Error("evidence store exploded"); } },
+    };
+    for (const [name, over] of Object.entries(cases)) {
+      resetShadowMemoryStateForTests();
+      const rows: LedgerLine[] = [];
+      outcomes[name] = { ...(await startWorker(root, ports({ ...over, rows }))), rows };
+    }
+    const row = (name: string) => outcomes[name]!.rows.find((r) => r.step === "memory_budget.shadow")!;
+    assert.equal(row("host").scenario, "serve-steady", "the shared producer observation answers, not this ledger's silence");
+    assert.equal(row("unreadable").scenario, "unknown", "a reader failure is named unknown and the shadow row is still written");
+    assert.equal(outcomes.unreadable!.rows.filter((r) => r.step === "memory_budget.shadow_error").length, 0);
+    // Resident serve memory is not counted a second time: the evidence selects the scenario and adds no memory figure.
+    assert.deepEqual(row("host").numbers, row("local").numbers, "the same scenario yields the same reservation arithmetic");
+    for (const name of Object.keys(cases)) {
+      assert.equal(outcomes[name]!.queried, 1, `${name}: the worker started exactly once`);
+      assert.deepEqual(startShape(outcomes[name]!.result), startShape(outcomes.local!.result), `${name}: starts identically`);
+    }
+
+    // A publisher failure never reaches the caller.
+    assert.equal(publishHostServeEvidence({ scenario: "serve-steady" }, {
+      ...shared, write: () => { throw new Error("disk full"); }, process: () => ({ pid: 1, start: "proc:1" }),
+    }).state, "failed");
+  } finally {
+    resetShadowMemoryStateForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

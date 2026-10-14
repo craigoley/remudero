@@ -1,0 +1,93 @@
+- id: W1-T5399
+  title: "Discover an interrupted assistant control action for its operator without resubmitting it"
+  repo: remudero
+  depends_on: [W1-T4763]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 45.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator console follow-up 2026-10-02: action recovery across devices, replicas and restart"
+  plan_refs: [W1-T3855, W1-T3882, W1-T4763]
+  files: [src/lib/panel-actions.ts, src/lib/assistant-action-discovery.ts, src/lib/instance-gateway.ts, src/lib/serve.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/assistant-control-idempotency.test.ts, test/assistant-action-discovery.test.ts, test/route-wiring.test.ts, test/every-served-route-is-in-the-contract.test.ts]
+  status: merged
+  attempts: 0
+  rationale: |
+    OBSERVED at main 975275e4d2f8029dc858d842a779c7f80b0b78c1: assistantControlPaths hashes
+    the action ID into a filename. The exclusive claim committed before the side effect retains
+    only fingerprint, actorHash, instance and repository. Known-ID GET requires an actionId.
+    A stopped attempt without a receipt cannot reveal its action ID, verb or submission time
+    to a new device. Known-ID recovery and duplicate suppression exist; browser-local hints
+    are not durable cross-device discovery. W1-T4763 has exact merged task credit on 7808,
+    commit 920378ba62e196b4919db8b6ab87749cd644ba10, and is an ancestor of this main.
+    The blast radius is exposure of another operator's actions or repeated pause/resume/stop,
+    not the number of files. Preserve current admission, verified-actor and exact-target guards.
+    RFC 9110 section 9.2.2 cautions against retrying non-idempotent requests without knowing
+    their semantics or that the first attempt was not applied. Read-only discovery supplies
+    evidence, not permission to retry: https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2
+  design: |
+    Version the authoritative admitted claim to retain actionId, exact verb, verified actor hash,
+    repository, instance, server-observed submission time and the canonical payload fingerprint.
+    Commit and fsync that complete identity exclusively before executing any side effect; a
+    separately written index must not make an admitted attempt invisible after interruption.
+    Reuse the current side-effect and receipt helpers. Validate the filename digest and complete
+    identity, and require an exact-target completion receipt with matching action and evidence.
+    Preserve existing known-ID GET behavior and duplicate suppression for valid legacy records.
+
+    Add an authenticated, read-only, actor- and mounted-instance-scoped discovery route over that
+    authoritative store, wired for core and non-core instances and explicitly contracted. Derive
+    the actor from existing verified authentication, never a caller-supplied actor header. Bound
+    file count, bytes, elapsed work and response size using asynchronous reads and bounded yielding.
+    Return source identity, observation time, completeness and continuation semantics; bind any
+    continuation to the verified actor and exact target without disclosing store paths or other
+    actors' identifiers. Use private no-store responses, not a shared cross-principal cache.
+    An unreadable, oversized, changed-during-read or unsupported legacy corpus is partial/unavailable,
+    never a certified empty pending list. Do not expose another actor's IDs, verbs, reasons or counts.
+    Old claims without recoverable identity stay an explicit discovery limitation; never reverse
+    hashes, invent an ID, erase a claim or dispatch another action. An absent exact receipt stays unknown.
+
+    Keep discovery strictly GET-only: no preparation, control request, guessed effect or retry.
+    Keep the existing explicit console action-admission gate disabled until separate shared-root,
+    replica/restart and same-operator production proofs are established. No new token or permission,
+    paid model call, broad account data, control activation or worker/service recycle is authorized.
+    Console account-scoped merging of server discovery and local hints is a separate consumer task,
+    blocked on this merged AND served read contract; this core task must not modify a consumer repo.
+  acceptance:
+    - claim: "a new device discovers the same admitted action after interruption and restart without another effect"
+      proof: 'grep: a fresh actor session discovers an interrupted assistant action without resubmission in test/assistant-action-discovery.test.ts'
+    - claim: "wrong actors and exact-target mismatches cannot discover or complete an action"
+      proof: 'grep: assistant discovery preserves actor target and completion receipt identity in test/assistant-action-discovery.test.ts'
+    - claim: "legacy corrupt unreadable and truncated discovery never becomes a verified empty population"
+      proof: 'grep: incomplete assistant discovery is not a verified empty pending list in test/assistant-action-discovery.test.ts'
+    - claim: "real replica processes share one admission and discovery never executes a control action"
+      proof: 'grep: replica discovery reads one admitted action and never dispatches a second effect in test/assistant-control-idempotency.test.ts'
+    - claim: "the served handler calls the bounded authoritative discovery reader rather than a test-only module"
+      proof: 'grep: readAssistantActionDiscovery( in src/lib/panel-actions.ts'
+  falsifier: |
+    Retain real-process tests while restoring the old four-field claim: interruption before receipt,
+    removal of disposable browser hints and a fresh same-actor process must fail to recover the ID.
+    Restore the fix and stop after claim and after effect separately; both remain discoverable and
+    receipt-less effects remain unknown with no redispatch. Use two actual processes sharing one
+    root, wrong actors/targets, forged headers, mismatched receipts, unknown versions, corrupt and
+    oversized files, EISDIR/read failures, changing corpus, cross-actor continuation attempts and
+    bounded-loop positive controls. A fake writer, known-ID-only lookup or fixture directory alone
+    is not cross-device acceptance. Verify the route's no-store policy and actual served wiring.
+  note: |
+    reservation hand-off: codex/plan-assistant-action-discovery-2026-10-03 -> codex/plan-assistant-discovery-2026-10-11
+
+    This same-chat continuation transfers its original operator-host filing to the fresh branch.
+    The old holder branch is absent remotely and its intact unpushed checkout is preserved;
+    reservation nonce 09d41b0d remains unchanged. This is not a competing takeover or new claim.
+    REFRESH 2026-10-11 15:37 UTC: the complete five-open-PR owner corpus and main 975275e4
+    were read and each exact head tree was swept for the task ID and discovery subject. W1-T4763
+    was a positive control on all six trees; no discovery task or runtime implementation matched.
+    No run-W1-T5399-* head exists. Reservation refs/rmd-id/W1-T5399 still resolves exactly to
+    09d41b0d48b259174e47c6fd6c3b6708a6657ea9, the operator-host holder branch
+    codex/plan-assistant-action-discovery-2026-10-03. No reservation was deleted or guessed.
+    Older overlapping handler and generated-contract PRs are no longer open; reconcile fresh
+    main contracts and all owners again before implementation. Source merge is not runtime proof.
+    Recheck current plan, merged task trailers AND merged run-branch credit, reservations and all
+    open-head subjects before building. Filing, implementation, merge, loaded generation and live
+    discovery are separate receipts. This filing authorizes no control activation or competing push.

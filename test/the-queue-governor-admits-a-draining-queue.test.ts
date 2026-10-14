@@ -220,6 +220,7 @@ function boardWithMostlyForeignOpenPrs(wipLimit: number): GitHub {
 async function captureDrainDepsWithLiveProjection(config: Config, planPath: string, github: GitHub): Promise<DrainDeps> {
   let captured: DrainDeps | undefined;
   const code = await drainCommand([], {
+    readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
     config,
     planPath,
     skipGitSync: true,
@@ -273,6 +274,7 @@ test("W1-T4465: daemonCommand's WIRED checkQueueGovernor also admits by ownershi
     const github = boardWithMostlyForeignOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
       githubFactory: () => github,
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();

@@ -20,9 +20,10 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runFlakeIncidentGardener } from "./flake-incident-gardener.js";
-import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener } from "./flow-gardener.js";
+import { FLOW_GARDENER_FAILED_STEP, flowCiReader, flowPassDue, runFlowGardener, type AdmissionFlowInput } from "./flow-gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
+import { ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_MIN_INTERVAL_MS, runIssueRevalidationGarden, type IssueRevalidationPorts } from "./issue-revalidation-garden.js";
 import { SCOUT_MIN_INTERVAL_MS } from "./scout-gardener.js";
 import {
   readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
@@ -35,6 +36,7 @@ import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
+import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
@@ -59,6 +61,10 @@ export const REGISTERED_GARDEN_NAMES = [
   "flow-remedy",
   // W1-T7421: the fix lane's own defects, clustered once a UTC day and drafted as one remedy per class.
   "fix-lane",
+  // W1-T5420: append the formerly separate knowledge starter; existing registered slots stay unchanged.
+  "knowledge",
+  // W1-T8864: every open issue re-checked against current evidence, shadow-first.
+  "issue-revalidation",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
@@ -77,7 +83,7 @@ export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; admitted?: () => void }) => Promise<number | null>;
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void }) => Promise<number | null>;
 
 /** Share a small host budget across all garden starters. A busy garden keeps its own pending
  * pass rather than spawning a second child, while queued passes from other gardens wait here. */
@@ -86,7 +92,7 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
   type Pending = {
     name: RegisteredGardenName;
     args: readonly string[];
-    signal: { readonly stopped: boolean; admitted?: () => void };
+    signal: Parameters<GardenPassSpawn>[2];
     resolve: (exit: number | null) => void;
     reject: (error: unknown) => void;
   };
@@ -142,6 +148,9 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow" || name === "fix-lane") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
+  if (name === "issue-revalidation") {
+    return { intervalFor: (i) => Math.max(i, ISSUE_REVALIDATION_MIN_INTERVAL_MS), minIntervalMs: ISSUE_REVALIDATION_MIN_INTERVAL_MS, hourly: false };
+  }
   return { intervalFor: sameInterval, minIntervalMs: 0, hourly: name === "test" };
 }
 
@@ -257,6 +266,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     let admittedMs: number | undefined;
     observe(event("queued", { passId, nextDueAt: null }));
     const passSignal = {
+      passId,
       get stopped() { return signal.stopped; },
       admitted: () => {
         admittedMs = clock.now();
@@ -365,9 +375,10 @@ export function childGardenPassSpawn(
   const root = opts.root ?? join(homedir(), "Remudero");
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
-  return async (name, args) => {
-    await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}` }, opts.admission);
-    const reservation = reserve();
+  return async (name, args, signal) => {
+    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve }, opts.admission);
+    const reservation = "reservation" in admission ? admission.reservation :
+      admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.
     if (reservation) {
       recordShadowMemoryVerdict({ workerClass: "garden", reservationId: reservation.id, estimateMib: reservation.estimateMib, root,
@@ -383,7 +394,8 @@ export function childGardenPassSpawn(
       // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
       const child = spawn(execPath, [...execArgv, `--max-old-space-size=${heapLimitMb}`, entry, "garden", "run", name, ...args], {
         cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1" },
+        env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1",
+          [GARDENER_ORIGIN_ENV]: gardenerOriginEnv(name, signal.passId) },
         stdio: ["ignore", "ignore", "pipe"],
       });
       let stderr = "";
@@ -528,15 +540,38 @@ export function selectorShadowGardenPass(
 
 /** W1-T5904: one daily flow pass as the daemon builds it — the ledger union, GitHub's CI timings through
  *  `io` (absent: the gh transport) and the shared filing path. Its due probe skips a reported day. */
+export interface FlowGardenIo extends Pick<SelectorShadowGhReads, "readJson"> { admission?: AdmissionFlowInput }
 export function flowGardenPass(
-  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: Pick<SelectorShadowGhReads, "readJson"> = {},
+  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: FlowGardenIo = {},
 ): (() => Promise<void>) & { due: () => boolean } {
   const pass = async (): Promise<void> => {
     try {
-      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson) });
+      await runFlowGardener(d, { mintTaskId, readCi: flowCiReader(owner, repo, io.readJson), admission: io.admission });
     } catch (e) {
       d.log(FLOW_GARDENER_FAILED_STEP, { error: String((e as Error)?.message ?? e) });
     }
   };
   return Object.assign(pass, { due: () => flowPassDue(d.stateDir, d.clock) });
+}
+
+/** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match
+ *  the previous ones widens the wait (never under the garden's hourly floor), and a changed verdict snaps
+ *  it back. A pass never throws: a failure is ledgered as `issue_revalidation.failed`. */
+export function issueRevalidationGardenPass(
+  stateDir: string, ports: IssueRevalidationPorts, clock?: Clock,
+): (() => Promise<void>) & { due: () => boolean } {
+  const pass = async (): Promise<void> => {
+    let found = false;
+    try {
+      found = (await runIssueRevalidationGarden(ports)).found;
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pass", error: String((e as Error)?.message ?? e) });
+    }
+    try {
+      recordGardenPacing(stateDir, "issue-revalidation", found, { clock });
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pacing", error: String((e as Error)?.message ?? e) });
+    }
+  };
+  return Object.assign(pass, { due: () => gardenPacingDue(stateDir, "issue-revalidation", { clock }) });
 }

@@ -1,0 +1,57 @@
+- id: W1-T9181
+  title: "THE REVALIDATION GARDEN'S FIRST SHADOW PASS WOULD HAVE CLOSED A LIVE ESCALATION ON A MISREAD STEP NAME — #10269 (the ci-friction gardener's filing fails) was judged resolved because the evidence pack read `ci-friction.garden_filing_failed` as `friction.garden_filing_failed`, a step nothing writes, and its zero rows reached the judge as proof of a fix, while the real step had a row at 14:16Z and the fleet re-observed the condition at 11:02Z the same day: step names keep their hyphens, a zero for a step no code writes is told to the judge as no evidence, and an absence-only citation or a re-observed escalation never closes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — what the revalidation garden may count as proof that an open issue is resolved
+  band_meaning: span
+  origin: "operator ruling 2026-10-13: the revalidation garden flips to act only when every shadow 'resolved' is correct; the first shadow pass (14:52Z) had one would-be close and it was wrong"
+  plan_refs: [W1-T8864]
+  files: [src/lib/issue-revalidation-garden.ts, test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts, test/the-revalidation-garden-never-closes-on-an-absence.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-13 at origin/main, the live ledger and issue #10269 (read-only).
+    OBSERVED, first shadow pass GARDEN-issue-revalidation-1791902984750 (14:52Z): 31 issues seen (search count 30 at
+    15:03Z), 10 judged, verdicts resolved 4 / still-true 9 / convert 1 / unknown 17, and ONE would-be close: #10269.
+    - #10269 is BLOCKED: "the ci-friction gardener's filing has failed 3 times in a row". The fleet appended "observed
+      the same condition" comments at 2026-10-10T11:06Z, 2026-10-13T05:20Z and 2026-10-13T11:02Z.
+    - The verdict was resolved, citing "ledger step friction.garden_filing_failed: 0 row(s) in the last 48 h".
+      The live ledger holds 0 rows of friction.garden_filing_failed (never written) and 1 row of
+      ci-friction.garden_filing_failed in the same window, newest 2026-10-13T14:16:26Z.
+    - CAUSE: evidenceNames' dotted-step pattern `\b([a-z][a-z_]+\.[a-z_]+...)` has no hyphen, so `\b` starts the
+      match after `ci-`. The same pattern takes `tasks.d` out of `plan/tasks.d/...` paths as a ledger step: four GRILL
+      verdicts in this pass cite "ledger step tasks.d: 0 row(s)".
+    - A zero-row count is passed to the judge with no positive control, and decideAction closes on any cited
+      `resolved`, including one whose only citation is an absence.
+    - The other three `resolved` verdicts were right: #11360 and #11359 (PRs #11344 and #11347 merged) and #10150.
+      #10150 was right only by luck: the Clerk proxy fix is in remudero-console, where a test asserts the symbol's
+      absence, but the evidence pack greps only this repo, and it cited "does not appear" while a feedback yaml here
+      still names it. All four were already withheld or allowed by the guards as designed.
+    OWNERSHIP: W1-T8864 (merged #11322) built the garden; nothing open touches evidenceNames.
+  design: |
+    1. evidenceNames reads a dotted step name whole, hyphens included (`ci-friction.garden_filing_failed`), and never
+       one that continues a path or a longer word (`plan/tasks.d/...` yields no `tasks.d`).
+    2. A zero-row ledger step fact tells the judge that a zero is absence, not proof of a fix, and the prompt says
+       a resolved verdict needs evidence of something present. A source grep cannot tell a real step from a misread
+       one, because step names are composed at runtime (`${spec.name}.garden_filing_failed` in src/lib/gardener.ts).
+    3. decideAction never closes on a `resolved` verdict whose citation is only an absence (zero rows, or "does not
+       appear"): guard `absence-only-citation`, keep. Act mode closes only on a citation that names something
+       present, such as a merged PR, a commit or a row.
+    4. decideAction never closes an escalation whose comments show the fleet re-observed the same condition within
+       48 h of the pass: guard `condition-reobserved`, keep. Comments are already read for every actionable verdict.
+    Shadow and act apply the same guards, so the next shadow pass's table shows them.
+  acceptance:
+    - claim: "the #10269 shape never closes: a hyphenated step is read whole, a zero is told to the judge as absence, not proof, and an absence-only citation or a re-observed escalation is kept with its guard"
+      proof: 'grep: test("W1-T9181: the revalidation garden never closes on an absence" in test/the-revalidation-garden-never-closes-on-an-absence.test.ts'
+    - claim: "decideAction names the absence guard"
+      proof: 'grep: absence-only-citation in src/lib/issue-revalidation-garden.ts'
+  falsifier: |
+    Restore the hyphen-less step pattern: the #10269 fixture's evidence names friction.garden_filing_failed and the
+    test fails. Drop the absence guard: the #10269 fixture's cited zero-row verdict yields action close and the test
+    fails. Drop the re-observed guard: a fixture with a present citation but a same-day "observed the same
+    condition" comment closes and the test fails.

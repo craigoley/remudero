@@ -1,0 +1,63 @@
+- id: W1-T8241
+  title: "A BREAKER TRIPPED ONLY BY THE HARNESS IS RELEASED BY A GOVERNED RUNBOOK, NOT A PERSON — W1-T7742's breaker held 7.5 h on two restart yields, a claim race, a refused checkpoint push and two node_modules refusals until an operator ran `rmd release` by hand at 2026-10-11T16:07Z"
+  repo: remudero
+  depends_on: [W1-T8240]  # answers W1-T8240's stranded-task finding and reuses its non-worker classifier
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the reversible remedy for a breaker whose every strike is non-worker
+  band_meaning: blast-radius
+  origin: "operator rulings 2026-10-09 (a hand-fixed PR is a bug in rmd) + 2026-09-23 (runbooks behind an independent governor): automate the hand `rmd release` of 2026-10-11"
+  plan_refs: [W1-T4386, W1-T4390, W1-T4678, W1-T4025, W1-T7742]
+  files: [src/lib/breaker-release.ts, src/run-task.ts, src/lib/sre-runbooks.ts, test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts]
+  status: queued
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-11 (core ledger, read-only): `dispatch.circuit_broken.verified` for W1-T7742 at 08:35:15Z disposed
+    "escalate" ("5 dispatch(es) with no new owned PR since (excluded: {worktree.node_modules: 2}) - no cheap
+    disposition applies"). BLOCKED issue #10825 opened at 08:35:18. A person released the breaker at 16:07:10
+    (`dispatch.breaker_released`, actor "unknown" on host Remudero, reason "breaker counted 2 restart yields, a claim
+    race, a refused checkpoint push and 2 node_modules refusals; no worker failure ... Operator-approved"). The
+    evidence for the release was all in the ledger at 08:35. The decision needed no judgment beyond "were any of
+    these strikes the worker's?".
+    #10866 now keeps those classes out of the breaker count, so this exact trip should not recur. The class does
+    recur: any new non-worker interruption the breaker does not yet exclude strands a task the same way, and only a
+    person releases it. Today `rmd release` (src/run-task.ts, the `dispatch.breaker_released` writer at :55200 and
+    its best-effort close of the breaker's escalation issue) is the only writer.
+  design: |
+    1. ONE RELEASE WRITER. Move the body of `rmd release` (count read, `dispatch.breaker_released` row, best-effort
+       close of the breaker's escalation issue) into src/lib/breaker-release.ts `releaseBreaker(...)`. Both the CLI
+       and the runbook call it, with `actor` naming who released (`sre-runbook:release-non-worker-breaker` for the
+       runbook). The CLI's behaviour and output do not change.
+    2. THE RUNBOOK `release-non-worker-breaker` in sreRunbookCatalog answers W1-T8240's `stranded-task` incident when
+       its subject says `breaker=tripped`.
+       - precheck: re-read the task's counted strikes and classify each with W1-T8240's classifier. Proceed only
+         when every one is non-worker, the task has no open PR, and no release receipt exists for the same evidence
+         fingerprint (strike run ids).
+       - act: `releaseBreaker` with a reason listing the classified strikes.
+       - verify: on a later pass the task is dispatchable again (not breaker-held).
+       Reversible: the breaker trips again on new evidence.
+    3. GOVERNED. The runbook enters the catalog like the four existing ones. The governor (sre-governor.ts) keeps a
+       new runbook in shadow until its shadow record is clean, so it first only records the release it would make.
+       It never touches a task with an attributable worker failure.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive the catalog with an
+    injected host and a ledger holding W1-T7742's 2026-10-11 strikes, plus a control task with one worker failure.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts"
+    - claim: "the runbook releases a breaker whose every strike is non-worker"
+      proof: 'grep: test("W1-T8241: a breaker with only non-worker strikes is released" in test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts'
+    - claim: "a breaker with one worker-attributable strike is left for the existing path"
+      proof: 'grep: test("W1-T8241: a breaker with a worker strike is not released" in test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts'
+    - claim: "the same evidence is never released twice"
+      proof: 'grep: test("W1-T8241: the same strikes are never released twice" in test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts'
+    - claim: "rmd release and the runbook write the release through one function"
+      proof: 'grep: releaseBreaker( in src/run-task.ts'
+    - claim: "the runbook is in the governed catalog"
+      proof: 'grep: release-non-worker-breaker in src/lib/sre-runbooks.ts'
+  falsifier: |
+    Without the runbook, the W1-T7742 replay incident finds no answering runbook and goes to feedback, so the first
+    test sees no `dispatch.breaker_released`. Skip the per-strike classification and the control task is released
+    too, so the second test fails.

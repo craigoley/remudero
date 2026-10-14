@@ -319,6 +319,16 @@ test("GOLDEN — PROMPT-SURFACE LESSON: the cited gate refusal reaches task auth
   assert.ok(selected.some((entry) => entry.id === "prompt-surface-gate-learning-path-evidence"));
 });
 
+test("GOLDEN — HEAD-IDENTITY LESSON: the cited refusal reaches the push lane and its proof executes", () => {
+  const { verdict, golden } = judgeCase("ci-head-identity-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const entries = loadLearningsForTaskFiles(join(HERE, "..", "learnings"), ["hooks/pre-push"]);
+  const selected = selectLearnings(entries, ["hooks/pre-push"]).selected;
+  assert.ok(selected.some((entry) => entry.id === "head-identity-gate-pre-push-identity"));
+});
+
 test("GOLDEN — UNWIRED-GATE LESSON: the cited proof executes and the gate lanes receive guidance", () => {
   const { verdict, golden } = judgeCase("ci-unwired-gate-lesson");
   assert.equal(golden.violation, "none");

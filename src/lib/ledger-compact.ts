@@ -391,8 +391,8 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
           const isSplit = parts.length > 1;
           const isLast = index === parts.length - 1;
           const canUseBase =
-            isSplit && isLast && (!fs.existsSync(basePath) || selectedPaths.has(basePath)) && !stagedPaths.has(basePath);
-          let outputName = !isSplit || canUseBase ? name : "";
+            (!isSplit || isLast) && (!fs.existsSync(basePath) || selectedPaths.has(basePath)) && !stagedPaths.has(basePath);
+          let outputName = canUseBase ? name : "";
           if (outputName === "") {
             const timedName = archiveNameForChunk(name, partBody);
             const timedPath = timedName ? join(stateDir, timedName) : "";

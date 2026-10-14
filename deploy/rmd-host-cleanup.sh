@@ -44,18 +44,25 @@
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
 
-# OVERRIDES. Thresholds: IDLE_MINUTES HIGH_WATER ARCHIVE_DAYS DRY_RUN. Idle windows have a hard six-hour minimum. Roots and probes, so a test
+# RETENTION is six hours at every disk pressure tier (W1-T8863), as on the Mac. Scratch-unit
+# idleness and the tsx cache follow that window unless pinned longer. Pins under six hours are
+# logged as CLAMP and raised to six hours; watched filesystem alarms still use their own marks.
+
+# OVERRIDES. Thresholds: IDLE_MINUTES (pins the idle window; empty = six hours)
+# HIGH_WATER ARCHIVE_DAYS DRY_RUN. Roots and probes, so a test
 # drives a fixture tree instead of the real /tmp and /mnt/rmd, on Linux or macOS:
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
+#   RMD_CLEANUP_LIVE_CHECKOUTS  live checkouts kept while judging only untracked immediate clones
 #   RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS  exact checkout paths excluded from those scans
 #   RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT  durable location for unpublished clean HEAD bundles
 #   RMD_CLEANUP_COVERAGE_PATHS   colon-separated exact regenerable coverage cache paths
 #   RMD_CLEANUP_TMP_ROOTS       colon-separated scratch roots
 #   RMD_CLEANUP_TMP_GLOBS       space-separated basename globs swept directly under those roots
 #   RMD_CLEANUP_BIG_MB          size (MB) at which an idle file under a scratch root is swept
-#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  age (h, minimum 6) past which a file inside a `tsx-*` cache
-#                               directly under a tmp root is pruned (default 6)
+#   RMD_CLEANUP_TSX_MAX_AGE_HOURS  pins the age (h; under 6 is clamped to 6) past which a file
+#                               inside a `tsx-*` cache directly under a tmp root is pruned
+#                               (default: the idle window)
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
@@ -90,7 +97,8 @@
 #                               not mounted) is not swept at all.
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
 #   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
-#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 360; cannot be lower)
+#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  pins scratch-unit payload inactivity (default: the idle
+#                               window; under 360 is clamped to 360)
 #   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
 #                               symlinks) for `rmd-c-<12 hex>` coverage scratch at ANY depth
 #                               (W1-T5708). Default: the tmp roots, scratch roots and parents, plus
@@ -102,20 +110,22 @@
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
 
-IDLE_MINUTES="${IDLE_MINUTES:-360}"      # 6 h, as requested by the operator
+FLOOR_MINUTES=360                        # 6 h: the protective floor for anything that could be live work
+IDLE_MINUTES="${IDLE_MINUTES:-}"         # empty: six hours (retention_window)
 HIGH_WATER="${HIGH_WATER:-85}"           # [UNVERIFIED] percent of / at which a pass fails
 ARCHIVE_DAYS="${ARCHIVE_DAYS:-30}"       # [UNVERIFIED] archive retention
 DRY_RUN="${DRY_RUN:-0}"
 
 CLEAN_HOME="${RMD_CLEANUP_HOME:-${HOME:-/}}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
+LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
 WORKTREE_ARCHIVE_ROOT="${RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-worktree-archive}"
 COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]
 TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVERIFIED]
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
-TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-6}"
+TSX_MAX_AGE_HOURS="${RMD_CLEANUP_TSX_MAX_AGE_HOURS:-}"  # empty: the idle window
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
 DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
@@ -151,7 +161,7 @@ else
   [ "$ROOT_FS" = / ] && NESTED_COVERAGE_ROOTS="$NESTED_COVERAGE_ROOTS:/mnt/rmd"
 fi
 COVERAGE_LOCK_DIR="${RMD_CLEANUP_COVERAGE_LOCK_DIR:-/tmp}"
-SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-360}"
+SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-}"  # empty: the idle window
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 # Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
 # with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
@@ -161,19 +171,18 @@ fi
 LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
 FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
-case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
+case "$HIGH_WATER$ARCHIVE_DAYS$BIG_MB" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
-if [ "$IDLE_MINUTES" -lt 360 ] || [ "$SCRATCH_IDLE_MINUTES" -lt 360 ]; then
-  echo "rmd-host-cleanup: FATAL idle retention must be at least 360 minutes (6h)" >&2; exit 2
-fi
-# TSX cache retention follows the same six-hour floor as other disposable scratch.
-case "$TSX_MAX_AGE_HOURS" in
-  ""|*[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
+# A pinned window must be a number (a typo is refused, not guessed at); how SMALL it is is not
+# refused here, it is clamped to the floor below.
+case "$IDLE_MINUTES$SCRATCH_IDLE_MINUTES" in
+  *[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
-if [ "$TSX_MAX_AGE_HOURS" -lt 6 ]; then
-  echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be at least 6" >&2; exit 2
-fi
+case "$TSX_MAX_AGE_HOURS" in
+  "") ;;
+  *[!0-9]*|0|0*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_TSX_MAX_AGE_HOURS must be a positive integer" >&2; exit 2 ;;
+esac
 case "$ONLY_TMP" in
   0|1) ;;
   *) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_ONLY_TMP must be 0 or 1" >&2; exit 2 ;;
@@ -206,7 +215,29 @@ if [ "$root_watched" = 0 ]; then
   W_FREE_KB=(0 ${W_FREE_KB[@]+"${W_FREE_KB[@]}"}); W_FREE_TXT=("" ${W_FREE_TXT[@]+"${W_FREE_TXT[@]}"})
 fi
 
-log() { printf '%s\n' "$*"; }
+# The durable audit log (W1-T8861): every REMOVE / ARCHIVE / PRUNE decision is appended here whatever
+# stdout is redirected to, so a pass run outside the cron's redirect still leaves a trace. One line:
+# ISO time, uid, DRY_RUN, pid, then the decision as logged (action, path, reason).
+AUDIT_LOG="${RMD_CLEANUP_AUDIT_LOG:-$CLEAN_HOME/.local/state/remudero/janitor-audit.log}"
+audit_writable() {
+  mkdir -p -- "$(dirname -- "$AUDIT_LOG")" 2>/dev/null && : >> "$AUDIT_LOG" 2>/dev/null
+}
+audit_append() {
+  printf '%s uid=%s dry_run=%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_UID" "$DRY_RUN" "$$" "$*" \
+    >> "$AUDIT_LOG" 2>/dev/null
+}
+log() {
+  printf '%s\n' "$*"
+  case "$*" in
+    "REMOVE "*|"ARCHIVE "*|"ARCHIVE-WORKTREE "*|"PRUNE "*) audit_append "$*" || true ;;
+  esac
+}
+
+# retention_window <points below the mark> — six hours regardless of disk pressure (W1-T8863).
+retention_window() {
+  echo "$FLOOR_MINUTES"
+}
+fmt_minutes() { if [ $(( $1 % 60 )) = 0 ]; then printf '%s h' "$(( $1 / 60 ))"; else printf '%s min' "$1"; fi; }
 
 # The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
 # needs no write access, so whichever identity created it, any mode the other can read works, and
@@ -226,6 +257,10 @@ esac
 # Every mutation goes through here, so DRY_RUN=1 has exactly one place to hold.
 act() {
   if [ "$DRY_RUN" = 1 ]; then log "DRYRUN would: $*"; return 0; fi
+  # A destructive step with no audit trail is refused, not done silently (W1-T8861).
+  case "$1" in
+    rm) audit_writable || { log "KEEP $*: audit log unwritable ($AUDIT_LOG)"; return 1; } ;;
+  esac
   "$@"
 }
 
@@ -282,7 +317,7 @@ is_protected_worktree() {
   local target="$1" protected
   while IFS= read -r protected; do
     [ -n "$protected" ] && [ "$target" = "$protected" ] && return 0
-  done < <(printf '%s\n' "$PROTECTED_WORKTREE_ROOTS" | tr ':' '\n')
+  done < <(printf '%s\n%s\n' "$PROTECTED_WORKTREE_ROOTS" "$LIVE_CHECKOUTS" | tr ':' '\n' | sed 's:/*$::')
   return 1
 }
 
@@ -353,10 +388,50 @@ worktree_saved() {
   esac
   return 1
 }
+# Every ref of a clone outside refs/remotes, as "<object> <refname>" lines (heads, tags, stash, ...).
+local_refs() {
+  local out
+  out="$(rgit "$1" for-each-ref --format='%(objectname) %(refname)')" || return 1
+  printf '%s\n' "$out" | awk 'NF && $2 !~ /^refs\/remotes\//'
+}
+# A clone's non-remote refs that no remote-tracking branch contains: one refname per line. Returns
+# non-zero when the refs cannot be read at all (unknown reads as unsaved).
+clone_unsaved_refs() {
+  local wt="$1" refs obj name
+  refs="$(local_refs "$wt")" || return 1
+  while read -r obj name; do
+    [ -n "$obj" ] || continue
+    [ -n "$(rgit "$wt" branch -r --contains "$obj" 2>/dev/null)" ] || printf '%s\n' "$name"
+  done <<< "$refs"
+}
+# The first live linked worktree whose git dir is this clone's: its `gitdir` file names the
+# worktree's .git file, and the directory holding it still exists.
+clone_live_worktree() {
+  local gitdir="$1" entry target
+  for entry in "$gitdir"/worktrees/*/; do
+    [ -d "$entry" ] || continue
+    if [ ! -r "${entry}gitdir" ]; then printf '%s\n' "${entry%/} (gitdir unreadable)"; return 0; fi
+    target="$(head -n 1 -- "${entry}gitdir" 2>/dev/null)"
+    [ -n "$target" ] || { printf '%s\n' "${entry%/} (gitdir empty)"; return 0; }
+    if [ -d "$(dirname -- "$target")" ]; then printf '%s\n' "$(dirname -- "$target")"; return 0; fi
+  done
+  return 1
+}
 archive_worktree_head() {
   local wt="$1" head="$2" archive="$WORKTREE_ARCHIVE_ROOT" name bundle tmp probe archive_fsid root_fsid
   local mode="${3:-head}" refs="$head HEAD" tag="" source="$ROOT_FS"
-  if [ "$mode" = branches ]; then
+  local -a all_refs=()
+  if [ "$mode" = all ]; then
+    local lines name_ref
+    lines="$(local_refs "$wt")" || return 1
+    # a stash keeps older entries only in its reflog, which a bundle cannot carry
+    if printf '%s\n' "$lines" | grep -q ' refs/stash$' && \
+       [ "$(rgit "$wt" reflog show refs/stash 2>/dev/null | grep -c .)" -gt 1 ]; then return 1; fi
+    refs="$(printf '%s\n%s\n' "$head HEAD" "$lines")"
+    while read -r _ name_ref; do [ -n "$name_ref" ] && all_refs+=("$name_ref"); done <<< "$lines"
+    tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
+    source="$wt"
+  elif [ "$mode" = branches ]; then
     refs="$(rgit "$wt" for-each-ref --format='%(objectname) %(refname)' refs/heads)" || return 1
     refs="$(printf '%s\n%s\n' "$head HEAD" "$refs")"
     tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
@@ -366,7 +441,7 @@ archive_worktree_head() {
   name="$(basename "$wt" | tr -c 'A-Za-z0-9._-' '-')"
   name="${name%-}"
   bundle="$archive/${name}-${head}${tag}.bundle"
-  if [ "$mode" = branches ]; then
+  if [ "$mode" = branches ] || [ "$mode" = all ]; then
     probe="$archive"
     while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
     archive_fsid="$(fs_id "$probe")"; root_fsid="$(fs_id "$source")"
@@ -392,8 +467,18 @@ archive_worktree_head() {
   [ ! -e "$tmp" ] || return 1
   local -a bundle_refs=(HEAD)
   [ "$mode" = branches ] && bundle_refs+=(--branches)
-  if ! rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
-     ! verify_worktree_bundle "$wt" "$tmp" "$refs"; then
+  [ "$mode" = all ] && bundle_refs+=("${all_refs[@]}")
+  # one retry: a transient failure (a background gc, a racing ref update) must not read as "cannot
+  # be archived", and the first failure's reason goes to stderr so a KEEP is never unexplained
+  local attempt bundle_err="" built=0
+  for attempt in 1 2; do
+    rm -f -- "$tmp"
+    if bundle_err="$(rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" 2>&1 >/dev/null)" && \
+       verify_worktree_bundle "$wt" "$tmp" "$refs"; then built=1; break; fi
+    printf 'rmd-host-cleanup: bundle of %s failed (attempt %s): %s\n' "$wt" "$attempt" "${bundle_err:-verification mismatch}" >&2
+    sleep 1
+  done
+  if [ "$built" != 1 ]; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -411,17 +496,52 @@ verify_worktree_bundle() {
     [ -z "$ref" ] || printf '%s\n' "$heads" | grep -Fxq -- "$ref" || return 1
   done <<< "$refs"
 }
+# Lost Git metadata cannot prove a tree clean: preserve its entire payload before removing it.
+archive_orphan() {
+  local wt="$1" raw parent probe archive="$WORKTREE_ARCHIVE_ROOT/orphans" tmp dest a b
+  raw="$(cat -- "$wt/.git" 2>/dev/null)" || return 1
+  case "$raw" in "gitdir: "/*/.git/worktrees/*) raw="${raw#gitdir: }" ;; *) return 1 ;; esac
+  case "$raw" in *$'\n'*|*/../*|*/./*) return 1 ;; esac
+  case "${raw##*/.git/worktrees/}" in ""|*/*) return 1 ;; esac
+  parent="${raw%/.git/worktrees/*}"
+  [ ! -e "$raw" ] && [ ! -L "$raw" ] && [ ! -e "$parent" ] && [ ! -L "$parent" ] || return 1
+  probe="$(dirname -- "$parent")"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ] && [ "$probe" != / ]; do probe="$(dirname -- "$probe")"; done
+  [ -d "$probe" ] && [ -r "$probe" ] && [ -x "$probe" ] || return 1
+  probe="$archive"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ] && [ "$probe" != / ]; do probe="$(dirname -- "$probe")"; done
+  a="$(fs_id "$wt")"; b="$(fs_id "$probe")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ] || return 1
+  audit_writable || return 1
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: archive orphan $wt -> $archive then remove it"; return 0
+  fi
+  mkdir -p -- "$archive" || return 1
+  [ ! -L "$archive" ] || return 1
+  archive="$(cd -P -- "$archive" && pwd -P)" || return 1
+  case "$archive" in "$wt"|"$wt"/*) return 1 ;; esac
+  b="$(fs_id "$archive")"
+  [ -n "$b" ] && [ "$a" != "$b" ] || return 1
+  tmp="$(mktemp "$archive/${wt##*/}.XXXXXX")" || return 1
+  dest="$tmp.tar"
+  if ! tar -cf "$tmp" --exclude=node_modules --exclude=coverage -C "$wt" . || \
+     [ ! -s "$tmp" ] || ! tar -tf "$tmp" >/dev/null || ! mv -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"; return 1
+  fi
+  log "ARCHIVE-WORKTREE $wt orphan -> $dest"
+}
 sweep_worktree() {
-  local wt="$1" gitdir idle_status kind head
+  local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
   if [ -d "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="standalone clone"
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
   else log "KEEP $wt: Git metadata is missing or has an unexpected type"; return
   fi
   if ! gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
-    log "KEEP $wt: Git metadata is unreadable or missing"; return
+    if [ "$kind" = "linked worktree" ]; then orphaned=1
+    else log "KEEP $wt: Git metadata is unreadable or missing"; return; fi
   fi
-  if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
+  if [ "$orphaned" = 0 ] && [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
   is_worktree_idle "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -429,6 +549,17 @@ sweep_worktree() {
     *) log "KEEP $wt: activity probe failed (unknown)"; return ;;
   esac
   if is_open "$wt"; then log "KEEP $wt: held open by a process"; return; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $wt: Docker mount snapshot failed (unknown)"; return; fi
+  if is_docker_mount "$wt"; then log "KEEP $wt: Docker mount"; return; fi
+  if [ "$orphaned" = 1 ]; then
+    if ! archive_orphan "$wt"; then
+      log "KEEP $wt: Git metadata is unreadable or missing; orphan archive unavailable or unsafe"; return
+    fi
+    [ "$DRY_RUN" = 1 ] && return
+    log "REMOVE $wt (archived orphan)"
+    act rm -rf -- "$wt" || log "KEEP $wt: orphan removal failed"
+    return
+  fi
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
@@ -445,9 +576,25 @@ sweep_worktree() {
     repo_fetch "$wt" --quiet origin 2>/dev/null || true
   fi
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
-  if ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
+  if [ "$kind" = "standalone clone" ]; then
+    # A clone is the git dir of every linked worktree built on it, and holds every local ref: judging
+    # it by HEAD alone deleted a clone hosting 33 worktrees (W1-T8861).
+    if hosted="$(clone_live_worktree "$gitdir")"; then
+      log "KEEP $wt: hosts linked worktree $hosted"; return
+    fi
+    if ! unsaved="$(clone_unsaved_refs "$wt")"; then
+      log "KEEP $wt: refs are unreadable (unknown)"; return
+    fi
+    if [ -n "$unsaved" ] || ! worktree_saved "$wt"; then
+      if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
+      if ! archive_worktree_head "$wt" "$head" all; then
+        log "KEEP $wt: unsaved refs (${unsaved//$'\n'/ }${unsaved:+ }HEAD) could not be archived safely"; return
+      fi
+    fi
+  elif ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
     log "KEEP $wt: unpublished HEAD could not be archived safely"; return
   fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
   log "REMOVE $wt ($kind)"
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$kind" = "standalone clone" ]; then log "DRYRUN would: rm -rf -- $wt"
@@ -459,6 +606,25 @@ sweep_worktree() {
   elif ! rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then
     log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"
   fi
+}
+
+sweep_live_checkout() {
+  local checkout="${1%/}" wt child status top
+  [ -d "$checkout/.git" ] || [ -f "$checkout/.git" ] || return
+  [ ! -L "$checkout" ] && [ ! -L "$checkout/.git" ] || return
+  top="$(rgit "$checkout" rev-parse --show-toplevel 2>/dev/null)" || return
+  [ "$top" = "$(cd -P -- "$checkout" && pwd -P)" ] || return
+  for wt in "$checkout"/* "$checkout"/.[!.]* "$checkout"/..?*; do
+    [ -d "$wt/.git" ] && [ ! -L "$wt" ] && [ ! -L "$wt/.git" ] || continue
+    child="${wt##*/}"
+    rgit "$checkout" ls-files --error-unmatch -- "$child/" >/dev/null 2>&1; status=$?
+    [ "$status" = 1 ] || continue
+    rgit "$checkout" ls-files --error-unmatch -- "$child" >/dev/null 2>&1; status=$?
+    # Only Git's explicit no-match is a candidate; errors and tracked paths stay untouched.
+    [ "$status" = 1 ] || continue
+    if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"
+    else sweep_worktree "$wt"; fi
+  done
 }
 
 # ── rule 4 ──
@@ -529,7 +695,9 @@ scratch_repo_check() {
       case "$raw" in
         */.git/worktrees/*)
           parent="${raw%/.git/worktrees/*}"
-          if [ ! -e "$raw" ] && [ ! -e "$parent" ]; then return 0; fi ;;
+          if [ ! -e "$raw" ] && [ ! -e "$parent" ]; then
+            SCRATCH_ORPHAN_REPOS+=("$repo"); return 0
+          fi ;;
       esac
     fi
     SCRATCH_REASON="Git metadata is unreadable or missing"; return 1
@@ -617,7 +785,7 @@ keep_scratch_for_repo() {
 # 29 GB root disk (root at 91%). scratch_guard keeps `tsx-*` whole — removing the directory under a
 # running build is never right — and nothing pruned INSIDE it. tsx (4.x) writes flat, write-once
 # files and treats a missing one as a cache miss (recompile, rewrite), so a stale FILE is safely
-# disposable while the directory stays. Only regular files older than TSX_MAX_AGE_HOURS go, then
+# disposable while the directory stays. Only regular files older than TSX_MAX_AGE_MINUTES go, then
 # empty subdirectories equally old (never the cache directory itself). find runs with -P (the
 # default: no symlink is followed, and -type f never matches one) and -xdev (no other filesystem
 # is entered). No per-file lsof check: tsx reads an entry and closes it, and unlinking a file a
@@ -626,7 +794,7 @@ TSX_PRUNED_COUNT=0
 TSX_PRUNED_BYTES=0
 prune_tsx_cache() {
   local dir="$1" minutes stats count bytes
-  minutes=$(( TSX_MAX_AGE_HOURS * 60 ))
+  minutes="$TSX_MAX_AGE_MINUTES"
   if [ -L "$dir" ] || [ ! -d "$dir" ]; then log "KEEP $dir: not a regular directory"; return; fi
   if [ "$OPEN_OK" != 1 ]; then log "KEEP $dir: lsof failed (fail closed)"; return; fi
   if ! stats="$(find "$dir" -xdev -type f -mmin "+$minutes" -exec du -k {} + 2>/dev/null \
@@ -635,7 +803,7 @@ prune_tsx_cache() {
   fi
   count="${stats%% *}"; bytes="${stats##* }"
   if [ "${count:-0}" -gt 0 ]; then
-    log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than ${TSX_MAX_AGE_HOURS} h"
+    log "PRUNE $dir: ${bytes} bytes, ${count} tsx cache files older than $(fmt_minutes "$TSX_MAX_AGE_MINUTES")"
     if act find "$dir" -xdev -type f -mmin "+$minutes" -delete; then
       TSX_PRUNED_COUNT=$((TSX_PRUNED_COUNT + count)); TSX_PRUNED_BYTES=$((TSX_PRUNED_BYTES + bytes))
     fi
@@ -643,7 +811,7 @@ prune_tsx_cache() {
   if [ -n "$(find "$dir" -xdev -mindepth 1 -type d -empty -mmin "+$minutes" -print -quit 2>/dev/null)" ]; then
     act find "$dir" -xdev -mindepth 1 -depth -type d -empty -mmin "+$minutes" -delete
   fi
-  log "KEEP $dir: tsx cache directory (entries newer than ${TSX_MAX_AGE_HOURS} h stay)"
+  log "KEEP $dir: tsx cache directory (entries newer than $(fmt_minutes "$TSX_MAX_AGE_MINUTES") stay)"
 }
 
 # W1-T5634. A unit another unit borrows objects from (objects/info/alternates) is kept: removing it
@@ -710,7 +878,7 @@ sweep_scratch_unit() {
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
-  local -a SCRATCH_LIVE_REPOS=()
+  local -a SCRATCH_LIVE_REPOS=() SCRATCH_ORPHAN_REPOS=()
   scratch_guard "$p" || return
   is_worktree_idle "$p"; status=$?
   case "$status" in
@@ -731,6 +899,11 @@ sweep_scratch_unit() {
     if ! scratch_repo_check "$repo"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON ($repo)" "$entries"; return; fi
   done <<< "$entries"
   # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
+  for repo in ${SCRATCH_ORPHAN_REPOS[@]+"${SCRATCH_ORPHAN_REPOS[@]}"}; do
+    if ! archive_orphan "$repo"; then
+      keep_scratch_for_repo "$p" "orphan archive unavailable or unsafe ($repo)" "$entries"; return
+    fi
+  done
   for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
       if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
@@ -938,10 +1111,60 @@ judge_filesystems() {
 
 # ── the pass ──
 before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
+
+# The tightest watched filesystem picks the tier: TIER_HEADROOM points below its mark (0 when it is
+# past its minimum free space), TIER_WHY saying which one. No readable filesystem is the floor.
+# RMD_CLEANUP_ROOT_FS reuses the pass's own "before" reading rather than asking df again.
+TIER_HEADROOM=""; TIER_WHY="no watched filesystem readable"
+for i in "${!W_PATH[@]}"; do
+  [ -e "${W_PATH[$i]}" ] || continue
+  if [ "${W_PATH[$i]}" = "$ROOT_FS" ]; then
+    t_pct="$before_pct"; t_avail="$before_avail"
+  else
+    t_row="$($DF_CMD "${W_PATH[$i]}" 2>/dev/null | awk 'NR==2 { gsub("%","",$5); print $5, $4 }')"
+    t_pct=""; t_avail=""; read -r t_pct t_avail <<<"$t_row"
+  fi
+  case "${t_pct:-x}${t_avail:-x}" in *[!0-9]*) continue ;; esac
+  t_head=$(( W_PCT[i] - 10#$t_pct ))
+  if [ "$(( 10#$t_avail ))" -lt "${W_FREE_KB[$i]}" ] && [ "$t_head" -gt 0 ]; then t_head=0; fi
+  if [ -z "$TIER_HEADROOM" ] || [ "$t_head" -lt "$TIER_HEADROOM" ]; then
+    TIER_HEADROOM="$t_head"
+    TIER_WHY="${W_PATH[$i]} ${t_pct}% used, mark $(printf '%s%%' "${W_PCT[$i]}")${W_FREE_TXT[$i]:+/${W_FREE_TXT[$i]}}"
+  fi
+done
+TIER_MINUTES="$(retention_window "${TIER_HEADROOM:-0}")"
+
+# pin_window <name> <shown value> <minutes> — sets PINNED to a pinned window, raised to the floor
+# (and logged as CLAMP) when it is under it.
+pin_window() {
+  PINNED=$(( 10#$3 ))
+  if [ "$PINNED" -lt "$FLOOR_MINUTES" ]; then
+    log "CLAMP $1=$2: under the six-hour floor; using $(fmt_minutes "$FLOOR_MINUTES")"
+    PINNED="$FLOOR_MINUTES"
+  fi
+}
+if [ -n "$IDLE_MINUTES" ]; then
+  pin_window IDLE_MINUTES "$IDLE_MINUTES min" "$IDLE_MINUTES"; IDLE_MINUTES="$PINNED"; IDLE_SOURCE="pinned by IDLE_MINUTES"
+else
+  IDLE_MINUTES="$TIER_MINUTES"; IDLE_SOURCE="tiered: tightest is $TIER_WHY"
+fi
+if [ -n "$SCRATCH_IDLE_MINUTES" ]; then
+  pin_window RMD_CLEANUP_SCRATCH_IDLE_MINUTES "$SCRATCH_IDLE_MINUTES min" "$SCRATCH_IDLE_MINUTES"; SCRATCH_IDLE_MINUTES="$PINNED"
+else
+  SCRATCH_IDLE_MINUTES="$IDLE_MINUTES"
+fi
+if [ -n "$TSX_MAX_AGE_HOURS" ]; then
+  pin_window RMD_CLEANUP_TSX_MAX_AGE_HOURS "$TSX_MAX_AGE_HOURS h" "$(( 10#$TSX_MAX_AGE_HOURS * 60 ))"; TSX_MAX_AGE_MINUTES="$PINNED"
+else
+  TSX_MAX_AGE_MINUTES="$IDLE_MINUTES"
+fi
+log "rmd-host-cleanup: retention idle $(fmt_minutes "$IDLE_MINUTES"), scratch $(fmt_minutes "$SCRATCH_IDLE_MINUTES"), tsx $(fmt_minutes "$TSX_MAX_AGE_MINUTES") ($IDLE_SOURCE)"
+
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 
-if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ]; then snapshot_docker; snapshot_alternates; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ] || [ "$ONLY_TMP" != 1 ]; then snapshot_docker; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS$STATE_PARENTS" ]; then snapshot_alternates; fi
 while IFS= read -r root; do
   [ -n "$root" ] && sweep_scratch_root "$root"
 done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')
@@ -995,6 +1218,17 @@ if [ "$ONLY_TMP" != 1 ]; then
       else sweep_worktree "$wt"; fi
     done
   done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+
+  while IFS= read -r checkout; do
+    [ -n "$checkout" ] && sweep_live_checkout "$checkout"
+  done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
+
+  if [ -d "$WORKTREE_ARCHIVE_ROOT/orphans" ] && [ ! -L "$WORKTREE_ARCHIVE_ROOT/orphans" ]; then
+    find "$WORKTREE_ARCHIVE_ROOT/orphans" -type f -name '*.tar' -mtime "+$ARCHIVE_DAYS" 2>/dev/null | while IFS= read -r old; do
+      log "REMOVE $old: orphan archive older than ${ARCHIVE_DAYS} days"
+      act rm -f -- "$old"
+    done
+  fi
 
   check_archive_root
   if [ "$ARCHIVE_OK" = 1 ]; then

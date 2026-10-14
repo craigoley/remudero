@@ -1,0 +1,105 @@
+- id: W1-T9153
+  title: "A FAILED APPROVE TEARS DOWN ONLY THE WORKTREE IT ADDED — addLockedRunWorktree overwrites a live run's lock at a path it then fails to add, and the approve's catch force-removes that path, so a second approve deleted a first approve's live worktree four times on 2026-10-13 (14:10:55Z to 14:23:23Z) and the first then died with no cwd"
+  repo: remudero
+  depends_on: [W1-T9065]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # one concern: a worktree's teardown is gated on owning it; one file, src/run-task.ts (addLockedRunWorktree and approveCommand's two teardowns)
+  origin: "found 2026-10-13 diagnosing approve failures after W1-T9065 (#11332) went live at the 13:06Z daemon boot; operator standing direction: fix at root, automated flow"
+  plan_refs: [W1-T9065, W1-T5356, W1-T4437, W1-T311, W1-T208, W1-T1036]
+  files:
+    - src/run-task.ts
+    - test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts
+  status: merged
+  priority: 1  # every concurrent pair of fleet approves on one plan PR kills the one that was working; W1-T9065 made approves reach this step for the first time since 2026-10-08
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-13 on host remudero, read-only and niced: the core ledger's live file (rotated 13:58Z; positive
+    control: 3,943 rows stamped 14:xx, every approve run below has its worktree.prune and worktree.add rows) and the
+    per-spawn logs state/logs/approve-*.log.
+      - Four times, two approves overlapped on ONE worktree path, worktrees/<branch of the open plan PR>. The later one
+        died at its add, and the earlier one lost its tree seconds later:
+          * 14:11:59Z pid 755647 adds run-APPROVE-proof-debt-W1-T6372-...-5b011df233d1. 14:12:33.9Z pid 757002 fails
+            "fatal: a branch named '...5b011df233d1' already exists". 14:12:38.7Z pid 755647 fails `git add`:
+            "fatal: cannot change to '/home/node/Remudero/worktrees/run-APPROVE-proof-debt-W1-T6372-...': No such
+            file or directory".
+          * 14:14:14Z pid 765818 adds the same path. 14:14:29.5Z pid 766541 fails the same way. 14:14:31.6Z pid
+            765818 writes approve.id_reservation_failed: "UNKNOWN push failure while reserving W1-T9121 ... fatal:
+            Unable to read current working directory". The pre-push lines "scripts/head-identity-gate.mjs absent",
+            "worker-branch-shape.mjs absent" and "lint exited 2" are the same symptom: the hook's relative paths
+            resolve against the deleted directory.
+          * 14:22:42Z pid 805933 adds run-APPROVE-followup-DAEMON-1789492764199-...-4b13226dc725. 14:23:23.5Z pid
+            807380 fails "a branch named ... already exists". 14:23:28.4Z pid 805933's commit fails: 'The specified
+            --cwd directory ... does not exist'.
+          * 14:10:55Z pid 752779 failed the same way while the plan PR's ORIGINAL approve (pid 739090, in ci.polling)
+            still held the path. The prune at 14:11:56Z then found that path's branch with no worktree and deleted it,
+            so the original's live tree had been removed.
+      - In every case, the losing run's `worktree.prune` row lists the winner's path under `skipped` (a live run lock).
+        So the prune saw the holder correctly. The loser then destroyed it anyway.
+      - The fresh origin/main tree W1-T9065 spawns approve in (worktrees/approve-<sha12>) is NOT what vanished. The
+        missing directory is always worktrees/run-APPROVE-..., and the stack frames after the failure still load from
+        approve-<sha12>.
+    WHY, READ on origin/main c226da0bb (symbols, not lines):
+      - `addLockedRunWorktree` (src/run-task.ts) runs `writeRunLock(worktreePath, ...)` BEFORE `worktreeAdd`, with no
+        check for a live holder. `writeRunLock` is an atomic overwrite, so the loser replaces the holder's lock. When
+        the add fails, it calls `removeRunLock(worktreePath)`, which deletes the lock the HOLDER depends on.
+      - `approveCommand`'s catch runs `worktreeRemove(repoDir, worktreePath)` whenever `worktreePath` is set.
+        `createRatificationBranch`, `completeRatificationBranch`, `joinRatificationBranch` and
+        `freshSkillApproveWorktree` all set it BEFORE the add ("so a failed add still leaves the path for the approve
+        catch's cleanup"). `worktreeRemove` is `git worktree remove --force`. So a run whose add never succeeded
+        force-removes whatever lives at that path.
+      - The success-path `removeApproveWorktree` has the same shape. At 14:17:13.2Z the original approve (pid 739090)
+        finished, and 1.5 s later the joiner pid 776761, which had added the path at 14:16:28Z, failed with no cwd.
+    W1-T9065 did not create this code. It is what made approves reach it: before 13:06Z every fleet approve died at
+    the self-sync guard. Concurrency comes from `ratifyCliGateway`, which hands off one child per proposal and does not
+    serialize across proposals. That is intended, so this task makes teardown safe under it rather than serializing.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 383 origin heads (refs/remotes/origin, fetched 14:31Z)
+    for addLockedRunWorktree, approveRunBranch, findJoinablePr, joinRatificationBranch and inbox-proposals.json.lock.
+    No head reads more than main, and main reads 0 for the first three; its 1 joinRatificationBranch hit is W1-T4706,
+    which is merged and about the joined PR's body. The control term W1-T9124 was read on all 383 heads.
+  design: |
+    No new bound. Ownership is decided by a fact (whose lock is at the path, and whether this run's add returned),
+    never by a timeout.
+    1. THE LOCK IS CLAIMED, NOT OVERWRITTEN. `addLockedRunWorktree` (and its async twin `addLockedRunWorktreeAsync`,
+       which shares the defect) reads the existing lock first with `readRunLock`. If the lock names a live pid other
+       than this process, the add refuses BEFORE writing anything. The refusal is a typed error naming the holder's
+       pid and run_id. It leaves the holder's lock, worktree and branch untouched. A dead holder's lock is reclaimed
+       as `pruneStaleRuns` already does. The claim must be race-free between two processes that both read "absent",
+       so write it with an exclusive create (`wx`), as `updateProposalRegistry` and drain-lock already do. Only on
+       an add failure AFTER this run's own claim does it remove the lock, because only then is the lock its own.
+    2. TEARDOWN NEEDS AN ADD THAT RETURNED. In `approveCommand`, the path the catch and `removeApproveWorktree` tear
+       down is recorded only after `addLockedRunWorktree` returns, for example as `ownedWorktreePath`. A run whose
+       add threw or was refused removes nothing. Keep `worktreePath` for logging. The ids the run reserved are still
+       released (`idBlock?.releaseAll()`), as today.
+    3. A REFUSED ADD NAMES ITS HOLDER. The refusal reaches the existing `approve.error` row, which W1-T9065's
+       `settleHandoffs` already reads as an outcome. Its text names the path and the holder's pid and run_id, so the
+       ledger says why the approve stopped. Add no new step.
+    Tests go in a new file, test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts, with `test(` titles
+    verbatim as in the proofs. Drive `addLockedRunWorktree` against a real temporary git repo with a fixture git
+    identity (`gitRepo()`, per the fixture-copy census) and a hand-written live lock naming another live pid (the test
+    process's parent pid). Drive approveCommand's teardown through its gateway seam with a fake gateway whose add
+    throws.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts"
+    - claim: "an add at a path whose lock names another live pid refuses and leaves that lock and worktree in place"
+      proof: 'grep: test("W1-T9153: an add at a live-held path refuses and keeps the holder" in test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts'
+    - claim: "two approves of the same plan PR branch run concurrently and neither loses its cwd"
+      proof: 'grep: test("W1-T9153: two concurrent approves on one path and neither loses its cwd" in test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts'
+    - claim: "an approve whose add threw removes no worktree in its catch"
+      proof: 'grep: test("W1-T9153: an approve whose add threw removes nothing" in test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts'
+    - claim: "a dead holder's lock is still reclaimed and the add succeeds"
+      proof: 'grep: test("W1-T9153: a dead holder lock is reclaimed and the add succeeds" in test/a-failed-approve-tears-down-only-the-worktree-it-added.test.ts'
+  falsifier: |
+    Restore the unconditional `writeRunLock` before `worktreeAdd`, and the first test fails: the holder's lock is
+    replaced, then deleted by the failed add's `removeRunLock`. Set `worktreePath` before the add and tear it down in
+    the catch, and the second test fails: the first approve's directory is gone when it next runs `git -C`, which is
+    the 14:12:38Z "cannot change to" failure. Treat a dead pid's lock as live, and the fourth test fails.
+  note: |
+    EFFECT, measured from the core ledger after the merge sha deploys, with no numeric pass mark. Count approve.error
+    and approve.id_reservation_failed rows whose text names "cannot change to", "Unable to read current working
+    directory" or "--cwd directory" under worktrees/run-APPROVE-. Healthy shape: none. Each refused add reads as
+    one named row, not a second failure seconds later. The `-b ... already exists` refusal itself is the join path's
+    task, W1-T9161.

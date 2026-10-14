@@ -70,6 +70,11 @@ function fleet(t: { after: (fn: () => void) => void }) {
     resolveCurrentSha: () => "test-sha",
     gatewayCheckout: async () => ({ state: "clean" }),
     githubAppRefresh: { start: () => ({ armed: false, stop() {} }) },
+    // `consoleSha` is a fake boot sha, so to serve's stale-code gate this process always runs stale
+    // code, and a HIGH-tier write finishing with nobody watching recycles it. The gate's default exit
+    // ends the REAL process with status 0: in the shared pure-test pool that ended every file after
+    // this one with no summary (ci-shard 1/8, 2026-10-11). The recycle is not this file's subject.
+    staleExitSeams: { scheduleRecheck: () => () => {}, exit: () => {} },
     instances: { stateBase, github: () => github },
     log: () => {},
   } as unknown as ServeDeps;

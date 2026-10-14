@@ -87,7 +87,8 @@ test("test/the-boards-blocked-pr-section-derives-only-what-it-reads.test.ts: nar
   }
   assert.deepEqual(statusBoard.deriveBlockedPrSections([disposed(1), disposed(2)], gateway()).blockedPrs.map((row) => row.prNumber), [1, 2]);
   assert.deepEqual(statusBoard.deriveBlockedPrSections([hold()]).mergeHeld,
-    [{ prNumber: 10, taskId: "W1-T10", by: "operator", reason: "manual review" }]);
+    [{ prNumber: 10, taskId: "W1-T10", by: "operator", reason: "manual review",
+      claimMismatch: false, setter: "operator (actor unrecorded)" }]);
   assert.deepEqual(statusBoard.deriveBlockedPrSections([hold(), hold({ step: "automerge.hold_released" })]).mergeHeld, []);
   const unavailable = statusBoard.deriveBlockedPrSections([disposed(1)], gateway({ readFailed: () => true, readFailureReason: () => "rate_limit" }));
   assert.deepEqual(unavailable.blockedPrs, []);

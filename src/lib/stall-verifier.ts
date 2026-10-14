@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import type { FixProgressVerdict } from "./fix-progress-judge.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { Task } from "./plan.js";
-import { readLedgerLines } from "./status.js";
+import { DISPATCH_BREAKER_JUDGED_STEP, isDispatchStreakReset, readLedgerLines, streakRefusal } from "./status.js";
 
 /**
  * W1-T4678: A CIRCUIT-BROKEN TASK PAGES THE OPERATOR WITH NO DIAGNOSIS.
@@ -204,4 +205,73 @@ export function verifyStalledTask(
     ...(verdict.kind === "escalate" ? { owner: verdict.owner, reason: verdict.reason } : {}),
   });
   return { fingerprint, verdict, alreadyVerified: false };
+}
+
+/** One attributable attempt the dispatch-break judge reads: a run's terminal verdict that no exclusion names. */
+export interface DispatchBreakAttempt { runId: string; verdict: string; reason?: string; costUsd?: number }
+
+/** The dispatch-break judge's whole input — the attempts since the streak last reset, and its own earlier rulings. */
+export interface DispatchBreakInput {
+  taskId: string;
+  title?: string;
+  freshCount: number;
+  excludedByReason: Readonly<Record<string, number>>;
+  attempts: DispatchBreakAttempt[];
+  priorRulings: Array<{ decision: string; reason: string }>;
+  stall: StallVerdict;
+}
+export type DispatchBreakJudge = (input: DispatchBreakInput) => Promise<FixProgressVerdict | undefined>;
+
+/** The attributable terminal verdicts since `taskId`'s streak last reset — what the breaker counted. */
+export function dispatchBreakAttempts(rows: ReadonlyArray<Record<string, unknown>>, taskId: string): DispatchBreakAttempt[] {
+  let attempts: DispatchBreakAttempt[] = [];
+  for (const row of rows) {
+    if (row.task_id !== taskId) continue;
+    if (isDispatchStreakReset(row)) {
+      attempts = [];
+      continue;
+    }
+    if (row.step !== "verdict" || typeof row.run_id !== "string" || streakRefusal(row) !== undefined) continue;
+    attempts.push({ runId: row.run_id, verdict: String(row.verdict),
+      ...(typeof row.reason === "string" ? { reason: row.reason.slice(0, 300) } : {}),
+      ...(typeof row.cost_usd === "number" ? { costUsd: row.cost_usd } : {}) });
+  }
+  return attempts;
+}
+
+/**
+ * W1-T7742 — THE BREAKER'S BOUND ASKS A JUDGE; IT IS NOT A WALL. When the streak breaker trips, the
+ * fix lane's progress-judge pattern decides whether the attempts so far justify more: `continue` (or
+ * `change-approach`) writes a {@link DISPATCH_BREAKER_JUDGED_STEP} row that resets the streak like an
+ * `rmd release`, so the task dispatches next tick; `escalate` keeps the trip and its page. An absent,
+ * throwing or unparseable judge escalates — the backstop is never weaker than before — and is not
+ * cached, so the next process asks again; a ruling is asked once per observed state.
+ */
+export async function judgeDispatchBreak(
+  task: Pick<Task, "id" | "title">,
+  evidence: Pick<StallEvidence, "freshCount" | "excludedByReason">,
+  stall: StallVerdict,
+  ctx: { repo: string; ledgerPath: string; runId: string; judge?: DispatchBreakJudge },
+): Promise<"continue" | "escalate"> {
+  const rows = readLedgerLines(ctx.ledgerPath);
+  const attempts = dispatchBreakAttempts(rows, task.id);
+  const observed = `${task.id}:fresh=${evidence.freshCount}:last=${attempts.at(-1)?.runId ?? "none"}`;
+  const own = rows.filter((row) => row.step === DISPATCH_BREAKER_JUDGED_STEP && matchesRepoScopedTask(row, ctx.repo, task.id));
+  const settled = own.findLast((row) => row.observed_state === observed && (row.decision === "continue" || row.decision === "escalate"));
+  if (settled) return settled.decision as "continue" | "escalate";
+  let verdict: FixProgressVerdict | undefined;
+  let failure = "dispatch-break judge is not wired";
+  try {
+    verdict = await ctx.judge?.({ taskId: task.id, title: task.title, freshCount: evidence.freshCount,
+      excludedByReason: evidence.excludedByReason, attempts, stall,
+      priorRulings: own.map((row) => ({ decision: String(row.decision), reason: String(row.reason ?? "") })) });
+    if (ctx.judge && !verdict) failure = "absent or unparseable dispatch-break verdict";
+  } catch (error) {
+    failure = `dispatch-break judgment failed: ${String((error as Error)?.message ?? error)}`;
+  }
+  const decision = verdict === undefined ? "unavailable" : verdict.verdict === "escalate" ? "escalate" : "continue";
+  appendLedger(ctx.ledgerPath, { run_id: ctx.runId, task_id: task.id, repo: ctx.repo, step: DISPATCH_BREAKER_JUDGED_STEP,
+    observed_state: observed, decision, fresh_count: evidence.freshCount, reason: verdict?.reason ?? failure,
+    ...(verdict?.verdict === "change-approach" ? { approach: verdict.approach } : {}) });
+  return decision === "continue" ? "continue" : "escalate";
 }

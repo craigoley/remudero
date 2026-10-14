@@ -1,0 +1,51 @@
+- id: W1-T8866
+  title: "AN ESCALATION WHOSE CAUSE CLEARED STAYS OPEN BECAUSE ITS PRODUCER NEVER CLOSES IT — the gardener overseer heals a gardener and then just deletes its episode, and the read-model worker closes its issue only through an in-memory episode.issueUrl that a serve restart loses; 4 liveness and 3 READ-MODEL issues stayed open after recovery: each producer closes its own escalation once the condition has cleared"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a producer closes the escalation it opened when its own recovery signal fires
+  band_meaning: span
+  origin: "operator ruling 2026-10-12: auto-resolve what does not need the operator, without unnecessary risk"
+  plan_refs: [W1-T4802, W1-T5908, W1-T8864]
+  files: [src/lib/gardener-overseer.ts, src/lib/read-model-worker.ts, src/lib/read-model-consistency.ts, test/a-producer-closes-its-own-escalation-on-recovery.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-12 at origin/main 42dae2eb8.
+    OBSERVED (code):
+    - `runGardenerOverseer` (src/lib/gardener-overseer.ts) escalates once through `livenessEscalation` and, on recovery,
+      runs `delete state.episodes[name]` with no close. The file has no `closeWithComment`, so a relapse also re-escalates
+      as new.
+    - `read-model-consistency.ts` `escalationFor` opens a MANUAL READ-MODEL-<INSTANCE> issue; a later `agree` or `healed`
+      outcome writes only rows.
+    - `read-model-worker.ts`'s `closeLoopIssue` closes only `episode.issueUrl` held in memory: 0
+      `read_model.recycle_loop_closed` rows in 48 h.
+    OBSERVED (GitHub 2026-10-12 22:11Z): #10530, #10838, #10888 and #11148 (liveness; each body says the overseer
+    healed) and #10884, #10886 and #11114 (READ-MODEL) are open. Ledger 24 h: consistency 378 agree, 1 healed,
+    1 escalated.
+    TEMPLATES (OBSERVED): `escalateStarvationCleared` (escalation-catalogue.ts) closes the URL named by the episode's own
+    `*.escalated` ledger row and then logs `*.cleared`; W1-T5908's `resolveClearedEscalation` does the same for tasks.
+    OWNERSHIP: none on main. W1-T8864 (the revalidation garden) is the backstop for issues no producer owns; this task
+    is the precise producer-side close.
+  design: |
+    1. Overseer: when a gardener's episode clears (healthy again) and the episode has `escalatedAt`:
+       - read the issue URL from that episode's `gardener_overseer.escalated` ledger row (durable, not in-memory);
+       - close it with a "recovered: first passing scorecard at <ts>" comment;
+       - log `gardener_overseer.cleared` with the URL.
+       Keep the episode's last `escalatedAt` for 24 h so a relapse comments on the closed issue's successor instead of
+       spamming.
+    2. Read-model: persist the escalation URL in the escalation's ledger row. After N (policy, default 3) consecutive
+       `agree` consistency runs for that instance following an `escalated` run, close it with a citation of the agreeing
+       windows and log `read_model.consistency_cleared`. A `ledgerLost` mismatch stays open (real loss).
+    3. Both closes are capped at one per producer per pass, are reversible, and fail closed: an unreadable ledger or
+       issue read means no close.
+  acceptance:
+    - claim: "a healed gardener's liveness issue and a read-model issue followed by N agreeing runs are closed by their producer using the URL from the ledger, while a ledgerLost mismatch and an unreadable read stay open"
+      proof: 'grep: test("W1-T8866: a producer closes its own escalation on recovery" in test/a-producer-closes-its-own-escalation-on-recovery.test.ts'
+  falsifier: |
+    Remove the close from the overseer's recovery branch: the healed fixture's issue stays open and the test fails. Read the
+    URL from memory instead of the ledger: the restart fixture leaves it open and the test fails.
