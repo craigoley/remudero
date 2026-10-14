@@ -1,0 +1,78 @@
+- id: W1-T9543
+  title: "A MERGED OR RETIRED TASK'S DISPATCH CLAIM IS DROPPABLE FROM ANY HOST, AND THE TICK RELEASES A RETIRED TASK'S CLAIM — `rmd claim --drop` refuses every claim whose anchor names another host even when the task has nothing left to protect, and no release arm ever frees a claim on a retired, unmerged task, which the fleet never dispatches again"
+  repo: remudero
+  depends_on: [W1-T9541]  # both edit claimCommand in src/run-task.ts; W1-T9541 changes the host comparison this task bypasses for landed tasks. W1-T9432 (queued) edits the same two src files with a renewal arm and does not touch the tick sweep or --drop
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — releasing a dispatch claim on plan evidence that its task is finished or abandoned; a wrong release reopens a double dispatch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: `rmd claim W1-T8171 --drop` refused the operator's own claim as another host's (hostname drift, W1-T9541); a claim on a finished task should drop whatever the host"
+  plan_refs: [W1-T2446, W1-T5859, W1-T8616, W1-T9432, W1-T9541, W1-T1287, W1-T147]
+  files: [src/run-task.ts, src/lib/dispatch-claim.ts, docs/cli-reference.md, test/a-landed-or-retired-tasks-claim-is-droppable-from-any-host.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main dd43a4596. Symbols, not lines.
+    `rmd claim <id> --drop` (`claimCommand`, src/run-task.ts, W1-T5859) decodes the anchor with
+    `parseClaimAnchorMessage` and refuses unless the anchor's host equals this host. That guard protects a LIVE
+    build on another host. It protects nothing once the task is merged or retired, yet it still refuses: on
+    2026-10-14 the refusal (caused by hostname drift, W1-T9541) left the operator deleting the ref with a hand
+    `git push`. The same refusal applies to a genuinely foreign claim on a finished task.
+    RELEASE ARMS ON MAIN, checked for a RETIRED task:
+      - `decideDispatchClaimRelease` (src/lib/dispatch-claim.ts) runs only when a lane meets the claim. Its evidence
+        arm reads `isMerged(task)`. A retired task (`status: blocked` with `retirement:` in RETIREMENT_REASONS,
+        src/lib/plan.ts) is never selected, so no lane meets its claim.
+      - The W1-T2446 hoist in runTask releases on `isMerged` only.
+      - W1-T8616's tick sweep (`releaseLandedDispatchClaims`, wired from src/run-task.ts through
+        `DaemonDeps.releaseLandedClaims`) passes only the cycle's `isMerged`.
+      - The W1-T5047 boot sweep (`releaseReplacedContainerClaims`) reads `isMerged` plus a replaced-container mint row.
+      - W1-T9432 (queued) judges silence in runTask's `taken` arm, which a retired task never reaches.
+      So no arm frees a claim on a retired, unmerged task: it stands until a human finds the ref.
+    MEASURED 2026-10-14 ~21:30Z: `git ls-remote origin 'refs/rmd-dispatch/*'` lists 7 claims; each id's shard was
+    found and read, and all 7 are `status: queued` (W1-T8616's sweep is clearing merged ones). Zero sit on a retired
+    task today. The plan holds 420 shards with a `retirement:` line (115 retired, 64 closed, 241 withdrawn), and
+    retirements land daily (gardener retire proposals, operator rulings), including tasks retired mid-build such as
+    W1-T9264. The class is latent, not observed.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d (38 shards mention rmd-dispatch, "dispatch claim" or
+    "rmd claim"; the 5 that also mention retire do not release a claim on retirement) and every remote head's
+    plan/tasks.d additions (42 heads add shards; none names a dispatch claim).
+    OVERLAP: W1-T147 (queued; the overnight chaos drill) also lists src/run-task.ts. It injects kill-9, ENOSPC and a
+    GitHub outage and checks recovery rows; it does not touch dispatch-claim release, so neither supersedes the other.
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    1. `rmd claim <id> --drop`: before the host check, read whether the task is FINISHED on origin/main. Finished
+       means its plan record's status is `merged` or `done`, or it carries a `retirement:` in RETIREMENT_REASONS,
+       or a commit on origin/main carries the exact trailer `Remudero-Task: <id>`. Add an injectable
+       `isFinished?: (taskId) => "merged" | "retired" | undefined` to `ClaimVerbOpts`; its default reads origin/main
+       the way `plannedOnOriginMain` already does. A finished task's claim is dropped whatever the anchor host or an
+       unreadable anchor, with `--force-with-lease` pinned to the sha read, and prints
+       `dropped <ref> (task <merged|retired>; any host may drop it)`. An unfinished task keeps today's host check.
+    2. Tick sweep: `releaseLandedDispatchClaims` (src/lib/dispatch-claim.ts) takes an optional
+       `isRetired: (taskId) => boolean` beside `isMerged`. A retired task's claim is released through the evidence
+       arm with its own reason (`<ref>'s task is retired and will never be dispatched; any host may drop it`), and
+       the `dispatch.claim_released` row carries `evidence: "retired"`. The `--rerun` guard applies to merged
+       claims only. The run-task closure that wires `releaseLandedClaims` supplies `isRetired` from `activePlanRef.current` (the reloaded plan); no new
+       `DaemonDeps` seam and no src/lib/daemon.ts edit.
+    3. docs/cli-reference.md: `--drop` on a merged or retired task drops any host's claim.
+    Tests go in the new file, `test(` titles verbatim as in the proofs below. Drive `claimCommand` with an injected
+    reserver and `isFinished`, and the sweep with an injected async reserver, as
+    test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts does.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-landed-or-retired-tasks-claim-is-droppable-from-any-host.test.ts"
+    - claim: "rmd claim --drop drops another host's claim on a merged or retired task"
+      proof: 'grep: test("W1-T9543: another host claim on a finished task is dropped" in test/a-landed-or-retired-tasks-claim-is-droppable-from-any-host.test.ts'
+    - claim: "rmd claim --drop still refuses another host's claim on an unfinished task"
+      proof: 'grep: test("W1-T9543: another host claim on an unfinished task is still refused" in test/a-landed-or-retired-tasks-claim-is-droppable-from-any-host.test.ts'
+    - claim: "the tick sweep releases a retired task's claim and leaves a queued task's claim alone"
+      proof: 'grep: test("W1-T9543: the tick releases a retired task claim" in test/a-landed-or-retired-tasks-claim-is-droppable-from-any-host.test.ts'
+    - claim: "the sweep accepts a retired predicate"
+      proof: "grep: isRetired in src/lib/dispatch-claim.ts"
+  falsifier: |
+    Against main, `claimCommand --drop` on a merged task whose anchor names `other-host.invalid` exits 1 with
+    "not by this host" and the ref stays, so the finished-task test fails; `releaseLandedDispatchClaims` with a
+    retired, unmerged task leaves its claim, so the tick test fails. If --drop skipped the host check for every
+    task, the unfinished-task test fails.

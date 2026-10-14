@@ -9,8 +9,7 @@
  * boot. No secret — the private key or the minted token — ever reaches a log line or a ledger
  * row; only the installation id, the token's `expires_at`, and a fixed reason string do.
  *
- * Trap: a worker's copy of `GH_TOKEN` is fixed at spawn and can outlive the one-hour token on a
- * long run. That gap is accepted, not fixed, here.
+ * A run child owns a separate refresh loop; model workers still inherit a snapshot at spawn.
  */
 // Why: docs/forensics/github-app.md#module-header
 
@@ -429,13 +428,14 @@ function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number):
 }
 
 /**
- * Starts the daemon's own installation-token refresh loop and reports whether it armed.
+ * Starts this process's installation-token refresh loop and reports whether it armed.
  *
  * Gated on config presence: with no `GH_APP_*` names set this is byte-identical to before this
  * loop existed, and `armed: false` says so explicitly. `ready` settles once the first mint
  * resolves (or fails and is logged), so a caller can wait for a real token before its first
  * GitHub call, and never rejects — a failed mint is caught, logged and rescheduled like every
  * later tick.
+ * `firstResult` reports that mint's outcome; `stop` cancels renewal when a run child finishes.
  *
  * Every seam is injectable, so a test drives the reschedule arithmetic with no network call and
  * no live timer. `setTimer` returns the timer so the caller can `unref` it.
@@ -446,8 +446,9 @@ export function startInstallationTokenRefresh(opts: {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   refresh?: (o: RefreshOptions) => Promise<RefreshResult>;
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  clearTimer?: (timer: { unref?: () => void }) => void;
   now?: () => number;
-}): { armed: boolean; ready?: Promise<void> } {
+}): { armed: boolean; ready?: Promise<void>; firstResult?: Promise<RefreshResult>; stop?: () => void } {
   const env = opts.env ?? process.env;
   if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
     return { armed: false };
@@ -456,24 +457,28 @@ export function startInstallationTokenRefresh(opts: {
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
   let lastSuccessfulExpiresAtMs: number | undefined;
+  let stopped = false;
+  let timer: { unref?: () => void } | undefined;
   // Arming the next timer must never depend on anything that can itself throw — `setTimer`
   // returning is the only thing this loop's survival rides on.
   const rearm = (delay: number): void => {
-    const timer = setTimer(tick, delay);
+    if (stopped) return;
+    timer = setTimer(tick, delay);
     timer.unref?.();
   };
   // The mint-and-rearm body, factored out of `tick` so its promise can be returned to the first
   // caller via `ready`, while every later tick stays fire-and-forget as before.
-  const runOnce = (): Promise<void> =>
-    refresh({ log: opts.log }).then(
+  const runOnce = (): Promise<RefreshResult> =>
+    Promise.resolve().then(() => refresh({ log: opts.log, env })).then(
       (result) => {
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
           rearm(nextRefreshDelayMs(result.expiresAtMs, now()));
-          return;
+          return result;
         }
         // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        return result;
       },
       (err) => {
         // The promise itself rejected — a throw, not a `{ ok: false }` result. Only `refresh`'s
@@ -489,11 +494,17 @@ export function startInstallationTokenRefresh(opts: {
         } catch {
           // Swallowed on purpose — see comment above.
         }
+        return { ok: false, reason: "refresh threw" };
       },
     );
   const tick = (): void => {
-    void runOnce();
+    if (!stopped) void runOnce();
   };
-  const ready = runOnce();
-  return { armed: true, ready };
+  const firstResult = runOnce();
+  const ready = firstResult.then(() => undefined);
+  const stop = (): void => {
+    stopped = true;
+    if (timer) (opts.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout)))(timer);
+  };
+  return { armed: true, ready, firstResult, stop };
 }
