@@ -68,7 +68,7 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB } from "./host-memory-ledger.js";
 import { ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./host-memory-shadow.js";
-import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimRecord } from "./daemon-memory-policy.js";
+import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
 } from "./pr-blocker.js";
@@ -239,6 +239,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
+import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   compareRestArgs,
   rollupFromRest,
@@ -14017,38 +14018,58 @@ export interface FixHostPressure {
   containerFloorMib?: number;
   binding?: "host" | "container";
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before this reading would have held container-short; the reading is then the
-   *  fresh one taken after it. */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before this reading would have held container-short or host-short; the
+   *  reading is then the fresh one taken after it. */
   reclaim?: SlackReclaimRecord;
 }
 
-/** The daemon's own reclaim, as a reading's caller hands it in: given the container working set, reclaim once and call
- *  `reread` after a collection. Undefined when this process has no reclaimer. */
-export type SlackReclaim = (containerWorkingSetMib: number | undefined, reread: () => number | undefined) => SlackReclaimRecord | undefined;
+/** The daemon's own reclaim, as a reading's caller hands it in: given the short pool's figure (the container working
+ *  set, or the host's MemAvailable for `pool` "host"), reclaim once and call `reread` after a collection; `reread`
+ *  returns the same pool's fresh figure. Undefined when this process has no reclaimer. */
+export type SlackReclaim = (
+  figureMib: number | undefined,
+  reread: () => number | undefined,
+  pool?: SlackReclaimPool,
+) => SlackReclaimRecord | undefined;
 
 /** The production reclaim: this process's installed reclaimer (only the daemon installs one). */
-export const installedSlackReclaim: SlackReclaim = (workingSetMib, reread) =>
-  installedDaemonSlackReclaimer()?.reclaim(workingSetMib, reread);
+export const installedSlackReclaim: SlackReclaim = (figureMib, reread, pool) =>
+  installedDaemonSlackReclaimer()?.reclaim(figureMib, reread, pool);
 
 /**
  * W1-T8401 — RECLAIM BEFORE HOLDING. A reading that would hold dispatch container-short first asks the daemon to give
  * back its own slack (`reclaim`: a full collection under the tightest growth factor, paced by evidence), then decides
- * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. Any other tier, or no reclaimer,
- * returns `first` unchanged. A paced or unavailable reclaim keeps `first`, named.
+ * on the fresh reading `reread` takes, carrying the reclaim on it for the hold row. A paced or unavailable reclaim
+ * keeps `first`, named.
+ *
+ * W1-T9358 — A HOST-SHORT READING RECLAIMS TOO. The daemon's pages are the host's, so its freed slack is host memory:
+ * on 2026-10-14 00:19-00:31Z three host-short holds kept 3 empty lanes idle with no reclaim, while reclaims in the same
+ * hour freed 0.18-2.24 GB each. A host-short reading hands the reclaimer the host's MemAvailable, so its evidence
+ * pacing waits on the binding pool's own figure. ONE RECLAIM PER READING: a reading that already carries a reclaim (a
+ * container-short reading whose re-read came back host-short) is never reclaimed again. Any other tier, or no
+ * reclaimer, returns `first` unchanged.
  */
-export function reclaimBeforeHold<T extends { tier?: string; container?: ContainerMemoryHeadroom; reclaim?: SlackReclaimRecord }>(
+export function reclaimBeforeHold<T extends {
+  tier?: string;
+  container?: ContainerMemoryHeadroom;
+  hostAvailableMib?: number;
+  reclaim?: SlackReclaimRecord;
+}>(
   first: T,
   reread: () => T,
   reclaim: SlackReclaim | undefined,
 ): T {
-  if (first.tier !== "container-short" || reclaim === undefined) return first;
-  const workingSet = (reading: T) => reading.container !== undefined && "workingSetMib" in reading.container
-    ? reading.container.workingSetMib : undefined;
+  if (reclaim === undefined || first.reclaim !== undefined) return first;
+  const pool: SlackReclaimPool | undefined = first.tier === "container-short" ? "container"
+    : first.tier === "host-short" ? "host" : undefined;
+  if (pool === undefined) return first;
+  const figure = (reading: T) => pool === "host" ? reading.hostAvailableMib
+    : reading.container !== undefined && "workingSetMib" in reading.container ? reading.container.workingSetMib : undefined;
   let fresh: T | undefined;
-  const record = reclaim(workingSet(first), () => {
+  const record = reclaim(figure(first), () => {
     fresh = reread();
-    return workingSet(fresh);
-  });
+    return figure(fresh);
+  }, pool);
   if (record === undefined) return first;
   return { ...(record.outcome === "reclaimed" && fresh !== undefined ? fresh : first), reclaim: record };
 }
@@ -20083,7 +20104,7 @@ export interface MemoryGovernorResult {
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
   tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
-  /** W1-T8401: the daemon's reclaim before a container-short hold (see {@link reclaimBeforeHold}). */
+  /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
 }
 
@@ -20094,7 +20115,9 @@ export interface MemoryGovernorResult {
  *
  *  TIERED for the container: below the floor it defers only while live work in this container can still free
  *  memory (`ownWorkLive`, asked only then). With none, waiting cannot help (the daemon's own heap holds the
- *  shortfall), so the dispatch is admitted and named, never wedged. The host arm is unchanged. */
+ *  shortfall), so the dispatch is admitted and named, never wedged. The host arm's tier is unchanged; its caller
+ *  (`memoryGovernorGateFor`) reclaims the daemon's slack once before a host-short hold, as before a container-short
+ *  one (W1-T9358, see {@link reclaimBeforeHold}). */
 export function checkMemoryGovernor(
   availableMib: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
@@ -21020,7 +21043,7 @@ export interface StaleEscalationRejudgeOptions {
   /** DEMOTE-ONLY (design clause ii): relabel `url` to {@link FLEET_NOTICE_LABEL} and post `reason`
    *  as a comment. Never called on a "deliver" verdict; never asked to close or delete anything —
    *  the type this rung hands back ({@link EscalationJudgeDecision}) cannot even express "close". */
-  demote: (url: string, reason: string) => void;
+  demote: (url: string, reason: string) => void | Promise<void>;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -21036,6 +21059,11 @@ export interface StaleEscalationRejudgeOptions {
    *  exactly like a fresh install with no history yet; this never widens who gets judged, only
    *  whether a given observed state is judged MORE THAN ONCE. */
   alreadyJudgedStateKeys?: ReadonlySet<string>;
+  triage?: {
+    mode: EscalationTriageMode;
+    evidence?: (e: Escalation) => TriageEvidence;
+    autoResolve?: (candidate: StaleEscalationRejudgeCandidate, action: TriageAction) => Promise<void>;
+  };
 }
 
 /** One candidate's outcome this pass. */
@@ -21135,12 +21163,27 @@ export async function runStaleEscalationRejudge(
     // EXEMPT AT BIRTH, EXEMPT ON RE-JUDGE: MANUAL/GRILL stay operator-owned by rule, mirroring
     // {@link judgeEscalation}'s own exemption check — never spend a spawn asking a question the
     // birth judge was never asked either.
+    let evidence: TriageEvidence = {};
+    let evidenceError: string | undefined;
+    try {
+      evidence = deps.triage?.evidence?.(c.escalation) ?? {};
+    } catch (err) {
+      // not erased: the unreadable evidence becomes a deliver verdict naming this error just below.
+      evidenceError = String(err);
+    }
+    const first = triageEscalation(c.escalation, evidence);
     let verdict: EscalationJudgeVerdict;
-    if (isEscalationJudgeExempt(c.escalation)) {
+    if (evidenceError !== undefined) {
+      verdict = { decision: "deliver", reason: `triage evidence unreadable (${evidenceError})` };
+    } else if (isEscalationJudgeExempt(c.escalation)) {
       verdict = { decision: "deliver", reason: `${c.escalation.class} is operator-owned by rule — exempt from judgement` };
+    } else if (first.decidedBy !== "default") {
+      verdict = { decision: first.kind === "digest" ? "demote" : "deliver", reason: first.reason };
     } else {
       try {
-        verdict = await deps.judge(c);
+        const proposed = await deps.judge(c);
+        verdict = proposed && (proposed.decision === "deliver" || proposed.decision === "demote") && typeof proposed.reason === "string"
+          ? proposed : { decision: "deliver", reason: "unreadable rejudge verdict" };
       } catch (err) {
         // FAIL-OPEN (acceptance criterion 5): a spawn throw, a timeout or an unparseable verdict
         // all leave the item on needs-human, unchanged — the SAME polarity as the birth judge,
@@ -21151,6 +21194,30 @@ export async function runStaleEscalationRejudge(
             `re-judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
             "leave needs-human, never silently hiding work from the operator",
         };
+      }
+    }
+
+    const triaged = evidenceError !== undefined
+      ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
+      : triageEscalation(c.escalation, evidence, verdict);
+    if (!deps.dryRun && deps.triage) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: c.escalation.taskId, step: "escalation.triaged",
+        class: c.escalation.class, issue_url: c.issueUrl, state_key: c.stateKey,
+        triage_mode: deps.triage.mode, triage_outcome: triaged.kind,
+        triage_decided_by: triaged.decidedBy, triage_reason: triaged.reason,
+        ...(triaged.kind === "auto_resolve" ? { triage_action: triaged.action } : {}),
+      });
+    }
+    if (deps.triage) verdict = {
+      decision: deps.triage.mode === "act" && triaged.kind === "digest" ? "demote" : "deliver",
+      reason: triaged.reason,
+    };
+    if (!deps.dryRun && deps.triage?.mode === "act" && triaged.kind === "auto_resolve" && deps.triage.autoResolve) {
+      try {
+        await deps.triage.autoResolve(c, triaged.action);
+      } catch (err) {
+        log("sweep.escalation_auto_resolve.failed", { issue_url: c.issueUrl, reason: String(err) });
       }
     }
 
@@ -21196,7 +21263,7 @@ export async function runStaleEscalationRejudge(
       continue;
     }
     try {
-      deps.demote(c.issueUrl, verdict.reason);
+      await deps.demote(c.issueUrl, verdict.reason);
       demoted++;
       results.push({
         issueUrl: c.issueUrl,

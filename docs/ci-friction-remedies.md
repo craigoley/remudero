@@ -188,3 +188,14 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   `Remudero-Task: <id>` trailer and push that update. The gate inspects the actual PR head commit,
   following first parents and ignoring merge commits, so a base-branch update merge cannot supply
   the identity; check the exact head ref and commit before retrying the gate.
+
+- `ci-friction:check:ci-log:ci-shard` — a `ci-shard (N/8)` job in `.github/workflows/ci.yml` went
+  red with no node-test summary (`# tests` / `# pass` / `# fail`) anywhere in its output. Its
+  step exits with `::error::` and a `W1-T2597: NO-SUMMARY SHARD` line in `$GITHUB_STEP_SUMMARY`,
+  because a killed or timed-out run prints only the assertions it reached. That red is UNVERIFIED:
+  its failure set is a subset by construction, so it is not a diagnosed failure. To fix: do not
+  push a code change against the failing test names read from that shard. Read the shard's
+  step summary to see whether it timed out or was killed, then re-run that one shard (or the whole
+  PR's CI if the aggregate is stale) to obtain a complete summary before deciding what is broken.
+  Do not raise `timeout-minutes` on a shard without reading the W1-T1009 invariant that keeps it
+  below `ci-gate.yml`'s `WAIT_CAP_SECONDS`.

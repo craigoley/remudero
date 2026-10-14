@@ -302,6 +302,8 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
 // container floor against a 2048 MiB implement worker, while the daemon held 2.79 GB RSS on a 0.81 GB main-heap live
 // set. The governors read the daemon's footprint as a fixed cost. Before a container-short hold, the daemon now gives
 // back what it can (one full collection under the tightest growth factor) and the governor decides on a fresh reading.
+// W1-T9358: before a host-short hold too (2026-10-14 00:19-00:31Z, three host-short holds with no reclaim), pacing on
+// the host's MemAvailable, since the daemon's freed pages are the host's.
 //
 // MEASURED 2026-10-12 on core's daemon.alive rows (04:09-10:19Z, 468 rows): over the 113 heartbeat intervals in which
 // V8's own collections shrank heap_total by 100 MB or more (32.1 GB in all), RSS fell 7.6 GB and RSS+swap 6.1 GB; the
@@ -415,9 +417,15 @@ export function deriveHeapCeiling(
   };
 }
 
+/** W1-T9358: the pool whose shortfall asked for a reclaim, and whose figure its pacing compares: the container's
+ *  working set (W1-T8401), or the host's MemAvailable before a host-short hold. */
+export type SlackReclaimPool = "container" | "host";
+
 /** What one reclaim did, or why it did not run. Rides the hold row and its own `daemon.slack_reclaim` row. */
 export interface SlackReclaimRecord {
   outcome: "reclaimed" | "paced" | "unavailable";
+  /** W1-T9358: the pool whose figure this reclaim was handed (the `container_*` or the `host_*` fields below). */
+  pool: SlackReclaimPool;
   rss_before_bytes: number;
   swap_before_bytes?: number;
   heap_used_before_bytes: number;
@@ -428,6 +436,11 @@ export interface SlackReclaimRecord {
   container_before_mib?: number;
   /** The caller's fresh reading after a collection. */
   container_after_mib?: number;
+  /** W1-T9358, a host reclaim: the host MemAvailable's variance between the readings this reclaimer saw (absent when
+   *  unlearned), the reading before the reclaim, and the caller's fresh one after a collection. */
+  host_noise_bytes?: number;
+  host_before_mib?: number;
+  host_after_mib?: number;
   rss_after_bytes?: number;
   swap_after_bytes?: number;
   /** The post-collection heap in use: the live set. */
@@ -447,9 +460,10 @@ export interface SlackReclaimRecord {
 }
 
 export interface DaemonSlackReclaimer {
-  /** Reclaim once, unless the last reclaim freed nothing measurable and nothing has moved since. After a collection
-   *  `reread` takes the caller's fresh reading and returns its container working set, so the row carries both sides. */
-  reclaim(containerWorkingSetMib?: number, reread?: () => number | undefined): SlackReclaimRecord;
+  /** Reclaim once, unless the last reclaim freed nothing measurable and nothing has moved since. `figureMib` is the
+   *  short pool's figure: the container working set, or (pool "host", W1-T9358) the host's MemAvailable. After a
+   *  collection `reread` takes the caller's fresh reading and returns the same figure, so the row carries both sides. */
+  reclaim(figureMib?: number, reread?: () => number | undefined, pool?: SlackReclaimPool): SlackReclaimRecord;
   derivedCeiling(): DerivedHeapCeiling;
 }
 
@@ -477,8 +491,9 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
   const clock = opts.clock ?? systemClock;
   const now = () => clock.now();
   const lives: LiveSetSample[] = [];
-  const containerSeen: Array<{ at: number; mib: number }> = [];
-  let futile: { liveBytes: number; containerMib?: number } | undefined;
+  // Each pool's figures, kept apart: a container working set and a host MemAvailable are not one series.
+  const seenBy: Record<SlackReclaimPool, Array<{ at: number; mib: number }>> = { container: [], host: [] };
+  let futile: { liveBytes: number; pool: SlackReclaimPool; figureMib?: number } | undefined;
   let ceilingInForce = 0;
   const ceiling = () => deriveHeapCeiling(lives, policy.heapGrowingPercent, ceilingInForce);
   const done = (record: SlackReclaimRecord): SlackReclaimRecord => {
@@ -490,37 +505,40 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
       ceilingInForce = snapshot().heap_size_limit_bytes;
       return ceiling();
     },
-    reclaim(containerMib, reread) {
+    reclaim(figureMib, reread, pool = "container") {
       const at = now();
-      if (containerMib !== undefined) {
-        containerSeen.push({ at, mib: containerMib });
-        while (containerSeen.length > 0 && at - containerSeen[0].at > FOOTPRINT_RETAIN_MS) containerSeen.shift();
-        if (containerSeen.length > FOOTPRINT_MAX_SAMPLES) containerSeen.shift();
+      const seen = seenBy[pool];
+      if (figureMib !== undefined) {
+        seen.push({ at, mib: figureMib });
+        while (seen.length > 0 && at - seen[0].at > FOOTPRINT_RETAIN_MS) seen.shift();
+        if (seen.length > FOOTPRINT_MAX_SAMPLES) seen.shift();
       }
       const before = snapshot();
       ceilingInForce = before.heap_size_limit_bytes;
       const noise = successiveSpread(opts.footprintBytes?.() ?? []);
-      const containerSpreadMib = successiveSpread(containerSeen.slice(0, -1).map((s) => s.mib));
-      const containerNoise = containerSpreadMib === undefined ? undefined : Math.round(containerSpreadMib * MIB_BYTES);
+      const figureSpreadMib = successiveSpread(seen.slice(0, -1).map((s) => s.mib));
+      const figureNoise = figureSpreadMib === undefined ? undefined : Math.round(figureSpreadMib * MIB_BYTES);
       const head = {
+        pool,
         rss_before_bytes: before.rss_bytes,
         ...(before.swap_bytes !== undefined ? { swap_before_bytes: before.swap_bytes } : {}),
         heap_used_before_bytes: before.heap_used_bytes,
         ...(noise !== undefined ? { noise_bytes: Math.round(noise) } : {}),
-        ...(containerNoise !== undefined ? { container_noise_bytes: containerNoise } : {}),
-        ...(containerMib !== undefined ? { container_before_mib: containerMib } : {}),
+        ...(figureNoise === undefined ? {} : pool === "host" ? { host_noise_bytes: figureNoise } : { container_noise_bytes: figureNoise }),
+        ...(figureMib === undefined ? {} : pool === "host" ? { host_before_mib: figureMib } : { container_before_mib: figureMib }),
       };
       if (futile !== undefined) {
         const liveMoved = Math.abs(before.heap_used_bytes - futile.liveBytes);
-        const containerMoved = containerMib === undefined || futile.containerMib === undefined ? undefined
-          : Math.abs(containerMib - futile.containerMib) * MIB_BYTES;
-        // The container's move counts only once its own variance is learned: unlearned, jitter and a move look alike.
-        const moved = liveMoved > (noise ?? 0) || (containerMoved !== undefined && containerNoise !== undefined && containerMoved > containerNoise);
+        // A figure from the other pool is not comparable: then the heap alone says whether anything moved.
+        const figureMoved = figureMib === undefined || futile.figureMib === undefined || futile.pool !== pool ? undefined
+          : Math.abs(figureMib - futile.figureMib) * MIB_BYTES;
+        // The pool's move counts only once its own variance is learned: unlearned, jitter and a move look alike.
+        const moved = liveMoved > (noise ?? 0) || (figureMoved !== undefined && figureNoise !== undefined && figureMoved > figureNoise);
         if (!moved) {
           return done({
             outcome: "paced", ...head, ceiling: ceiling(),
             reason: `the last reclaim freed nothing above the noise; since then the heap moved ${Math.round(liveMoved / MIB_BYTES)} MiB` +
-              (containerMoved === undefined ? "" : ` and the container ${Math.round(containerMoved / MIB_BYTES)} MiB`) +
+              (figureMoved === undefined ? "" : ` and the ${pool === "host" ? "host's MemAvailable" : "container"} ${Math.round(figureMoved / MIB_BYTES)} MiB`) +
               `, inside the noise (${noise === undefined ? "unlearned" : `${Math.round(noise / MIB_BYTES)} MiB`})`,
           });
         }
@@ -542,13 +560,13 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
       const measurable = freed > (noise ?? 0);
       lives.push({ at, live_bytes: after.heap_used_bytes, heap_before_bytes: before.heap_used_bytes });
       if (lives.length > FOOTPRINT_MAX_SAMPLES) lives.shift();
-      futile = measurable ? undefined : { liveBytes: after.heap_used_bytes, ...(containerMib !== undefined ? { containerMib } : {}) };
-      const containerAfter = reread?.();
+      futile = measurable ? undefined : { liveBytes: after.heap_used_bytes, pool, ...(figureMib !== undefined ? { figureMib } : {}) };
+      const figureAfter = reread?.();
       return done({
         outcome: "reclaimed", ...head,
         rss_after_bytes: after.rss_bytes,
         ...(after.swap_bytes !== undefined ? { swap_after_bytes: after.swap_bytes } : {}),
-        ...(containerAfter !== undefined ? { container_after_mib: containerAfter } : {}),
+        ...(figureAfter === undefined ? {} : pool === "host" ? { host_after_mib: figureAfter } : { container_after_mib: figureAfter }),
         heap_used_after_bytes: after.heap_used_bytes,
         freed_bytes: freed,
         freed_heap_bytes: freedHeap,
@@ -565,7 +583,7 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
 let installedReclaimer: DaemonSlackReclaimer | undefined;
 
 /** The daemon installs its reclaimer once; the governors' readings in its process reclaim through it. Elsewhere (a
- *  drain, a review child, a test) none is installed and a container-short reading holds as before. */
+ *  drain, a review child, a test) none is installed and a container-short or host-short reading holds as before. */
 export function installDaemonSlackReclaimer(reclaimer: DaemonSlackReclaimer | undefined): void {
   installedReclaimer = reclaimer;
 }
@@ -579,10 +597,13 @@ export function reclaimLedgerFields(record: SlackReclaimRecord | undefined): Rec
   if (record === undefined) return {};
   return {
     reclaim_outcome: record.outcome,
+    reclaim_pool: record.pool,
     reclaim_rss_before_bytes: record.rss_before_bytes,
     reclaim_rss_after_bytes: record.rss_after_bytes,
     reclaim_container_before_mib: record.container_before_mib,
     reclaim_container_after_mib: record.container_after_mib,
+    reclaim_host_before_mib: record.host_before_mib,
+    reclaim_host_after_mib: record.host_after_mib,
     reclaim_freed_bytes: record.freed_bytes,
     reclaim_freed_outside_heaps_bytes: record.freed_outside_heaps_bytes,
     reclaim_measurable: record.measurable,

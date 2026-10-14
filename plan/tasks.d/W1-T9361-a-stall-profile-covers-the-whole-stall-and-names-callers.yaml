@@ -1,0 +1,68 @@
+- id: W1-T9361
+  title: "A STALL PROFILE COVERS THE WHOLE STALL AND NAMES THE CALLERS — the 2026-10-14 00:41Z `daemon.loop_stall_profile` row (lag 504 s) attributes 156 s to five native leaf frames (readFileUtf8, getReport, stat, readdir, GC) because W1-T7746 keeps only the newest two profile chunks and ledgers self time only, so 'unattributed_ms 497,652' is mostly time the profile dropped and no frame names its JS caller"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what a loop-stall profile row attributes, and to which caller; it runs inside the daemon process
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T7746, W1-T7745, W1-T9352, W1-T9362]
+  files: [src/lib/loop-stall-profiler.ts, test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger, daemon pid 1710758; local copy of the rotated archives, Azure host read-only):
+      - 00:41:30.287 `daemon.loop_stall_profile`: lag_ms 504,260, sync_spawn_ms 6,608, unattributed_ms 497,652,
+        bound_ms 67,524, top_frames readFileUtf8 73,804 ms, getReport 56,189, stat 14,895, readdir 6,558,
+        (garbage collector) 4,734. Every frame is a native leaf with url "" and line 0. The five sum to 156,180 ms,
+        under a third of the lag.
+      - 2026-10-13 19:55:37 (pid 392494), the other profile row that day: lag 89,099, top frames sum about 2.5 s.
+      - The stall itself is W1-T9352's: a fresh pre-exit full pass blocked the loop 00:32 to 00:41 (`daemon.loop_lag`
+        458,845 ms at 00:40:27, phase sweep) with 4.3 GB of host swap.
+    READ on origin/main b102674b1 (src/lib/loop-stall-profiler.ts, W1-T7746, merged):
+      - `LOOP_STALL_WATCHDOG_SOURCE`: profiling begins only once the heartbeat has been still past the bound, and
+        `rotate` keeps one previous chunk (`stall.previous = profile`); `finish` posts `[previous, current]`. The
+        module doc says so: "profiled in chunks one bound long, and only the newest two are kept". With a 67.5 s
+        bound, the row can cover about two bounds plus a heartbeat period, not 504 s.
+      - `record` computes `unattributed_ms` as lag minus sync spawn time, so it counts the dropped chunks and the
+        unprofiled first bound as "unattributed" too; the row has no figure for how much of the lag it profiled.
+      - `topSelfFrames` keys on the sampled node's own call frame only. The V8 profile's node tree (each node's
+        children) is discarded, so a native leaf never names the JS function that called it.
+    THE getReport FRAME is filed separately as W1-T9362 (its caller is found: the SDK's per-query musl probe).
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the 8 open PR heads (2026-10-14 01:28Z) for
+    loop_stall_profile, topSelfFrames and LOOP_STALL_WATCHDOG_SOURCE. Control: "loop_stall_profile" reads 2 shards
+    on main (W1-T7746, W1-T9352) and 1 on each head (heads predate W1-T9352); neither changes chunk retention or
+    caller attribution.
+  design: |
+    No new constant. Memory stays bounded by distinct frames, not by stall length.
+    1. FOLD, DON'T DROP. Each rotated chunk is folded into a running per-frame aggregate before it is released, so a
+       stall of any length is attributed from the moment profiling began. The aggregate is keyed by frame and
+       caller, so its size follows the number of distinct frames the stall ran, never its duration.
+    2. SAY WHAT WAS PROFILED. The row gains `profiled_ms` (the summed span of the folded chunks) and
+       `unprofiled_ms` (the stall's time before profiling began, about one bound). `unattributed_ms` keeps its meaning
+       (lag minus sync spawn); a reader can now tell profiled-and-unnamed from never-profiled.
+    3. NAME THE CALLER. Each top self frame carries `caller`: the nearest ancestor in the profile's node tree with
+       a script url (function, url, line), so readFileUtf8 or getReport names the JS that called it. The row also
+       carries `top_inclusive`: the JS frames with the most total (self plus descendants) time, the same count
+       (`LOOP_STALL_TOP_FRAMES`) as the self list.
+    4. Unchanged: the derived bound, the one-profile-at-a-time rule, the failure row and the no-file rule.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Feed `topSelfFrames`' successor
+    synthetic `CpuProfile` chunks (a native leaf under a named JS function, three chunks of one stall).
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts"
+    - claim: "a stall profiled in more than two chunks attributes every chunk's samples, and the row's profiled_ms covers them all"
+      proof: 'grep: test("W1-T9361: every chunk of a long stall is attributed and profiled_ms covers them" in test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts'
+    - claim: "a native leaf frame names its nearest JS caller"
+      proof: 'grep: test("W1-T9361: a native leaf names its nearest JS caller" in test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts'
+    - claim: "the row names the top inclusive JS frames"
+      proof: 'grep: test("W1-T9361: the row names the top inclusive JS frames" in test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts'
+    - claim: "the aggregate stays bounded by distinct frames however long the stall"
+      proof: 'grep: test("W1-T9361: the aggregate grows with distinct frames, not stall length" in test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts'
+  falsifier: |
+    Keep the two-chunk window: the first test's three-chunk stall loses its first chunk's frame and profiled_ms is
+    two chunks. Key frames on the leaf alone: the second test's readFileUtf8 has no caller.
