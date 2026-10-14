@@ -13,6 +13,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Worker, WorkerOptions } from "node:worker_threads";
 import { execArgvWithoutTsx, setWorkerEntryLog, startWorker, type StartWorkerDeps } from "../src/lib/child-entry-argv.js";
+import { spawnSite } from "../src/lib/worker-heaps.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "build-child-entries.mjs");
@@ -130,4 +131,15 @@ test("only tsx's loader flags leave a bundled worker's execArgv", () => {
   assert.deepEqual(execArgvWithoutTsx(["--import=file:///app/node_modules/tsx/dist/esm/index.mjs", "--require", "tsx/cjs", "--import", "./x.mjs"]), ["--import", "./x.mjs"]);
   assert.deepEqual(execArgvWithoutTsx(["--loader", "tsx", "--trace-warnings"]), ["--trace-warnings"]);
   assert.deepEqual(execArgvWithoutTsx(["--import", "tsxlike", "--import", "my-tsx-helpers"]), ["--import", "tsxlike", "--import", "my-tsx-helpers"], "a name that merely contains tsx stays");
+});
+
+test("serve.memory still names a worker by the module that asked for it, not by startWorker", () => {
+  const stack = [
+    "Error",
+    "    at new Worker (node:internal/worker:297:28)",
+    "    at construct (file:///app/src/lib/child-entry-argv.ts:150:9)",
+    "    at startWorker (file:///app/src/lib/child-entry-argv.ts:171:22)",
+    "    at spawnHeavyViews (file:///app/src/lib/read-model-worker.ts:1802:21)",
+  ].join("\n");
+  assert.equal(spawnSite(stack), "read-model-worker:spawnHeavyViews");
 });
