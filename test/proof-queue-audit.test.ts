@@ -17,7 +17,9 @@
  *        offender split by cause, and the command EXITS 0 regardless — a report, never a gate.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -235,8 +237,11 @@ function dumpOf(...entries: Array<[subject: string, body?: string]>): string {
 const ZERO_MATCH_TITLE = ["a fixture title that will.*", "never match any real test", "kx4471q"].join(" ");
 
 function buildFixturePlan(): { tasksPath: string; dir: string } {
-  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t1053-audit-"));
+  const dir = mkdtempSync(join(tmpdir(), "rmd-proof-audit-corpus-"));
   mkdirSync(join(dir, "plan"), { recursive: true });
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "control.test.ts"),
+    'import { test } from "node:test";\ntest("audit fixture readable positive control", () => {});\n');
   const tasksPath = join(dir, "plan", "tasks.yaml");
   const body =
     fixtureTaskYaml("W9-OPEN-BAD-GREP", "queued", "grep: TODO in test/does-not-exist-w1-t1053.ts") +
@@ -270,6 +275,28 @@ async function runAuditCapturing(
   }
 }
 
+/** Real CLI root binding and real grep over one immutable private corpus, never peer tests' scratch trees. */
+function runFixtureAudit(tasksPath: string, dir: string, dump: string): { exitCode: number; stdout: string } {
+  const loader = createRequire(import.meta.url).resolve("tsx");
+  const script = `
+    process.chdir(${JSON.stringify(dir)});
+    const { resolveNameFilteredCandidates } = await import(${JSON.stringify(join(REPO_ROOT, "src/lib/review.ts"))});
+    const control = resolveNameFilteredCandidates(process.cwd(), "audit fixture readable positive control");
+    if (control.status !== "resolved" || control.files.length !== 1) throw Error("fixture corpus positive control unavailable");
+    console.log("fixture-corpus-positive-control: one readable physical test");
+    const { proofQueueAuditCommand } = await import(${JSON.stringify(join(REPO_ROOT, "src/run-task.ts"))});
+    process.exitCode = await proofQueueAuditCommand(["--plan", ${JSON.stringify(tasksPath)}], {
+      readMergeEvidenceLog: () => ({ dump: ${JSON.stringify(dump)}, ref: "fixture-ref" }),
+      executeProof: () => "unreadable"
+    });
+  `;
+  const stdout = execFileSync(process.execPath,
+    ["--import", loader, "--input-type=module", "-e", script, "--", "audit-fixture", "--repo-root", dir],
+    { cwd: REPO_ROOT, encoding: "utf8", timeout: 20_000 });
+  assert.match(stdout, /fixture-corpus-positive-control: one readable physical test/);
+  return { exitCode: 0, stdout };
+}
+
 test("proofQueueAuditCommand: an unknown flag is refused, exit 2, nothing audited", async () => {
   const { exitCode } = await runAuditCapturing(["--bogus"]);
   assert.equal(exitCode, 2);
@@ -284,9 +311,7 @@ test("proofQueueAuditCommand: scopes to open+unmerged, names every offender spli
   const { tasksPath, dir } = buildFixturePlan();
   try {
     const dump = dumpOf(["feat(x): ship it (#1)", "body\n\nRemudero-Task: W9-MERGED-ELSEWHERE-BAD-GREP"]);
-    const { exitCode, stdout } = await runAuditCapturing(["--plan", tasksPath], {
-      readMergeEvidenceLog: () => ({ dump, ref: "fixture-ref" }),
-    });
+    const { exitCode, stdout } = runFixtureAudit(tasksPath, dir, dump);
     // A REPORT, NOT A GATE: this fixture is deliberately full of offenders, and the command must
     // still exit 0 — the load-bearing claim of the whole task.
     assert.equal(exitCode, 0, "the audit must exit 0 regardless of how many offenders it names");
@@ -322,10 +347,7 @@ test("proof audit fixture is independent of unrelated interpolated titles in the
   try {
     writeFileSync(join(foreign, "ambiguous.test.ts"),
       'import { test } from "node:test";\nconst prefix = "foreign";\ntest(`${prefix} never match any real test`, () => {});\n');
-    const { stdout } = await runAuditCapturing(["--plan", tasksPath], {
-      readMergeEvidenceLog: () => ({ dump: dumpOf(), ref: "fixture-ref" }),
-      executeProof: () => "unreadable", // Classification only; an ambiguous name must not launch a whole-suite probe.
-    });
+    const { stdout } = runFixtureAudit(tasksPath, dir, dumpOf());
     assert.match(stdout, /name-filtered-zero-match\s+1 task\(s\): W9-OPEN-ZERO-MATCH/);
   } finally {
     rmSync(foreign, { recursive: true, force: true });
