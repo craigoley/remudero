@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {rmSync} from 'node:fs';
 import {test,type TestContext} from 'node:test';
-import {realArmDeps,realArmDepsAsync} from '../src/lib/arm-auto-merge.js';
+import {armFailureAction,armFailureIsRateLimited,realArmDeps,realArmDepsAsync} from '../src/lib/arm-auto-merge.js';
 import {ghPrMergeSquash} from '../src/lib/worker.js';
 import {SecurityMergeRefused} from '../src/lib/security-merge-admission.js';
 import {withLiveWritesAllowed} from '../src/lib/live-write-guard.js';
@@ -48,4 +48,21 @@ test('default core merge effectors refuse new high and UNKNOWN evidence before a
  }
  assert.ok(shim.calls().some(call=>call.includes('/check-runs?')),'positive control: refused observations saw the security corpus');
  assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')||call.includes('PUT')),false);
+});
+test('security UNKNOWN recovery rechecks the same head without a fresh SHA or an ungated fallback',async t=>{
+ const shim=fixture(t),port=realArmDepsAsync();
+ shim.addRoute({when:'/check-runs?',stdout:JSON.stringify({total_count:1,check_runs:[{...clean,status:'in_progress',conclusion:null}]})});
+ await withLiveWritesAllowed(async()=>{
+  await assert.rejects(async()=>await port.armAuto(url),(error:unknown)=>{
+   assert.ok(error instanceof SecurityMergeRefused);assert.equal(error.state,'unknown');
+   assert.equal(armFailureAction(error.message),'retryable');assert.equal(armFailureIsRateLimited(error.message),false);return true;
+  });
+  assert.equal(shim.calls().some(call=>call.startsWith('pr merge ')),false);
+  shim.addRoute({when:'/check-runs?',stdout:JSON.stringify({total_count:1,check_runs:[clean]})});
+  await port.armAuto(url);
+ });
+ const writes=shim.calls().filter(call=>call.startsWith('pr merge '));assert.equal(writes.length,1);
+ assert.ok(writes[0]!.includes('--match-head-commit '+head));
+ assert.equal(armFailureAction(new SecurityMergeRefused('blocked','new-high-alert').message),'retryable');
+ assert.equal(armFailureIsRateLimited(new SecurityMergeRefused('blocked','new-high-alert').message),false);
 });

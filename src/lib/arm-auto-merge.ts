@@ -2104,6 +2104,9 @@ export function decideArmReprobeFromFacts(
  */
 
 export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "retryable" | "unknown" {
+  // Fresh CodeQL completion/API recovery on the SAME head must be reconsidered. This
+  // grants only a later gated observation, never direct merge or quota fallback.
+  if (/^security merge (?:unknown|blocked):/.test(stderrText)) return "retryable";
   if (/clean status/i.test(stderrText)) return "direct-merge";
   if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
     stderrText,
