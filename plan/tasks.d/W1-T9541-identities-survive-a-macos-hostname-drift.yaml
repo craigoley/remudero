@@ -1,0 +1,132 @@
+- id: W1-T9541
+  title: "A PID@HOST IDENTITY SURVIVES A MACOS HOSTNAME DRIFT — os.hostname() on the operator Mac flips between `Craigs-Mac-mini` and `Craigs-Mac-mini.local` with network state, and every site that compares a recorded host to the local hostname with `===` then reads this host's own claim or lock as another host's; on 2026-10-14 `rmd claim W1-T8171 --drop` refused the operator's own claim and the ref was deleted by hand"
+  repo: remudero
+  depends_on: []  # W1-T9432 (queued) edits src/lib/dispatch-claim.ts and src/run-task.ts too; it adds a renewal arm and does not touch the host comparisons named here
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — how two host names are judged equal; a too-loose match lets a pid probe run against another host's pid
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: refs/rmd-dispatch/W1-T8171 anchored `rmd-dispatch claim 21407@Craigs-Mac-mini 2026-10-14T19:18:21Z`; after a power-failure reboot `rmd claim W1-T8171 --drop` on the same Mac refused it as another host's"
+  plan_refs: [W1-T396, W1-T978, W1-T2784, W1-T5047, W1-T5859, W1-T6261, W1-T8616, W1-T9161, W1-T9432]
+  files: [src/lib/host-identity.ts, src/run-task.ts, src/lib/dispatch-claim.ts, src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/ledger.ts, src/lib/report-commands.ts, src/lib/test-slot.ts, src/lib/auto-triage.ts, src/lib/heavy-build-reservation.ts, test/identities-survive-a-macos-hostname-drift.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main 339281608 (re-checked at dd43a4596: none of the cited files moved). Symbols, not lines.
+    OBSERVED 2026-10-14 on the operator Mac:
+      - `refs/rmd-dispatch/W1-T8171`'s anchor read `rmd-dispatch claim 21407@Craigs-Mac-mini 2026-10-14T19:18:21Z`,
+        taken from this Mac before a power-failure reboot.
+      - After the reboot `node -e 'console.log(require("os").hostname())'` and `hostname` both print
+        `Craigs-Mac-mini.local`; `scutil --get LocalHostName` still prints `Craigs-Mac-mini`; `scutil --get HostName`
+        is not set. With HostName unset, macOS derives the kernel hostname from DHCP/mDNS state, so it flips between
+        the bare and the `.local` form across reboots and network changes. A DHCP search domain can add other
+        suffixes (`.lan`, `.home`, a router's domain) the same way.
+      - `rmd claim W1-T8171 --drop` refused: "held by 21407@Craigs-Mac-mini, not by this host (Craigs-Mac-mini.local)".
+        The operator deleted the ref with a hand `git push`.
+    REPRODUCED on origin/main 339281608 with injected seams:
+      - `claimCommand(["W1-T8171","--drop"], {reserver, isPlanned: () => true, localHost: "Craigs-Mac-mini.local"})`
+        over a reserver whose anchor is the message above exits 1 and never calls `drop`.
+      - `isHolderStale({pid: 999999, host: "Craigs-Mac-mini", startedAt: ...}, {isPidAlive: () => false,
+        hostname: () => "Craigs-Mac-mini.local", inContainer: () => false})` returns false; the same call with
+        `hostname: () => "Craigs-Mac-mini"` returns true. A dead pid's lock on this host is read as a foreign
+        live holder and is never reclaimed.
+    SITE CENSUS. Every place that compares a recorded host to this process's hostname (or a recorded holder host to
+    a ledger row's host for liveness). Containers are unaffected: inside one, os.hostname() is the container id and
+    does not drift. The Mac and any bare-metal host are.
+      1. `claimCommand` (src/run-task.ts, `rmd claim --drop`): `identity.host !== localHost`. Mismatch: the
+         operator's own claim is refused as another host's (the incident above).
+      2. `isHolderStale` rung 1 (src/lib/fs-race-safe.ts): `held.host !== myHost`. Mismatch: returns "not stale"
+         before the boot and pid rungs run, so a DEAD same-host holder is never reclaimed. THE WORST CASE. Every
+         `reclaimStaleLock` caller inherits it: `acquireDrainLock` (src/lib/drain-lock.ts), `acquireInflightLock`
+         (src/lib/inflight-lock.ts), the inbox locks (src/lib/inbox.ts), the coverage gate lock (src/lib/ci-parity.ts),
+         the review lock and owner classifier (src/lib/review.ts), the task-id reservation lock
+         (src/lib/task-id-reservation.ts), the worker-home lock (src/lib/worker-home.ts) and the ledger rotation lock.
+         Fixing the rung fixes all of them; none of those files needs its own edit.
+      3. `sweepStaleInflightLocks`' live/unverifiable split (src/lib/inflight-lock.ts): `reclaim.holder.host !== myHost`,
+         a mirror of rung 1. Mismatch: a live local run is reported `unverifiableForeignHost`.
+      4. `isRotationLockHolderStale` (src/lib/ledger.ts): `held.host !== myHost`. Mismatch: a live same-host
+         rotation holder is judged by age alone and its lock can be taken mid-rotation.
+      5. `judgeInflightLocks` (src/lib/report-commands.ts, doctor): `info.host === myHost`. Mismatch: a same-host lock
+         falls through to the container lookup and is reported `unverifiable` instead of live or dead.
+      6. src/lib/test-slot.ts: `inheritedTestSlot` (`held.host !== hostname()` rejects an inherited slot as
+         `different-holder`), `testSlotHolderStale` (`held.host === opts.hostname()`: a same-host holder is aged by
+         boot id and lease instead of by pid), and `testSlotAcquisition`'s own-holder checks (`host() === hostname()`,
+         `h.host === host()`). Mismatch: a test child re-acquires a slot its parent holds, and a dead holder waits
+         out the lease.
+      7. `decideDispatchClaimRelease` (src/lib/dispatch-claim.ts): arm 3 W1-T2784 `a.host === l.localHost` (declines
+         a provably dead same-host claimant) and arm 3 W1-T5047 `a.host !== r.localHost && m.host === a.host`.
+         `findClaimMintRow` matches `row.host !== anchor.host`. Mismatch: W1-T2784 declines a claimant that is
+         provably dead on this host and leaves it to the operator; W1-T5047 judges a same-host claim as a replaced
+         container's.
+      8. `staleDispatchClaimEscalations` (src/lib/dispatch-claim.ts, status board): `claim.identity?.host === localHost`
+         skips this host's own claims. Mismatch: this host's day-old claim is escalated as "cross-host liveness is
+         undecidable".
+      9. `releaseLandedDispatchClaims`' rerun guard (src/lib/dispatch-claim.ts, W1-T8616 tick sweep):
+         `anchor.host === deps.localHost`. Mismatch: this host's `--rerun` lane claim on a merged task is released.
+      10. `classifyReservationAnchor` (src/run-task.ts, `rmd next-task-id`): `holder.host === caller.host`. Mismatch
+          (hostname flips between mint and contest inside one process): the caller's own reservation reads as `fleet`.
+      11. The approve join guard in src/run-task.ts (W1-T9161, `findJoinablePr`): `candidate.host === hostname()`
+          before `defaultIsPidAlive`. Mismatch: a live same-host approving pid is treated as another host's, and the
+          join proceeds onto a PR that approve may be about to merge.
+      12. `assessTriageClaimLiveness` (src/lib/auto-triage.ts): `row.host !== i.holder.host` when scanning ledger rows
+          for the holder's heartbeat. Mismatch: rows written after a flip are not the holder's, so a LIVE holder can
+          read `dead` (some old-form rows seen, none recent) and its claim is released.
+      13. `releaseHeavyNewBuilds` (src/lib/heavy-build-reservation.ts): `current.owner.host !== actual.host` for the
+          SAME process. Mismatch: the minting process cannot release its own reservation, which then records an
+          escalation.
+    NOT IN SCOPE, named so the builder does not widen the diff:
+      - PAUSE writer identity: `evaluatePauseTier`'s `setterAlive` (src/lib/fleet-control.ts) has no producer on main
+        (`checkPauseHold` is never wired), and W1-T9409's dead-writer release is shell
+        (deploy/release-orphan-recycle-pause.sh, `[ "${host}" != "${this_host}" ]`) that runs only on the Azure Linux
+        host, whose hostname is static. A baked deploy/ path ships by image rebuild, so it stays out of this diff.
+      - Row-to-row analytics that compare two recorded hosts both written by `hostname()` in long-lived container
+        processes: src/lib/host-resource-gardener.ts, src/lib/status.ts (`environmentChangedSince`'s daemon.boot
+        host), src/lib/fleet-liveness.ts, src/lib/field-trials-cohorts.ts, src/lib/ci-remedy-execution.ts,
+        src/lib/skill-eval-reservation.ts.
+      - Writers. Every anchor and lock keeps writing raw `hostname()`, so old anchors still parse and an operator
+        still reads the host as the machine reported it.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d for hostname drift, `.local`, sameHost, host
+    normalization, mDNS and LocalHostName (25 shards mention hostname; none normalizes or compares host names
+    tolerantly; W1-T972 stamps a host on rows, W1-T978 handles container ids). Swept the plan/tasks.d additions on
+    every remote head (431 refs, 42 heads add shards): none matches.
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    1. NEW src/lib/host-identity.ts exports `hostIdentity(host: string): string` and
+       `sameHost(a: string | undefined, b: string | undefined): boolean`.
+       - `hostIdentity` trims, lowercases, drops one trailing `.`, then drops a trailing `.local` (mDNS).
+       - `sameHost` is false when either side is absent or empty. Otherwise it is true when the two identities are
+         equal, or when exactly one side is a bare label (no `.`) and it equals the other side's first DNS label.
+         So `Craigs-Mac-mini` matches `Craigs-Mac-mini.local` and `craigs-mac-mini.lan`, while `foo.a.example` and
+         `foo.b.example` stay different hosts. A container id (12 or 64 hex, no dot) matches only itself.
+    2. Every site in the census (items 1-13) compares through `sameHost`. Where a site keeps an "absent host means
+       skip the check" reading (`isHolderStale`, the inflight split), keep that branch before the call.
+    3. The refusal text in `claimCommand` is unchanged for a real foreign host.
+    4. Tests go in the new file, `test(` titles verbatim as in the proofs below:
+       - drive `claimCommand --drop` with an injected reserver whose anchor is `rmd-dispatch claim 21407@Host ...`
+         and `localHost: "Host.local"`: it drops. With `localHost: "other-host.invalid"` it still refuses;
+       - `isHolderStale` with a dead pid recorded as `Host` and `hostname: () => "Host.local"`, `inContainer: () =>
+         false`: stale;
+       - a table test of `sameHost`: case, trailing dot, `.local`, a search-domain suffix against a bare label,
+         two different FQDNs sharing a first label, two container ids, and empty/undefined.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/identities-survive-a-macos-hostname-drift.test.ts"
+    - claim: "a claim anchored on the bare host is dropped by rmd claim --drop run from the .local form of that host"
+      proof: 'grep: test("W1-T9541: a claim anchored on the bare host is dropped from its mDNS form" in test/identities-survive-a-macos-hostname-drift.test.ts'
+    - claim: "a dead lock holder recorded under the bare host is stale when judged from the .local form"
+      proof: 'grep: test("W1-T9541: a dead lock from the bare host is stale from its mDNS form" in test/identities-survive-a-macos-hostname-drift.test.ts'
+    - claim: "a genuinely different host's claim is still refused"
+      proof: 'grep: test("W1-T9541: another host claim is still refused" in test/identities-survive-a-macos-hostname-drift.test.ts'
+    - claim: "one shared host comparison exists"
+      proof: "grep: export function sameHost in src/lib/host-identity.ts"
+    - claim: "rmd claim --drop compares hosts through sameHost"
+      proof: "grep: sameHost( in src/run-task.ts"
+    - claim: "the shared lock-staleness rung compares hosts through sameHost"
+      proof: "grep: sameHost( in src/lib/fs-race-safe.ts"
+  falsifier: |
+    Against main, the drop test exits 1 with "not by this host (Host.local)" and the ref stays; the lock test reads
+    "not stale". If `sameHost` compared first labels in every case, `foo.a.example` and `foo.b.example` would match
+    and the table test fails. If a site kept its `===`, its census case in the test fails.
