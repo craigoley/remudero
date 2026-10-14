@@ -142,6 +142,11 @@ export function qualifySemgrep({ command = "semgrep", enginePath = process.env.S
     return { schema: "rmd-semgrep-native-qualification-v1", version: VERSION,
       runtime: { node: process.version, platform: process.platform, arch: process.arch },
       enginePayload: { sha256: digest(engineBytes), bytes: engineBytes.length },
+      workflowSha: process.env.GITHUB_SHA ?? null,
+      lockSha256: {
+        build: digest(readFileSync(new URL("../.github/semgrep/build-requirements.txt", import.meta.url))),
+        runtime: digest(readFileSync(new URL("../.github/semgrep/requirements.txt", import.meta.url))),
+      },
       controlRuleSha256: digest(ruleBytes), base, head, fullControl, baselineControl,
       invalidControl: { exitCode: bad.result.status, errorCount: invalidReport.errors.length },
       authority: "original synthetic controls only; no registry-rule redistribution, Pro engine or pilot activation",
