@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: core PAUSE from pid 405262 at 08:12:24Z, writer gone by 08:30Z, daemon still the old container"
   plan_refs: [W1-T4197, W1-T5281, W1-T5804, W1-T4429, W1-T6597, W1-T8245]
   files: [deploy/release-orphan-recycle-pause.sh, deploy/recycle-container.sh, deploy/install-host-units.sh, test/a-recycle-pause-whose-writer-died-is-released.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

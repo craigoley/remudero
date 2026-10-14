@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
-import { createSlotPreparer, prepareSlotDeps, runCommand, type RunCommand } from "./serve-slots.js";
+import { buildSlotChildEntries, createSlotPreparer, prepareSlotDeps, runCommand, type RunCommand } from "./serve-slots.js";
 import { createServeSupervisor, handoffSwitch, SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "./serve-supervisor.js";
 
 export const SERVE_GENS_DIR_ENV = "RMD_SERVE_GENS_DIR";
@@ -47,6 +47,8 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
   // The cold generation runs from the clone the entrypoint synced; its install is made fresh here,
   // because a supervised generation skips serve's own fetch-and-install gate.
   const coldDeps = await prepareSlotDeps(repoDir, repoDir, run);
+  // W1-T9421: and its worker bundles are built, as a prepared slot's are.
+  const coldChildEntries = await buildSlotChildEntries(repoDir, run);
   const sha = (opts.headSha ?? ((dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()))(repoDir);
   const supervisor = (opts.create ?? createServeSupervisor)({
     coldSlot: { dir: repoDir, sha, deps: coldDeps },
@@ -58,7 +60,7 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
   });
   const onSignal = opts.onSignal ?? ((signal, handler) => void process.once(signal, handler));
   for (const signal of ["SIGTERM", "SIGINT"] as const) onSignal(signal, () => void supervisor.shutdown(signal.toLowerCase()));
-  log("serve.supervisor_start", { sha, repoDir, gensDir, coldDeps });
+  log("serve.supervisor_start", { sha, repoDir, gensDir, coldDeps, coldChildEntries });
   await supervisor.start();
   return supervisor;
 }

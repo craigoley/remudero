@@ -1,0 +1,57 @@
+- id: W1-T9501
+  title: "A READ-MODEL LOCK STALL NEVER NAMES THE CONNECTION HOLDING THE LOCK — on 2026-10-14 serve's projector (thread 4) AND its views writer (thread 12) both got 'database is locked' on core.v1.sqlite from 12:27:02Z to 12:40:43Z, the stall escalated #11656, and nothing recorded which third connection held the write lock for 13 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a lock failure and a stall name the write-transaction holder (read-model-db.ts records it, read-model-worker.ts carries it into the stall)
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: triage of needs-human #11656 (READ-MODEL-CORE), fix every problem at the root"
+  plan_refs: [W1-T5177, W1-T4568]
+  files: [src/lib/read-model-db.ts, src/lib/read-model-worker.ts, test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the core ledger (archive ledger.2026-10-14T13-40-43-328Z.ndjson.gz and the live file), serve run
+    SERVE-1791980175174, pid 128:
+      - 12:27:02Z first read_model.tick_failed "database is locked [connection=369176e1…/writer pid=128 thread=4
+        path=/home/node/rmd-scratch/read-model/core.v1.sqlite]", and in the same second read_model.view_cost_write_failed
+        "database is locked [connection=21045f48…/writer pid=128 thread=12 …]". Both of serve's writers waited.
+      - 12:29:00Z read_model.stalled (stalledMs 77500), the store was reopened; 12:30:05Z read_model.stall_escalated
+        opened #11656; tick_failed continued (failures 9..17, backoff 60 s) with fresh connection ids after each reopen.
+      - 12:40:43Z read_model.unstalled, stalledMs 784978, with no operator action. Single one-retry lock misses
+        recurred at 13:24Z, 13:48-13:49Z and 15:34Z.
+    The writer lock was held by a THIRD connection for about 13 minutes. identifyLockFailure (read-model-db.ts)
+    appends only the WAITING connection's id, role, pid and thread, so neither the tick_failed rows nor the
+    escalation can say which connection, thread, process or code path held it. The read-model directory is bind-mounted
+    into BOTH the serve and core-daemon containers (/mnt/scratch/rmd/rmd-state2/read-model), so the holder may be
+    another process. W1-T5177 moved READERS onto read-only connections, so this was a writer or a checkpoint.
+    Without the holder's name, the fix for the holder cannot be chosen; this task supplies it.
+  design: |
+    1. Every writable ReadModelDb (openReadModel's writer and attachReadModel) records each write transaction it
+       opens: BEGIN IMMEDIATE (immediate/withWriteTransaction) writes a small holder record — connection id, pid,
+       thread id, the caller's label (the lease name or the operation, e.g. "projector.tick", "view_cost",
+       "memo_retention"), and startedMs — into a per-database sidecar directory beside the db (readModelSidecarDir),
+       one file per connection, written before BEGIN and removed after COMMIT or ROLLBACK. A process that dies
+       leaves its file; a reader treats a record whose pid is not alive on this host as stale and says so.
+    2. identifyLockFailure appends the holders it finds to the error text:
+       `holders=[<connection>/<label> pid=<p> thread=<t> held=<ms>]`, oldest first, bounded to the three oldest.
+       No holder file found is stated as `holders=none-recorded` (a connection outside this code, e.g. the sqlite3 CLI).
+    3. read_model.stalled and read_model.stall_escalated carry the same holders field, and the escalation detail
+       names the oldest holder and how long it has held the lock, so the issue says what to fix.
+    4. The holder record never blocks or fails a write: a sidecar write error is swallowed and logged once per
+       connection as read_model.holder_record_failed.
+    Tests go in the new file, titled verbatim as in the proofs, over a REAL WAL file in a private tmp dir with two
+    connections: one holds BEGIN IMMEDIATE with a label, the other's write fails and its error names the holder.
+  acceptance:
+    - claim: "a write that fails on the read model's lock names the connection that holds it, with its label and how long it has held it"
+      proof: 'grep: test("W1-T9501: a locked write names the connection holding the lock" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
+    - claim: "a stall escalation carries the oldest holder"
+      proof: 'grep: test("W1-T9501: a stall escalation names the oldest lock holder" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
+    - claim: "a holder whose process is gone is reported as stale, and a lock held by an unrecorded connection says none-recorded"
+      proof: 'grep: test("W1-T9501: a dead or unrecorded holder is named as such" in test/a-read-model-lock-stall-names-the-connection-holding-the-lock.test.ts'
+  falsifier: |
+    Remove the holder record from immediate() and the locked write's error names only the waiting connection again.

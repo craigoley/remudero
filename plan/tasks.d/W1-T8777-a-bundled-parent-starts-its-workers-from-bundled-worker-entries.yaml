@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: docs/adr/0006-precompiled-daemon-child-entries.md's third unfiled follow-up (W1-T7729, #11136)"
   plan_refs: [W1-T7729, W1-T8775, W1-T8776]
   files: [scripts/build-child-entries.mjs, src/lib/child-entry-argv.ts, src/lib/read-model-worker.ts, src/lib/read-model-slow-lane.ts, src/lib/status.ts, src/lib/board-worker.ts, test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: ADR 0007 runs every build on this bundle; it is on the chain that offsets the new per-lane child memory
   attempts: 0
   rationale: |

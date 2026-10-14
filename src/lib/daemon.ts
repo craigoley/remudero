@@ -132,7 +132,9 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
-import { createDaemonMemoryGovernor, type DaemonMemoryGovernor } from "./daemon-memory-policy.js";
+import {
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, type DaemonMemoryGovernor, type HeapShadowOptions,
+} from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
   accountIdleLaneMinutes,
@@ -1134,6 +1136,8 @@ export interface DaemonDeps {
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
    *  awaits it, and the NEXT row's fields carry what it found. */
   readMemoryTelemetry?: (() => Record<string, unknown>) & { afterRow?: () => void };
+  /** W1-T8883: the heap-ceiling shadow's heap reading and process id; absent, this process's own. A test seam. */
+  heapShadowSeams?: Pick<HeapShadowOptions, "snapshot" | "pid">;
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1220,6 +1224,10 @@ export interface DaemonDeps {
   /** True when a task's own read is indeterminate — a genuine read failure rather than a clean
    *  absence of evidence — re-derived from the same projection. Optional (W1-T119). */
   isIndeterminate?: (taskId: string) => boolean;
+  /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits (`releaseLandedDispatchClaims`:
+   *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
+   *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
+  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
   /** W1-T8676: every latch release the status projection derives (`independentFailureLatch`), by task id. Each
@@ -1720,6 +1728,8 @@ interface InterphaseReviewClock {
  *  the watchdog and doctor read, so its error rides the row instead of escaping the tick. */
 function readMemoryTelemetrySafely(deps: Pick<DaemonDeps, "readMemoryTelemetry">): Record<string, unknown> {
   if (!deps.readMemoryTelemetry) return {};
+  // W1-T8883: the same heartbeat feeds the heap-ceiling shadow (rate-limited there); it never costs the heartbeat.
+  try { installedHeapShadow()?.sampleNow(); } catch { /* Reason: observability only; the shadow is report-only. */ }
   try {
     return deps.readMemoryTelemetry();
   } catch (e) {
@@ -3357,6 +3367,7 @@ export async function runDaemon(
   // daemon-lifetime state: sweeps keep owning the open PR, and a restart may safely reconstruct the
   // same fact from the status projection rather than introducing another durable queue.
   const parkedBlockers = new Map<string, { prUrl?: string; dependents: string[] }>();
+  let landedClaimSweepInFlight = false;
   // Library fallback for callers that do not wire the status projection: independent failures are
   // still recorded in the ledger, but the same in-process loop must not re-spend on the id before a
   // projection reader has a chance to observe that row. Not a Task mutation, so plan reloads cannot
@@ -3520,6 +3531,26 @@ export async function runDaemon(
   // The Clock port (W1-T2897): `deps.now` keeps its legacy `() => Date` shape (many tests inject
   // it directly), adapted here once for every reading this loop needs.
   const daemonClock: Clock = clockFromDateFn(deps.now);
+  // W1-T8883: the heap-ceiling shadow learns from live heap samples kept across boots (7 days) and ledgers the ceiling
+  // it would propose, at start and hourly. REPORT ONLY: the ceiling in force is unchanged. Needs the state directory.
+  const heapShadowStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
+  const heapShadow = heapShadowStateDir === undefined || !deps.readMemoryTelemetry ? undefined : createHeapShadow({
+    path: heapSamplePath(heapShadowStateDir),
+    clock: daemonClock,
+    ...deps.heapShadowSeams,
+    onPersistError: (reason) => emitLog("daemon.heap_samples_persist_failed", { reason }),
+    onProposal: (proposal) => log("daemon.heap_ceiling_shadow", { basis: "hourly", ...proposal }),
+  });
+  if (heapShadow) {
+    installHeapShadow(heapShadow);
+    try {
+      log("daemon.heap_ceiling_shadow", {
+        basis: "learned", ...heapShadow.propose(), ...(heapShadow.loadError === undefined ? {} : { samples_unread: heapShadow.loadError }),
+      });
+    } catch (e) {
+      log("daemon.heap_ceiling_shadow_failed", { reason: String((e as Error)?.message ?? e).slice(0, 160) });
+    }
+  }
   // W1-T4390: the SRE governor's port — injected, else over the fleet lane's state root (see DaemonDeps.sreGovernor).
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
@@ -3574,6 +3605,10 @@ export async function runDaemon(
     if (repositoryMaintenanceTimer) clearInterval(repositoryMaintenanceTimer);
     clearTimeout(bootGateTimer);
     bootGateTrigger ??= "exited";
+    if (heapShadow) {
+      try { heapShadow.flush(); } catch { /* Reason: report-only samples; a failed flush loses at most one persist gap. */ }
+      if (installedHeapShadow() === heapShadow) installHeapShadow(undefined);
+    }
     const failures: unknown[] = [];
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
@@ -5050,6 +5085,17 @@ export async function runDaemon(
       if (!reason) continue;
       parkedBlockers.delete(taskId);
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
+    }
+
+    // W1-T8616: a merged task's dispatch claim is released here, from the cycle's own `isMerged`.
+    if (deps.releaseLandedClaims && !landedClaimSweepInFlight) {
+      landedClaimSweepInFlight = true;
+      void deps
+        .releaseLandedClaims(isMerged)
+        .catch((e) => log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: String((e as Error)?.message ?? e).slice(0, 300) }))
+        .finally(() => {
+          landedClaimSweepInFlight = false;
+        });
     }
 
     // Admit the restricted boot review BEFORE a phase ticker can wake during the scheduler turns below.

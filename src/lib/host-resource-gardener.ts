@@ -9,7 +9,7 @@ import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gitDirOf } from "./typecheck-buildinfo.js";
-import { prepareGardenTaskIds, recordGardenMintTimeout, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
+import { prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -826,6 +826,10 @@ interface FiledRecord {
   at: string;
   url?: string;
   failedAt?: string;
+  /** The {@link consumerFilingShape} of a filing whose PR did not open (the plan-PR preflight refused it): that
+   *  proposal is not filed again until its shape changes. 2026-10-11..14: the `rmd` consumer's unchanged filing
+   *  was refused 495 times, about one per pass, each reserving a task id and running the preflight. */
+  notLandedShape?: string;
   growthKbPerHourAtFiling?: number;
   judgedAt?: string;
 }
@@ -900,17 +904,34 @@ export function hostResourceEscalation(f: Finding): Escalation {
   };
 }
 
+/** What a filing asks of its build: the janitor file and the acceptance criterion. The proof greps the filing's
+ *  ORIGIN, never the bare consumer name: a name the janitor already mentions (`rmd`) passes at origin/main, so
+ *  proof-discrimination refused that filing every time it was offered. */
+function consumerFilingContract(f: ConsumerFiling): { files: string[]; acceptance: { claim: string; proof: string }[] } {
+  const file = "deploy/rmd-host-cleanup.sh";
+  return {
+    files: [file],
+    acceptance: [{
+      claim: `the janitor reaps ${f.consumer} on ${f.host} with a rule that cites its origin ${f.origin}, so its growth rate stops being positive`,
+      proof: `grep: ${f.origin} in ${file}`,
+    }],
+  };
+}
+
+/** The part of a filing the plan-PR preflight judges and that does not drift with each pass's growth figures. */
+export function consumerFilingShape(f: ConsumerFiling): string {
+  return createHash("sha256").update(JSON.stringify({ origin: f.origin, ...consumerFilingContract(f) })).digest("hex").slice(0, 16);
+}
+
 /** Render one persistent grower as a plan-only task record. */
 export function consumerShardYaml(f: ConsumerFiling, taskId: string): string {
   const a = f.attribution;
-  const file = "deploy/rmd-host-cleanup.sh";
   const rendered = renderMachineShard({
     taskId,
     title: `HOST ${f.host}: ${f.consumer} keeps growing (+${fmtKb(a.growthKbPerHour)}/h, ${(a.share * 100).toFixed(0)}% of the ${f.device} fall) across ${a.janitorPasses} janitor passes and no janitor rule reaps it`,
     origin: f.origin,
-    files: [file],
+    ...consumerFilingContract(f),
     cost: (a.growthKbPerHour * 24) / 1024 ** 2,
-    acceptance: [{ claim: `the janitor reaps ${f.consumer} on ${f.host}, so its growth rate stops being positive`, proof: `grep: ${f.consumer} in ${file}` }],
     note: `Filed by the host-resource gardener (W1-T4804). BEFORE: ${f.consumer} grew ${fmtKb(a.growthKbPerHour)}/h over ${fmtHours(a.spanHours)} (${a.points} samples) while the janitor ran ${a.janitorPasses} times. The gardener measures this consumer's growth rate again a week after filing and credits or debits the remedy by whether it stopped growing. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
   });
   if (rendered.refused) throw new Error(`host-resource gardener: drafted record refused by lint (${rendered.refused})`);
@@ -949,13 +970,16 @@ export function fileConsumerVia(openWorkspace: GardenWorkspacePort, mintTaskId: 
 
 function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: GardenTaskIdMinter, f: ConsumerFiling, log: (step: string, fields?: Record<string, unknown>) => void): Steps<string | undefined> {
   const ws = yield* step<GardenCheckout | GardenCheckoutAsync>(openWorkspace);
+  let unfiled = "the filing PR did not open (plan_pr.preflight_refused names why)";
   try {
     const ids = yield* step(() => prepareGardenTaskIds(ws, 1, mintTaskId, Boolean(mintTaskId.async)));
     return yield* step(() => landConsumerShard(ws, mintTaskId, f, ids[0]!));
   } catch (error) {
+    unfiled = String((error as Error)?.message ?? error);
     recordGardenMintTimeout(error, "host-resource", log);
     throw error;
   } finally {
+    yield* step(() => releaseGardenTaskIds(ws, `host-resource gardener: ${unfiled}`, Boolean(mintTaskId.async)));
     yield* step(() => ws.dispose());
   }
 }
@@ -1082,17 +1106,24 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
     const a = f.attribution;
     if (isPersistentGrower(a) && ports.fileConsumer) {
       const origin = consumerOrigin(f.host, a.consumer);
+      const filing: ConsumerFiling = { host: f.host, device: f.device, consumer: a.consumer, origin, attribution: a };
+      const shape = consumerFilingShape(filing);
       const rec = state.filed[origin];
       const failedAtMs = rec?.failedAt === undefined ? undefined : Date.parse(rec.failedAt);
       const retryOk = failedAtMs === undefined || nowMs - failedAtMs >= FILE_RETRY_MS;
       const alreadyFiled = rec !== undefined && rec.url !== undefined;
-      if (!ports.planOrigins().includes(origin) && !alreadyFiled && retryOk) {
+      // A refused filing is not offered again until what the preflight judged changes.
+      const refusedUnchanged = rec?.notLandedShape === shape;
+      if (!ports.planOrigins().includes(origin) && !alreadyFiled && retryOk && !refusedUnchanged) {
         try {
           const fileConsumer = ports.fileConsumer;
-          const url = yield* step(() => fileConsumer({ host: f.host, device: f.device, consumer: a.consumer, origin, attribution: a }));
+          const url = yield* step(() => fileConsumer(filing));
           if (url !== undefined) {
             state.filed[origin] = { at: clock.iso(), url, growthKbPerHourAtFiling: a.growthKbPerHour };
             ports.log(`${HOST_RESOURCE}.filed`, { ...row, consumer: a.consumer, growth_kb_per_hour: Math.round(a.growthKbPerHour), share: Math.round(a.share * 100) / 100, pr_url: url });
+          } else {
+            state.filed[origin] = { at: rec?.at ?? clock.iso(), notLandedShape: shape };
+            ports.log(`${HOST_RESOURCE}.file_not_landed`, { host: f.host, consumer: a.consumer, shape, reason: "the filing PR did not open (plan_pr.preflight_refused names why); not offered again until its shape changes" });
           }
         } catch (error) {
           state.filed[origin] = { at: rec?.at ?? clock.iso(), failedAt: clock.iso() };

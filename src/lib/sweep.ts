@@ -563,6 +563,15 @@ function assessReviewReuse(
  * directly from the number, because an id that is enumerable but UNDERIVABLE would convert a
  * visible orphan into an invisible one, which is strictly worse than leaving it alone.
  */
+/** The stalled-stage reason as an escalation SUMMARY: its age and episode start dropped. A stalled-stage
+ *  escalation dedups on its exact title (`headDedup: "independent"`), and the title carried "for 32 minutes" and
+ *  "since <ts>", so each pass that re-escalated the same (PR, blocker, diagnosis) after a restart or a re-read
+ *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
+ *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
+export function stalledStageEscalationSummary(reason: string): string {
+  return reason.replace(/^(PR stage stalled: .+?) for \d+ minutes \(BACKSTOP \d+\); since [^;]*;/, "$1;");
+}
+
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
   // W1-T5866: the `unfiled` branch-shape sentinel is every ad-hoc PR's id, never one PR's — it maps to `PR-<n>` here
   // exactly as it does for the review rows (W1-T5839), so two run-unfiled PRs never share an escalation.
@@ -3212,7 +3221,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           ...contractRevisionFor(pr),
-          summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
+          summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
             `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,
@@ -4292,7 +4301,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   proofCwd: worktreePath,
                 });
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body }, { log });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
                   // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
                   // and no amendment row settles this source run, so a later pass asks again.
@@ -4302,7 +4311,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
                   try {
                     base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
-                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body });
+                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body }, { log });
                     base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
                   } catch (e) {
                     const reason = String((e as Error)?.message ?? e);
@@ -4651,7 +4660,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body }, { log });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           // A check that ran out of its budget spends no strike: recorded as such, and the next pass asks again.
@@ -6883,6 +6892,32 @@ export function cancelledCheckRequeueDecision(alreadyRequeued: boolean): Cancell
   };
 }
 
+/** W1-T8040 — the signature of a cancelled check whose OWN log proves the job ran its tests, recorded a
+ *  failure, and was cancelled only by its ceiling: re-running the same sha runs the same tests and hangs
+ *  again (ci.yml's SHARD HANG text). Three shapes, mirroring W1-T8038's `poolOrTimeoutSignature`
+ *  (ci-friction-gardener.ts, which this module cannot import: gate-fire-rate.ts imports sweep.ts back):
+ *  a POOL DEFECT, a pooled failure that passes isolated, and a runner `not ok` before a timeout line.
+ *  `undefined` for everything else — no failure in the log ("timed out after a passing summary"), no
+ *  readable log, and a SUPERSEDED run keep W1-T1223's one bounded requeue. */
+export function deterministicTimeoutSignature(logTail: string | undefined): string | undefined {
+  if (!logTail) return undefined;
+  const bodies = logTail.split("\n").map((l) => l.replace(/^.*?\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").trim());
+  if (bodies.some((b) => /\bSUPERSEDED\b/.test(b))) return undefined;
+  const defect = bodies.map((b) => /^pure-test-pool: POOL DEFECT\b.*?leaking file: (not isolated to one file|\S+)/.exec(b)).find((m) => m);
+  if (defect) return `pool defect: ${defect[1] === "not isolated to one file" ? "leak not isolated to one file" : `${defect[1]} leaks`}`;
+  const poolFailed = bodies.some((b) => /^pure-test-pool: the pool of \d+ file\(s\) failed/.test(b));
+  const isolatedPassed = bodies.some((b) => /^pure-test-pool: (?:every pooled file passes isolated|rerun run complete)/.test(b));
+  const alsoFailsIsolated = bodies.some((b) => /^pure-test-pool: the pooled files also fail isolated/.test(b));
+  const firstNotOk = bodies.map((b) => /^not ok \d+ - (.+?)(?:\s+# .*)?$/.exec(b)?.[1]).find((t) => t !== undefined && !/^failing tests:?$/.test(t));
+  if (poolFailed && isolatedPassed && !alsoFailsIsolated) {
+    return `pool failure: ${firstNotOk ?? "pooled not ok"} fails pooled, passes isolated`;
+  }
+  if (firstNotOk !== undefined && bodies.some((b) => RUNNER_TIMEOUT_LINE.test(b))) {
+    return `timed out after a failing test: ${firstNotOk}`.slice(0, 160);
+  }
+  return undefined;
+}
+
 /** W1-T3652 — the verdict {@link cancelledRunCheckOutcome} returns: whether one check run's
  *  conclusion should be trusted as a real CI failure, plus a stated reason. `isFailure: false`
  *  is NOT a suppression — the caller still sees the check name and its own conclusion, only the
@@ -8733,18 +8768,22 @@ export function decidePlanRepair(
 ): PlanRepairDecision | undefined {
   const failures = pr.ciFailures ?? [];
   const head = `${pr.prNumber}@${pr.headSha}`;
-  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) {
-    return inheritedRedRefresh(pr, failures.map((f) => f.name), main, history, behindMain);
+  // The renumber and retitle rungs push to the lane's OWN branch, so only a fleet machine-lane head gets them.
+  const fleetLane = isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts.authorLogin);
+  if (fleetLane) {
+    const heldIds = heldTaskIdsFromCiFailures(failures);
+    if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
+      return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
+    }
+    const titleRed = titleOnlyCommitlintRed(failures);
+    const title = facts.title ?? "";
+    if (titleRed && title.length > CONVENTIONAL_LIMITS.headerMaxLength && !history.has(`${head}@title-length`)) {
+      return { signature: "title-length", action: "retitle", check: titleRed.name, title: fitPlanPrTitle(title), jobId: titleRed.jobId };
+    }
   }
-  const heldIds = heldTaskIdsFromCiFailures(failures);
-  if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
-    return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
-  }
-  const titleRed = titleOnlyCommitlintRed(failures);
-  const title = facts.title ?? "";
-  if (titleRed && title.length > CONVENTIONAL_LIMITS.headerMaxLength && !history.has(`${head}@title-length`)) {
-    return { signature: "title-length", action: "retitle", check: titleRed.name, title: fitPlanPrTitle(title), jobId: titleRed.jobId };
-  }
+  // W1-T9250: main's red is no filing's plan violation, whoever authored it (#11407, an operator
+  // plan-file-* head, was escalated twice while main was red on its one check). Every plan filing
+  // waits while main fails each of its checks, and is refreshed once main is green.
   const names = failures.map((f) => f.name);
   if (names.length === 0 || history.has(`${head}@base-red`)) return undefined;
   const check = names.join(", ");
@@ -8753,6 +8792,7 @@ export function decidePlanRepair(
   }
   if (main?.state !== "green") return undefined;
   if (history.has(`${head}@base-red-wait`)) return { signature: "base-red", action: "refresh", check, cause: "main-red" };
+  if (!fleetLane) return inheritedRedRefresh(pr, names, main, history, behindMain);
   const staleBase =
     names.every((n) => n === "proof-discrimination") &&
     pr.currentMergeBaseSha !== undefined &&
@@ -17244,7 +17284,16 @@ export async function runSweep(
               const noCommitRound = fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).noCommitRounds.at(-1);
               const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
                 row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
-              if (noCommitRound !== undefined && !rerunAttempted &&
+              // W1-T8041: a requeue GitHub deferred at this head is retried FIRST, by the requeue arms
+              // below, which hold while its run is in flight. The no-commit rerun's one-shot receipt is
+              // never spent ahead of it.
+              const pendingDeferral = [...(isBlockedCi(pr) ? pr.ciFailures ?? [] : []), ...(isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [])].some((check) => {
+                const key = `${pr.headSha}@${check.name}`;
+                return checkDeferrals.has(key) && !checkDeferrals.get(key)!.escalated && !requeuedCheckKeys.has(key);
+              });
+              // W1-T8041: an "unavailable" rerun answers nothing, so its pass still reaches the requeue arms.
+              let unavailableRerunStandDown: string | undefined;
+              if (noCommitRound !== undefined && !rerunAttempted && !pendingDeferral &&
                   flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
                 if (!deps.rerunFailedChecks) {
@@ -17274,7 +17323,8 @@ export async function runSweep(
                   no_commit_rerun_outcome: result.outcome, no_commit_rerun_run_ids: result.runIds,
                   no_commit_rerun_reason: result.reason };
                 standDownReason = `no-commit CI fix: failed-job rerun ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
-                break;
+                if (result.outcome !== "unavailable") break;
+                unavailableRerunStandDown = standDownReason;
               }
               if (noCommitRound !== undefined && rerunAttempted && deps.fixProgressJudge) {
                 progressParkedReason = "rerun-still-red: failed-job rerun left this head red";
@@ -17653,13 +17703,33 @@ export async function runSweep(
               // cancellations never spends a strike on nothing.
               if (cancelledChecks.length > 0) {
                 const outcomes: string[] = [];
+                // W1-T8040: cancelled checks whose own log proves a deterministic ceiling timeout; they stay
+                // genuine failures for the ci-log fix path instead of earning a requeue.
+                const deterministicTimeouts = new Set<string>();
                 for (const check of cancelledChecks) {
                   const key = `${pr.headSha}@${check.name}`;
                   // W1-T2431: OR the ledger-derived reading with the surface-derived one — a re-run
                   // this fleet ledgered, OR one GitHub's `run_attempt` shows already happened (an
                   // operator's own, invisible to the ledger). This only widens the true case.
-                  const decision = cancelledCheckRequeueDecision(incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
-                    (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt)));
+                  const alreadyRequeued = incidentHolds.fresh.get(key) !== (check.runAttempt ?? null) &&
+                    (requeuedCheckKeys.has(key) || cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt));
+                  const decision = cancelledCheckRequeueDecision(alreadyRequeued);
+                  const timeoutSignature = deterministicTimeoutSignature(ciFailuresForFix.find((f) => f.name === check.name)?.logTail);
+                  if (decision.requeue && timeoutSignature !== undefined) {
+                    deterministicTimeouts.add(check.name);
+                    appendLine(deps.ledgerPath, {
+                      run_id: deps.runId,
+                      task_id: pr.taskId ?? "SWEEP",
+                      step: "sweep.check_requeue.skipped",
+                      pr_number: pr.prNumber,
+                      head_sha: pr.headSha,
+                      check_name: check.name,
+                      reason: "deterministic-timeout",
+                      signature: timeoutSignature,
+                    });
+                    outcomes.push(`not re-queued "${check.name}" (deterministic-timeout: ${timeoutSignature})`);
+                    continue;
+                  }
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL (inside `requeueCheckJob`). Not dry-run-guarded:
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
@@ -17669,15 +17739,18 @@ export async function runSweep(
                       await deps.escalateCancelledCheck(pr, check, result.escalate, "requeue-deferral-backstop");
                     outcomes.push(result.note ?? `re-queued "${check.name}"`);
                   } else {
-                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, decision.reason, "cancelled-twice");
-                    outcomes.push(`escalated "${check.name}" (${decision.reason})`);
+                    // W1-T8040: a second cancellation whose log still names the failure says so.
+                    const reason = timeoutSignature === undefined ? decision.reason : `${decision.reason} — its log names: ${timeoutSignature}`;
+                    if (deps.escalateCancelledCheck) await deps.escalateCancelledCheck(pr, check, reason, "cancelled-twice");
+                    outcomes.push(`escalated "${check.name}" (${reason})`);
                   }
                 }
                 // A cancelled check carries no diff defect — when EVERY red required check named
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
-                const genuineFailures = ciFailuresForFix.filter((f) => !cancelledChecks.some((c) => c.name === f.name));
+                const genuineFailures = ciFailuresForFix.filter((f) =>
+                  deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
@@ -17703,6 +17776,11 @@ export async function runSweep(
                   standDownReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   break;
                 }
+              }
+              // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
+              if (unavailableRerunStandDown !== undefined) {
+                standDownReason = unavailableRerunStandDown;
+                break;
               }
               const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
@@ -21328,10 +21406,37 @@ export async function runStaleEscalationRejudge(
 // kept every row, and copied that array once per open issue. The rung reads only the slice below.
 
 /** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
-const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
+export const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
 
-/** The escalation-triage rung's slice of the ledger union, as a whole-corpus read would answer it. */
-export type EscalationTriageHistoryReader = (stateDir: string) => Promise<LedgerUnionRecordRead>;
+/** One holder's slice of the ledger union: the steps it reads, and the name its durable digest is kept under. */
+export interface EscalationTriageSlice {
+  holder: string;
+  steps: readonly string[];
+}
+
+/** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
+export const ESCALATION_TRIAGE_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.escalation-triage-history", steps: [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP],
+};
+
+/**
+ * W1-T9406: the slice buildEscalationTriageRuntime's `evidence` reads — the fix strikes, the re-kicks already
+ * attempted, the births carrying `triage_subject` and `issue_url`, and the dispositions escalationClassSignal
+ * counts. Before W1-T9406 that callback read every row of every rotation, synchronously, once per escalation.
+ */
+export const ESCALATION_TRIAGE_EVIDENCE_SLICE: EscalationTriageSlice = {
+  holder: "run-task.escalation-triage-evidence",
+  steps: ["fix.dispatch", "escalation.auto_resolve_attempted", ...ESCALATION_TRIAGE_BIRTH_STEPS, "panel.escalation_marked_handled"],
+};
+
+/**
+ * A holder's slice of the ledger union, as a whole-corpus read would answer it. Calling it loads every rotation
+ * not yet seen OFF the loop, then answers; `current` answers synchronously from what the last call loaded, reading
+ * only the live bytes written since (a rotation no call has loaded yet is read inline, as the union reads it).
+ */
+export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<LedgerUnionRecordRead>) & {
+  current(stateDir: string): LedgerUnionRecordRead;
+};
 
 /**
  * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
@@ -21340,14 +21445,17 @@ export type EscalationTriageHistoryReader = (stateDir: string) => Promise<Ledger
  * {@link createIncrementalLedgerUnion} read that follows answers those rotations from their digests, keeps
  * them in memory, and reads the live file from where the previous pass stopped. No time window: an issue
  * born in the oldest rotation is still found. `refuseIncomplete` holds: an unread rotation gives no rows.
+ * `slice` (W1-T9406) names the steps and the digest holder; absent, it is the rung's own
+ * {@link ESCALATION_TRIAGE_HISTORY_SLICE}. Each holder keeps its own durable digest and incremental union.
  */
 export function createEscalationTriageHistoryReader(
-  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer> } = {},
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice } = {},
 ): EscalationTriageHistoryReader {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
-  const steps = [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP];
-  const identity = { holder: "sweep.escalation-triage-history", reducerVersion: "1" };
+  const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
+  const steps = [...slice.steps];
+  const identity = { holder: slice.holder, reducerVersion: "1" };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -21358,14 +21466,15 @@ export function createEscalationTriageHistoryReader(
     return `${s.size}:${s.mtimeMs}`;
   };
   let loaded = new Map<string, string>();
-  return async (stateDir) => {
+  const current = (stateDir: string): LedgerUnionRecordRead => union(stateDir, { step: steps, refuseIncomplete: true });
+  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
     let names: string[] = [];
     try {
       names = fsDeps.readdirSync(stateDir);
     } catch {
       // deliberate: the union read below lists the directory itself and answers for an unreadable one.
     }
-    const current = new Map<string, string>();
+    const stats = new Map<string, string>();
     const fresh: LedgerCorpusEntry[] = [];
     for (const entry of ledgerRotationEntries(names, stateDir)) {
       let key: string;
@@ -21375,7 +21484,7 @@ export function createEscalationTriageHistoryReader(
         // deliberate: an unstattable rotation is left to the union read, which reports it unread.
         continue;
       }
-      current.set(entry.path, key);
+      stats.set(entry.path, key);
       if (loaded.get(entry.path) !== key) fresh.push(entry);
     }
     if (fresh.length > 0) {
@@ -21384,9 +21493,9 @@ export function createEscalationTriageHistoryReader(
       });
       await memo.load(fresh);
     }
-    loaded = current;
-    return union(stateDir, { step: steps, refuseIncomplete: true });
-  };
+    loaded = stats;
+    return current(stateDir);
+  }, { current });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */

@@ -204,7 +204,7 @@ import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
@@ -847,7 +847,9 @@ import {
   taskIdReservationRef,
   taskIdReservationsDir,
   withIdReservationLogging,
+  gitReservationRunnerAsync,
 } from "./lib/task-id-reservation.js";
+import { releaseTaskIdReservation, releaseTaskIdReservationAsync, type HeldTaskIdReservation } from "./lib/task-id-release.js";
 import {
   applyPlanProposalCommit,
   buildPlanGrillEscalation,
@@ -867,6 +869,7 @@ import {
   approveBatch,
   approveBatchCommitMessage,
   approveCommitMessage,
+  approvePrTitle,
   approveProposal,
   classifyProposal,
   draftAttemptKey,
@@ -895,7 +898,9 @@ import {
   materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
-  pruneOrphanedDrafts,
+  createProposalShardReader,
+  proposalShardDir,
+  pruneOrphanedDraftsAsync,
   parseProposalRegistry,
   parseSupersedesExpr,
   deriveTaskReferent,
@@ -1030,9 +1035,12 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
+import type { ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
+  defaultProofRunner,
+  defaultProofRunnerAsync,
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
@@ -1620,6 +1628,8 @@ import {
   readNamespaceBootMs,
   findClaimMintRow,
   releaseReplacedContainerClaims,
+  releaseLandedDispatchClaims,
+  claimMintedByRerun,
   type DispatchClaimReserver,
   type DispatchClaimReserverAsync,
 } from "./lib/dispatch-claim.js";
@@ -1726,6 +1736,7 @@ import {
   listRetirableEscalationIssues,
   listRetirableEscalationIssuesAsync,
   createEscalationTriageHistoryReader,
+  ESCALATION_TRIAGE_EVIDENCE_SLICE,
   indexEscalationTriageHistory,
   type EscalationTriageHistoryReader,
   logCostGovernorDeferral,
@@ -3225,6 +3236,7 @@ import {
   stopDetail,
 } from "./lib/fleet-control.js";
 import { resolvePauseTarget, type PauseTarget } from "./lib/pause-target.js";
+import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import {
   readGithubWebhookSecret,
   resolveGithubWebhookSecretFilePath,
@@ -3285,12 +3297,21 @@ function realDeps(): ComposedRealGraph {
   return composedRealGraph;
 }
 
-/** Bind the closed executors to existing write ports. One factory owns one pass's budget. */
+/**
+ * Bind the closed executors to existing write ports. One factory owns one pass's budget.
+ *
+ * W1-T9406: `evidence` reads the {@link ESCALATION_TRIAGE_EVIDENCE_SLICE} through W1-T9390's incremental
+ * reader, never the whole ledger union. A pass driver awaits `refresh` first, which loads every rotation not
+ * yet seen OFF the loop; `evidence` then answers synchronously from those rotations and the live bytes written
+ * since. No time window. An unreadable slice throws (the triage then delivers), never an empty history.
+ * `evidenceHistory` is the daemon's reader, built once per start; absent, this factory builds its own.
+ */
 export function buildEscalationTriageRuntime(
   context: { root: string; config: Config; owner: string; repo: string },
   io: {
     readPolicy?: () => unknown;
     readRows?: (ledgerPath: string) => Record<string, unknown>[];
+    evidenceHistory?: EscalationTriageHistoryReader;
     clock?: Clock;
     seenAt?: () => number | undefined;
     windowMs?: () => number;
@@ -3299,10 +3320,15 @@ export function buildEscalationTriageRuntime(
     amend?: (e: Escalation, deps: EscalateDeps<AsyncIssueGateway>) => Promise<string>;
     kick?: (e: Escalation) => void;
   } = {},
-): (deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings {
+): ((deps: EscalateDeps<AsyncIssueGateway>) => EscalateTriageSettings) & { refresh(ledgerPath: string): Promise<void> } {
   const { root, config, owner, repo } = context;
   let pass: ReturnType<typeof newTriagePass> | undefined;
-  const readRows = io.readRows ?? ((path) => readLedgerUnionRecordsSync(dirname(path), { refuseIncomplete: true }).rows);
+  const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
+  const readRows = io.readRows ?? ((path) => {
+    const read = evidenceHistory.current(dirname(path));
+    if (!read.ok) throw new Error(`triage evidence history is unreadable (${read.unread.length} unread: ${read.unread.slice(0, 3).join(", ")})`);
+    return read.rows;
+  });
   const clock = io.clock ?? systemClock;
   const client = io.client ?? (() => {
     const tokens = JSON.parse(readFileSync(serviceTokensPath(config.root), "utf8")) as { write?: unknown };
@@ -3328,7 +3354,8 @@ export function buildEscalationTriageRuntime(
     if (!id || e.taskId !== `TRIAGE-${id}`) throw new Error("feedback referent is unreadable");
     return id;
   };
-  return (deps) => {
+  const refresh = async (ledgerPath: string): Promise<void> => void (await evidenceHistory(dirname(ledgerPath)));
+  return Object.assign((deps: EscalateDeps<AsyncIssueGateway>): EscalateTriageSettings => {
     const policy = parseEscalationTriagePolicy((io.readPolicy ?? (() => parseYaml(readFileSync(policyPath(root), "utf8"))))());
     pass ??= newTriagePass(policy.maxAutoResolvesPerPass);
     const receipts = new Map<string, string>();
@@ -3402,7 +3429,24 @@ export function buildEscalationTriageRuntime(
         return undefined; // A proposed amendment or a kick is not yet a resolved block.
       },
     };
-  };
+  }, { refresh });
+}
+
+/**
+ * W1-T9406: a pass driver's refresh of the triage evidence slice, loading its new rotations off the loop before the
+ * pass triages anything. A failed refresh is contained and logged: the evidence then reads what it lacks inline, as
+ * the union would, or refuses when the slice is unreadable.
+ */
+export async function refreshEscalationTriageEvidence(
+  runtime: Pick<ReturnType<typeof buildEscalationTriageRuntime>, "refresh">,
+  ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  try {
+    await runtime.refresh(ledgerPath);
+  } catch (e) {
+    log("escalation_triage.evidence_refresh_failed", { error: String((e as Error)?.message ?? e) });
+  }
 }
 
 // `unknownArgError` MOVED to ./lib/cli-args.ts — its sibling `commandSyntax` stays here,
@@ -5162,9 +5206,10 @@ export function ghPrCreateFillCommand(
   title?: string,
   bodyOverride?: string,
   proofRunner?: OpenPullRequestProofRunner,
+  childStore: ChildEntryStoreOptions = {},
 ): PrCreateCommand {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title, bodyOverride);
-  const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner, { owner, repo });
+  const checkedBody = openPullRequestChecked(draft.body, branch, worktreePath, "origin/main", proofRunner ?? ((proof, base, root, target) => defaultProofRunner(proof, base, root, target, process.execPath, undefined, childStore)), { owner, repo });
   return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
 }
 
@@ -5179,11 +5224,12 @@ export async function ghPrCreateFillCommandAsync(
   runProofAsync?: AsyncOpenPullRequestProofRunner,
   /** A finished build whose only defect is a failing filed proof is opened with that proof named, never stranded. */
   openOnFailingProof = false,
+  childStore: ChildEntryStoreOptions = {},
 ): Promise<PrCreateCommand> {
   const draft = draftPrCreate(worktreePath, owner, repo, branch, title);
   let checkedBody: string;
   try {
-    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync, { owner, repo });
+    checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
   } catch (err) {
     if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
     const opened: PrCreateDiagnostic = {
@@ -6898,7 +6944,9 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
-  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
+    ? preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName })
+    : planPrPreflightAtCommitAsync(tree, sha, { ...meta, headRef: pr.headRefName }, { log: deps.log });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
   let roundId: string | undefined;
   const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -13918,6 +13966,7 @@ export async function runFixRung(opts: {
         roundStartSha,
         stageable: proofRepairStageable,
         proofs: proofDiscriminationNow.proofs.map((p) => p.proof),
+        childStore: { log: deps.log },
       });
       if (gate !== undefined) {
         harnessCommitRefusalReason = gate.reason;
@@ -14288,6 +14337,12 @@ export async function runFixRung(opts: {
       }
       if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
+      // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
+      // repaired; re-read the PR once at this head rather than stand down for a person.
+      if (shouldRecheckAfterNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
+        deps.say("fix rung: the worker reported FIXED but changed nothing — re-reading the PR once before standing down");
+        continue;
+      }
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
@@ -15154,6 +15209,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
   proofs: readonly string[];
   /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
   childRoot?: string;
+  childStore?: ChildEntryStoreOptions;
 }): { reason: string; undeclared: string[] } | undefined {
   const git = (args: string[]): string =>
     hostWorktreeGit(input.worktreePath, args).trim();
@@ -15171,7 +15227,7 @@ export function proofRepairRoundRefusalInWorktree(input: {
     changedFiles,
     proofs: input.proofs,
     checkProofStatus: (proof) =>
-      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot), {
+      spawnSync(process.execPath, checkProofLaunchArgv(proof, mergeBase, input.childRoot, [], input.childStore), {
         cwd: input.worktreePath,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
@@ -17180,6 +17236,34 @@ export function refreshManagedCheckout(
   // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
   const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
+}
+
+/**
+ * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
+ * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
+ * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
+ */
+export async function buildEngineAfterStore(
+  repoDir: string,
+  stateRoot: string,
+  storeRoot: string,
+  stored: StoreBuildResult,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
+  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
+): Promise<void> {
+  if (stored.kind !== "built" && stored.kind !== "present") return;
+  try {
+    const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
+    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
+    const { isCurrent, ...buildSeams } = seams;
+    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
+    if (built.kind === "failed") return;
+    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
+    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
+  } catch (error) {
+    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
+  }
 }
 
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
@@ -19819,16 +19903,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     await releaseDispatchClaimAsync(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
-  // W1-T8776: a checkout now at main fills the shared child-entry store once per main revision, in a child process
-  // and unawaited, so every worktree cut at this source hash can copy the bundle instead of cold-starting tsx. A hash
-  // already stored is a no-op; a failed build is ledgered and changes nothing (children keep running tsx).
-  if (checkoutRefresh.kind === "current" || checkoutRefresh.kind === "fast_forwarded") {
-    void buildIntoStore(repoDir, {
-      storeRoot: childEntryStoreRoot(config.root),
-      log,
-      liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
-    });
-  }
   // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
   // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
   // after a full run as the scope guard's "forged merge-base" misdiagnosis. Verdict stays
@@ -19910,6 +19984,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   } finally {
     checkoutRefresh.release();
   }
+  // W1-T9374: this fresh main worktree has a usable install even when repos/<repo> is unborrowed.
+  // Fill the shared store off-loop and unawaited; the builder writes its own --out, never this tree.
+  log("child_entry.store_build_requested", { source: "run-worktree", tree: worktreePath, checkout_kind: checkoutRefresh.kind });
+  void buildIntoStore(worktreePath, {
+    storeRoot: childEntryStoreRoot(config.root),
+    log,
+    liveTrees: () => listRegisteredWorktrees(repoDir).map(({ path }) => path),
+  }).then((stored) => buildEngineAfterStore(worktreePath, join(config.root, "state"), childEntryStoreRoot(config.root), stored, log));
   // W1-T2626 (design note (iii)): a single unreadable remote head is already ledgered --
   // `worktree.add`'s `remote_head: "unreadable"` plus its `worktree.base_uncheckable`
   // companion, both from worktreeAdd itself -- but nothing yet distinguished "this happened
@@ -21198,7 +21280,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
-        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true);
+        prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch, branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log });
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
@@ -22322,7 +22404,7 @@ export function materializeReviewWorktree(
   const removeWorktree = deps.removeWorktree ?? worktreeRemove;
 
   try {
-    deps.fetch(repoDir, prNumber);
+    deps.fetch(repoDir, prNumber, headSha);
   } catch (e) {
     // Nothing was created yet — no cleanup needed, only a named reason.
     return {
@@ -22706,7 +22788,7 @@ interface ReviewCommandDeps {
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
-  fetchHead?: (repoDir: string, prNumber: number) => void;
+  fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => void;
   /** Operator CLI remains deterministic; only internal unattended callers opt in. */
   executionMode?: "deterministic" | "semantic";
   /** W1-T3115: the sweep already proved this from GitHub's complete material file list. Carry
@@ -23294,7 +23376,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // outage through its own `fetch-failure` class, which is the degradation path this command
   // already has. Failing here instead would invent a second one for the same condition.
   try {
-    fetchHead(subjectRepoDir, view.number);
+    fetchHead(subjectRepoDir, view.number, view.headRefOid);
   } catch (e) {
     void e;
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
@@ -24911,9 +24993,20 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
     releaseBaseProofDir(process.cwd(), built, baseRemoveWorktree);
   }
 
+  // #11704 (2026-10-14): acceptance-author-gate refuses a body `grep:` pattern wrapped in quotes or backticks
+  // (wrappedGrepPattern, authorTimeProofShapeRefusal) whether or not it matches, and this verb printed OK on it.
+  // The gate skips the check when the criteria come from a trailer's shard, so this does too.
+  const wrapped = trailerResolved ? [] : criteria.flatMap((c, i) => {
+    const w = wrappedGrepPattern(c.proof ?? "");
+    return w ? [`criterion ${i + 1} wraps its grep pattern in ${w.delimiter}; use: grep: ${w.bare} in <path>`] : [];
+  });
   // design (iv)/(v): a stale criterion ends the "OK" verdict — the summary states how many of N
   // still discriminate instead, and the exit code follows non-zero, the gate's own contract.
   const okOrStale = (okLine: string): number => {
+    if (wrapped.length > 0) {
+      console.log(`REFUSED by acceptance-author-gate (proof-shape): ${wrapped.join("; ")}.`);
+      return 1;
+    }
     if (staleCount === 0) {
       console.log(okLine);
       return 0;
@@ -26633,7 +26726,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
-  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string> } {
+  ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
   let budget = opts.budget ?? gardenMintBudgets.get(root);
   if (!budget) {
     const readPolicy = opts.loadPolicy ?? loadDefaultPolicy;
@@ -26643,13 +26736,17 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
   const mintBudget = budget;
   const clock = opts.clock ?? clockFromMillisFn(() => performance.now());
   const now = () => clock.now();
+  // The sha each id's ref was left at, so a refused filing can release exactly its own claim.
+  const held = new Map<string, string>();
+  const releaseOpts = (reason: string) => ({ reason, lane: "garden", log });
+  const gitAt = (args: string[], timeout: number) => spawnSync("git", args, { cwd: root, encoding: "utf8", timeout, killSignal: "SIGKILL" });
   const mintSync = (filingBranch?: string) => {
     const started = now();
     const bound = mintBudget.boundMs();
     const runGit = (args: string[]) => {
       const remaining = bound - (now() - started);
       if (remaining <= 0) throw new GardenMintTimedOutError(now() - started, bound);
-      const result = spawnSync("git", args, { cwd: root, encoding: "utf8", timeout: Math.ceil(remaining), killSignal: "SIGKILL" });
+      const result = gitAt(args, Math.ceil(remaining));
       if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new GardenMintTimedOutError(now() - started, bound);
       return result;
     };
@@ -26662,15 +26759,33 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
     // The bridge supplies its actual landing identity, even when this manual command starts from
     // main. Reserving under the checkout's source branch would create a holder claim its true
     // landing branch cannot satisfy.
-    const held = reserveTaskIdRemote(
-      mint.n,
-      gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log }),
-    );
+    const reserver = gatedRemoteRefReserver({ run: gitRunAdapter(runGit), filingBranch, lane: "ci-learning", log });
+    const won = reserveTaskIdRemote(mint.n, reserver);
+    held.set(won.taskId, reserver.wonAnchor?.(won.taskId) ?? won.anchor);
     if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
     mintBudget.observe(now() - started);
-    return held.taskId;
+    return won.taskId;
+  };
+  const heldReservation = (taskId: string) => {
+    const sha = held.get(taskId);
+    held.delete(taskId);
+    return sha === undefined ? undefined : { taskId, sha };
   };
   return Object.assign(mintSync, {
+    heldSha: (taskId: string) => held.get(taskId),
+    release: (taskId: string, reason: string) => {
+      const claim = heldReservation(taskId);
+      if (!claim) return;
+      const timeout = Math.ceil(mintBudget.boundMs());
+      releaseTaskIdReservation((args) => {
+        const r = gitAt(args, timeout);
+        return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr || String(r.error ?? "") };
+      }, claim, releaseOpts(reason));
+    },
+    releaseAsync: async (taskId: string, reason: string) => {
+      const claim = heldReservation(taskId);
+      if (claim) await releaseTaskIdReservationAsync(gitReservationRunnerAsync(root, { timeoutMs: Math.ceil(mintBudget.boundMs()) }), claim, releaseOpts(reason));
+    },
     async: async (filingBranch: string): Promise<string> => {
       const started = now();
       const bound = mintBudget.boundMs();
@@ -26697,13 +26812,14 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
            const { ciLearningTaskIdMinter } = await import(${JSON.stringify(import.meta.url)});
            const { GardenMintBudget } = await import(${JSON.stringify(new URL("./lib/gardener.js", import.meta.url).href)});
            try {
-             const id = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
-               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) })(process.argv[2]);
-             process.stdout.write(JSON.stringify({ id, rows }));
+             const minter = ciLearningTaskIdMinter(process.argv[1], (step, fields) => rows.push({ step, fields }), undefined,
+               { budget: new GardenMintBudget(() => ${JSON.stringify(bound)}) });
+             const id = minter(process.argv[2]);
+             process.stdout.write(JSON.stringify({ id, sha: minter.heldSha(id), rows }));
            } catch (error) {
              process.stdout.write(JSON.stringify({ error: String(error?.message ?? error), timedOut: error?.name === "GardenMintTimedOutError", rows }));
            }`, root, filingBranch], { maxBuffer: 1 << 26, timeout: Math.ceil(bound), killSignal: "SIGKILL", signal: controller.signal }), expired]);
-        const result = JSON.parse(stdout) as { id: string; error?: string; timedOut?: boolean;
+        const result = JSON.parse(stdout) as { id: string; sha?: string; error?: string; timedOut?: boolean;
           rows: Array<{ say: string } | { step: string; fields: Record<string, unknown> }> };
         if (stderr) process.stderr.write(stderr);
         for (const row of result.rows) {
@@ -26713,6 +26829,7 @@ export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields
         if (now() - started >= bound) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.timedOut) throw new GardenMintTimedOutError(now() - started, bound);
         if (result.error !== undefined) throw new Error(result.error);
+        if (result.sha) held.set(result.id, result.sha);
         mintBudget.observe(now() - started);
         return result.id;
       } catch (error) {
@@ -29969,6 +30086,7 @@ export interface PreflightProofsDeps {
   resolveCriteria?: (body: string, headSha: string) => readonly { proof?: string; satisfied_by?: string }[];
   /** The tree whose check-proof entry each proof runs through; defaults to this harness. */
   childRoot?: string;
+  childStore?: ChildEntryStoreOptions;
 }
 
 /**
@@ -30051,7 +30169,7 @@ export function runPreflightProofs(
     if (isDialectGrepProof(proof)) continue;
     const run = spawn(
       process.execPath,
-      checkProofLaunchArgv(proof, mergeBase, deps.childRoot),
+      checkProofLaunchArgv(proof, mergeBase, deps.childRoot, [], deps.childStore),
       { cwd: repoRoot },
     );
     // ONLY exit 5 is a finding. 3 is no-match and 4 is exec_error, and neither says a proof failed
@@ -34067,7 +34185,7 @@ async function retroCommand(
     }
 
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath), undefined, undefined, { log });
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     }
     if (!prUrl) {
@@ -37977,7 +38095,7 @@ export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
     git,
     fetcher: opts.fetcher ?? ghJson,
     docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
-    preflight: opts.preflight ?? planPrPreflight,
+    preflight: opts.preflight ?? ((input) => planPrPreflight(input, { log: opts.log })),
   };
   return {
     root,
@@ -37995,7 +38113,7 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
-    preflight: opts.preflight ?? planPrPreflightAsync,
+    preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
   };
   return {
     root,
@@ -38849,6 +38967,7 @@ export async function daemonCommand(
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
     bootClaimReserver?: DispatchClaimReserver;
+    tickClaimReserver?: DispatchClaimReserverAsync;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
@@ -39297,6 +39416,7 @@ export async function daemonCommand(
     throw e;
   }
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
+  const landedClaimRerunReported = new Set<string>();
   try {
     const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
@@ -39759,6 +39879,17 @@ export async function daemonCommand(
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
         isIndeterminate,
+        releaseLandedClaims: async (isMerged) => {
+          await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
+            isMerged,
+            isIndeterminate,
+            prUrlFor: (id) => lastProj?.get(id)?.prUrl,
+            isRerunClaim: (id, anchor) => claimMintedByRerun(dirname(ledgerPath), id, anchor),
+            reportedRerun: landedClaimRerunReported,
+            localHost: hostname(),
+            log,
+          });
+        },
         isIndependentFailureBlocked,
         independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
         // PER-TASK DISPATCH CIRCUIT BREAKER (P29(ii)): re-derived from the SAME
@@ -39822,8 +39953,15 @@ export async function daemonCommand(
         // opening its PR against the WRONG owner. That partial fix is worse than today's honest
         // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
         // refuses.
-        runOne: (taskId, runOptions) =>
-          runTaskFn(taskId, {
+        runOne: (taskId, runOptions) => {
+          // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
+          // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
+          const admittedPlan = createAdmittedPlanSlot();
+          void startRunChildProbe({
+            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
+            options: { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" },
+          });
+          return runTaskFn(taskId, {
             planPath: target.planPath,
             config,
             allowStale,
@@ -39841,7 +39979,7 @@ export async function daemonCommand(
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
             // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
-            planSnapshot: planSyncCoalescer.sync,
+            planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
@@ -39851,7 +39989,8 @@ export async function daemonCommand(
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
             ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
-          }),
+          });
+        },
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
         // processes already announced, so a restart does not re-announce. Read ONCE at daemon
@@ -46882,6 +47021,8 @@ export async function sweepEscalationTriage(
     const { births, judgedStateKeys } = indexEscalationTriageHistory(history);
     const nowMs = (io.clock ?? systemClock).now();
     const runtime = io.runtime ?? buildEscalationTriageRuntime(context);
+    // W1-T9406: the evidence slice is refreshed off the loop before any candidate's evidence is read.
+    await runtime.refresh(ledgerPath);
     const deps = { issues, ledgerPath, runId };
     const cfg = runtime(deps);
     // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
@@ -47939,6 +48080,8 @@ export function buildSweepHook(
   // W1-T9390: the escalation-triage rung's ledger slice, held for this daemon's life like `boardGithub`, so a
   // full sweep parses only the rotations and live bytes written since the one before.
   const escalationTriageHistory = createEscalationTriageHistoryReader();
+  // W1-T9406: the triage evidence's own slice, held for this daemon's life the same way.
+  const escalationTriageEvidence = createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -47950,8 +48093,11 @@ export function buildSweepHook(
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
     const tickRead = await tickReadFor?.();
-    const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo });
+    const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
+      { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
+    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
     try {
       await mainHealthRung?.();
     } catch (e) {
@@ -49042,6 +49188,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
       pushed: result.pushed,
       reason: reason ?? null,
       session_id: result.sessionId,
+      actor_evidence: result.actor_evidence,
       expires_at: result.expiresAt,
       requested_by_pid: process.pid,
     });
@@ -49068,6 +49215,7 @@ async function pauseCommand(rest: string[]): Promise<number> {
     resolved_by: target.resolvedBy,
     reason: reason ?? null,
     session_id: info.sessionId ?? null,
+    actor_evidence: info.actor_evidence,
     expires_at: info.expiresAt ?? null,
     requested_by_pid: info.pid,
   });
@@ -49099,6 +49247,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
       step: "fleet.resume",
       scope: "fleet",
       cleared_shared_pause: cleared,
+      actor_evidence: gatherActorEvidence(),
+      session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+      requested_by_pid: process.pid,
     });
     console.log(`### rmd resume --fleet — ${sharedPauseRef()} ${cleared ? "deleted" : "NOT deleted (the push did not land)"}; no instance flag was touched.`);
     return cleared ? 0 : 1;
@@ -49116,6 +49267,9 @@ async function resumeFleetCommand(rest: string[] = []): Promise<number> {
     resolved_by: target.resolvedBy,
     cleared_stop: result.clearedStop,
     cleared_pause: result.clearedPause,
+    actor_evidence: gatherActorEvidence(),
+    session_id: process.env.REMUDERO_SESSION_ID?.trim() || null,
+    requested_by_pid: process.pid,
   });
   console.log(
     `### rmd resume — instance '${target.instance}' cleared: stop=${result.clearedStop} pause=${result.clearedPause}. ` +
@@ -50145,7 +50299,7 @@ async function triageCommandLocked(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], undefined, undefined, { log });
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("triage.error", { error: "no PR opened" });
@@ -50598,7 +50752,7 @@ export async function planCommand(
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody);
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0], planPrBody, undefined, { log });
     const prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
     if (!prUrl) {
       log("plan.error", { error: "no PR opened" });
@@ -51034,6 +51188,9 @@ export function buildInboxDraftHook(
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
+  // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
+  // full sweep reads, off the loop, only the shard files that changed since the one before.
+  const shardReader = createProposalShardReader(proposalShardDir(join(config.root, "state", "inbox-proposals.json")), { log });
   return async () => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -51042,7 +51199,7 @@ export function buildInboxDraftHook(
       const ledgerPath = ledgerPathFor(config);
 
       const draftsPath = join(config.root, "state", "inbox-drafts.json");
-      const pruned = pruneOrphanedDrafts(draftsPath, registryPath);
+      const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(config.root, "state", "inbox-draft-attempts.json");
@@ -52753,6 +52910,12 @@ export async function approveCommand(
   // ids. Released on any failure path too (the catch around `approveProposal` below) — every
   // reserved id, used or not, must come back, or it is a phantom-id hole (W1-T199/224/247/263).
   let idBlock: TaskIdReservationBlock | undefined;
+  // The remote claims behind idBlock: given back when the filing fails before its branch is pushed.
+  const approveClaims: Array<{ run: (args: string[]) => { status: number; stdout: string; stderr: string }; held: HeldTaskIdReservation }> = [];
+  let approvePushStarted = false;
+  const releaseApproveClaims = (reason: string): void => {
+    for (const c of approveClaims.splice(0)) releaseTaskIdReservation(c.run, c.held, { reason: `rmd approve ${proposalId}: ${reason}`, lane: "approve", log });
+  };
   // W1-T903: shared by findPushedBranch (resume evidence) and createRatificationBranch (fresh
   // PROCEED) — both need the same clone, and only one of the two ever runs per approve call.
   const ensureRepoDir = (): string => {
@@ -52834,23 +52997,20 @@ export async function approveCommand(
           // reservation failure into a free-text `reason` string) so a genuine
           // `TaskIdReservationError` still leaves a durable, structured ledger event before
           // `materializeDraftTaskIds` reduces it to prose.
+          const approveRun = (args: string[]) => {
+            const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+            return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+          };
+          const approveReserver = gatedRemoteRefReserver({ lane: "approve", log, filingBranch, run: approveRun });
           const remote = withIdReservationLogging(
             log,
             "approve.id_reservation_failed",
-            () =>
-              reserveTaskIdBlockRemote(
-                approveReserveFrom,
-                count,
-                gatedRemoteRefReserver({
-                  lane: "approve", log, filingBranch,
-                  run: (args) => {
-                    const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
-                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                  },
-                }),
-              ),
+            () => reserveTaskIdBlockRemote(approveReserveFrom, count, approveReserver),
             { proposal_id: payload.proposalId },
           );
+          for (const h of remote.handles) {
+            approveClaims.push({ run: approveRun, held: { taskId: h.taskId, sha: approveReserver.wonAnchor?.(h.taskId) ?? h.anchor } });
+          }
           return { ids: remote.ids };
         },
       },
@@ -52895,7 +53055,7 @@ export async function approveCommand(
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
   const preflightApprovePush = (path: string, branch: string, id: string): void =>
-    refuseRedPlanPr(planPrPreflight({ cwd: path, title: `chore(plan): ratify ${id} via rmd approve`, body: "" }), { lane: "approve", branch, log });
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }, { log }), { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -52981,6 +53141,7 @@ export async function approveCommand(
       worktreePath = addApproveWorktree(dir, join(worktreesDir(config), branch), branch, "origin/main");
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`, branch);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
+      approvePushStarted = true;
       gitPushRunBranch(worktreePath);
       return branch;
     },
@@ -52998,6 +53159,7 @@ export async function approveCommand(
       const ownTree = (worktreePath = addOwnTreeAt(dir, `origin/${branch}`));
       materializeAndCommitApproveFragment(ownTree, payload, `joined ${branch}`, branch);
       preflightApprovePush(ownTree, branch, payload.proposalId);
+      approvePushStarted = true;
       try {
         gitPushRunBranch(ownTree, { destination: branch });
       } catch (e) {
@@ -53007,6 +53169,8 @@ export async function approveCommand(
         log("approve.join_lost", { proposal_id: payload.proposalId, branch, released_ids: idBlock?.ids ?? [] });
         idBlock?.releaseAll();
         idBlock = undefined;
+        approvePushStarted = false;
+        releaseApproveClaims(`the join push onto ${branch} was rejected as non-fast-forward`);
         dropOwnTree(dir, ownTree);
         return undefined;
       }
@@ -53057,7 +53221,7 @@ export async function approveCommand(
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
       const created = createPlanPrRest(ghJson, owner, repo, {
-        title: `chore(plan): ratify ${id} via rmd approve`,
+        title: approvePrTitle(id),
         body,
         head: branch,
         base: "main",
@@ -53135,6 +53299,7 @@ export async function approveCommand(
     // (if any) comes back rather than punching a phantom-id hole.
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlock?.releaseAll();
+    if (!approvePushStarted) releaseApproveClaims(`failed before its branch was pushed: ${String((e as Error)?.message ?? e)}`);
     // W1-T9153: only a worktree this run's add returned. A refused or failed add left nothing of its own here.
     if (repoDir && addedWorktreePath) {
       try {
@@ -56817,7 +56982,9 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
+import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { createAdmittedPlanSlot, startRunChildProbe, tapPlanSnapshot } from "./lib/run-child.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -57812,3 +57979,8 @@ export {
   type BranchCitationHit,
   type ReverseBranchDrift,
 } from "./lib/branch-reaper.js";
+
+/** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
+export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
+}

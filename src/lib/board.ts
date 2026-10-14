@@ -1001,7 +1001,21 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
   }
   const newLines = lines.slice(state.scannedLines);
   state.scannedLines = lines.length;
+  feedRecentActivity(deps, cache, newLines);
+  return recentActivityEntries(cache, max);
+}
 
+/** The feed's newest `max` entries, newest first. */
+export function recentActivityEntries(cache: RecentActivityCache, max = 20): RecentActivityEntry[] {
+  return cache.state.entries.slice(-max).reverse();
+}
+
+/**
+ * Classifies `newLines` into the feed, each exactly once: {@link computeRecentActivity}'s body, for a caller that hands
+ * it each row as it is read rather than a cursor into one growing array (W1-T9436: the board's rows now drop rows).
+ */
+export function feedRecentActivity(deps: BoardDeps, cache: RecentActivityCache, newLines: ReadonlyArray<Record<string, unknown>>): void {
+  const state = cache.state;
   for (const line of newLines) {
     const runId = typeof line.run_id === "string" ? line.run_id : undefined;
     if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
@@ -1041,8 +1055,6 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
     if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
   }
-
-  return state.entries.slice(-max).reverse();
 }
 
 /** The feed's default page, and what `?limit=` may raise it to (the whole retained history). */

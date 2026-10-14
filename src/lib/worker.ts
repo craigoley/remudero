@@ -1,4 +1,6 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
+import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence,
+  type WorkerMcpIsolation, type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -245,6 +247,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
+  mcpIsolation?: WorkerMcpIsolationEvidence;
   /** Bounded observational SDK init names; raw auth/configuration envelopes are never retained. */
   initSummary?: WorkerInitSummary;
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
@@ -575,6 +579,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  mcp_isolation?: WorkerMcpIsolationEvidence;
   sdk_init_summary: WorkerInitSummary;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
@@ -629,6 +634,7 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
@@ -1073,6 +1079,8 @@ export function workerEgressMode(raw: string | undefined): WorkerEgressMode {
 }
 
 export interface SpawnWorkerArgs {
+  /** Staged/default off. Requires a fresh explicit Claude spawn and a repository-only toolkit. */
+  mcpIsolation?: WorkerMcpIsolation;
   cwd: string;
   permissionMode: PermissionMode;
   /** Path to the worker settings file (permissions + hooks + sandbox). */
@@ -2328,6 +2336,7 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  validateWorkerMcpIsolation(args);
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
@@ -3191,6 +3200,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
       // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
       // so a provider refusal cannot leave the watchdog running after the caller catches it.
+      if (args.mcpIsolation) applyWorkerMcpIsolation(options);
       const liveQuery = runQuery({ prompt: args.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3228,6 +3238,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      if (args.mcpIsolation) {
+        result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
+        // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
+        if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;
+      }
       if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;
       result.selectionAssignmentId = selectionAssignmentId;

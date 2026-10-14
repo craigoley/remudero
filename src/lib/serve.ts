@@ -42,6 +42,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
+import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -151,6 +152,7 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
+import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
   buildDaemonHealthRoute,
@@ -266,6 +268,7 @@ import {
   startProviderAuthSession,
   type ProviderAuthProfile,
 } from "./provider-auth-sessions.js";
+import { setWorkerEntryLog } from "./child-entry-argv.js";
 
 /**
  * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
@@ -526,6 +529,9 @@ export interface ServeDeps {
   incidents?: Omit<IncidentsRouteInput, "stateDir"> & { stateDir?: string };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
   registry?: {
+    /** Explicit caller opt-in only; no deployment/environment selection is activated here. */
+    selectedRegistry?: RegistrySelectionInput;
+    selectedRegistryIO?: RegistryFileIO;
     /** The repo-tracked `.remudero/daemon-instances.yaml` — the one registry. */
     repoRegistryPath?: string;
     /** The fleet host's copy; defaults to {@link DEFAULT_HOST_INSTANCE_REGISTRY_PATH}. */
@@ -582,6 +588,9 @@ export interface ServeDeps {
    * the real `plan/policy.yaml` row so the console never carries a second, drifting copy of that
    * bound.
    */
+  /** W1-T3956: the automation-trigger-v1 registry. Omitted, serve builds one journalled to
+   *  `ledgerPath` with no flow or trigger registered, so every start is refused by name. */
+  automationTriggers?: AutomationTriggerRegistry;
   githubEventWake?: {
     secret?: string;
     repository: string;
@@ -1956,6 +1965,10 @@ export type HostRegistryState = InstancesHostRegistryState;
 export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode"> };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const selectedInput = deps.selectedRegistry === undefined ? undefined : {
+    ...deps.selectedRegistry,
+    ...(deps.selectedRegistry.requiredCapabilities ? { requiredCapabilities: [...deps.selectedRegistry.requiredCapabilities] } : {}),
+  };
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
@@ -1972,6 +1985,18 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: async (_req, res) => {
+      if (selectedInput !== undefined) {
+        const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
+        if (selected.kind === "unknown" || selected.kind === "refused") {
+          sendJson(res, 503, { error: "selected_registry_unavailable", reason: selected.reason });
+          return;
+        }
+        if (selected.kind === "ready") {
+          sendJson(res, 200, { ...selected.binding.publicProjection(), source: "selected",
+            publicationPermission: selected.binding.publicationPermission, generatedAt: clock.iso() });
+          return;
+        }
+      }
       const served = deps.readModel && viewMode(deps.readModel, INSTANCES_VIEW_NAME) === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
       const answer = served ? registryFromInstances(served.body.data as InstancesData)
         : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
@@ -2850,6 +2875,10 @@ function assembleServeRoutes(
   // private content never crosses these routes either: inventory strips it structurally and
   // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
+  // W1-T3956: one named-start registry per process, journalled to the SAME daemon ledger. Manual
+  // starts enter over HTTP; the schedule and verified-webhook adapters submit through this call too.
+  const automationTriggers = deps.automationTriggers ?? createAutomationTriggerRegistry({ journal: automationTriggerLedgerJournal(deps.ledgerPath) });
+  const automationTriggerRoutes = buildAutomationTriggerRoutes({ registry: automationTriggers, submit: (request) => submitAutomationTrigger(automationTriggers, request) });
   // One history per `rmd serve` process, never a module singleton; a throw logs `github.wake.check_run_callback_failed`.
   let ciIncidentState: CiIncidentState = createCiIncidentState();
   const onCheckRunCompleted = async (info: CheckRunCompletedInfo): Promise<void> => {
@@ -2983,6 +3012,7 @@ function assembleServeRoutes(
     ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
       instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
+    ...automationTriggerRoutes,
     ...buildPanelGraphRoutes(panelReadDeps, panelReadDeps.readPlanSnapshot),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
@@ -3248,6 +3278,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
+  // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
+  setWorkerEntryLog(deps.log);
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));

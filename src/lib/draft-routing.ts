@@ -139,11 +139,26 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
   return stats;
 }
 
+const DRAFT_STATS_STEPS = ["draft.routing.outcome", "inbox.draft_synthesized", "inbox.drafted", "inbox.draft_error"] as const;
+
+/** Could this unparseable ledger line have been a row of one of `steps`? Only a line that names a
+ *  step, and none of these, proves it was not: a line torn before its `step` field could be anything. */
+export function tornLineCouldBeStep(line: string, steps: readonly string[]): boolean {
+  if (steps.some((step) => line.includes(JSON.stringify(step)))) return true;
+  return !line.includes('"step":"');
+}
+
 export function readDraftStats(stateDir: string, lane: string): DraftStats {
   // The union's best-effort directory read otherwise hides a permissions failure as an empty prior.
   readdirSync(stateDir);
-  const read = readLedgerUnionRecordsSync(stateDir, { order: "oldest-first", refuseIncomplete: true,
-    step: ["draft.routing.outcome", "inbox.draft_synthesized", "inbox.drafted", "inbox.draft_error"] });
-  if (!read.ok || read.torn > 0) throw new Error(`draft stats corpus incomplete: ${read.unread.join(", ")}; torn=${read.torn}`);
+  // The union counts EVERY unparseable line it scans, whatever its step. One spliced 2026-09-20 ENOSPC
+  // row (sweep.fix_capacity + serve.error) failed all 927 reads from 10-04 to 10-14, so this lane never
+  // routed by its posteriors. Refuse only over a torn line that could have been one of these rows.
+  let tornDraftRows = 0;
+  const read = readLedgerUnionRecordsSync(stateDir, { order: "oldest-first", refuseIncomplete: true, step: [...DRAFT_STATS_STEPS],
+    onTorn: (line) => { if (tornLineCouldBeStep(line, DRAFT_STATS_STEPS)) tornDraftRows += 1; } });
+  if (!read.ok || tornDraftRows > 0) {
+    throw new Error(`draft stats corpus incomplete: ${read.unread.join(", ")}; torn=${tornDraftRows} of ${read.torn}`);
+  }
   return draftStatsFromRows(read.rows, lane);
 }

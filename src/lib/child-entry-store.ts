@@ -16,13 +16,14 @@ import { isAbsolute, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 
 interface Currency { current: boolean; reason: string; bundle?: string }
-interface StoredManifest { sourceHash?: unknown; entries?: unknown }
+interface StoredManifest { sourceHash?: unknown; entries?: unknown; workers?: unknown }
 interface BuildScript {
   OUT_DIR: string;
   MANIFEST_NAME: string;
   sourceHash(root: string): string;
   readChildEntryManifest(root: string, outDir?: string): unknown;
   childEntryIsCurrent(root: string, name: string, opts?: { outDir?: string; treeHash?: string }): Currency;
+  workerBundle(root: string, module: string, opts?: { outDir?: string; treeHash?: string }): Currency;
 }
 /** Loaded on demand for the reason child-entry-argv.ts gives: a tree may carry src/ but not scripts/. */
 const loadBuildScript = (): BuildScript => createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as BuildScript;
@@ -74,11 +75,21 @@ function storedBuildRefusal(script: BuildScript, dir: string, treeRoot: string, 
     const verdict = script.childEntryIsCurrent(treeRoot, String(entry?.name), { outDir: dir, treeHash });
     if (!verdict.current) return verdict.reason;
   }
+  // W1-T8777: a build's worker bundles are judged as its entries are, so a materialized copy never lacks one.
+  for (const worker of storedWorkers(manifest)) {
+    const verdict = script.workerBundle(treeRoot, String(worker?.module), { outDir: dir, treeHash });
+    if (!verdict.current) return `worker ${String(worker?.module)}: ${verdict.reason}`;
+  }
   return null;
 }
 
-const bundleNames = (script: BuildScript, dir: string): string[] =>
-  ((script.readChildEntryManifest(dir, ".") as StoredManifest).entries as { bundle: string }[]).map((e) => e.bundle);
+const storedWorkers = (manifest: StoredManifest): Array<{ module?: unknown; bundle?: unknown }> =>
+  Array.isArray(manifest.workers) ? manifest.workers as Array<{ module?: unknown; bundle?: unknown }> : [];
+
+const bundleNames = (script: BuildScript, dir: string): string[] => {
+  const manifest = script.readChildEntryManifest(dir, ".") as StoredManifest;
+  return [...(manifest.entries as { bundle: string }[]), ...storedWorkers(manifest)].map((e) => String(e.bundle));
+};
 
 function touch(path: string): void {
   const now = systemClock.date();
@@ -247,7 +258,9 @@ export function buildIntoStore(treeRoot: string, opts: BuildIntoStoreOptions): P
   const pass = buildIntoStoreUnlogged(resolve(treeRoot), opts)
     .catch((err: unknown): StoreBuildResult => ({ kind: "failed", reason: String((err as Error)?.message ?? err).slice(0, 400) }))
     .then((result) => {
-      if (result.kind === "built") log("child_entry.store_built", { hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "built") log("child_entry.store_built", { reason: "new-build", hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "present") log("child_entry.store_present", { reason: "source-hash-already-present", hash: result.hash });
+      if (result.kind === "skipped") log("child_entry.store_build_skipped", { reason: result.reason });
       if (result.kind === "failed") log("child_entry.store_build_failed", { reason: result.reason, hash: result.hash });
       if (result.kind !== "skipped") prune(opts, log);
       return result;

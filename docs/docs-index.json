@@ -668,6 +668,12 @@
       "grepHint": "Bounded heavy READY reservations, v2"
     },
     {
+      "path": "docs/instance-registry-selection-contract.md",
+      "title": "Instance registry selection contract",
+      "summary": "W1-T9435 supplies an additive public read/binding contract and an explicitly opted-in",
+      "grepHint": "Instance registry selection contract"
+    },
+    {
       "path": "docs/knowledge-garden-log.md",
       "title": "Knowledge garden log",
       "summary": "Each section is one pass of the knowledge gardener (W1-T4095): what it changed and how the knowledge base scored.",
@@ -840,6 +846,12 @@
       "title": "Console views: `GET /v1/views/<name>`",
       "summary": "A view is one read per console surface, computed in core. The console renders it; it does not",
       "grepHint": "Console views: `GET /v1/views/<name>`"
+    },
+    {
+      "path": "docs/worker-mcp-isolation.md",
+      "title": "Staged worker MCP isolation",
+      "summary": "This policy is default off: no production caller supplies `mcpIsolation` today. It changes neither",
+      "grepHint": "Staged worker MCP isolation"
     }
   ]
 }

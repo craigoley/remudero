@@ -24,17 +24,29 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. */
+/** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. `run-child` is W1-T9082's (ADR 0007). */
 export const CHILD_ENTRIES = Object.freeze([
   { name: "run-task", source: "src/run-task.ts" },
   { name: "check-proof-main", source: "src/check-proof-main.ts" },
+  { name: "run-child", source: "src/run-child-main.ts" },
 ]);
+/**
+ * W1-T8777: the modules that start a worker thread from their own URL, each built as its own bundle so a bundled
+ * parent can start it with no tsx loader. ADR 0006 decision 4 names these four; `grep -rln "new Worker(" src`
+ * is the live inventory of the rest.
+ */
+export const WORKER_ENTRIES = Object.freeze([
+  "src/lib/read-model-worker.ts", "src/lib/read-model-slow-lane.ts", "src/lib/status.ts", "src/lib/board-worker.ts",
+]);
+/** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
+export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;
 /** Output directory, relative to the tree root. It lies under the gitignored `dist/`. */
 export const OUT_DIR = "dist/child-entries";
 export const MANIFEST_NAME = "manifest.json";
-/** Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. */
-export const RECIPE_VERSION = 2;
-/** The manifest layout this file writes and the only one {@link childEntryIsCurrent} accepts (2: per-entry `sha256`). */
+/** Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. 3: the bundled flag and worker bundles. */
+export const RECIPE_VERSION = 3;
+/** The manifest layout this file writes and the only one {@link childEntryIsCurrent} accepts (2: per-entry `sha256`). W1-T8777's
+ *  `workers` list is additive: a manifest without one holds no worker bundle, and recipe 3 already retires older builds. */
 export const MANIFEST_SCHEMA = 2;
 /**
  * Inputs besides `src/` that change what a bundle contains. A missing file hashes as absent. This script is one:
@@ -150,13 +162,17 @@ function moduleUrlPlugin(bundleDir) {
   };
 }
 
-function bundleBanner(bundleDir, entryPath) {
+function bundleBanner(bundleDir, entryPath, { worker = false } = {}) {
   const entryRel = relative(bundleDir, entryPath).split(sep).join("/");
+  // W1-T8777: every bundle marks its isolate, so a module it holds can tell it has no tsx loader (bundledWorkerUrl).
+  const marked = ["const __rmd_bundle_url = import.meta.url;", "globalThis.__rmd_bundled = true;"];
+  // A worker keeps its parent's `process.argv`: a worker module's main-module guard must not see itself as the entry.
+  if (worker) return marked.join("\n");
   // `process.argv[1]` is set to the SOURCE entry, so a main-module guard such as run-task.ts's
   // `fileURLToPath(import.meta.url) === process.argv[1]` holds exactly as it does under tsx.
   return [
     'import { fileURLToPath as __rmd_fileURLToPath } from "node:url";',
-    "const __rmd_bundle_url = import.meta.url;",
+    ...marked,
     `process.argv[1] = __rmd_fileURLToPath(new URL(${JSON.stringify(entryRel)}, __rmd_bundle_url));`,
   ].join("\n");
 }
@@ -176,7 +192,7 @@ function writeAtomic(path, text) {
  * is computed against it; `outDir` is only where the bytes land. The shared store builds into a private
  * directory laid out as `<root>/dist/child-entries`, so a copy materialized there resolves inside its tree.
  */
-export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTRIES, outDir = OUT_DIR, layoutDir = outDir } = {}) {
+export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTRIES, workers = WORKER_ENTRIES, outDir = OUT_DIR, layoutDir = outDir } = {}) {
   root = resolve(root);
   const esbuild = loadEsbuild(root);
   const bundleDir = resolve(root, outDir);
@@ -185,13 +201,11 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
   // Remove the old manifest first, so a failed rebuild leaves no manifest vouching for half-written bundles.
   rmSync(join(bundleDir, MANIFEST_NAME), { force: true });
   const hashBefore = sourceHash(root, esbuild.version);
-  const built = [];
-  for (const entry of entries) {
-    const entryPath = resolve(root, entry.source);
-    if (!existsSync(entryPath)) throw new Error(`child entry ${entry.name}: source ${entry.source} does not exist under ${root}`);
-    const bundle = `${entry.name}.mjs`;
+  /** One bundle, built in memory as if at its layout path, then written where outDir says: the bytes never depend on outDir. */
+  const bundleOne = async (label, source, bundle, worker) => {
+    const entryPath = resolve(root, source);
+    if (!existsSync(entryPath)) throw new Error(`${label}: source ${source} does not exist under ${root}`);
     const outfile = join(bundleDir, bundle);
-    // Built in memory as if at its layout path, then written where outDir says: the bytes never depend on outDir.
     const result = await esbuild.build({
       absWorkingDir: root,
       entryPoints: [entryPath],
@@ -202,7 +216,7 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
       format: "esm",
       packages: "external",
       logLevel: "silent",
-      banner: { js: bundleBanner(layout, entryPath) },
+      banner: { js: bundleBanner(layout, entryPath, { worker }) },
       define: { "import.meta.url": "__rmd_module_url" },
       plugins: [moduleUrlPlugin(layout)],
     });
@@ -210,12 +224,22 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
     rmSync(outfile, { force: true });
     if (output) writeFileSync(outfile, output.contents);
     const payload = readIfPresent(outfile) ?? Buffer.alloc(0);
-    if (payload.length === 0) throw new Error(`child entry ${entry.name}: esbuild reported success but wrote no bundle at ${outfile}`);
-    built.push({ name: entry.name, source: entry.source, bundle, bytes: payload.length, sha256: payloadDigest(payload) });
+    if (payload.length === 0) throw new Error(`${label}: esbuild reported success but wrote no bundle at ${outfile}`);
+    return { bundle, bytes: payload.length, sha256: payloadDigest(payload) };
+  };
+  const built = [];
+  for (const entry of entries) {
+    built.push({ name: entry.name, source: entry.source, ...(await bundleOne(`child entry ${entry.name}`, entry.source, `${entry.name}.mjs`, false)) });
+  }
+  const builtWorkers = [];
+  // A tree that lacks a declared worker module (a fixture, a consumer checkout) builds the rest; the real tree holding
+  // every one is a test's claim, and a bundled parent missing one refuses loudly at the start (bundledWorkerUrl).
+  for (const module of workers.filter((declared) => existsSync(resolve(root, declared)))) {
+    builtWorkers.push({ module, ...(await bundleOne(`worker entry ${module}`, module, workerBundleName(module), true)) });
   }
   const hashAfter = sourceHash(root, esbuild.version);
   if (hashAfter !== hashBefore) throw new Error("src/ changed while the child entries were being built; rerun the build");
-  const manifest = { schema: MANIFEST_SCHEMA, sourceHash: hashBefore, recipe: RECIPE_VERSION, esbuild: esbuild.version, entries: built };
+  const manifest = { schema: MANIFEST_SCHEMA, sourceHash: hashBefore, recipe: RECIPE_VERSION, esbuild: esbuild.version, entries: built, workers: builtWorkers };
   writeAtomic(join(bundleDir, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
@@ -263,16 +287,29 @@ export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash } =
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
 function judgeChildEntry(root, name, outDir, treeHash) {
   if (typeof name !== "string" || !ENTRY_NAME.test(name)) return notCurrent("entry-name-invalid");
-  const manifest = readChildEntryManifest(root, outDir);
-  if (!manifest) return notCurrent("no-manifest");
-  if (typeof manifest !== "object" || Array.isArray(manifest)) return notCurrent("manifest-invalid");
-  if (manifest.schema !== MANIFEST_SCHEMA || manifest.recipe !== RECIPE_VERSION) return notCurrent("manifest-unsupported");
-  if (!Array.isArray(manifest.entries) || !SHA256_HEX.test(String(manifest.sourceHash))) return notCurrent("manifest-invalid");
+  const read = validManifest(root, outDir);
+  if (!read.manifest) return read;
+  const { manifest } = read;
   const entry = manifest.entries.find((e) => e && typeof e === "object" && e.name === name);
   if (!entry) return notCurrent("entry-not-built");
   const declared = CHILD_ENTRIES.find((e) => e.name === name);
   if (!isSafeRelativePath(entry.source) || (declared && declared.source !== entry.source)) return notCurrent("entry-source-invalid");
   if (entry.bundle !== `${name}.mjs`) return notCurrent("bundle-name-invalid");
+  return judgeBundleFile(root, outDir, manifest, entry, treeHash, true);
+}
+
+/** A manifest that this build wrote, or why not: the checks every entry kind starts from. */
+function validManifest(root, outDir) {
+  const manifest = readChildEntryManifest(root, outDir);
+  if (!manifest) return notCurrent("no-manifest");
+  if (typeof manifest !== "object" || Array.isArray(manifest)) return notCurrent("manifest-invalid");
+  if (manifest.schema !== MANIFEST_SCHEMA || manifest.recipe !== RECIPE_VERSION) return notCurrent("manifest-unsupported");
+  if (!Array.isArray(manifest.entries) || !SHA256_HEX.test(String(manifest.sourceHash))) return notCurrent("manifest-invalid");
+  return { manifest };
+}
+
+/** The bundle a manifest entry names: a regular file inside the output directory, of the size and digest recorded, built from `root`'s source when `verifySource`. */
+function judgeBundleFile(root, outDir, manifest, entry, treeHash, verifySource) {
   if (!Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !SHA256_HEX.test(String(entry.sha256))) return notCurrent("entry-metadata-invalid");
   const dir = resolve(root, outDir);
   const bundle = join(dir, entry.bundle);
@@ -290,9 +327,32 @@ function judgeChildEntry(root, name, outDir, treeHash) {
     throw err;
   }
   if (refusal) return refusal;
+  if (!verifySource) return { current: true, reason: "bundle-intact", bundle };
   const now = treeHash ?? sourceHash(root);
   if (manifest.sourceHash !== now) return { current: false, reason: "source-changed", built: manifest.sourceHash, now };
   return { current: true, reason: "source-hash-match", bundle };
+}
+
+/**
+ * W1-T8777: whether `<root>`'s build holds a sound bundle for the worker module `module` (a src/ path, as WORKER_ENTRIES lists).
+ * `verifySource: false` is for a process that already runs bundled from this build: its workers must come from
+ * the same build whatever the tree now holds, so only the bundle's integrity is judged. Never throws.
+ */
+export function workerBundle(root, module, { outDir = OUT_DIR, treeHash, verifySource = true } = {}) {
+  try {
+    root = resolve(root);
+    if (!isSafeRelativePath(module) || !module.startsWith("src/")) return notCurrent("worker-module-invalid");
+    const read = validManifest(root, outDir);
+    if (!read.manifest) return read;
+    const { manifest } = read;
+    if (!Array.isArray(manifest.workers)) return notCurrent("manifest-invalid");
+    const entry = manifest.workers.find((w) => w && typeof w === "object" && w.module === module);
+    if (!entry) return notCurrent("worker-not-built");
+    if (entry.bundle !== workerBundleName(module)) return notCurrent("bundle-name-invalid");
+    return judgeBundleFile(root, outDir, manifest, entry, treeHash, verifySource);
+  } catch (err) {
+    return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
+  }
 }
 
 async function main(argv) {
@@ -317,6 +377,7 @@ async function main(argv) {
     const outDir = outAt >= 0 ? resolve(argv[outAt + 1] ?? ".") : OUT_DIR;
     const manifest = await buildChildEntries({ root, outDir, layoutDir: OUT_DIR });
     for (const e of manifest.entries) process.stdout.write(`built ${OUT_DIR}/${e.bundle} (${e.bytes} bytes) from ${e.source}\n`);
+    for (const w of manifest.workers) process.stdout.write(`built ${OUT_DIR}/${w.bundle} (${w.bytes} bytes) from ${w.module} (worker)\n`);
     process.stdout.write(`source hash ${manifest.sourceHash}\n`);
     return 0;
   } catch (err) {

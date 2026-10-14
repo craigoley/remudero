@@ -1,0 +1,137 @@
+- id: W1-T9493
+  title: Registry write targets bind an explicit repository-relative file before any proposal effect
+  repo: remudero
+  depends_on: [W1-T9435]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-14: continue the staged public-core/private-ops split without duplicate work, activation, schedules or worker stops"
+  plan_refs: [W1-T4266, W1-T9435, W1-T7727]
+  files: [src/lib/onboarding-golive.ts, src/lib/serve.ts, test/onboarding-golive.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ actual main d61a3afe29308abefff5ef9b0e2d0a15a0ade1a4 after source
+    PR11714 normally merged at 2026-10-14T16:13:40Z. W1-T9435 supplies a bounded,
+    immutable host-file reader and an opt-in read-only registry route. It neither
+    wires a writer nor makes an absolute host path a repository-relative target.
+    requestGoLive in onboarding-golive.ts accepts registryRepository, but derives
+    its contents path from resolveRepoLayout("", () => undefined).stateDir plus
+    daemon-instances.yaml. A private registry in a different file location cannot
+    be targeted explicitly. buildOnboardingGoLiveRoutes forwards the repository
+    through the authenticated, high-tier operator-confirmed route; this is the
+    consequential writer caller, not merely metadata stored by a producer.
+    Preserve the existing legacy request sequence and operator confirmation when
+    no new selection is supplied. A selected target must not degrade to that
+    legacy path after invalid, unreadable or revised evidence. Repository, path,
+    commit revision, file identity and exact bytes are separate bindings.
+    GitHub's repository-contents documentation requires the replaced file's blob
+    SHA for an update, and notes that contents reads can dereference a symlink.
+    A success-shaped file response alone therefore does not prove the selected
+    Git path is a regular blob. Use bounded exact-path Git-tree identity evidence,
+    not a whole-repository scanner or guessed path. Relevant primary references:
+    https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28
+    https://docs.github.com/en/rest/git/refs?apiVersion=2022-11-28
+    The complete fresh main/open-head subject sweep and reserved filing branch
+    are retained in the private operator recovery docket. W1-T4266 is the existing
+    go-live mechanism, W1-T9435 is the reader foundation, and W1-T7727 scopes
+    pause/resume. None supplies this explicit selected writer-file binding.
+    No live registry/configuration is selected by this source task. It does not
+    qualify the full daemon, installer, recycler or private-overlay cutover.
+  design: |
+    1. Add one additive, typed registryTarget to the existing GoLiveWiring and
+       request inputs: an explicit repository and canonical repository-relative
+       file path. Resolve/copy the pair before the first await. Explicit selection
+       wins over the legacy repository/default file; only genuine absence uses
+       the existing behavior. Empty, malformed, partial, absolute host/container,
+       traversal, query/fragment, backslash, control-character or ambiguous path
+       inputs refuse before any proposal write. Do not trim an invalid selection
+       into absence, silently normalize it to another target, or derive it from
+       a private host path. Encode valid path segments exactly once for REST.
+       Keep repository case/identity rules consistent with existing resolution.
+    2. For the selected arm, bind actual repository identity, current default
+       branch commit, exact-path regular Git blob identity, file SHA and digest
+       of the same bytes parsed and edited. Bound exact-path tree traversal by
+       path depth and existing async transport deadlines; refuse truncated,
+       unreadable, missing, directory, symlink, submodule, unsupported or mismatched
+       evidence. Never recurse over an inbox/repository population or use contents
+       type alone as a regular-file assertion. Keep unknown distinct from healthy
+       absence and never fall back to a healthy legacy registry. Use the existing
+       shared error/async API ports; do not add a blocking daemon adapter or weaken
+       the live-write sentinel. No unsupported protocol or schema capability is
+       silently adopted.
+    3. Immediately before the first proposal effect, re-read the selected origin,
+       branch/file identities and shadow target against the bound intent. Refuse
+       revisions, changed repository identity, changed target or unknown evidence
+       without POST/PUT. Preserve current verified operator/high-tier confirmation,
+       owner/admin override, minimum shadow-run policy and required normal review;
+       actor admission or an integrity digest is not private-publication permission.
+       There is no new general adoption exception or global trusted-PR hold.
+       A valid request creates only its proposal branch from the bound commit and
+       PUTs only the selected file with that actual file SHA. It must never write
+       main, another registry path or another instance's mode. Preserve every
+       unrelated registry byte, comment and safety field.
+    4. Keep the returned proposal receipt review-pending, never activation or
+       success of a live cutover. Carry sufficient bound revision/target-digest
+       evidence for exact operator reconciliation without exposing private host
+       paths, raw content or new private target details in public projections.
+       Preserve legacy receipts/ledger behavior when selection is absent. Failures
+       before writes make none; failures after a real proposal effect retain its
+       bounded evidence and must not claim nothing happened or automatically repeat
+       effects. Reuse the existing GoLiveError/receipt mechanism where applicable;
+       unknown does not become success/external on timeout. No real cleanup/closure
+       or automatic remedy is authorized by this task.
+    5. Snapshot the selected target at the actual serve route composition/dispatch
+       seam, not merely in a test fixture or producer object. Caller mutation while
+       confirmation or async reads are in flight cannot retarget it. Preserve the
+       verifiedActor refusal, high-tier action-confirmation flow, instance/state-root
+       selection and existing no-selection request bytes. Do not add ambient
+       environment/configuration activation, widen route scopes, bypass an owner
+       hold, or declare all other registry consumers migrated.
+    6. Extend the existing onboarding-golive tests with literal proof titles below.
+       Test two independent repository/file/instance controls, healthy legacy traps
+       beside failed explicit selection, invalid/partial paths, actual regular-file
+       identity, revision changes between awaits, immutable caller snapshots,
+       selected-only REST URL/branch/SHA requests, unchanged non-target bytes and
+       every pre/post-effect catch. Exercise the existing real default transport
+       and live-write sentinel in bounded disposable fixtures; no actual GitHub
+       proposal or promotion. Preserve configured-human/owner and legacy behavior.
+       Delete the actual target/backstop/snapshot fixes to observe failure, then
+       restore exactly and pass; a source-text marker alone is not a falsifier.
+    7. Update the existing contract document and only its generated index entry if
+       generation changes it. Separate absolute reader paths, repository-relative
+       writer targets and private release permission. Record WORKERS CONTINUE for
+       this isolated source work, and retain separately human-approved exact-instance
+       drain/full affected-writer stop rules for later live migrations. Keep the
+       complete public Apache core, trusted PR flow and scoped services intact.
+       All new admission stays opt-in SHADOW ONLY. Do not change live config/policy,
+       GitHub settings, infrastructure, private values, state/claim formats, baselines,
+       schedules, production scheduler activation or W1-T9410.
+    8. Before build and publication refresh exact merged Task trailers OR run-branch
+       credit, active refs, actual main and every open-head subject with corpus/window
+       controls, the repo's package selector and ordinary ownership. Commit scoped
+       trees before measurement; use verified paths, child tsx/tmp hygiene and shipped
+       host slots. Instrument every changed source SF in mapped diff coverage. One
+       native author per distinct committed tree; reproduce every new failure on that
+       run's actual unchanged pinned base before attribution/repair. Unknown causes
+       stay unknown; no baseline waiver, out-of-scope repair before normal scope merge,
+       unchanged failed retry, extra reviewer, force/admin merge or fake green.
+  acceptance:
+    - claim: Explicit writer selection wins and failed selection never consults a legacy target
+      proof: 'unit test: registry writer explicit target wins and never falls back'
+    - claim: No-selection legacy requests retain their existing contract
+      proof: 'unit test: registry writer legacy target keeps existing requests'
+    - claim: Invalid or stale selected targets cause no proposal writes
+      proof: 'unit test: registry writer invalid or stale selected target makes no writes'
+    - claim: The selected Git file identity and current revision are verified before effects
+      proof: 'unit test: registry writer checks regular file identity and revision before writes'
+    - claim: Proposal effects bind only the chosen repository path branch and file SHA
+      proof: 'unit test: registry writer targets only chosen repo path and file SHA'
+    - claim: The actual authenticated route snapshots its target without weakening confirmation
+      proof: 'unit test: registry writer route snapshots target without weakening operator confirmation'
+    - claim: Partial failure never becomes a success receipt or unexplained repeated effect
+      proof: 'unit test: registry writer refuses partial failure without publishing success receipt'

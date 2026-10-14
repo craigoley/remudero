@@ -1,0 +1,93 @@
+- id: W1-T9450
+  title: "A CI-LEARNING TASK IS FILED WITHOUT THE COMPANIONS ITS OWN GATES REQUIRE — ciLearningShardYaml declares `files: [learnings/ci.yaml]` alone, so every lesson PR lacks the golden verdict under test/fixtures/golden-verdicts/ that prompt-surface-gate demands and the regenerated learnings/index.json; #11652 (W1-T8445) went red on prompt-surface-gate, rule-checks and learnings-index on 2026-10-14 and #11527 (W1-T3828) merged only after a repair added both, while the learning entry that names this remedy matches plan/tasks.d/** and never reaches the worker editing learnings"
+  repo: remudero
+  depends_on: [W1-T7954]  # W1-T7954 moves new lessons to learnings/ci.d/<slug>.yaml, drops the committed index, and edits the same shard writer and narrow-shape rule
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a ci-learning filing names and produces every file its PR's gates require; high for span: the shard writer, the parked-shape rule, one lesson entry and its golden case
+  band_meaning: span
+  origin: "operator session 2026-10-14: #11652 (W1-T8445) red on prompt-surface-gate + rule-checks + learnings-index STALE, repaired by hand; #11527 needed a fix round for the same"
+  plan_refs: [W1-T3077, W1-T3906, W1-T5837, W1-T6335, W1-T7954, W1-T8445, W1-T3828]
+  files:
+    - src/lib/measurement-cadence.ts
+    - src/lib/plan.ts
+    - learnings/ci.yaml
+    - learnings/index.json
+    - test/fixtures/golden-verdicts/ci-prompt-surface-lesson-path/golden.yaml
+    - test/fixtures/golden-verdicts/ci-prompt-surface-lesson-path/criteria.yaml
+    - test/fixtures/golden-verdicts/ci-prompt-surface-lesson-path/diff.patch
+    - test/fixtures/golden-verdicts/ci-prompt-surface-lesson-path/report.md
+    - test/fixtures/golden-verdicts/ci-prompt-surface-lesson-path/checkout/learnings/ci.yaml
+    - test/a-ci-learning-filing-declares-the-companions-its-gates-require.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main 5fa4c003e. Symbols, not lines.
+    THE FILING. src/lib/measurement-cadence.ts ciLearningShardYaml writes `files:` as the one line
+    `- ${CI_LEARNING_LESSONS_FILE}` ("learnings/ci.yaml"), and its only proof is a grep of the finding id in that
+    file. src/lib/plan.ts isParkedMachineProposal admits the shape only when `task.files.length === 1` and
+    `task.files[0] === "learnings/ci.yaml"` for a `ci-learning:` origin, so the shard writer and the shape rule
+    must change together.
+    THE GATES THE PR MEETS. scripts/prompt-surface-gate.mjs (W1-T3077) treats a path matching LEARNINGS_SHARD_RE
+    (`^learnings/[^/]+\.ya?ml$`) as a prompt surface and accepts only a golden verdict under GOLDEN_FIXTURE_RE
+    (`^test/fixtures/golden-verdicts/`) as its evidence. learnings/index.json is derived
+    (scripts/generate-learnings-index.mjs) and test/learnings-index.test.ts requires it fresh. Neither companion is
+    declared, so a worker held to its declared files cannot add the fixture.
+    MEASURED.
+      - W1-T8445 (origin ci-learning:10954:mutation-ratchet). Its worker branch run-W1-T8445-1791804947480
+        (bcf2fdad8, 2026-10-12) changed learnings/ci.yaml only. PR #11652 went red on prompt-surface-gate,
+        rule-checks and learnings-index STALE (operator session 2026-10-14). The hand repair on
+        run-W1-T8445-1791976999669 (c714034ea "index and golden verdict for the mutation-ratchet lesson") added
+        learnings/index.json, five files under test/fixtures/golden-verdicts/ci-mutation-ratchet-lesson/ and a
+        case in test/golden-verdicts.test.ts.
+      - W1-T3828: #11527 (7a8f03514) merged with learnings/index.json and five
+        test/fixtures/golden-verdicts/ci-coverage-ratchet-lesson/ files beside learnings/ci.yaml, after a fix
+        round, against a declared scope of learnings/ci.yaml.
+    THE LESSON THAT SHOULD HAVE REACHED THE WORKER. learnings/ci.yaml entry
+    prompt-surface-gate-learning-path-evidence (W1-T6335, src ci-learning:9856:prompt-surface-gate) states the
+    remedy ("any changed learning entry needs the golden fixture in the same diff"), but its `files:` is
+    ["plan/tasks.d/**"]. Learnings are selected by the task's files (loadLearningsForTaskFiles), so a worker
+    whose task declares learnings/ci.yaml never receives it.
+    WHAT W1-T7954 ALREADY COVERS AND WHAT IT LEAVES. W1-T7954 (queued, P2) makes CI_LEARNING_LESSONS_FILE a
+    per-finding learnings/ci.d/<slug>.yaml and stops committing learnings/index.json, which retires the index half.
+    It does not declare a golden fixture, and its files do not include scripts/prompt-surface-gate.mjs, whose
+    LEARNINGS_SHARD_RE does not match learnings/ci.d/<slug>.yaml. This task waits for it and closes the rest.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for ciLearningShardYaml, CI_LEARNING_LESSONS_FILE,
+    isParkedMachineProposal and the entry id (main 5 shards: W1-T3906, W1-T5995, W1-T8523 merged; W1-T4281 creates
+    a different lesson file; W1-T7954 above), and the plan/ trees of all 369 readable origin heads (no head adds
+    one). Heads touching src/lib/measurement-cadence.ts are W1-T7691 (cadence child naming) and a stale
+    codex/ci-learning-flow (2026-09-20); neither touches the shard writer's files list. Positive control: the same
+    sweep finds `^- id: W1-T9436$` on head plan-file-1791981352331 only.
+  design: |
+    1. THE FILING DECLARES ITS COMPANIONS. ciLearningShardYaml declares, after the lesson file, the golden verdict
+       case files for this finding under test/fixtures/golden-verdicts/<finding slug>/ (golden.yaml, criteria.yaml,
+       diff.patch, report.md and checkout/<lesson path>), and learnings/index.json while main still commits it
+       (W1-T7954 removes it). isParkedMachineProposal accepts exactly that list for a ci-learning: origin, in that
+       order, and nothing wider.
+    2. THE LESSON FILE IS STILL A PROMPT SURFACE. If W1-T7954 landed without it, widen
+       scripts/prompt-surface-gate.mjs LEARNINGS_SHARD_RE to match learnings/<shard>.d/*.yaml too, so a per-entry
+       lesson is gated like a shard entry rather than escaping the gate; add the script to this task's files by
+       operator amendment if so.
+    3. THE INDEX REGENERATES WITH THE EDIT, while it is committed: the ci-learning worker's prompt names
+       `node scripts/generate-learnings-index.mjs`, or the harness regenerates it before the pre-open gate (it is
+       already a REGENERABLE_ARTIFACT_GENERATORS path, src/lib/sweep.ts), whichever the existing pre-open path
+       supports without a new mechanism.
+    4. THE REMEDY REACHES THE LANE. Add the lesson paths ("learnings/*.yaml", and "learnings/*.d/*.yaml" once
+       W1-T7954 lands) to prompt-surface-gate-learning-path-evidence's `files:`, with its own golden verdict case
+       (the fixture paths declared above), and regenerate learnings/index.json.
+    Tests go in the new file, `test(` titles verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-ci-learning-filing-declares-the-companions-its-gates-require.test.ts"
+    - claim: "a filed ci-learning shard declares the lesson file and its golden verdict case files, and still parses as the parked ci-learning shape"
+      proof: 'grep: test("W1-T9450: a ci-learning filing declares its golden verdict companions and keeps its parked shape" in test/a-ci-learning-filing-declares-the-companions-its-gates-require.test.ts'
+    - claim: "a task whose files name a learnings lesson file is selected the prompt-surface-gate golden-evidence lesson"
+      proof: 'grep: test("W1-T9450: a task editing a lesson file receives the golden-evidence lesson" in test/a-ci-learning-filing-declares-the-companions-its-gates-require.test.ts'
+  falsifier: |
+    Against main, render a ci-learning shard: its files list is learnings/ci.yaml alone, so the first test fails.
+    Select learnings for files [learnings/ci.yaml]: prompt-surface-gate-learning-path-evidence is not selected, so
+    the second test fails. Widen the shard's files without the shape rule and isParkedMachineProposal stops
+    admitting it, which the first test also checks.
