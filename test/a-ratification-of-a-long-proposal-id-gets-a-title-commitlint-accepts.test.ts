@@ -9,7 +9,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { CONVENTIONAL_LIMITS, checkCommitMessage } from "../src/lib/commit-message.js";
-import { approvePrTitle } from "../src/lib/inbox.js";
+import * as inbox from "../src/lib/inbox.js";
+
+/** Read through the namespace, so the suite loads at a base that lacks the helper and fails on the assertion. */
+function approvePrTitle(id: string): string {
+  const fit = (inbox as { approvePrTitle?: (id: string) => string }).approvePrTitle;
+  assert.equal(typeof fit, "function", "inbox.ts exports approvePrTitle");
+  return fit!(id);
+}
 
 const REFUSED_IDS = [
   "adoption:symbol-no-caller:src/lib/github-transport.ts:classifyGhLimitFailure",
