@@ -107,7 +107,7 @@
     - claim: "a NEEDS_SCOPE with an unreadable closure or no base verdict still goes to scope amendment"
       proof: "unit test: W1-T9561: an unknown attribution keeps the scope amendment"
     - claim: "the reroute writes a fix-round test.flake_retry row the flake-incident gardener reads"
-      proof: "unit test: W1-T9561: a rerouted flake leaves a fix-round test.flake_retry row"
+      proof: "unit test: W1-T9561: a rerouted flake leaves a fix-round flake retry row"
   falsifier: |
     Drop the attribution fact from decideFixOutcomeAction, which is today's behaviour. The first test's fixture is
     #11702's shape: diff learnings/ci.yaml plus test/fixtures/golden-verdicts/... plus test/golden-verdicts.test.ts,
