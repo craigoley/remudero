@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 const { summarizeReports, verifyControl, qualifySemgrep, main } = await import(
-  new URL("../scripts/qualify-semgrep-native.mjs", import.meta.url).href);
+  new URL("../scripts/semgrep-native-contract-ratchet.mjs", import.meta.url).href);
 const ruleId = "rmd-native-qualification-sentinel";
 function reports(paths = ["old.js", "new.js"]) {
   return {
@@ -76,11 +76,14 @@ fs.writeFileSync(value('--sarif-output'), JSON.stringify(data.sarif));
 process.exit(invalid ? 4 : 0);
 `);
     chmodSync(command, 0o755);
-    const receipt = qualifySemgrep({ command });
+    const receipt = qualifySemgrep({ command, enginePath: command });
     assert.equal(receipt.fullControl.findingCount, 2);
     assert.equal(receipt.baselineControl.findingCount, 1);
     assert.equal(receipt.invalidControl.exitCode, 4);
     assert.notEqual(receipt.base, receipt.head, "real isolated git baseline and head differ");
+    assert.match(receipt.enginePayload.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(receipt.enginePayload.bytes > 0, "fake payload identity is observed, not native proof");
+    assert.throws(() => qualifySemgrep({ command, enginePath: "" }), /engine payload path/);
     writeFileSync(command, "#!/usr/bin/env node\nconsole.log('wrong-version');\n");
     assert.throws(() => qualifySemgrep({ command }), /installed scanner version differs/);
     assert.throws(() => qualifySemgrep({ command: join(root, "absent") }), /ENOENT/);

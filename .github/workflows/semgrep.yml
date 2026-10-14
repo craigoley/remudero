@@ -79,12 +79,16 @@ jobs:
             -r .github/semgrep/requirements.txt
           "$VENV/bin/python" -m pip check
           test "$("$VENV/bin/semgrep" --version)" = "1.180.0"
+          # Resolve the same CE binary as this locked package; refuse a system-PATH fallback.
+          ENGINE="$("$VENV/bin/python" -c 'from semgrep.semgrep_core import SemgrepCore; print(SemgrepCore.executable_path())')"
+          case "$ENGINE" in "$VENV"/*) ;; *) echo "CE engine escaped locked environment" >&2; exit 1 ;; esac
+          printf 'SEMGREP_QUALIFICATION_ENGINE=%s\n' "$ENGINE" >> "$GITHUB_ENV"
           printf '%s\n' "$VENV/bin" >> "$GITHUB_PATH"
 
       - name: Qualify native engine, baseline and invalid-rule refusal
         # Original synthetic rule only. Fail closed on broken scanner/format/baseline behavior;
         # this does not turn repository findings into a blocking policy.
-        run: node scripts/qualify-semgrep-native.mjs --receipt "$RUNNER_TEMP/semgrep-qualification.json"
+        run: node scripts/semgrep-native-contract-ratchet.mjs --receipt "$RUNNER_TEMP/semgrep-qualification.json"
 
       - name: Run Semgrep
         id: scan
@@ -119,7 +123,7 @@ jobs:
         env:
           SCAN_EXIT: ${{ steps.scan.outputs.exit_code }}
         run: |
-          node scripts/qualify-semgrep-native.mjs \
+          node scripts/semgrep-native-contract-ratchet.mjs \
             --json "$RUNNER_TEMP/semgrep-scan.json" --sarif semgrep.sarif --exit "$SCAN_EXIT" \
             --receipt "$RUNNER_TEMP/semgrep-scan-inventory.json"
 

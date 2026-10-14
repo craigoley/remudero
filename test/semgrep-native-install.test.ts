@@ -147,7 +147,7 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
 test("native Semgrep qualification runs in the existing Scan job before the advisory repository scan", () => {
   const steps = load().jobs.semgrep!.steps;
   const qualify = step("Qualify native engine, baseline and invalid-rule refusal");
-  assert.match(qualify.run!, /node scripts\/qualify-semgrep-native\.mjs --receipt "\$RUNNER_TEMP\/semgrep-qualification\.json"/);
+  assert.match(qualify.run!, /node scripts\/semgrep-native-contract-ratchet\.mjs --receipt "\$RUNNER_TEMP\/semgrep-qualification\.json"/);
   assert.equal(qualify["continue-on-error"], undefined, "broken control behavior must not be reported as qualified");
   // step() reparses the document; compare names in this physical source ordering.
   assert.ok(steps.findIndex(candidate => candidate.name === qualify.name) <

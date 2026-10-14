@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Cheap controls inside the existing Scan job, not a new runner, registry mirror or policy.
+// Native scanner contract non-regression ratchet, protected by the existing *-ratchet instrument
+// surface. Cheap controls inside Scan, not a new runner, registry mirror or findings policy.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -71,7 +72,7 @@ export function verifyControl(report, sarif, expectedPaths) {
   return summary;
 }
 
-export function qualifySemgrep({ command = "semgrep" } = {}) {
+export function qualifySemgrep({ command = "semgrep", enginePath = process.env.SEMGREP_QUALIFICATION_ENGINE } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-semgrep-qualification-"));
   const repo = join(root, "fixture");
   const deadline = Date.now() + 300_000;
@@ -100,6 +101,9 @@ export function qualifySemgrep({ command = "semgrep" } = {}) {
     const version = run(command, ["--version"]);
     assert.equal(version.status, 0, "scanner version command failed");
     assert.equal(version.stdout.trim(), VERSION, "installed scanner version differs from lock");
+    assert.ok(enginePath, "actual Community Edition engine payload path is required");
+    const engineBytes = readFileSync(enginePath);
+    assert.ok(engineBytes.length > 0, "actual engine payload is empty");
     const rule = join(root, "rule.json");
     const ruleBytes = JSON.stringify({ rules: [{ id: RULE_ID, languages: ["javascript"],
       severity: "WARNING", message: "original disposable qualification sentinel", pattern: "rmdHarnessSentinel($X)" }] });
@@ -137,6 +141,7 @@ export function qualifySemgrep({ command = "semgrep" } = {}) {
     assert.equal(git(["status", "--porcelain"]), "", "baseline fixture must stay clean");
     return { schema: "rmd-semgrep-native-qualification-v1", version: VERSION,
       runtime: { node: process.version, platform: process.platform, arch: process.arch },
+      enginePayload: { sha256: digest(engineBytes), bytes: engineBytes.length },
       controlRuleSha256: digest(ruleBytes), base, head, fullControl, baselineControl,
       invalidControl: { exitCode: bad.result.status, errorCount: invalidReport.errors.length },
       authority: "original synthetic controls only; no registry-rule redistribution, Pro engine or pilot activation",
@@ -150,7 +155,7 @@ export function qualifySemgrep({ command = "semgrep" } = {}) {
 export function main(argv = process.argv.slice(2), log = console.log) {
   const { values, positionals, helpRequested } = parseArgv(argv, {
     receipt: { type: "string" }, json: { type: "string" }, sarif: { type: "string" }, exit: { type: "string" },
-  }, { helpText: "Usage: qualify-semgrep-native.mjs --receipt PATH [--json PATH --sarif PATH --exit CODE]" });
+  }, { helpText: "Usage: semgrep-native-contract-ratchet.mjs --receipt PATH [--json PATH --sarif PATH --exit CODE]" });
   if (helpRequested) return 0;
   assert.equal(positionals.length, 0, "unexpected qualification arguments");
   assert.ok(values.receipt, "immutable receipt path is required");
