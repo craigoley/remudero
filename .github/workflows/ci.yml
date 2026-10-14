@@ -1931,14 +1931,28 @@ jobs:
           fi
           for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
+            if [ ! -s "coverage-shards/coverage-shard-${SHARD}/lcov.info" ]; then
+              echo "coverage-ratchet: shard ${SHARD} is missing its independently generated lcov line evidence."
+              exit 1
+            fi
             if ! find "$RAW_DIR" -maxdepth 1 -type f \( -name 'coverage-bundle-*.json' -o -name 'coverage-corpus-*.json' -o -name 'coverage-premapped-*.json' \) -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
             fi
           done
           mkdir -p coverage
+          # Each shard's native LCOV is its independent line-hit receipt; union DA counts by max.
+          # Keep function/branch indexes from the ordered raw-range merge below.
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
             --shard-count 8 \
+            --line-lcov coverage-shards/coverage-shard-1/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-2/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-3/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-4/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-5/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-6/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-7/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-8/lcov.info \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
             coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
             coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
