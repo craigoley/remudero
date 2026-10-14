@@ -127,6 +127,7 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
   // Keep canonical raw-line fingerprints, never raw lines or provider/config payloads (W1-T8484).
   const stream = openLedgerUnion(stateDir, { since: runtime.configuredAt, dedupe: false,
     onUnreadArchive: () => { complete = false; }, onUnreadLive: () => { complete = false; },
+    onUnreadDirectory: () => { complete = false; },
     onMalformedRow: () => { complete = false; }, onLiveRead: () => { liveObserved = true; },
     onAcceptedRecord: (row, raw) => {
       const parent = row.step === "garden.lifecycle" || row.step === "garden.pass";
