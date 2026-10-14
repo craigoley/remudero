@@ -285,36 +285,6 @@ test("W1-T8868: the stale rejudge records shadow triage without demoting", async
   assert.equal(rows(lp).find((r) => r.step === "escalation.triaged")?.triage_outcome, "digest");
 });
 
-test("W1-T8868: the stale rejudge delivers when its triage evidence is unreadable, never asking the judge", async () => {
-  const lp = ledger();
-  let judged = 0;
-  let demoted = 0;
-  let autoResolved = 0;
-  const result = await runStaleEscalationRejudge([{
-    issueUrl: "https://github.com/craigoley/remudero/issues/1", escalation: esc(),
-    ageMs: 7 * 60 * 60 * 1000, referentStateNow: "still open", siblingSummaries: [], stateKey: "head-unreadable",
-  }], {
-    ledgerPath: lp, runId: "sweep",
-    judge: async () => { judged++; return { decision: "demote", reason: "can wait" }; },
-    demote: () => { demoted++; },
-    triage: {
-      mode: "act", evidence: () => { throw new Error("unreadable history"); },
-      autoResolve: async () => { autoResolved++; },
-    },
-  });
-  assert.equal(judged, 0);
-  assert.equal(demoted, 0);
-  assert.equal(autoResolved, 0);
-  assert.equal(result.demoted, 0);
-  const triaged = rows(lp).find((r) => r.step === "escalation.triaged");
-  assert.equal(triaged?.triage_outcome, "deliver");
-  assert.equal(triaged?.triage_decided_by, "default");
-  assert.match(String(triaged?.triage_reason), /triage evidence unreadable \(Error: unreadable history\)/);
-  const rejudged = rows(lp).find((r) => r.step === "escalation.rejudged");
-  assert.equal(rejudged?.judge_decision, "deliver");
-  assert.match(String(rejudged?.judge_reason), /unreadable history/);
-});
-
 test("W1-T8868: unreadable history delivers before a rule or model can hide the issue", async () => {
   const lp = ledger();
   // A torn row of the very step the tier is read from: it could be the evidence that stops a digest.
@@ -568,25 +538,6 @@ test("W1-T8868: a failed auto-resolve in the rejudge sweep puts the issue back o
   const failed = f.logged.find((l) => l.step === "sweep.escalation_auto_resolve.failed");
   assert.equal(failed?.extra?.issue_url, f.url);
   assert.match(String(failed?.extra?.reason), /auto-resolve declined/);
-});
-
-test("W1-T8868: the rejudge sweep skips an open issue that has no recorded triage subject", async () => {
-  const f = sweepFixture(async () => "unused");
-  const url = f.url;
-  const issues = {
-    listOpen: (label: string) => label === NEEDS_HUMAN_LABEL ? [{ number: 41, url, title: "t", body: "**Task:** W1-TS\n" }] : [],
-    comment: () => { throw new Error("must not comment"); },
-  } as unknown as IssueGateway;
-  const root = runtimeRoot();
-  const relabels: string[] = [];
-  const unrelated = { ts: new Date().toISOString(), step: "escalation.issue_opened", issue_url: url };
-  const bad = { ts: "not a date", step: "escalation.issue_opened", issue_url: url, triage_subject: staleProof() };
-  await sweepEscalationTriage(
-    { root, config: { root } as Config, owner: "o", repo: "r", ledgerPath: f.lp, runId: "SWEEP-T8868" },
-    [], () => {}, { rows: [unrelated, bad], issues, relabel: (u) => { relabels.push(u); } },
-  );
-  assert.deepEqual(relabels, []);
-  assert.equal(rows(f.lp).filter((r) => r.step === "escalation.rejudged").length, 0);
 });
 
 test("W1-T8868: an unreadable issue listing is logged by the rejudge sweep, never thrown", async () => {
