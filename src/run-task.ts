@@ -1860,7 +1860,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { terminalUnionScans } from "./lib/sweep.js";
+import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -48349,7 +48349,8 @@ export function lightPassActionable(
   // W1-T8086: the ordinary own-red lane uses the existing per-claim fix-capacity admission.
   ownRedFixAllowed: boolean = false,
 ): boolean {
-  if (disposition === "post-review") return true;
+  // W1-T9558: all three review-lane dispositions; the cheap modes otherwise waited on a full pass.
+  if (isReviewLaneDisposition(disposition)) return true;
   if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
   // `blocked-fixable` also admits requeues and capacity-gated own-red fixes; `conflicted`'s action is
