@@ -141,10 +141,13 @@ function setWritable(path: string, writable: boolean): void {
 
 function verifyPackages(checkout: string, modules: string): void {
   const pkg = JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")) as Manifest;
-  const lock = JSON.parse(readFileSync(join(checkout, "package-lock.json"), "utf8")) as { packages?: Record<string, { link?: boolean }> };
+  const lock = JSON.parse(readFileSync(join(checkout, "package-lock.json"), "utf8")) as { packages?: Record<string, { link?: boolean; version?: string }> };
   for (const name of Object.keys({ ...pkg.dependencies, ...pkg.devDependencies })) {
     if (lock.packages?.[`node_modules/${name}`]?.link) continue;
     if (!existsSync(join(modules, name, "package.json"))) throw new Error(`dependency seed is missing ${name}`);
+    const expected = lock.packages?.[`node_modules/${name}`]?.version;
+    const actual = JSON.parse(readFileSync(join(modules, name, "package.json"), "utf8")) as { version?: string };
+    if (expected && expected !== actual.version) throw new Error(`dependency seed version mismatch for ${name}`);
   }
 }
 

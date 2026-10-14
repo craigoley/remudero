@@ -140,6 +140,8 @@ test("dependency seed fails closed on mismatched or incomplete donors and instal
   assert.throws(() => materializeDependencySeed(checkout, opts), /do not match/);
   assert.ok(!existsSync(join(checkout, "node_modules")));
   writeFileSync(join(donor, "package.json"), readFileSync(join(checkout, "package.json")));
+  writeFileSync(join(donor, "node_modules", "dep", "package.json"), '{"name":"dep","version":"2.0.0"}');
+  assert.throws(() => materializeDependencySeed(checkout, opts), /version mismatch/);
   rmSync(join(donor, "node_modules", "dep"), { recursive: true });
   assert.throws(() => materializeDependencySeed(checkout, opts), /missing dep/);
   assert.throws(() => materializeDependencySeed(checkout, { ...opts, sourceDir: undefined, runInstall: () => { throw new Error("install failed"); } }), /install failed/);
@@ -152,7 +154,7 @@ test("dependency seed npm installs disable lifecycle scripts and publish only a 
     installs++;
     assert.deepEqual(args, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
     mkdirSync(join(stage, "node_modules", "dep"), { recursive: true });
-    writeFileSync(join(stage, "node_modules", "dep", "package.json"), '{"name":"dep"}');
+    writeFileSync(join(stage, "node_modules", "dep", "package.json"), '{"name":"dep","version":"1.0.0"}');
   } });
   assert.equal(installs, 1);
   if (result.status === "materialized") assert.equal(result.installed, true);
@@ -258,3 +260,21 @@ test("dependency seed concurrent builders install once and never expose a partia
     assert.equal([a.installed, b.installed].filter(Boolean).length, 1);
   } finally { writable(root); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("dependency seed installer publishes complete immutable tools and preserves existing configuration", () => fixture((root) => {
+  const home = join(root, "home"); mkdirSync(home);
+  const installer = join(process.cwd(), "deploy", "install-dependency-seeds.sh");
+  const env = { ...process.env, HOME: home, RMD_SEED_NODE: process.execPath, RMD_DEPENDENCY_SEED_ROOT: join(home, "store") };
+  execFileSync("bash", [installer], { env });
+  const wrapper = join(home, ".local", "bin", "remudero-dependencies");
+  const saved = readFileSync(wrapper), config = readFileSync(dependencySeedConfigPath(home));
+  const versions = join(home, ".local", "share", "remudero", "dependency-seed-tools");
+  const version = readdirSync(versions).find(name => /^[a-f0-9]{64}$/.test(name))!;
+  assert.ok(existsSync(join(versions, version, "src", "lib", "clock.ts")));
+  execFileSync("bash", [installer], { env });
+  assert.deepEqual(readFileSync(wrapper), saved);
+  assert.deepEqual(readFileSync(dependencySeedConfigPath(home)), config);
+  rmSync(join(versions, version, "scripts", "dependency-seeds.mjs"));
+  assert.throws(() => execFileSync("bash", [installer], { env, stdio: "pipe" }), /Command failed/);
+  assert.deepEqual(readFileSync(wrapper), saved);
+}));
