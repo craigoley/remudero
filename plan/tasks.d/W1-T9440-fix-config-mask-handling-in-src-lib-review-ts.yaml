@@ -1,0 +1,23 @@
+- id: W1-T9440
+  title: Fix config mask handling in src/lib/review.ts
+  repo: remudero
+  depends_on:
+    - W1-T9a
+    - W1-T72
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-07 follow-up on https://github.com/craigoley/remudero/pull/9838, ratified via
+    rmd approve:
+  
+    config mask handling touches both config and review subsystems
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/review.ts
+  acceptance:
+    - claim: review.ts applies config mask correctly for production paths
+      proof: "unit test: config mask respects production path in review.ts"
+  origin: architect
