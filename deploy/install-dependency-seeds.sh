@@ -36,11 +36,11 @@ for (const file of ['src/lib/dependency-seeds.ts','src/lib/clock.ts','scripts/de
 JS
 # A stable wrapper does not depend on the source checkout surviving janitor cleanup.
 "$NODE" - "$HOME/.local/bin/remudero-dependencies" "$NODE" "$TOOL/scripts/dependency-seeds.mjs" <<'JS'
-const fs = require('node:fs'), {randomUUID}=require('node:crypto');
+const fs = require('node:fs'), {randomUUID}=require('node:crypto'), {dirname}=require('node:path');
 const [dest, node, tool] = process.argv.slice(2);
 const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
 const stage=dest+'.'+randomUUID();
-fs.writeFileSync(stage, '#!/bin/sh\nexec ' + quote(node) + ' ' + quote(tool) + ' "$@"\n', {mode: 0o755,flag:'wx'});
+fs.writeFileSync(stage, '#!/bin/sh\nPATH=' + quote(dirname(node)) + ':"$PATH"\nexport PATH\nexec ' + quote(node) + ' ' + quote(tool) + ' "$@"\n', {mode: 0o755,flag:'wx'});
 fs.renameSync(stage,dest);
 JS
 if [ ! -e "$HOME/.config/remudero/dependency-seeds.json" ]; then

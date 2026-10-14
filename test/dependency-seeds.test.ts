@@ -282,6 +282,11 @@ test("dependency seed installer publishes complete immutable tools and preserves
   assert.ok(existsSync(join(versions, version, "src", "lib", "clock.ts")));
   assert.throws(() => execFileSync(process.execPath, [join(versions, version, "scripts", "dependency-seeds.mjs"), "enable"], { env, stdio: "pipe" }), /existing seed configuration/);
   assert.deepEqual(readFileSync(dependencySeedConfigPath(home)), config);
+  const fresh = join(home, "fresh"); mkdirSync(fresh);
+  writeFileSync(join(fresh, "package.json"), '{"name":"empty","version":"1.0.0"}');
+  writeFileSync(join(fresh, "package-lock.json"), '{"name":"empty","version":"1.0.0","lockfileVersion":3,"packages":{}}');
+  const cold = JSON.parse(execFileSync(wrapper, ["prime", fresh], { env: { ...env, PATH: "/usr/bin:/bin", npm_config_offline: "true" }, encoding: "utf8" }));
+  assert.equal(cold.status, "materialized", "SSH/cron's minimal PATH still resolves the pinned npm toolchain");
   execFileSync("bash", [installer], { env });
   assert.deepEqual(readFileSync(wrapper), saved);
   assert.deepEqual(readFileSync(dependencySeedConfigPath(home)), config);
