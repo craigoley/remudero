@@ -1941,8 +1941,6 @@ jobs:
             fi
           done
           mkdir -p coverage
-          # Each shard's native LCOV is its independent line-hit receipt; union DA counts by max.
-          # Keep function/branch indexes from the ordered raw-range merge below.
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
             --shard-count 8 \
             --line-lcov coverage-shards/coverage-shard-1/lcov.info \
