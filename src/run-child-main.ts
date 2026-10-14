@@ -171,7 +171,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
           onBackgroundWork: (work: Promise<unknown>) => { background.push(work); },
         })) };
     } catch (error) {
-      outcome = { error };
+      outcome = { error }; // Carried, not erased: it is rethrown as the run's failure, or recorded as the abort that caused it, below.
     } finally {
       clearInterval(beat);
     }

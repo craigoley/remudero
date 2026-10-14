@@ -18117,11 +18117,9 @@ async function runTask(
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
      *  `rmd run-task` keeps the ambient helper byte-for-byte. */
     gitCredentialSocketPath?: string;
-    /** W1-T9085: a run child's cancel, chained into every worker spawn's own `signal` (W1-T5659): an abort ends the worker query at its
-     *  next safe point and `withWorkerGroupTeardown` tears its process group down. Omitted, no spawn gets one. */
+    /** W1-T9085: a run child's cancel, chained into every worker spawn's `signal` (W1-T5659). Omitted, no spawn gets one. */
     abortSignal?: AbortSignal;
-    /** W1-T9085: receives the fire-and-forget work this run starts and does not await (the paired trial, the prospective A/A pair), so a
-     *  run child can await it before its terminal status. Omitted, the work is detached exactly as before. */
+    /** W1-T9085: receives the fire-and-forget paired-trial work so a run child can await it. Omitted, it is detached as before. */
     onBackgroundWork?: (work: Promise<unknown>) => void;
   } = {},
 ): Promise<RunResult> {
@@ -18488,7 +18486,6 @@ async function runTask(
     }
     throw e;
   }
-  // W1-T9085: both start unawaited and run past this function's return; a run child hands them to `onBackgroundWork` to await them.
   const detach = (work: Promise<unknown>): void => opts.onBackgroundWork?.(work);
   detach(runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
     ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo), spawn: rawSpawn,
@@ -38923,6 +38920,41 @@ export function daemonMemoryTelemetryReader(
   return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
 
+export interface RunInChildInput {
+  taskId: string;
+  config: Config;
+  repoDir: string;
+  allowStale: boolean;
+  options: RunChildSpecOptions;
+  planSync: (options: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
+export async function runInChildWhenOn(
+  input: RunInChildInput,
+  seams: { readMode?: () => RunChildMode; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+): Promise<{ settled: Promise<RunResult> } | undefined> {
+  const mode = runChildModeIsOn(seams.readMode);
+  const fallback = (reason: string): undefined => {
+    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+    return undefined;
+  };
+  if (mode.unreadable !== undefined) return fallback(`sweep.runChild.mode unreadable: ${mode.unreadable}`);
+  if (!mode.on) return undefined;
+  if (input.options.skipGitSync) return fallback("an explicit --plan is read literally; the run stays in-process");
+  const start = seams.spawn ?? ((spawnInput, spawnPorts) => spawnRunChild(spawnInput, spawnPorts));
+  const launched = await start({
+    taskId: input.taskId, stateRoot: join(input.config.root, "state"), repoDir: input.repoDir, root: input.config.root,
+    log: input.log, options: input.options,
+    plan: async () => input.planSync({ allowStale: input.allowStale }),
+  }, {
+    abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), Date.now()).yieldCost.ms },
+    ...seams.ports,
+  });
+  return launched.started ? { settled: launched.settled } : undefined;
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -39959,18 +39991,11 @@ export async function daemonCommand(
         // refuses.
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
-          // W1-T9085: under sweep.runChild.mode on the run executes in a detached child and this promise settles from its status file.
-          // A child that cannot be started (no engine tree, an explicit --plan, an unreadable policy) runs the task in-process as before.
-          const childMode = runChildModeIsOn();
-          if (childMode.unreadable !== undefined) log(RUN_CHILD_FALLBACK_STEP, { task_id: taskId, reason: `sweep.runChild.mode unreadable: ${childMode.unreadable}` });
-          if (childMode.on && childOptions.skipGitSync) log(RUN_CHILD_FALLBACK_STEP, { task_id: taskId, reason: "an explicit --plan is read literally; the run stays in-process" });
-          if (childMode.on && !childOptions.skipGitSync) {
-            const launched = await spawnRunChild({
-              taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, log, options: childOptions,
-              plan: async () => planSyncCoalescer.sync({ allowStale }),
-            }, { abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(config))), Date.now()).yieldCost.ms } });
-            if (launched.started) return launched.settled;
-          }
+          // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
+          const inChild = await runInChildWhenOn({
+            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
+          });
+          if (inChild) return inChild.settled;
           // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
           // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
           const admittedPlan = createAdmittedPlanSlot();
@@ -57023,7 +57048,10 @@ import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./li
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
 import {
   RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
+  type SpawnRunChildPorts,
 } from "./lib/run-child.js";
+import type { RunChildMode } from "./lib/policy.js";
+import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

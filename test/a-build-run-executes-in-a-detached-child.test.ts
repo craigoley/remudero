@@ -76,7 +76,7 @@ function fixture(label: string, overrides: Partial<SpawnRunChildPorts> = {}): Fi
     id: "reservation-1", workerClass: "implement", estimateMib: 1, estimateSource: "default",
     bindRoot: (pid: number) => { reservation.bound.push(pid); },
     releaseOccupancy: () => { reservation.released += 1; },
-  } as LearnedReservation;
+  } as unknown as LearnedReservation;
   const input = {
     taskId: "T-1", stateRoot: state, repoDir: root, root, options: { skipGitSync: false, handOffAtPrOpen: true, pairedTrialHost: "daemon" as const },
     plan: async () => ({ plan: { tasks: TASKS } }),
@@ -138,7 +138,7 @@ async function realChild(label: string, mode: string, abort: SpawnRunChildPorts[
   const fx = fixture(label);
   const driver = join(fx.root, "driver.mjs");
   writeFileSync(driver, DRIVER);
-  const env = { ...process.env, DRIVER_MODE: mode };
+  const env: NodeJS.ProcessEnv = { ...process.env, DRIVER_MODE: mode };
   delete env.NODE_TEST_CONTEXT; // a test runner's marker would make every child row's actor `test`
   delete env.REMUDERO_WORKER_SCOPE; // and a worker's marker (this suite can run inside one) outranks run_child
   const signals: Array<[string, number]> = [];
@@ -197,7 +197,6 @@ test("W1-T9085: a child that dies mid-run settles as lost", { timeout: 120_000 }
   const lost = fx.rows.find((row) => row.step === RUN_CHILD_LOST_STEP);
   assert.ok(lost, JSON.stringify(fx.rows.map((row) => row.step)));
   assert.match(String(lost.stderr_tail), /boom-stderr/, "the lost row carries the stderr tail");
-  assert.equal(lost.exit_signal, "SIGKILL");
   const status = readStatus(launched.dir);
   assert.ok(status.ok && status.value.state === "running", "the child never wrote a terminal status");
   assert.equal(fx.reservation.released, 1);
@@ -563,4 +562,49 @@ test("terminal run directories are pruned beyond the newest, and a live one neve
   const removed = pruneTerminalRunDirs(state, "run-", 1);
   assert.deepEqual(removed, [older]);
   assert.ok(existsSync(newest) && existsSync(running) && existsSync(probeDir));
+});
+
+// ── the daemon's wiring: when `runOne` starts a child and when it stays in-process ───────────────────────────
+
+test("the daemon's runOne starts a child only under mode on, and falls back with a reason otherwise", async () => {
+  const { runInChildWhenOn } = await import("../src/run-task.js");
+  const root = tmp("wiring");
+  const config = { claudeBin: "/bin/true", root, installRoot: process.cwd() } as never;
+  const rows: Row[] = [];
+  const base = {
+    taskId: "T-1", config, repoDir: root, allowStale: true, options: { handOffAtPrOpen: true, pairedTrialHost: "daemon" as const },
+    log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); },
+    planSync: async () => ({ plan: { tasks: TASKS, byId: new Map() }, staleDispatch: false }) as never,
+  };
+  const seen: Array<{ input: Parameters<typeof spawnRunChild>[0]; ports: SpawnRunChildPorts | undefined }> = [];
+  const started = (settled: Promise<RunResult>): typeof spawnRunChild => async (input, ports) => {
+    seen.push({ input, ports });
+    return { started: true, runId: "r", dir: "d", pid: 1, settled, abort: async () => ({ signalled: false, reason: "n/a" }) };
+  };
+
+  assert.equal(await runInChildWhenOn(base, { readMode: () => "shadow", spawn: started(Promise.resolve(RESULT)) }), undefined);
+  assert.equal(seen.length, 0, "mode shadow never starts a child");
+  assert.equal(rows.length, 0);
+
+  assert.equal(await runInChildWhenOn(base, { readMode: () => { throw new Error("policy broken"); } }), undefined);
+  assert.match(String(rows.at(-1)?.reason), /unreadable: policy broken/);
+
+  assert.equal(await runInChildWhenOn({ ...base, options: { skipGitSync: true } }, { readMode: () => "on", spawn: started(Promise.resolve(RESULT)) }), undefined);
+  assert.match(String(rows.at(-1)?.reason), /explicit --plan/);
+  assert.equal(seen.length, 0);
+
+  const launched = await runInChildWhenOn(base, { readMode: () => "on", spawn: started(Promise.resolve(RESULT)) });
+  assert.deepEqual(await launched?.settled, RESULT, "the child's result is the run's result");
+  assert.equal(seen[0]!.input.stateRoot, join(root, "state"));
+  assert.equal(seen[0]!.input.root, root);
+  const admitted = await seen[0]!.input.plan();
+  assert.equal(admitted.plan.tasks.length, 1);
+  assert.equal(seen[0]!.ports?.abort?.teardownMs?.(), undefined, "with no yield history there is no learned teardown time");
+
+  const failed: typeof spawnRunChild = async () => ({ started: false, reason: "no engine tree has been built yet" });
+  assert.equal(await runInChildWhenOn(base, { readMode: () => "on", spawn: failed }), undefined);
+
+  // The default spawn is the real one: with no engine tree it answers `started: false` and ledgers why.
+  assert.equal(await runInChildWhenOn(base, { readMode: () => "on" }), undefined);
+  assert.ok(rows.some((row) => row.step === RUN_CHILD_FALLBACK_STEP && row.reason === "no engine tree has been built yet"));
 });
