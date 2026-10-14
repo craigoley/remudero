@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { prepareGardenTaskIds, runGarden, runGardenAsync, type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter } from "../src/lib/gardener.js";
+import { prepareGardenTaskIds, releaseGardenTaskIds, runGarden, runGardenAsync, type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter } from "../src/lib/gardener.js";
 import { fileConsumerVia } from "../src/lib/host-resource-gardener.js";
+import { runSelectorShadowGardener } from "../src/lib/selector-shadow-gardener.js";
 import { RESERVATION_RELEASED_STEP, RESERVATION_RELEASE_SKIPPED_STEP, releaseTaskIdReservation, releaseTaskIdReservationAsync } from "../src/lib/task-id-release.js";
 import { gitRemoteRefReserver, gitReservationRunnerAsync, reserveTaskIdRemote, taskIdReservationRef } from "../src/lib/task-id-reservation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -193,4 +194,70 @@ test("a host-resource filing whose PR does not open releases its reserved id", a
   assert.equal(url, undefined);
   assert.deepEqual(f.released.map(([id]) => id), ["W1-T9641"]);
   assert.match(f.released[0]![1], /^host-resource gardener: /);
+});
+
+test("a reservation release that cannot complete leaves the claim and says why, never throwing", async () => {
+  const sha = "a".repeat(40);
+  const rows: Row[] = [];
+  const log = (step: string, fields: Record<string, unknown>) => void rows.push({ step, fields });
+  const calls: string[][] = [];
+  const answer = (listed: { status: number; stdout: string; stderr: string }, pushed?: { status: number; stdout: string; stderr: string }) =>
+    (args: string[]) => (calls.push(args), args[0] === "ls-remote" ? listed : args[0] === "remote" ? { status: 0, stdout: "/tmp/local-origin.git\n", stderr: "" } : pushed!);
+  const held = { taskId: "W1-T9651", sha };
+  const opts = { reason: "refused", lane: "garden", log };
+  assert.equal(releaseTaskIdReservation(answer({ status: 0, stdout: "", stderr: "" }), { taskId: "W1-T9651", sha: "" }, opts), "failed");
+  assert.deepEqual(calls, [], "a malformed sha is refused before any git call");
+  assert.equal(releaseTaskIdReservation(answer({ status: 128, stdout: "", stderr: "fatal: could not read from remote repository" }), held, opts), "unreadable");
+  const listed = { status: 0, stdout: `${sha}\trefs/rmd-id/W1-T9651\n`, stderr: "" };
+  assert.equal(releaseTaskIdReservation(answer(listed, { status: 1, stdout: "", stderr: "fatal: the remote end hung up unexpectedly" }), held, opts), "failed");
+  assert.equal(releaseTaskIdReservation(() => { throw new Error("spawn EAGAIN"); }, held, opts), "failed");
+  assert.equal(await releaseTaskIdReservationAsync(async () => { throw new Error("spawn EAGAIN"); }, held, opts), "failed");
+  assert.deepEqual(rows.map((r) => [r.step, r.fields.outcome]), [
+    [RESERVATION_RELEASE_SKIPPED_STEP, "failed"], [RESERVATION_RELEASE_SKIPPED_STEP, "unreadable"], [RESERVATION_RELEASE_SKIPPED_STEP, "failed"],
+    [RESERVATION_RELEASE_SKIPPED_STEP, "failed"], [RESERVATION_RELEASE_SKIPPED_STEP, "failed"],
+  ]);
+  assert.match(String(rows[3]!.fields.detail), /spawn EAGAIN/);
+});
+
+test("an awaited garden landing that rejects keeps its ids, and one failed release never stops the others", async (t) => {
+  const rejected = gardenFixture(t, (async () => { throw new Error("pr create failed after the push"); }) as unknown as GardenCheckout["land"]);
+  await runGardenAsync(rejected.spec, rejected.deps);
+  assert.deepEqual(rejected.released, [], "an awaited landing that rejected may have pushed");
+
+  const notOpened = gardenFixture(t, (async () => undefined) as unknown as GardenCheckout["land"]);
+  await runGardenAsync(notOpened.spec, notOpened.deps);
+  assert.deepEqual(notOpened.released.map(([id]) => id), ["W1-T9631"], "an awaited landing that did not open releases");
+
+  const tried: string[] = [];
+  const mint: GardenTaskIdMinter = Object.assign(() => `W1-T${9660 + tried.length}`, {
+    release: (id: string) => { tried.push(id); if (tried.length === 1) throw new Error("release failed"); },
+  });
+  const ws = { branch: "scout-garden-fixture", land: () => undefined };
+  prepareGardenTaskIds(ws, 2, mint);
+  assert.equal(releaseGardenTaskIds(ws, "refused", false), undefined);
+  assert.equal(tried.length, 2, "the second id was still released after the first threw");
+  releaseGardenTaskIds(ws, "refused again", false);
+  assert.equal(tried.length, 2, "released ids are forgotten");
+});
+
+test("a selector-shadow filing refused before its PR opens releases its reserved id", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selector-release-`));
+  for (const dir of ["test", "state", join("plan", "tasks.d")]) mkdirSync(join(root, dir), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const log = Array.from({ length: 8 }, (_, i) =>
+    `coverage-shard (${i + 1}/8)\tAFFECTED-SUITES-SHADOW: ${JSON.stringify({
+      fullRun: false, floorSize: 1, narrowSize: 0,
+      failures: i === 0 ? [{ file: "test/cold.test.ts", floor: "selected", narrow: "missed" }] : [],
+    })}\ncoverage-shard (${i + 1}/8)\tSELECTOR-SHADOW-JOB: conclusion=${i === 0 ? "failure" : "success"}`,
+  ).join("\n");
+  const released: Array<[string, string]> = [];
+  const mint = Object.assign(() => "W1-T9671", { releaseAsync: async (id: string, reason: string) => void released.push([id, reason]) });
+  const deps = {
+    stateDir: join(root, "state"), repoRoot: root, log: () => {},
+    openWorkspace: () => ({ root, branch: "selector-1", land: () => "https://github.com/acme/remudero/pull/1", dispose: () => {} }),
+  };
+  await assert.rejects(runSelectorShadowGardener(deps as never, () => [{ id: 1, headSha: "head-1", prNumber: 1, log }], () => ["src/lib/status.ts"], mint, () => []), /machine-filing admission/);
+  assert.deepEqual(released.map(([id]) => id), ["W1-T9671"]);
+  assert.match(released[0]![1], /^selector-shadow gardener: .*machine-filing admission/);
+  rmSync(root, { recursive: true, force: true });
 });
