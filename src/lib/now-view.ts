@@ -898,6 +898,8 @@ export function createNowView(opts: NowViewOptions): {
   prepare(ctx: NowViewContext, more: () => boolean): boolean;
   stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
+  /** W1-T9403: each held board projection, by instance: the rows it keeps and their source bytes. */
+  heldSizes(): Record<string, { rows: number; keptBytes: number }>;
   perInstance: true;
   readPaced: true;
 } {
@@ -1382,6 +1384,9 @@ export function createNowView(opts: NowViewOptions): {
     stages(ctx) {
       const out = Object.assign({}, ...ctx.instances.map(({ state }) => ran.get(state.instance) ?? {})) as Record<string, number>;
       return Object.keys(out).length > 0 ? out : undefined;
+    },
+    heldSizes() {
+      return Object.fromEntries([...held].map(([instance, h]) => [instance, h.board.size()]));
     },
     /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {
