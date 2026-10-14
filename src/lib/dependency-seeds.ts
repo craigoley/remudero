@@ -301,12 +301,10 @@ export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?
         const currentNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
         if (mountNamespace !== currentNamespace) { reason = "foreign or unverified consumer mount namespace"; continue; }
         const marker = join(checkout, "node_modules", CONSUMER_MARKER);
-        let present = false;
-        try { lstatSync(marker); present = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-        if (present) {
+        try {
           const ref = JSON.parse(readFileSync(marker, "utf8")) as { seed: string };
           if (ref.seed === seed) reason = "referenced by checkout";
-        }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       }
       if (!reason) {
         if (!opts.isOpen) reason = "open-file scan unavailable";

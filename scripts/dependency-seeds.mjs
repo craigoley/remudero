@@ -18,8 +18,8 @@ try {
     if (!isAbsolute(root)) throw new Error('seed root must be absolute');
     const file = dependencySeedConfigPath();
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    if (existsSync(file)) throw new Error('existing seed configuration must be reviewed before replacing it');
-    writeFileSync(file, JSON.stringify({ enabled: true, root }), { mode: 0o600, flag: 'wx' });
+    try { writeFileSync(file, JSON.stringify({ enabled: true, root }), { mode: 0o600, flag: 'wx' }); }
+    catch (error) { if (error.code === 'EEXIST') throw new Error('existing seed configuration must be reviewed before replacing it'); throw error; }
     console.log(JSON.stringify({ config: file, root }));
   } else if (command === 'prime' && checkout) {
     console.log(JSON.stringify(materializeDependencySeed(checkout, { root, sourceDir: flag('--source'), proof: args.includes('--proof') })));
