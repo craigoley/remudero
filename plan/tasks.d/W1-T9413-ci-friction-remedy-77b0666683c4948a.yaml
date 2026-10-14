@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.15
   status: queued
@@ -37,3 +37,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/affected-suites.ts and a new test file. Both are ordinary code and test paths. Neither is a secrets, auth, deploy, merge-policy or review-policy surface."
+      - "The description names a flaky-test cause in a ratchet test. It doesn't state any deletion of data, branches or history, any irreversible action, or any decision reserved for the operator."
+      - "The acceptance criterion is a grep-verifiable test in the new file, so the finding can be checked from what is shown. The change will still go through CI and review."
+      - "The family track record is mixed (24 merged, 40 declined, Beta mean 0.60). That calls for some scrutiny but isn't a gates-state concern on its own. The one missing declared file is the new test file the task will create."
+    judged_at: "2026-10-14T09:31:43.422Z"
+    pin: "44f3d9200e90f1a3337aa75535356c52d9d83c964940d2c623819d044ff113c6"
