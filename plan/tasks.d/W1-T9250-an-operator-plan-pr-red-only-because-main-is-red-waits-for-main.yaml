@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/an-operator-plan-pr-red-only-because-main-is-red-waits-for-main.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # every operator filing opened while main is red files a needs-human escalation and waits for a hand refresh
   attempts: 0
   rationale: |

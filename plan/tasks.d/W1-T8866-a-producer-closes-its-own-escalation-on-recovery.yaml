@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: auto-resolve what does not need the operator, without unnecessary risk"
   plan_refs: [W1-T4802, W1-T5908, W1-T8864]
   files: [src/lib/gardener-overseer.ts, src/lib/read-model-worker.ts, src/lib/read-model-consistency.ts, test/a-producer-closes-its-own-escalation-on-recovery.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
