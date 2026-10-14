@@ -3394,10 +3394,7 @@ export function approveProposal(
   };
 }
 
-/** The PR title of a single-proposal ratification, fitted to commitlint's header limit, which the PR title meets
- *  as the squash commit's header. A long proposal id (`adoption:symbol-no-caller:<path>:<symbol>`) made the raw
- *  `chore(plan): ratify <id> via rmd approve` 103-112 characters, and the approve push preflight refused it
- *  [pr-title] every time (2026-10-13..14). */
+/** A ratification PR title fitted to commitlint's header limit: a long proposal id overran it (2026-10-13). */
 export function approvePrTitle(proposalId: string): string {
   return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
 }
