@@ -13,7 +13,9 @@
     rmd approve:
   
     config mask handling touches both config and review subsystems
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T9440 — It depends on W1-T9a, which will never be built.
   attempts: 0
   files:
     - src/lib/review.ts

@@ -12,7 +12,7 @@
   plan_refs: [W1-T8776, W1-T8775, W1-T9279, W1-T7813, W1-T4356]
   files: [src/run-task.ts, src/lib/child-entry-store.ts, src/lib/plan-pr-emitter.ts, src/lib/pr-open.ts, test/the-core-fleet-fills-the-child-entry-store.test.ts]
   status: queued
-  priority: 1
+  priority: 0.5
   attempts: 0
   rationale: |
     MEASURED 2026-10-14 on the core host, read-only. Core booted at 01:46:29Z on 2581c1d51, which contains
@@ -37,6 +37,8 @@
     W1-T8775 and W1-T9279 switched the spawn sites and W1-T8776 built the store mechanism. This task makes the
     store actually fill on core.
     On 2026-10-13 at 20:43Z, a plan-PR check-proof child under tsx measured 100-117 MB RSS at birth.
+    Operator ruling 2026-10-14: prioritize this store-fill task at 0.5 after the recovery review. The user
+    authorized this priority promotion; queue, memory, provider and ownership admission gates still apply.
   design: |
     1. Fill the store from a tree that holds main's source and a usable install, independent of the managed checkout's
        borrow state. The fresh run worktree satisfies both: runTaskBody cuts it with worktreeAddAsync(..., "origin/main"),
