@@ -3,12 +3,22 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 NODE="${RMD_SEED_NODE:-$(command -v node)}"
-TOOL="$HOME/.local/share/remudero/dependency-seed-tool"
-mkdir -p "$TOOL/scripts" "$TOOL/src/lib" "$HOME/.local/bin"
-install -m 0644 "$HERE/src/lib/dependency-seeds.ts" "$TOOL/src/lib/dependency-seeds.ts"
-install -m 0644 "$HERE/src/lib/clock.ts" "$TOOL/src/lib/clock.ts"
-install -m 0755 "$HERE/scripts/dependency-seeds.mjs" "$TOOL/scripts/dependency-seeds.mjs"
-install -m 0755 "$HERE/deploy/dependency-seed-guard.sh" "$TOOL/dependency-seed-guard.sh"
+TOOL_VERSION=$("$NODE" - "$HERE" <<'JS'
+const fs=require('node:fs'), crypto=require('node:crypto'), path=require('node:path');
+const hash=crypto.createHash('sha256');
+for (const file of ['src/lib/dependency-seeds.ts','src/lib/clock.ts','scripts/dependency-seeds.mjs','deploy/dependency-seed-guard.sh']) hash.update(fs.readFileSync(path.join(process.argv[2],file))).update('\0');
+console.log(hash.digest('hex'));
+JS
+)
+TOOL="$HOME/.local/share/remudero/dependency-seed-tools/$TOOL_VERSION"
+mkdir -p "$HOME/.local/bin"
+if [ ! -d "$TOOL" ]; then
+  mkdir -p "$TOOL/scripts" "$TOOL/src/lib"
+  install -m 0644 "$HERE/src/lib/dependency-seeds.ts" "$TOOL/src/lib/dependency-seeds.ts"
+  install -m 0644 "$HERE/src/lib/clock.ts" "$TOOL/src/lib/clock.ts"
+  install -m 0755 "$HERE/scripts/dependency-seeds.mjs" "$TOOL/scripts/dependency-seeds.mjs"
+  install -m 0755 "$HERE/deploy/dependency-seed-guard.sh" "$TOOL/dependency-seed-guard.sh"
+fi
 # A stable wrapper does not depend on the source checkout surviving janitor cleanup.
 "$NODE" - "$HOME/.local/bin/remudero-dependencies" "$NODE" "$TOOL/scripts/dependency-seeds.mjs" <<'JS'
 const fs = require('node:fs');

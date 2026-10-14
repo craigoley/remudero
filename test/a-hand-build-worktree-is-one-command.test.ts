@@ -3,7 +3,7 @@
 // default seams are the ones exercised.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
@@ -95,6 +95,28 @@ test("hand-worktree creates run-<taskId>-<epochMs> at an absolute path with no u
   assert.equal(modules.isSymbolicLink(), false, "node_modules must never be a symlink");
   assert.equal(modules.isDirectory(), true);
   assert.equal(statSync(join(path, "node_modules", ".bin", "tool")).ino, statSync(join(lender, "node_modules", ".bin", "tool")).ino);
+});
+
+test("hand-worktree uses enabled dependency seeds and preserves an occupied destination", () => {
+  const f = fleet(), lender = donor(f, "seed-lender"), target = f.core.addWorktree(join(f.parent, "seed-consumer"), "seed-consumer").dir;
+  const store = join(realpathSync(f.parent), "seeds"), previous = process.env.RMD_DEPENDENCY_SEED_ROOT;
+  const writable = (path: string): void => { const s = lstatSync(path); if (s.isSymbolicLink()) return; chmodSync(path, s.mode | 0o700); if (s.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name)); };
+  try {
+    process.env.RMD_DEPENDENCY_SEED_ROOT = store;
+    const outcome = hardLinkNodeModules(lender, target);
+    assert.equal(outcome.kind, "seeded");
+    assert.ok(lstatSync(join(target, "node_modules")).isDirectory());
+    const result = { status: "created" as const, path: target, branch: "seed-consumer", freeBytes: 2 * 1024 ** 3, nodeModules: outcome };
+    assert.match(renderHandWorktree(result), /validated dependency seed/);
+    assert.deepEqual(hardLinkNodeModules(lender, target), { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] });
+    const invalid = join(f.parent, "invalid"); mkdirSync(invalid);
+    const refused = hardLinkNodeModules(lender, invalid);
+    assert.equal(refused.kind, "npm-ci-needed");
+    if (refused.kind === "npm-ci-needed") assert.match(refused.reasons[0], /dependency seed refused/);
+  } finally {
+    if (previous === undefined) delete process.env.RMD_DEPENDENCY_SEED_ROOT; else process.env.RMD_DEPENDENCY_SEED_ROOT = previous;
+    if (existsSync(store)) { writable(store); rmSync(store, { recursive: true }); }
+  }
 });
 
 test("hand-worktree refuses a relative parent and writes nothing", () => {

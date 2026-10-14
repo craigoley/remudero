@@ -25,6 +25,8 @@ function fixture(body: (root: string, donor: string, checkout: string) => void):
   mkdirSync(join(donor, "node_modules", "dep"), { recursive: true });
   writeFileSync(join(donor, "node_modules", "dep", "package.json"), '{"name":"dep","version":"1.0.0"}');
   writeFileSync(join(donor, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+  mkdirSync(join(donor, "node_modules", ".bin"));
+  writeFileSync(join(donor, "node_modules", ".bin", "fixture"), "#!/bin/sh\n");
   try { body(root, donor, checkout); }
   finally { writable(root); rmSync(root, { recursive: true, force: true }); }
 }
