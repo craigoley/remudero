@@ -34,6 +34,17 @@ export function summarizeReports(report, sarif, exitCode) {
     invocations.every((item) => item.executionSuccessful === true);
   const notificationErrors = Array.isArray(invocations) ? invocations.flatMap((item) =>
     item.toolExecutionNotifications ?? []).filter((item) => item.level === "error").length : null;
+  const errorInventory = report.errors.slice(0, 64).map((error) => {
+    const type = Array.isArray(error.type) ? error.type[0] : error.type;
+    const rawPath = error.path ?? error.spans?.[0]?.file;
+    // Error messages and snippets may include source or secrets. Retain only constrained labels,
+    // safe repository-relative identities and a hash of the complete private error corpus.
+    const path = typeof rawPath === "string" && rawPath.length <= 256 &&
+      /^[A-Za-z0-9_@.+/-]+$/.test(rawPath) && !rawPath.startsWith("/") &&
+      !rawPath.split("/").includes("..") ? rawPath : null;
+    return { type: typeof type === "string" && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(type) ? type : "UNKNOWN",
+      level: ["error", "warn", "warning", "info"].includes(error.level) ? error.level : "UNKNOWN", path };
+  });
   return {
     version: report.version, scannerExitCode: exitCode,
     status: exitCode === 0 && report.errors.length === 0 && successful && notificationErrors === 0 &&
@@ -41,6 +52,8 @@ export function summarizeReports(report, sarif, exitCode) {
     engineRequested: report.engine_requested ?? null,
     findingCount: report.results.length, sarifFindingCount: run.results.length,
     errorCount: report.errors.length, targetCount: report.paths.scanned.length,
+    errorInventory, errorInventoryTruncated: report.errors.length > errorInventory.length,
+    errorInventorySha256: digest(JSON.stringify(report.errors)),
     skippedTargetCount: Array.isArray(report.paths.skipped) ? report.paths.skipped.length : null,
     skippedRuleCount: Array.isArray(report.skipped_rules) ? report.skipped_rules.length : null,
     ruleCount: ids.length, ruleIdsSha256: digest(JSON.stringify([...ids].sort())),

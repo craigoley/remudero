@@ -54,6 +54,31 @@ test("native Semgrep missing, mismatched and failed observations never become co
   assert.equal(summarizeReports(unknown, sarif, 0).skippedTargetCount, null, "missingness is not zero");
 });
 
+test("native Semgrep error inventory preserves partial scans without exposing messages or outside paths", () => {
+  const { report, sarif } = reports();
+  const errors = [
+    { type: "ParseError", level: "warn", path: "test/fixtures/invalid.ts", message: "private source bytes" },
+    { type: ["PartialParsing", []], level: "warning", spans: [{ file: "src/example.ts" }], message: "private source bytes" },
+    { type: "secret type with spaces", level: "unknown", path: "/Users/secret/file.ts", message: "private source bytes" },
+    { type: "Timeout", level: "error", path: "../outside.ts", message: "private source bytes" },
+  ];
+  const summary = summarizeReports({ ...report, errors }, sarif, 0);
+  assert.equal(summary.status, "INCOMPLETE", "exit zero with parser errors is never complete");
+  assert.deepEqual(summary.errorInventory, [
+    { type: "ParseError", level: "warn", path: "test/fixtures/invalid.ts" },
+    { type: "PartialParsing", level: "warning", path: "src/example.ts" },
+    { type: "UNKNOWN", level: "UNKNOWN", path: null },
+    { type: "Timeout", level: "error", path: null },
+  ]);
+  assert.equal(summary.errorInventoryTruncated, false);
+  assert.ok(!JSON.stringify(summary).includes("private source bytes"));
+  assert.ok(!JSON.stringify(summary).includes("/Users/secret"));
+  const many = summarizeReports({ ...report, errors: Array.from({ length: 65 }, () => errors[0]) }, sarif, 0);
+  assert.equal(many.errorCount, 65);
+  assert.equal(many.errorInventory.length, 64);
+  assert.equal(many.errorInventoryTruncated, true);
+});
+
 test("native Semgrep real subprocess fixture exercises CLI contracts without pretending to be native engine evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-semgrep-cli-contract-"));
   const command = join(root, "fake-semgrep");
