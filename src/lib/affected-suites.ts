@@ -101,7 +101,7 @@ const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
-const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
+const READ_MAPPED = /^(?:(?:openapi|deploy)\/[\s\S]*|[\s\S]*\.json)$/;
 
 /** The two modelled contracts use content readers; other contract-tree paths force a full run.
  *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */

@@ -1,0 +1,92 @@
+- id: W1-T9515
+  title: "EVERY RECYCLE NAMES WHO INVOKED IT — at 15:42:56Z on 2026-10-14 a deploy/recycle-container.sh run (pid 230354) recycled core and its PAUSE held dispatch from 15:43:55Z, while core's deploy tick judged behind_role 0 and skipped and the progress watchdog read PROGRESSING action=none; nothing on the PAUSE, the ledger or the board says what started it, and W1-T7839's actor evidence covers `rmd pause` only, so the recycle's PAUSE still reads `actor unrecorded`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the provenance of a container recycle (who invoked recycle-container.sh)
+  band_meaning: span
+  origin: "operator session 2026-10-14 (Craig approved filing): who recycled core at 15:42:56Z"
+  plan_refs: [W1-T7839, W1-T8264, W1-T9409, W1-T4197, W1-T6597, W1-T9500]
+  files:
+    - deploy/recycle-container.sh
+    - deploy/install-host-units.sh
+    - src/lib/deployer.ts
+    - src/lib/sre-runbooks.ts
+    - src/lib/operator-interventions.ts
+    - test/every-recycle-names-who-invoked-it.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (Azure host, read-only and niced: rmd-fleet-watchdog.service journal and the system journal).
+      - 15:42:55Z `rmd-relaunch.sh[224419]`: progress-watchdog PROGRESSING action=none. 15:42:56Z the same launcher:
+        "remudero-daemon healthy -- asking the supervisor whether a RECYCLE is due". It runs `rmd deploy-run
+        --image-drift-only`, which logged `deploy.image_drift_scoped` {role build, behind_all 3, behind_role 0} and
+        `deploy.skip` at 15:43:50Z. Neither launcher rung recycled.
+      - 15:42:55Z and 15:42:56Z: two ssh sessions from the operator Mac (108.17.86.227, user craigoleyagent) opened and
+        closed within a second each (sessions 66995 and 66996).
+      - A recycle-container.sh writer, pid 230354, started at 15:42:56. Its PAUSE ("PAUSE requested: container recycle
+        (deploy/recycle-container.sh)") appeared at 15:43:55Z as a `worker.recycle_yield` row.
+        15:47:32Z release-orphan-recycle-pause: "keep — the recycle writing it (pid 230354, started Wed Oct 14 15:42:56
+        2026) is still running".
+    The evidence fits a detached hand recycle from an operator-Mac session, but nothing recorded proves it. The PAUSE
+    body names the writer's pid and start time, not who started the writer.
+    READ on origin/main abbee334d (symbols):
+      - deploy/recycle-container.sh writes `RECYCLE_PAUSE_BODY` with reason, requestedAt, pid, host, container,
+        containerName, writerStart and phase (W1-T9409). It has no caller or actor field. Its only invocation-context
+        input is `RMD_RECYCLE_VERDICT` (W1-T6597), which only the progress-watchdog rung sets.
+      - Automated invokers: install-host-units.sh `watchdog_recycle` (it holds a `who` for each rung and never passes
+        it on); src/lib/deployer.ts (`recycleContainerScript`, the deploy tick's recycle backend); and
+        src/lib/sre-runbooks.ts (`execFileSync("bash", [.../recycle-container.sh, "--container", ...])`). A person or
+        agent running the script by hand passes nothing. The script cannot tell these apart.
+      - W1-T7839 (#11703, merged abbee334d) added `ActorEvidence` (src/lib/actor-evidence.ts) to the `rmd pause` flag
+        and rows. It leaves the recycle script alone. Its own comment in src/lib/fleet-control.ts `pauseDetail` says
+        "Legacy recycle scripts write a machine-consumed sentinel; pauseActor and the board still expose its missing
+        actor", so `pauseActor` reads a recycle PAUSE as "actor unrecorded".
+      - W1-T8264 (merged) classes hand actions from `CONTROL_INTERVENTION_STEPS` (fleet.pause, fleet.resume, ...) and
+        `cli.invoked` verbs. A recycle writes neither, so a hand recycle is not an intervention today.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main abbee334d and all 11 open PR heads for recycle-container
+    (positive control: 128 files on main and on every head), "who recycled", "no known caller", and recycle within 40
+    characters of caller, invoker, "invoked by" or attribut. Each read 0, apart from W1-T4197 ("write an attributable
+    pause", which concerns the script's own pid and host) and W1-T8138 (an `RMD_RECYCLE_WAIT_S` caller).
+  design: |
+    Operator rulings: no fixed threshold; automated flow; a hand action is evidence, never refused.
+    1. THE CALLER NAMES ITSELF. Each automated invoker passes `RMD_RECYCLE_CALLER`. `watchdog_recycle` passes
+       `watchdog:<who>` (progress-watchdog and each other rung), deployer.ts's recycle backend passes `deploy-tick`, and
+       sre-runbooks.ts passes `sre-runbook:<runbook>`. It is a label, not a secret.
+    2. THE SCRIPT RECORDS ITS ACTOR. recycle-container.sh gathers the facts W1-T7839's `gatherActorEvidence` reads
+       (OS user, host, container id, stdin/stdout tty, SSH_CONNECTION client and pty, agent env markers, the parent
+       process chain, REMUDERO_SESSION_ID as a claim) and writes them as an `actor_evidence` object in the same
+       `ActorEvidence` shape, so `readActorEvidence`, `pauseActor` and `pauseDetail` read it unchanged. Its
+       `caller_class` follows the same rule; a test pins the shell and TypeScript classifiers to agree on the same
+       inputs. The PAUSE body gains `caller` and `actor_evidence`. `reason` and the W1-T9409 fields are unchanged,
+       because W1-T5127, W1-T5804 and release-orphan-recycle-pause.sh key on them.
+    3. A ROW FOR EVERY INVOCATION. Before it pulls or pauses anything, the script appends `recycle.invoked`
+       {caller, actor_evidence, pid, writer_start, container, instance, verdict} to the ledger it already writes. A
+       run that refuses or exits early still leaves the row.
+    4. A RECYCLE WITH NO KNOWN CALLER IS SURFACED. With `RMD_RECYCLE_CALLER` unset, the row's caller is
+       `unattributed`. operator-interventions.ts reads a `recycle.invoked` with no automated caller as a control
+       intervention (`hand-recycle:<caller_class>`), with the cause read from the ledger as for a `fleet.pause`.
+       Because W1-T8264 already reports interventions, the fleet sees each hand recycle and who ran it.
+    Tests (new file, `test(` titles verbatim as in the proofs below) run recycle-container.sh with the stub `docker`
+    the W1-T9409/W1-T5281 tests use and read its PAUSE body and ledger row. They drive the launcher's
+    `watchdog_recycle` and deployer.ts's recycle backend to check the variable they pass, and they drive
+    operator-interventions.ts with an unattributed row.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/every-recycle-names-who-invoked-it.test.ts"
+    - claim: "a recycle's PAUSE body carries its caller and actor evidence, which pauseActor reads"
+      proof: 'grep: test("W1-T9515: a recycle PAUSE names its caller and actor" in test/every-recycle-names-who-invoked-it.test.ts'
+    - claim: "every recycle invocation writes a recycle.invoked row before it pulls or pauses, even when it refuses"
+      proof: 'grep: test("W1-T9515: every recycle invocation writes a recycle\.invoked row" in test/every-recycle-names-who-invoked-it.test.ts'
+    - claim: "the watchdog rung and the deploy tick name themselves to the recycle they start"
+      proof: 'grep: test("W1-T9515: the watchdog and the deploy tick name themselves to the recycle" in test/every-recycle-names-who-invoked-it.test.ts'
+    - claim: "a recycle with no named caller is a hand-recycle intervention"
+      proof: 'grep: test("W1-T9515: a recycle with no known caller is a hand-recycle intervention" in test/every-recycle-names-who-invoked-it.test.ts'
+  falsifier: |
+    Leave `RECYCLE_PAUSE_BODY` as on main: the first test's `pauseActor` reads "actor unrecorded". Write the row only
+    after the PAUSE: a run refused at its preflight leaves no `recycle.invoked`. Leave `watchdog_recycle` without the
+    variable: the third test reads caller `unattributed` for a progress-watchdog recycle.
