@@ -307,6 +307,79 @@ test("W1-T9082: a probe that hangs is killed and a spawn error is ledgered", asy
   assert.equal(only(rows, "run_child.shadow").tree_peak_bytes, null);
 });
 
+test("W1-T9082: a ledger that throws, a prune that fails and a release that fails never break the probe", async () => {
+  const fx = fixture("ledger-faults", false);
+
+  // A ledger sink that throws: the skip still resolves with its reason.
+  const out = await startRunChildProbe(
+    inputFor(fx, [], { log: () => { throw new Error("ledger closed"); } }),
+    seamsFor(fx, { readMode: () => { throw new Error("policy gone"); } }),
+  );
+  assert.equal(out.started, false);
+  assert.match(String((out as { reason: string }).reason), /unreadable: policy gone/);
+
+  // A plan-snapshots directory holding a dangling link: pruning fails, and says so, after the shadow row.
+  const rows: Row[] = [];
+  mkdirSync(join(fx.state, "plan-snapshots"), { recursive: true });
+  symlinkSync(join(fx.root, "nowhere.json"), join(fx.state, "plan-snapshots", "dangling.json"));
+  const pruned = await startRunChildProbe(inputFor(fx, rows), seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch("process.exit(0)", fx) }));
+  assert.ok(pruned.started);
+  assert.match(String(only(rows, "run_child.shadow_skipped").reason), /^pruning failed: /);
+  only(rows, "run_child.shadow");
+
+  // A reservation whose release throws while the probe is already failing: the original failure is the one ledgered.
+  const failing: Row[] = [];
+  let released = 0;
+  const reserve: NonNullable<RunChildProbePorts["reserve"]> = () => ({
+    id: "r1", workerClass: "run-child-probe", estimateMib: 1, estimateSource: { kind: "default-unmeasured" },
+    bindRoot: () => {}, releaseOccupancy: () => { released += 1; throw new Error("release failed"); },
+  });
+  const failed = await startRunChildProbe(inputFor(fx, failing), seamsFor(fx, {
+    engine: { isCurrent: () => true }, launch: scriptLaunch("", fx), reserve,
+    spawn: () => { throw new Error("no fork for you"); },
+  }));
+  assert.ok(failed.started);
+  assert.equal(released, 1, "the release was attempted");
+  assert.equal(only(failing, "run_child.shadow").error, "no fork for you");
+});
+
+test("W1-T9082: a probe that exits badly or stops short of done is ledgered as unknown with its state", async () => {
+  const fx = fixture("odd-ends", false);
+  const writer = (state: string, exitCode: number): string => `
+    const { writeFileSync } = require("node:fs"); const { join } = require("node:path");
+    const dir = process.argv.at(-2);
+    writeFileSync(join(dir, "status.json"), JSON.stringify({ schema: { major: 1, minor: 0 }, runId: "x", state: "${state}", phase: "p", heartbeatAt: 1,
+      engineSha: "e", entryKind: "tsx", identity: { pid: 1, startTicks: "1", containerGeneration: { containerId: "c", initStart: "i" } } }));
+    process.exit(${exitCode});`;
+  for (const [state, code] of [["done", 3], ["running", 0]] as const) {
+    const rows: Row[] = [];
+    await startRunChildProbe(inputFor(fx, rows), seamsFor(fx, { engine: { isCurrent: () => true }, launch: scriptLaunch(writer(state, code), fx) }));
+    const row = only(rows, "run_child.shadow");
+    assert.equal(row.contract, "unknown", JSON.stringify(row));
+    assert.equal(row.error, `probe ended in state ${state}, exit ${code}`);
+  }
+});
+
+test("W1-T9082: a probe whose identity cannot be proven records unknown start ticks", async () => {
+  const fx = fixture("identity", false);
+  const dir = runDir(fx.state, "probe-identity");
+  mkdirSync(dir, { recursive: true });
+  const snapshot = writePlanSnapshot(fx.state, TASKS);
+  writeSpec(dir, {
+    schema: RUN_CHILD_SCHEMA, taskId: "T", runId: "probe-identity", instance: "i", engine: { sourceHash: HASH, sha: SHA },
+    planSnapshotPath: snapshot.path, reservationId: "", options: {},
+  });
+  const generation = { containerId: "c", initStart: "i" };
+  const code = await runChildMain(["--run-dir", dir, "--probe"], {
+    stderr: () => {}, loadRunPath: async () => {},
+    probe: { process: () => ({ state: "gone" }), generation: () => generation },
+  });
+  assert.equal(code, 0);
+  const status = readStatus(dir);
+  assert.ok(status.ok, JSON.stringify(status));
+  assert.deepEqual(status.value.identity, { pid: process.pid, startTicks: "unknown", containerGeneration: generation });
+});
+
 test("W1-T9082: the plan tap hands the probe the plan and leaves the run its own result and failure", async () => {
   const slot = createAdmittedPlanSlot();
   const plan = { plan: { tasks: TASKS } };
