@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: escalation #10269 triage"
   plan_refs: [W1-T4203, W1-T3483]
   files: [src/lib/commit-message.ts, test/a-commit-body-line-never-exceeds-commitlint-for-one-long-token.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

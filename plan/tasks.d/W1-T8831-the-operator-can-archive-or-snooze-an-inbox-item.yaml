@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: console inbox review; mockup https://claude.ai/artifact/A4JqyAFckCYDJaEzPxopRC"
   plan_refs: [W1-T2604, W1-T3407, W1-T4088]
   files: [src/lib/panel-graph.ts, src/lib/inbox-view.ts, openapi/daemon.yaml, scripts/console-parity-ratchet.mjs, test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts, test/route-wiring.test.ts, test/the-console-draws-the-graph-it-computes.test.ts]
-  status: queued
+  status: merged
   priority: 0.93 # operator-2026-10-13: the console inbox archive/snooze waits on these routes; at priority 1.5 it sat behind ~30 ready tasks with no dispatch
   attempts: 0
   rationale: |

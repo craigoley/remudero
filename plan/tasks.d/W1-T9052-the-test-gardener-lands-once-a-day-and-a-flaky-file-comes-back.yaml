@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-13: gardener loop audit (gardener PR churn)"
   plan_refs: [W1-T8350, W1-T7703]
   files: [src/lib/test-gardener.ts, test/the-test-gardener-lands-once-a-day-and-a-flaky-file-comes-back.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |
