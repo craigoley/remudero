@@ -316,6 +316,22 @@ test("proofQueueAuditCommand: scopes to open+unmerged, names every offender spli
   }
 });
 
+test("proof audit fixture is independent of unrelated interpolated titles in the shared checkout", async () => {
+  const { tasksPath, dir } = buildFixturePlan();
+  const foreign = mkdtempSync(join(REPO_ROOT, "test", ".tmp-proof-audit-foreign-"));
+  try {
+    writeFileSync(join(foreign, "ambiguous.test.ts"),
+      'import { test } from "node:test";\nconst prefix = "foreign";\ntest(`${prefix} never match any real test`, () => {});\n');
+    const { stdout } = await runAuditCapturing(["--plan", tasksPath], {
+      readMergeEvidenceLog: () => ({ dump: dumpOf(), ref: "fixture-ref" }),
+    });
+    assert.match(stdout, /name-filtered-zero-match\s+1 task\(s\): W9-OPEN-ZERO-MATCH/);
+  } finally {
+    rmSync(foreign, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("proofQueueAuditCommand: fails open on unresolvable merge evidence (shallow checkout) — still exits 0, audits nothing", async () => {
   const { tasksPath, dir } = buildFixturePlan();
   try {
