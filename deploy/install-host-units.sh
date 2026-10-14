@@ -315,6 +315,18 @@ render_app_private_key_mount() {
   printf '\napp_private_key_mount_args %q %q || exit 1\n' "$GH_APP_KEY_HOST_V" "$GH_APP_KEY_V"
 }
 
+# W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
+# /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon's
+# SRE lane could not tell which instance it was. An --instance install hands its launcher the name;
+# the legacy no-instance install renders an empty list and the container gets nothing.
+render_instance_name_env() {
+  if [ -n "$INSTANCE_NAME" ]; then
+    printf 'INSTANCE_ENV_ARGS=(-e %q)\n' "RMD_INSTANCE_NAME=${INSTANCE_NAME}"
+  else
+    printf 'INSTANCE_ENV_ARGS=()\n'
+  fi
+}
+
 # Insert literal shell into the rendered launcher. The outer launcher heredoc is expanded by the
 # installer, so writing dollar signs directly there would read the installer's environment instead
 # of the daemon host's environment at boot.
@@ -1299,6 +1311,9 @@ fi
 CREDENTIAL_ARGS=()
 $(render_credential_mount)
 
+# W1-T9500: the instance this launcher was installed for, named to its container (empty legacy).
+$(render_instance_name_env)
+
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
@@ -1326,6 +1341,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   "\${APP_PRIVATE_KEY_ARGS[@]+"\${APP_PRIVATE_KEY_ARGS[@]}"}" \\
   "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
+  "\${INSTANCE_ENV_ARGS[@]+"\${INSTANCE_ENV_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
