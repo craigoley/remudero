@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
-import type { WorkflowRunObservation } from "./workflow-run.js";
+import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
 // W1-T2384: from the LEAF, never from sweep.js. dependency-cruiser reads a type-only import as
 // a dependency (MEASURED: importing this off sweep.js took it 13 -> 24 warnings), and sweep.ts
 // imports a VALUE back off this module — see supersession.ts's own header.
@@ -1223,7 +1223,7 @@ function runHasConcluded(conclusion: unknown): boolean {
 
 export const CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES = 2_048; // BACKSTOP: a concluded attempt's settled jobs are immutable
 
-export type ConcludedRunJobsCache = Map<string, ReadonlyArray<{ status?: string }>>;
+export type ConcludedRunJobsCache = Map<string, ReadonlyArray<WorkflowRunJobObservation>>;
 
 const concludedRunJobs: ConcludedRunJobsCache = new Map();
 
@@ -1231,18 +1231,18 @@ export type StuckRunSuspects = Set<string>;
 
 const stuckRunSuspects: StuckRunSuspects = new Set();
 
-function jobSettled(job: { status?: string }): boolean {
+function jobSettled(job: WorkflowRunJobObservation): boolean {
   return (job.status ?? "").toLowerCase() === "completed";
 }
 
 /** One fresh jobs read of a concluded attempt: all settled is cached; a running job is reported only on a re-read. */
 function concludedRunJobsAsRead(
-  jobs: ReadonlyArray<{ status?: string }>,
+  jobs: ReadonlyArray<WorkflowRunJobObservation>,
   runKey: string,
   cacheKey: string | undefined,
   jobsCache: ConcludedRunJobsCache,
   suspects: StuckRunSuspects,
-): ReadonlyArray<{ status?: string }> | undefined {
+): ReadonlyArray<WorkflowRunJobObservation> | undefined {
   if (jobs.every(jobSettled)) {
     suspects.delete(runKey);
     if (cacheKey !== undefined) {
@@ -1255,6 +1255,17 @@ function concludedRunJobsAsRead(
   suspects.add(runKey);
   if (suspects.size > CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES) suspects.delete(suspects.values().next().value as string);
   return undefined;
+}
+
+/** W1-T2947: one job of the jobs response, keeping the `name` and `id` the single-job requeue targets.
+ *  Each is carried only when GitHub supplied a usable one; the keys are otherwise ABSENT, so a missing
+ *  identity reads as "cannot target this job" and never as an empty-string name or a zero id. */
+function restJobObservation(x: { status?: string | null; name?: string | null; id?: number | null }): WorkflowRunJobObservation {
+  return {
+    status: typeof x.status === "string" ? x.status : undefined,
+    ...(typeof x.name === "string" && x.name.trim() !== "" ? { name: x.name } : {}),
+    ...(typeof x.id === "number" && Number.isSafeInteger(x.id) && x.id > 0 ? { id: String(x.id) } : {}),
+  };
 }
 
 /** Observations for one head: every workflow run on it, with jobs attached to the runs that have
@@ -1292,16 +1303,16 @@ function* workflowRunObservationSteps(
       continue;
     }
     const key = typeof run.run_attempt === "number" ? `${owner}/${repo}#${run.id}@${run.run_attempt}` : undefined;
-    let jobs: ReadonlyArray<{ status?: string }> | undefined = key === undefined ? undefined : jobsCache.get(key);
+    let jobs: ReadonlyArray<WorkflowRunJobObservation> | undefined = key === undefined ? undefined : jobsCache.get(key);
     if (jobs) {
       out.push({ conclusion, jobs });
       continue;
     }
     try {
       const j = (yield* ghRead(fetch, jobsForRunRestArgs(owner, repo, run.id))) as {
-        jobs?: ReadonlyArray<{ status?: string | null }>;
+        jobs?: ReadonlyArray<{ status?: string | null; name?: string | null; id?: number | null }>;
       };
-      const read = (j?.jobs ?? []).map((x) => ({ status: typeof x.status === "string" ? x.status : undefined }));
+      const read = (j?.jobs ?? []).map(restJobObservation);
       jobs = concludedRunJobsAsRead(read, key ?? `${owner}/${repo}#${run.id}`, key, jobsCache, suspects);
     } catch {
       /* leave `jobs` undefined: "could not check", never "nothing was scheduled" */

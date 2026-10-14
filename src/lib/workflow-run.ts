@@ -14,6 +14,16 @@
  * produces it. This is that shape, one field over.
  */
 
+/** One job of a workflow run. `name` and `id` (W1-T2947) are present only when GitHub's payload carried
+ *  them as a non-empty string / a number; they are the identity the single-job requeue needs, and an
+ *  absent one means the job cannot be targeted — never a guess. */
+export interface WorkflowRunJobObservation {
+  status?: string;
+  name?: string;
+  /** GitHub's job id, as the decimal string `actions/jobs/{job_id}/rerun` takes. */
+  id?: string;
+}
+
 /** One workflow RUN plus its jobs' OWN statuses — the raw input the stalled-run predicate reads. */
 export interface WorkflowRunObservation {
   /** The run's OWN conclusion — GitHub populates this ONLY once the run itself has concluded
@@ -24,5 +34,5 @@ export interface WorkflowRunObservation {
    *  `undefined` means the jobs could not be read (or were not fetched because the run had not
    *  concluded, so they could not change the answer) — never degraded to `[]`, which would read as
    *  "GitHub scheduled nothing" instead of "we did not check". */
-  jobs?: ReadonlyArray<{ status?: string }>;
+  jobs?: ReadonlyArray<WorkflowRunJobObservation>;
 }

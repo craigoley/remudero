@@ -267,7 +267,7 @@ import type {
 } from "./supersession.js";
 export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus, SupersessionVerdict };
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
-import type { WorkflowRunObservation } from "./workflow-run.js";
+import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
 import type { ReviewCapacityPolicy } from "./review-capacity.js";
 import {
   dispatchMainRunGaps,
@@ -6820,19 +6820,38 @@ const JOB_TERMINAL_STATUSES = new Set(["completed"]);
  *  NOT an absence of jobs, which the reading measurement falsified. It needs no threshold, so this
  *  takes no `policy` or `now`, and every unreadable input FAILS TOWARD "NOT STALLED". */
 export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undefined): string | undefined {
+  const found = firstStalledJob(runs);
+  if (found === undefined) return undefined;
+  return (
+    `a job is still "${found.job.status ?? "unstarted"}" but its own run already concluded "${found.conclusion}" — ` +
+    `a terminal run schedules nothing further, so that job will never move`
+  );
+}
+
+/** The first non-terminal job inside an already-concluded run — the ONE job {@link stalledRunReason} names. */
+function firstStalledJob(runs: readonly WorkflowRunObservation[] | undefined): { job: WorkflowRunJobObservation; conclusion: string } | undefined {
   if (runs === undefined) return undefined;
   for (const run of runs) {
     const conclusion = (run.conclusion ?? "").trim();
     if (conclusion === "") continue; // run still in progress — untouched, not this function's concern
-    const stuck = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
-    if (stuck) {
-      return (
-        `a job is still "${stuck.status ?? "unstarted"}" but its own run already concluded "${conclusion}" — ` +
-        `a terminal run schedules nothing further, so that job will never move`
-      );
-    }
+    const job = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
+    if (job) return { job, conclusion };
   }
   return undefined;
+}
+
+/** W1-T2947 — the stalled-run rung's reason always begins with this; runSweep keys the pinned-job requeue on it. */
+export const STALLED_RUN_REASON_PREFIX = "stalled, not pending — ";
+
+/** W1-T2947 — the one job a terminal run pinned non-terminal, WITH the identity the single-job requeue needs.
+ *  `undefined` when nothing is stalled OR the pinned job carries no name or no id: a job we cannot name
+ *  authorizes no mutation, so the caller keeps the existing escalation. */
+export function stalledRunPinnedJob(runs: readonly WorkflowRunObservation[] | undefined): { name: string; jobId: string } | undefined {
+  const found = firstStalledJob(runs);
+  const name = found?.job.name?.trim();
+  const jobId = found?.job.id;
+  if (!name || !jobId || !/^\d+$/.test(jobId)) return undefined;
+  return { name, jobId };
 }
 
 /** W1-T1278 — of the checks a fix rung believes are red, which are STILL red on a FRESH rollup read.
@@ -10229,13 +10248,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // like ordinary in-flight CI to the rows below, and would wait out the ceiling even though the
     // run that pinned the job is DONE. Ordered STRICTLY BEFORE them so a stalled head is named the
     // moment it is detectable; this shape needs no threshold at all. GATED ON `"pending"`
-    // EXPLICITLY, never `"none"`, so it cannot fire on the input the ABSENT arm owns. TAKES NO
-    // ACTION — re-running a concluded run is left to the operator, GitHub having refused it 403.
+    // EXPLICITLY, never `"none"`, so it cannot fire on the input the ABSENT arm owns. THE ROW ONLY
+    // CLASSIFIES; a run-level rerun is refused 403, so runSweep's blocked-ambiguous arm tries the one pinned
+    // JOB's rerun first (W1-T2947) and escalates only when that is unavailable or already spent.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns) !== undefined,
     blocker: "awaiting-ci",
     reason: (pr) =>
-      `stalled, not pending — ${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
+      `${STALLED_RUN_REASON_PREFIX}${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
       `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
@@ -16496,7 +16516,7 @@ export async function runSweep(
     // W1-T78: render the question up front for blocked-ambiguous PRs — it is ledgered EVERY sweep
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
-    const question =
+    let question =
       (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue && !priorContradiction
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
@@ -18123,6 +18143,34 @@ export async function runSweep(
                   standDownReason = dirtyFleetRebase.standDownReason;
                   break;
                 }
+              }
+              // W1-T2947 — A TERMINAL RUN PINNING ONE JOB is the shape the single-job requeue (W1-T1223)
+              // already fixes: POST actions/jobs/{job_id}/rerun, NEVER a run-level rerun. Bounded by the
+              // SAME head+check ledger row, written BEFORE the POST; a second observation escalates naming
+              // the job. No job name or id, or no wired effect, leaves the escalation below untouched.
+              const pinnedJob = pr.checksState === "pending" && reason.startsWith(STALLED_RUN_REASON_PREFIX) && deps.requeueCheck
+                ? stalledRunPinnedJob(pr.workflowRuns) : undefined;
+              if (pinnedJob) {
+                const key = `${pr.headSha}@${pinnedJob.name}`;
+                const named = `pinned job "${pinnedJob.name}" (id ${pinnedJob.jobId})`;
+                let followUp: string | undefined;
+                if (requeuedCheckKeys.has(key) || checkDeferrals.has(key)) {
+                  followUp = `${named} was already sent its one bounded single-job requeue on this head and a terminal run still pins it`;
+                } else {
+                  const result = await requeueCheckJob(deps, pr, { name: pinnedJob.name, jobId: pinnedJob.jobId }, undefined, undefined,
+                    { surface: "pr", signature: "terminal-run-pinned-job", outcome: "attempting", worker_strike_avoided: true });
+                  if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+                  if (result.kind === "failed") followUp = `the single-job rerun of ${named} failed`;
+                  else {
+                    acted = false;
+                    standDownReason = result.kind === "dispatched"
+                      ? `re-queued ${named} once instead of escalating — its run already concluded; no worker strike spent`
+                      : `${named} requeue ${result.note ?? "was deferred"} — no escalation this pass, the next observation escalates`;
+                    break;
+                  }
+                }
+                reason = `${reason} — ${followUp}`;
+                question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
               }
               // W1-T3422 — the target was already filtered by a terminal required failure's
               // completion time, a newer observed main repair, a declared route, and a bounded
