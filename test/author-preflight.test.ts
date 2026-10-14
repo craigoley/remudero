@@ -101,6 +101,21 @@ test('author docs precheck follows real index inputs including deletions without
   assert.deepEqual(mod.authorDocsIndexInputs(inputs), inputs);
 });
 
+test('author missing dependency donor refuses before census, static admission and tests', () => {
+  const f = fixture();
+  unlinkSync(join(f.root, 'node_modules'));
+  symlinkSync(join(f.root, 'vanished-donor'), join(f.root, 'node_modules'));
+  const select = () => ({ fullRun: false, suites: ['test/leaf.test.ts'], reasons: ['physical donor fixture'] });
+  assert.equal(mod.main([], { root: f.root, select }), 1);
+  const refused = f.receipt();
+  assert.equal(refused.verdict, 'refused');
+  assert.equal(refused.dependencyProvenance.before.state, 'unavailable');
+  assert.deepEqual(refused.steps, [], 'even the cheap census must not start with a missing installation');
+  assert.equal(refused.testSlot, undefined);
+  assert.equal(refused.phaseAccounting.trainingEligible, false);
+  assert.match(refused.error, /expensive validation not started/);
+});
+
 test('author preflight runs real affected tests without coverage and records exact tree scope', () => {
   assert.equal(typeof mod.main, 'function', 'the shipped author gate must exist, including at the proof base');
   const f = fixture();
