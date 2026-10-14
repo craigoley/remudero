@@ -3304,6 +3304,7 @@ const CI_LEARNING_SLUG_MAX = 72;
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
 export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
+  const lessonsFile = ciLearningLessonsFile(draft.findingId);
   return [
     `- id: ${taskId}`,
     `  title: ${q(draft.title)}`,
@@ -3311,7 +3312,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE], draft.prs.length, population),
+    ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
@@ -3321,21 +3322,22 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     // parser for a fact the record can simply carry.
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
-    `    - ${CI_LEARNING_LESSONS_FILE}`,
+    `    - ${lessonsFile}`,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
-    `      proof: ${q(`grep: ${draft.findingId} in ${CI_LEARNING_LESSONS_FILE}`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
 
-/** The canonical CI learning shard a drafted remedy names. A concrete path, not the `learnings/*.yaml`
- *  GLOB: a `grep:` proof is a BASIC REGEX, so a glob matches nothing and the criterion would
- *  degrade silently (CLAUDE.md's proof section). Keep this pointed at the existing subsystem
- *  shard: the landing bridge writes plan records, and the eventual worker must land the lesson in
- *  the corpus that `loadLearningsCorpus` actually indexes. */
+/** Historical filings still name this shard; new filings use ciLearningLessonsFile. */
 export const CI_LEARNING_LESSONS_FILE = "learnings/ci.yaml";
+
+/** A finding owns a new path, so independent lessons never append to the same file. */
+export function ciLearningLessonsFile(findingId: string): string {
+  return `learnings/ci.d/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}.yaml`;
+}
 
 /** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
  *  the renderer produces takes the LINT arm, so the UNPARSEABLE one is testable only here — a catch
