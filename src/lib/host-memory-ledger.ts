@@ -40,11 +40,14 @@ import { resolveTestSlotDir, testSlotProcessFacts } from "./test-slot.js";
  * own heavy children, reserved since the 2026-10-10 census found them unreserved (about 1 GB, 250-290 MB and a sandboxed
  * gate run each). "test" is a `node --test` runner found INSIDE another reservation's tree (a worker's `npm test` or a
  * hand-typed run): reserved on its own so the budget sees the spike when the run starts (host-memory-learning.ts).
+ * "run-child-probe" (W1-T9082, ADR 0007 decision C) is the shadow probe a daemon starts beside an in-process run to measure
+ * what a run child costs on this host; it is learned like the others, so the measured figure replaces its prior.
  */
 export type WorkerClass =
-  | "review" | "fix" | "implement" | "unclassified" | "advisory" | "garden" | "check-proof" | "push-gate" | "test";
+  | "review" | "fix" | "implement" | "unclassified" | "advisory" | "garden" | "check-proof" | "push-gate" | "test"
+  | "run-child-probe";
 export const WORKER_CLASSES: readonly WorkerClass[] = [
-  "review", "fix", "implement", "unclassified", "advisory", "garden", "check-proof", "push-gate", "test",
+  "review", "fix", "implement", "unclassified", "advisory", "garden", "check-proof", "push-gate", "test", "run-child-probe",
 ];
 
 /** A process identity: pid AND its kernel start time. `start: "unknown"` means it was alive but unreadable. */
@@ -143,6 +146,8 @@ export const DEFAULT_ESTIMATE_MIB: Readonly<Record<WorkerClass, number>> = {
   "check-proof": 512,
   "push-gate": 1_024,
   test: 2_048,
+  // ADR 0007 sizes a bundled child at 220-330 MiB and a cold tsx one at 519-547 MiB (ADR 0006); the prior covers tsx.
+  "run-child-probe": 640,
 };
 
 export interface OpenReservationInput {

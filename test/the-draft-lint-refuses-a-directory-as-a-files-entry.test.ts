@@ -31,6 +31,7 @@ const isDirectory = (path: string) => statSync(join(ROOT, path), { throwIfNoEntr
 function fragment(files: string[], proof = "unit test: the directory draft is refused"): string {
   const [task] = parseTasksFromYaml(inboxDraftExampleFragmentYaml(), "directory draft fixture");
   task.files = files;
+  task.design = "CREATES: test/future.test.ts";
   task.acceptance = [{ claim: "the directory draft is refused", proof }];
   return stringify([task]);
 }
@@ -50,7 +51,7 @@ test("W1-T9162: the draft lint blocks a files entry that is a directory", () => 
       fragment([path]), violations), /name the files the task changes, never a directory/);
   }
   assert.deepEqual(lint(fragment(["src/lib/plan.ts", "test/example.test.ts"])), []);
-  assert.deepEqual(lint(fragment(["src/lib/plan.ts", "test/future.test.ts"])), [], "new files remain legal");
+  assert.deepEqual(lint(fragment(["src/lib/plan.ts", "test/future.test.ts"])), [], "declared new files remain legal");
   assert.ok(lintDraftedFragment(fragment(["src", "test/example.test.ts"]), PROPOSAL, STAMP, KNOWN)
     .some((v) => v.check === "draft-directory-files"), "the production stat default also blocks directories");
 });

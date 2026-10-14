@@ -50,9 +50,12 @@ import { loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy } from "./host-
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
 
-/** Supervisor rows that open a handoff, and rows after which none is in flight. */
-const HANDOFF_OPEN_STEPS = ["serve.handoff_requested", "serve.handoff_deferred", "serve.handoff_shed"];
+/** Supervisor rows that open a handoff, and rows after which none is in flight. W1-T9504: a deferral (W1-T8311's
+ *  `deferUpgrade`) forks no standby, holds no lock and keeps the active generation, so nothing is mid-swap after it;
+ *  counting it open held the replace for as long as a handoff that never fits kept deferring (2026-10-14). */
+const HANDOFF_OPEN_STEPS = ["serve.handoff_requested", "serve.handoff_shed"];
 const HANDOFF_CLOSED_STEPS = [
+  "serve.handoff_deferred",
   "serve.handoff_done",
   "serve.handoff_aborted",
   "serve.handoff_skipped",

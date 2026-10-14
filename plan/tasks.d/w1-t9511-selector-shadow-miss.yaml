@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/every-env-name-a-source-file-reads-is-registered\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/every-env-name-a-source-file-reads-is-registered.test.ts for each recorded edge"
       proof: "grep: test/every-env-name-a-source-file-reads-is-registered\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are limited to the selector library (src/lib/affected-suites.ts) and its shadow test (test/the-affected-suite-selector-runs-in-shadow.test.ts). The description shows no secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible action."
+      - "The task adds a selector edge for one test suite and a regression test for it. Both acceptance criteria are grep-verifiable, and both declared files exist at the base."
+      - "The family track record is 18 merged and 0 declined, with a Beta mean of 0.95, which shows this pattern is well-trodden. The task asks for no operator-only decision, and its PR still passes CI and review."
+    judged_at: "2026-10-14T18:48:53.287Z"
+    pin: "6a60afe5e954014a7fedc20d590d8771aa7682053b7467552ab009e0950116b6"

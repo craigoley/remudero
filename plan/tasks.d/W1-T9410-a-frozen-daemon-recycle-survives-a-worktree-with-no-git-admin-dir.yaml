@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: root cause of the 08:12Z core recycle abort (rc=2, pid 405262)"
   plan_refs: [W1-T6597, W1-T9409, W1-T5281]
   files: [deploy/recycle-container.sh, test/a-frozen-daemon-recycle-survives-a-worktree-with-no-git-admin-dir.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

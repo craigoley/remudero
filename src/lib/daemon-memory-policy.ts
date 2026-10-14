@@ -29,6 +29,7 @@ import { parse as parseYaml } from "yaml";
 
 import { systemClock, type Clock } from "./clock.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
+import { writeAtomic } from "./fs-race-safe.js";
 
 /** `plan/policy.yaml`'s optional `daemonMemory:` section, resolved. */
 export interface DaemonMemoryPolicy {
@@ -560,6 +561,8 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
       const measurable = freed > (noise ?? 0);
       lives.push({ at, live_bytes: after.heap_used_bytes, heap_before_bytes: before.heap_used_bytes });
       if (lives.length > FOOTPRINT_MAX_SAMPLES) lives.shift();
+      // W1-T8883: the live set after a forced collection is the shadow's best sample; it survives the next boot.
+      installedShadow?.observe({ used_bytes: after.heap_used_bytes, size_bytes: after.heap_physical_bytes, after_gc: true });
       futile = measurable ? undefined : { liveBytes: after.heap_used_bytes, pool, ...(figureMib !== undefined ? { figureMib } : {}) };
       const figureAfter = reread?.();
       return done({
@@ -578,6 +581,236 @@ export function createDaemonSlackReclaimer(opts: DaemonSlackReclaimerOptions = {
       });
     },
   };
+}
+
+/** W1-T8883: the heap-ceiling shadow's persisted live-heap samples, so the proposal learns across boots.
+ *
+ *  OBSERVED 2026-10-12 (48 h, 2,366 `daemon.alive` rows): the main heap used at most 2.19 GB under an 8 GiB ceiling,
+ *  forced full collections freed a median 530 MiB, and `daemon.heap_ceiling_shadow` was written at boot only, with
+ *  `live_samples` 0 in 13 of 13 rows, because the reclaimer's in-memory live sets die with the daemon, which
+ *  reboots about hourly. These samples are kept in the state directory over a rolling 7 days.
+ *
+ *  REPORT ONLY. Nothing here applies a ceiling; the operator applies a proposal by an explicit config change. */
+export const HEAP_SAMPLE_FILE = "daemon-heap-samples.json";
+/** The rolling window the proposal is learned over. */
+export const HEAP_SAMPLE_RETAIN_MS = 7 * 24 * 60 * 60_000;
+/** One heartbeat sample at most this often: a heartbeat can come every few seconds, and a week of them is not wanted. */
+export const HEAP_SAMPLE_MIN_GAP_MS = 60_000;
+/** The file is rewritten at most this often (a restart loses at most this much; the daemon restarts about hourly). */
+export const HEAP_SAMPLE_PERSIST_GAP_MS = 5 * 60_000;
+/** A proposal row at most this often from a running daemon. */
+export const HEAP_PROPOSAL_EVERY_MS = 60 * 60_000;
+/** BACKSTOP on samples kept: a minute-spaced week (10,080) plus the ~10-minute collections, with room. */
+export const HEAP_SAMPLE_MAX = 12_000;
+/** The proposal is never below this multiple of the largest live set observed. */
+export const HEAP_PROPOSAL_FLOOR_MULTIPLE = 2;
+/** The quantile of the post-collection live set the proposal is taken at. */
+export const HEAP_PROPOSAL_QUANTILE = 0.999;
+
+/** One reading of the heap: what was in use, and the heap's size. `after_gc` marks a reading taken right after a
+ *  forced full collection (the live set); the rest are heartbeat readings (an upper bound of it). */
+export interface HeapSample {
+  at: number;
+  used_bytes: number;
+  size_bytes: number;
+  after_gc: boolean;
+  pid: number;
+}
+
+export interface HeapSampleIo {
+  readFile: (path: string) => string;
+  writeFile: (path: string, content: string) => void;
+}
+
+const realHeapSampleIo: HeapSampleIo = {
+  readFile: (path) => readFileSync(path, "utf8"),
+  writeFile: (path, content) => void writeAtomic(path, content, { tmpTag: "heap-samples-tmp" }),
+};
+
+export function heapSamplePath(stateDir: string): string {
+  return join(stateDir, HEAP_SAMPLE_FILE);
+}
+
+/** The persisted samples (oldest first), or why they cannot be read. A torn file is named, never read as empty. */
+export function parseHeapSamples(text: string): HeapSample[] | { unread: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    void error; // A torn or foreign file: named, never read as an empty series.
+    return { unread: "unparseable" };
+  }
+  const rows = (parsed as { samples?: unknown } | null)?.samples;
+  if (!Array.isArray(rows)) return { unread: "no samples array" };
+  const out: HeapSample[] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== 5) continue;
+    const [at, used, size, gc, pid] = row as unknown[];
+    if (![at, used, size, pid].every((n) => typeof n === "number" && Number.isFinite(n)) || (gc !== 0 && gc !== 1)) continue;
+    out.push({ at: at as number, used_bytes: used as number, size_bytes: size as number, after_gc: gc === 1, pid: pid as number });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/** The nearest-rank quantile of `values`. Undefined when there are none. */
+export function quantileOf(values: readonly number[], q: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
+}
+
+/** The heap ceiling the daemon would want, learned over the persisted window. SHADOW: nothing applies it. */
+export interface HeapCeilingProposal {
+  shadow: true;
+  report_only: true;
+  ceiling_in_force_bytes: number;
+  proposed_ceiling_bytes?: number;
+  /** Why no ceiling is proposed yet. */
+  proposed_unlearned?: string;
+  live_samples: number;
+  after_gc_samples: number;
+  /** Distinct daemon processes the samples span: how many boots the proposal has learned across. */
+  boots_sampled: number;
+  window_ms: number;
+  live_p999_bytes?: number;
+  live_max_bytes?: number;
+  headroom_factor: number;
+  floor_bytes?: number;
+}
+
+/** Pure: p99.9 of the post-collection live set × the headroom V8 allows above it before collecting (1 + the growth
+ *  percent), never below {@link HEAP_PROPOSAL_FLOOR_MULTIPLE}× the largest live set seen at any sample. With no
+ *  collected sample the quantile is taken over the heartbeat readings, an upper bound of the live set. */
+export function proposeHeapCeiling(
+  samples: readonly HeapSample[], growthPercent: number, ceilingInForceBytes: number,
+): HeapCeilingProposal {
+  const headroom = 1 + growthPercent / 100;
+  const base = {
+    shadow: true as const, report_only: true as const, ceiling_in_force_bytes: ceilingInForceBytes,
+    live_samples: samples.length, after_gc_samples: samples.filter((s) => s.after_gc).length,
+    boots_sampled: new Set(samples.map((s) => s.pid)).size, window_ms: HEAP_SAMPLE_RETAIN_MS, headroom_factor: headroom,
+  };
+  if (samples.length === 0) return { ...base, proposed_unlearned: "no live heap sample yet" };
+  const collected = samples.filter((s) => s.after_gc);
+  const p999 = quantileOf((collected.length > 0 ? collected : samples).map((s) => s.used_bytes), HEAP_PROPOSAL_QUANTILE) as number;
+  const max = Math.max(...samples.map((s) => s.used_bytes));
+  const floor = HEAP_PROPOSAL_FLOOR_MULTIPLE * max;
+  return {
+    ...base, live_p999_bytes: p999, live_max_bytes: max, floor_bytes: floor,
+    proposed_ceiling_bytes: Math.round(Math.max(p999 * headroom, floor)),
+  };
+}
+
+export interface HeapShadow {
+  readonly path: string;
+  /** Add one reading; persist when due, and hand `onProposal` a proposal when one is due (hourly). */
+  observe(reading: { used_bytes: number; size_bytes: number; after_gc: boolean }): void;
+  /** Take a heartbeat reading of this process's heap (rate-limited). */
+  sampleNow(): void;
+  /** Write the file now. */
+  flush(): { persisted: true } | { persisted: false; reason: string };
+  samples(): readonly HeapSample[];
+  propose(): HeapCeilingProposal;
+  /** Why the file could not be loaded, if it could not (a first boot has none and is not an error). */
+  readonly loadError?: string;
+}
+
+export interface HeapShadowOptions {
+  path: string;
+  policy?: DaemonMemoryPolicy;
+  clock?: Clock;
+  io?: HeapSampleIo;
+  snapshot?: () => SlackSnapshot;
+  pid?: number;
+  /** Called with the reason when a persist fails: the samples stay in memory. */
+  onPersistError?: (reason: string) => void;
+  /** Called with a proposal at most once per {@link HEAP_PROPOSAL_EVERY_MS}, from the reading that finds it due. */
+  onProposal?: (proposal: HeapCeilingProposal) => void;
+}
+
+function errnoOrReason(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" ? code : String((error as Error)?.message ?? error).slice(0, 120);
+}
+
+/** The shadow's store: loaded from `path` once (so a restart keeps the week), then held in memory. NEVER IN THE
+ *  PATH: a failed load starts empty, a failed persist keeps the samples and is reported to `onPersistError`. */
+export function createHeapShadow(opts: HeapShadowOptions): HeapShadow {
+  const policy = opts.policy ?? DEFAULT_DAEMON_MEMORY_POLICY;
+  const clock = opts.clock ?? systemClock;
+  const io = opts.io ?? realHeapSampleIo;
+  const snapshot = opts.snapshot ?? (() => readSlackSnapshot());
+  const pid = opts.pid ?? process.pid;
+  let held: HeapSample[] = [];
+  let loadError: string | undefined;
+  try {
+    const loaded = parseHeapSamples(io.readFile(opts.path));
+    if (Array.isArray(loaded)) held = loaded;
+    else loadError = loaded.unread;
+  } catch (error) {
+    // No file yet (a first boot) is not an error; anything else is named on the store.
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") loadError = errnoOrReason(error);
+  }
+  let ceilingInForce = 0;
+  let lastHeartbeatAt = -Infinity;
+  let lastPersistAt = -Infinity;
+  let lastProposalAt = clock.now();
+  let dirty = false;
+  const propose = () => {
+    ceilingInForce = snapshot().heap_size_limit_bytes;
+    return proposeHeapCeiling(held, policy.heapGrowingPercent, ceilingInForce);
+  };
+  const flush = (): { persisted: true } | { persisted: false; reason: string } => {
+    try {
+      io.writeFile(opts.path, `${JSON.stringify({ samples: held.map((s) => [s.at, s.used_bytes, s.size_bytes, s.after_gc ? 1 : 0, s.pid]) })}\n`);
+      lastPersistAt = clock.now();
+      dirty = false;
+      return { persisted: true };
+    } catch (error) {
+      const reason = errnoOrReason(error);
+      opts.onPersistError?.(reason);
+      lastPersistAt = clock.now(); // Retry on the normal cadence, not on every heartbeat.
+      return { persisted: false, reason };
+    }
+  };
+  const observe: HeapShadow["observe"] = (reading) => {
+    const at = clock.now();
+    held = [...held.filter((s) => at - s.at <= HEAP_SAMPLE_RETAIN_MS && s.at <= at),
+      { at, used_bytes: reading.used_bytes, size_bytes: reading.size_bytes, after_gc: reading.after_gc, pid }]
+      .slice(-HEAP_SAMPLE_MAX);
+    dirty = true;
+    if (at - lastPersistAt >= HEAP_SAMPLE_PERSIST_GAP_MS) flush();
+    if (at - lastProposalAt >= HEAP_PROPOSAL_EVERY_MS) {
+      lastProposalAt = at;
+      opts.onProposal?.(propose());
+    }
+  };
+  return {
+    path: opts.path,
+    ...(loadError === undefined ? {} : { loadError }),
+    observe,
+    sampleNow() {
+      const at = clock.now();
+      if (at - lastHeartbeatAt < HEAP_SAMPLE_MIN_GAP_MS) return;
+      lastHeartbeatAt = at;
+      const now = snapshot();
+      observe({ used_bytes: now.heap_used_bytes, size_bytes: now.heap_physical_bytes, after_gc: false });
+    },
+    flush: () => (dirty ? flush() : { persisted: true }),
+    samples: () => held,
+    propose,
+  };
+}
+
+let installedShadow: HeapShadow | undefined;
+
+/** The daemon installs its shadow once; its heartbeat and its reclaims feed it. Elsewhere none is installed. */
+export function installHeapShadow(shadow: HeapShadow | undefined): void {
+  installedShadow = shadow;
+}
+
+export function installedHeapShadow(): HeapShadow | undefined {
+  return installedShadow;
 }
 
 let installedReclaimer: DaemonSlackReclaimer | undefined;

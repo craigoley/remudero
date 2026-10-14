@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: now-view shadow went real=0 for four hours after W1-T9356, then 300 real diffs from one task"
   plan_refs: [W1-T9356, W1-T5066, W1-T9357]
   files: [src/lib/now-view.ts, test/a-now-view-body-is-stamped-as-of-what-its-board-read.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -479,6 +479,7 @@ refresh_deploy_code() {
 # src/lib/deployer.ts with every local module it imports (test/a-busy-primary-reaches-its-image-
 # recycle.test.ts walks that import graph and fails when a module is missing here).
 DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliation.ts
+  src/lib/actor-evidence.ts
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
