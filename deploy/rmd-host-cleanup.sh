@@ -349,6 +349,7 @@ sweep_path() {
   # Generic temp globs must not bypass Git safety for a checkout or a unit
   # containing one. Incomplete walks are not permission to remove a tree.
   if [ -d "$p" ] && [ ! -L "$p" ]; then
+    if ! bare_repository_scan "$p"; then log "KEEP $p: bare repository or incomplete repository scan; Git history retained"; return; fi
     entries=$(find "$p" \( -name node_modules -o -name .git \) -prune -a -name .git -print 2>/dev/null) || {
       log "KEEP $p: repository scan failed (unknown)"; return;
     }
@@ -364,6 +365,16 @@ sweep_path() {
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   log "REMOVE $p"
   act rm -rf -- "$p"
+}
+
+bare_repository_scan() {
+  local root="$1" heads entry parent
+  heads=$(find "$root" \( -name .git -o -name node_modules \) -prune -o -type f -name HEAD -print 2>/dev/null) || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    parent=${entry%/HEAD}
+    if [ -d "$parent/objects" ] && [ -d "$parent/refs" ]; then return 1; fi
+  done <<< "$heads"
 }
 
 # ── rule 3 ──
@@ -488,6 +499,7 @@ sweep_worktree() {
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt"; then log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; return; fi
   if [ "$kind" = "standalone clone" ]; then
+    if ! rmd_remote_outside_retirement "$wt" "$wt"; then log "KEEP $wt: remote publication lender is inside removal unit or unverified"; return; fi
     # A clone is the git dir of every linked worktree built on it, and holds every local ref: judging
     # it by HEAD alone deleted a clone hosting 33 worktrees (W1-T8861).
     if hosted="$(clone_live_worktree "$gitdir")"; then
@@ -784,7 +796,7 @@ lender_check() {
   [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
 }
 sweep_scratch_unit() {
-  local p="$1" status entries entry repo head bundles bytes seed_reason
+  local p="$1" status entries entry repo head bundles bytes seed_reason gitdir hosted
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
   # Empty when the unit holds no repository: healthy, and it still passes every check below.
   # ${a[@]+...} because Bash before 4.4 calls an empty array unbound under `set -u` (W1-T6594).
@@ -800,6 +812,7 @@ sweep_scratch_unit() {
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
   if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return; fi
+  if [ -d "$p" ] && ! bare_repository_scan "$p"; then log "KEEP $p: bare repository or incomplete repository scan; Git history retained"; return; fi
   if ! entries="$(find "$p" -name node_modules -prune -o -name .git -prune -print 2>/dev/null)"; then
     log "KEEP $p: repository scan failed (unknown)"; return
   fi
@@ -818,6 +831,9 @@ sweep_scratch_unit() {
   # Validate the whole unit before removing any of its repositories. Missing
   # metadata and unpublished work stay in place, even if an archive is possible.
   for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
+    if ! rmd_remote_outside_retirement "$repo" "$p"; then
+      log "KEEP $p: remote publication lender is inside removal unit or unverified ($repo)"; return
+    fi
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
       if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
         keep_scratch_for_repo "$p" "Git fetch failed (unknown)" "$entries"; return

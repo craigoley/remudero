@@ -173,6 +173,23 @@ test("Linux janitor protects recent real ctime even when the entire payload mtim
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
+test("a local remote inside the retirement unit and bare object stores never authorize deletion", () => {
+  const fx = fixture();
+  try {
+    const { main } = repos(fx);
+    const unit = join(fx.scratch, "rmd-with-local-origin"); mkdirSync(unit);
+    const origin = join(unit, "origin.git");
+    git(fx.root, "clone", "--bare", main, origin);
+    const repo = join(unit, "repo"); git(fx.root, "clone", origin, repo); age(unit, 7);
+    const r = run(fx, { RMD_CLEANUP_ONLY_TMP: "1" });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(origin), true); assert.equal(existsSync(repo), true);
+    assert.match(r.stdout, /bare repository/);
+    const unsafe = spawnSync("bash", ["-c", 'source "$1"; rmd_remote_outside_retirement "$2" "$3"', "proof", GUARD, repo, unit]);
+    assert.notEqual(unsafe.status, 0);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
 test("Mac installer installs both safety helpers and preserves the previous script without changing schedules", () => {
   const fx = fixture();
   try {

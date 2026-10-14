@@ -32,7 +32,7 @@ account. Azure also checks configured-root alternates and linked registrations;
 all local refs and reflog-only commits must be published before clone removal.
 
 Each account writes human logs plus a tab-separated decision receipt at
-`~/.local/state/remudero/janitor-decisions.tsv`. Columns are pass PID, UTC time,
+`~/.local/state/remudero/janitor-decisions.tsv`. Columns are timestamp/PID pass ID, UTC time,
 action, reason code and escaped complete message. Tabs/newlines/percent signs in
 messages are escaped. Each pass summarizes skip counts by reason. A Git-unknown
 hold needs its original object store restored or an operator-reviewed recovery;
