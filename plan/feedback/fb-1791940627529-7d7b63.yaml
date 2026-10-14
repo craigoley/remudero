@@ -1,0 +1,27 @@
+id: fb-1791940627529-7d7b63
+ts: 2026-10-14T01:17:07.529Z
+raw: |-
+  Native qualification found concurrent shared-store publication replacing another owner’s completed valid hash.
+
+  Context: W1-T8776, PR #11515, published head e8df3af0ff1bb6f762fd308791b03422bb792953, merged 2026-10-14T01:06:17Z as 7ebd43e68b4f8de21fd4884da17ca0e6dd16d83f. Its build recipe, store, launcher, callers and tested files are byte-identical to tested head b60665df5b11bb50c05858d70fe67e364d3a3e46. All seven review criteria and the existing 19 native tests pass, but the task design and ADR additionally promise that a concurrent publisher never replaces another owner’s completed valid build.
+
+  OBSERVED: publishStored in src/lib/child-entry-store.ts validates the destination before calling publishDir. If another process completes the hash after that check and before the first rename, rename fails with ENOTEMPTY. publishDir then moves the now-valid destination aside, publishes its own staging directory, and removes the completed winner. The earlier validation does not protect this interleaving.
+
+  Reproduction used Node 24.21.0 on macOS and two independent real buildIntoStore processes against disposable owned fixture trees. Only publisher A’s rename scheduling was gated; every filesystem operation delegated to the real implementation. Pause A immediately before its first stage-to-hash rename, let B build through the default API, positively validate B with childEntryIsCurrent, record B’s directory inode, then release A. Both build receipts report kind=built and the same source hash. B’s completed directory inode is replaced by A’s staging inode. Both resulting payloads remain current: this receipt demonstrates an ownership/immutable-publication contract failure, not payload corruption.
+
+  Exact original control: sourceHash 1b3d1da41ddb652e3606211e8a62146196078aaa98f297b5c056984c96f29a75; B winner inode 998808799; A final inode 998808790; both currency judgements current:true/source-hash-match. Official admitted test runner: 1 test, 1 fail, assertion “the completed valid directory published by B must not be replaced by A”.
+
+  Load-bearing control: an isolated private code copy that refuses an occupied target with the real rename preserves B and returns a typed failure for A (1 passing case). Returning to the unchanged published code reproduces replacement (1 failing case). That prototype is not a complete production remedy: invalid-store recovery and additional publication races still require design and qualification. No repository implementation or fleet branch was changed.
+
+  Durable operator receipts: /Users/craigoleyagent/Remudero/handoff-2026-10-13/triage-execution/store-concurrent-publish.tap and store-concurrent-prototype-and-restored.tap. The private fixture script is store-concurrent-publish-v2.test.mjs in the same directory; its steps above permit independent reproduction without those local paths.
+
+  Governed request: choose the existing owning/fix lane or a scoped dependent remedy for W1-T8776, without filing a duplicate implementation task or racing a live owner. Preserve atomic publication and typed tsx fallback; qualify absent-target races and invalid-target recovery under two independent publishers before crediting the no-overwrite guarantee. Runtime adoption, real fleet bundle use, physical CoW savings and paired memory benefit are separate claims and remain unqualified in this continuation.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
