@@ -164,6 +164,7 @@ test("the author preflight's affected tests fail when a suite's process exits 0 
   writeFileSync(join(root, ".nvmrc"), process.versions.node + "\n");
   writeFileSync(join(root, ".gitignore"), "node_modules\ncoverage\n");
   symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
+  writeFileSync(join(root, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
   writeFileSync(join(root, "scripts/diff-class.mjs"), "// This fixture has no census path readers.\n");
   writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
