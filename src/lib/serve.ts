@@ -150,6 +150,7 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
+import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
   buildDaemonHealthRoute,
@@ -579,6 +580,9 @@ export interface ServeDeps {
    * the real `plan/policy.yaml` row so the console never carries a second, drifting copy of that
    * bound.
    */
+  /** W1-T3956: the automation-trigger-v1 registry. Omitted, serve builds one journalled to
+   *  `ledgerPath` with no flow or trigger registered, so every start is refused by name. */
+  automationTriggers?: AutomationTriggerRegistry;
   githubEventWake?: {
     secret?: string;
     repository: string;
@@ -2833,6 +2837,10 @@ function assembleServeRoutes(
   // private content never crosses these routes either: inventory strips it structurally and
   // export returns only a bounded, secret-scrubbed preview (see context-controls.ts's header).
   const contextControlsRoutes = buildContextControlsRoutes({ ledgerPath: deps.ledgerPath });
+  // W1-T3956: one named-start registry per process, journalled to the SAME daemon ledger. Manual
+  // starts enter over HTTP; the schedule and verified-webhook adapters submit through this call too.
+  const automationTriggers = deps.automationTriggers ?? createAutomationTriggerRegistry({ journal: automationTriggerLedgerJournal(deps.ledgerPath) });
+  const automationTriggerRoutes = buildAutomationTriggerRoutes({ registry: automationTriggers, submit: (request) => submitAutomationTrigger(automationTriggers, request) });
   // One history per `rmd serve` process, never a module singleton; a throw logs `github.wake.check_run_callback_failed`.
   let ciIncidentState: CiIncidentState = createCiIncidentState();
   const onCheckRunCompleted = async (info: CheckRunCompletedInfo): Promise<void> => {
@@ -2963,6 +2971,7 @@ function assembleServeRoutes(
     ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
       instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
+    ...automationTriggerRoutes,
     ...buildPanelGraphRoutes(panelReadDeps, panelReadDeps.readPlanSnapshot),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
