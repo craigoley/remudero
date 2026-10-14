@@ -186,9 +186,10 @@ test("SDK gardener origin default child ledger", async (t) => {
         {cwd:${JSON.stringify(join(dir, "tmp", "root"))},env:childEnv,timeout:10_000,stdio:'pipe'});
     }
   `);
-  const seen = await records(join(dir, "tmp", "sdk-ledger.ndjson"));
+  const ledgerPath = join(dir, "tmp", "sdk-ledger.ndjson");
+  const seen = await records(ledgerPath);
   assert.equal(seen.length, 8, "all four real descendant modes reached the default writer twice");
-  assert.equal((await readFile(join(dir, "sdk-ledger.ndjson"), "utf8")).includes("W9494-fixture-secret"), false);
+  assert.equal((await readFile(ledgerPath, "utf8")).includes("W9494-fixture-secret"), false);
   for (const mode of ["explicit", "default", "absent", "invalid"]) {
     const priced = seen.find(row => row.run_id === `${mode}-priced`)!;
     const unpriced = seen.find(row => row.run_id === `${mode}-unpriced`)!;
@@ -223,12 +224,14 @@ test("SDK gardener origin default child ledger", async (t) => {
 });
 
 interface SdkCallerObservation {
-  mode: "explicit" | "default" | "conflict";
+  mode: "explicit" | "default" | "conflict" | "invalid";
   kind: "query" | "containment";
   queryCalls: number;
   containmentCalls: number;
   sdkOrigin?: origin.GardenerOrigin;
   containedOrigin?: origin.GardenerOrigin;
+  sdkCarrier?: string;
+  containedCarrier?: string;
   sameEnv: boolean;
   runId: string;
   taskId: string;
@@ -271,10 +274,11 @@ test("SDK gardener origin actual caller handoff", async (t) => {
     const settingsFile = ${JSON.stringify(join(dir, "worker.json"))};
     writeFileSync(settingsFile,JSON.stringify({sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false}}));
     const observations = [];
-    for (const mode of ['explicit','default','conflict']) for (const kind of ['query','containment']) {
+    for (const mode of ['explicit','default','conflict','invalid']) for (const kind of ['query','containment']) {
       let queryCalls = 0,containmentCalls = 0,capturedOptions,capturedSpawn;
       const marker = new Error('W9494-private-containment-capture');
       if (mode === 'explicit') delete process.env[GARDENER_ORIGIN_ENV];
+      else if (mode === 'invalid') process.env[GARDENER_ORIGIN_ENV] = 'W9494-fixture-secret-invalid-parent';
       else process.env[GARDENER_ORIGIN_ENV] = inherited;
       const queryFn = ({options}) => {
         queryCalls++;
@@ -301,6 +305,7 @@ test("SDK gardener origin actual caller handoff", async (t) => {
         egress:{mode:'off'},
         containment:{spawn:(opts)=>{containmentCalls++;capturedSpawn=opts;throw marker;}},
         ...(mode === 'explicit' ? {env:{[GARDENER_ORIGIN_ENV]:inherited}} : {}),
+        ...(mode === 'invalid' ? {env:{[GARDENER_ORIGIN_ENV]:inherited}} : {}),
         ...(mode === 'conflict' ? {env:{[GARDENER_ORIGIN_ENV]:conflicting,
           [RUN_ID_ENV]:'spoofed-run',[TASK_ID_ENV]:'W1-T999',[WORKER_SCOPE_ENV]:'spoofed-installation'}} : {}),
       };
@@ -314,6 +319,7 @@ test("SDK gardener origin actual caller handoff", async (t) => {
         ? JSON.parse(readFileSync(capturedOptions.settings,'utf8')) : capturedOptions.settings;
       observations.push({mode,kind,queryCalls,containmentCalls,sdkOrigin:readGardenerOrigin(env),
         containedOrigin:capturedSpawn ? readGardenerOrigin(capturedSpawn.env) : undefined,
+        sdkCarrier:env[GARDENER_ORIGIN_ENV],containedCarrier:capturedSpawn?.env[GARDENER_ORIGIN_ENV],
         sameEnv:kind === 'query' || capturedSpawn.env === env,
         runId:env[RUN_ID_ENV],taskId:env[TASK_ID_ENV],scope:env[WORKER_SCOPE_ENV],expectedScope:workerInstallationScope(root),
         containedRunId:capturedSpawn?.env[RUN_ID_ENV],containedTaskId:capturedSpawn?.env[TASK_ID_ENV],
@@ -328,7 +334,7 @@ test("SDK gardener origin actual caller handoff", async (t) => {
     writeFileSync(${JSON.stringify(join(dir, "sdk-observations.json"))},JSON.stringify(observations));
   `, true);
   const observations = JSON.parse(await readFile(join(dir, "sdk-observations.json"), "utf8")) as SdkCallerObservation[];
-  assert.equal(observations.length, 6, "query/containment paths ran for absent extras, explicit fallback and conflicting extras");
+  assert.equal(observations.length, 8, "query/containment paths ran for default, explicit, conflicting and invalid ambient metadata");
   for (const row of observations) {
     assert.equal(row.queryCalls, 1);
     assert.equal(row.containmentCalls, row.kind === "containment" ? 1 : 0);
@@ -345,8 +351,8 @@ test("SDK gardener origin actual caller handoff", async (t) => {
     assert.equal(row.settingsSameInput, true, "SDK receives the real validated sandbox settings path");
     const sandbox = { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false };
     assert.deepEqual(row.settingsSandbox, sandbox);
-    if (row.inlineSandboxPresent) assert.deepEqual(row.inlineSandbox, sandbox, "an exposed inline sandbox must preserve enforcement");
-    else assert.equal(row.inlineSandbox, undefined, "the current native SDK options carry sandbox through settings, not both options");
+    assert.equal(row.inlineSandboxPresent, false, "sandbox enforcement travels through the validated settings file, not an extra override");
+    assert.equal(row.inlineSandbox, undefined);
     assert.equal(row.permissionMode, "default");
     assert.equal(row.billing, "subscription");
     assert.equal(row.homePrivate, true);
@@ -368,4 +374,13 @@ test("SDK gardener origin actual caller handoff", async (t) => {
     assert.deepEqual(row.sdkOrigin, expected, "valid ambient parent A must win over a different valid extra carrier B");
     if (row.kind === "containment") assert.deepEqual(row.containedOrigin, expected);
   }
+  for (const row of observations.filter(row => row.mode === "invalid")) {
+    assert.deepEqual(row.sdkOrigin, { state: "invalid", reason: "malformed" });
+    assert.equal(row.sdkCarrier, "null", "invalid ambient input stays bounded and cannot be rescued by valid extras");
+    if (row.kind === "containment") {
+      assert.deepEqual(row.containedOrigin, row.sdkOrigin);
+      assert.equal(row.containedCarrier, "null");
+    }
+  }
+  assert.equal(JSON.stringify(observations).includes("W9494-fixture-secret"), false);
 });
