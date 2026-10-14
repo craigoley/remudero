@@ -1293,3 +1293,17 @@ export function renderImplementPrompt(
     capabilityContextPart,
   ).prompt;
 }
+
+/**
+ * W1-T6166: whether a `reviewer-unmet` fix round is worth dispatching at all. A round whose evidence
+ * names no unmet criterion, no gate failure and an empty review summary hands a worker nothing to act
+ * on, so it is prevented rather than retried. PURE; any other mode is never judged here.
+ */
+export function reviewerUnmetPrevention(
+  evidence: FixEvidence,
+): { dispatch: true } | { dispatch: false; reason: string } {
+  if (deriveFixMode(evidence) !== "reviewer-unmet") return { dispatch: true };
+  if ((evidence.review?.unmetCriteria.length ?? 0) > 0) return { dispatch: true };
+  if ((evidence.review?.summary ?? "").trim().length > 0) return { dispatch: true };
+  return { dispatch: false, reason: "reviewer-unmet evidence is empty: no unmet criterion and no review summary" };
+}

@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a deterministic main red. #11758 and #11744 collided on test/the-core-fleet-fills-the-child-entry-store.test.ts (the store-fill fixture lacked src/run-child-main.ts), and #11782 (f19b8c887, main-repair) fixed it at 20:10Z, before its filing was judged at 20:54Z; its own evidence reads "0 recovered on retry, 3 also failed"; operator 2026-10-14
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/the-core-fleet-fills-the-child-entry-store.test.ts#W1-T9374: a filled store makes a fresh preflight tree launch the bundle"
