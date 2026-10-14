@@ -222,15 +222,18 @@ function withExplicitConsequence(e: Escalation): Escalation {
   return Object.prototype.hasOwnProperty.call(e, "consequence") ? e : { ...e, consequence: null };
 }
 
-/** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
-export type EscalationCause = "review" | "ci" | "conflict";
+/** The cause split {@link Escalation.cause} keys on (W1-T195's design). "stage-stall" (W1-T8167) is the
+ *  stalled-stage escalation's OWN cause: a fix strike's probe always carries "review", "ci" or "conflict",
+ *  so the cause dimension keeps an open stall issue from standing a fix round down. It is never returned
+ *  by {@link escalationCause}. */
+export type EscalationCause = "review" | "ci" | "conflict" | "stage-stall";
 
 /** Classify a blocked PR's cause from the SAME two booleans each rung already computes for dispatch
  *  (W1-T195) — never a second classification, never string-parsing a free-text reason. INVARIANT:
  *  `conflicted` wins over `ciFailing`, because a dirty merge state means GitHub never ran checks at
  *  all, so checks read "none"/stale rather than genuinely failing (see {@link isBlockedCi} in
  *  sweep.ts). Why: docs/forensics/escalate.md. */
-export function escalationCause(conflicted: boolean, ciFailing: boolean): EscalationCause {
+export function escalationCause(conflicted: boolean, ciFailing: boolean): Exclude<EscalationCause, "stage-stall"> {
   if (conflicted) return "conflict";
   if (ciFailing) return "ci";
   return "review";

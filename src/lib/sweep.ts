@@ -240,6 +240,7 @@ import {
   tryEscalate,
   type AskType,
   type Escalation,
+  type EscalationCause,
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
@@ -3225,7 +3226,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ...(reason.startsWith("PR stage stalled:") || reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
-          cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          cause: question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
           detail:
@@ -11203,6 +11204,9 @@ export interface ClarificationQuestion {
   /** W1-T186: which named {@link ObservedBlockerState} this escalation observed, or `undefined`
    *  for an ordinary review-failure block where the criterion fields already say everything. */
   observedState?: ObservedBlockerState;
+  /** W1-T8167: the escalation's own cause when it is not derivable from the PR's merge/CI state (a
+   *  stalled-stage report is "stage-stall"); absent leaves the closure's `escalationCause` read. */
+  cause?: EscalationCause;
 }
 
 /** Render ONE blocked-ambiguous PR's clarification question deterministically, from ledger ground
@@ -14880,6 +14884,15 @@ export function noteReviewDuration(ms: number): void {
   if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
 }
 
+/** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */
+const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.post_failed", "review.post_refused"]);
+
+/** PURE. How long a review may run before it counts as overdue: the longest of the observed durations
+ *  (the window's upper bound), or undefined when none are observed so the caller keeps its stand-in. */
+export function observedReviewOverrunBoundMs(durationsMs: readonly number[]): number | undefined {
+  return durationsMs.length === 0 ? undefined : Math.max(...durationsMs);
+}
+
 /** A PR whose head differs from the one this process last saw for it was pushed to. */
 export function noteHeadObservation(prNumber: number, headSha: string, atMs: number): void {
   idleMemo.sinceMs ??= atMs;
@@ -15135,6 +15148,27 @@ export async function runSweep(
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const diagnoses: string[] = [];
+    // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
+    // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
+    if (fields.blocker === "awaiting-review") {
+      const admitted = stageRows.findLast(row => row.step === "sweep.review_admitted" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+      const admittedAtMs = admitted === undefined ? NaN : Date.parse(String(admitted.ts));
+      if (admitted !== undefined && Number.isFinite(admittedAtMs) &&
+          !stageRows.some(row => LIVE_REVIEW_CLOSING_STEPS.has(String(row.step)) &&
+            Date.parse(String(row.ts)) >= admittedAtMs)) {
+        const observedBoundMs = observedReviewOverrunBoundMs(idleMemo.reviewMs);
+        const overdueAfterMs = observedBoundMs ?? bound.minutes * 60_000;
+        if (now - admittedAtMs <= overdueAfterMs) {
+          if (!currentRows.some(row => row.step === "pr.stuck.deferred" && stageKey(row) === key)) {
+            record("pr.stuck.deferred", { ...fields, admitted_at: admitted.ts, review_age_ms: now - admittedAtMs,
+              overdue_after_ms: overdueAfterMs, overdue_basis: observedBoundMs === undefined ? "backstop" : "observed" });
+          }
+          return;
+        }
+        diagnoses.push("review running past its observed length");
+      }
+    }
     const stalledFiles = baseReproductionFiles(pr.ciFailures ?? []);
     if (fields.blocker === "own-red" && mainTipSha !== undefined &&
         (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0 &&
@@ -15202,6 +15236,7 @@ export async function runSweep(
       await deps.escalate(pr, reason, {
         taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
         criterion: "", reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [],
+        cause: "stage-stall",
         resolutions: [
           { label: "repair the stalled stage", detail: `Inspect ${fields.blocker} and its ${diagnosis} diagnosis.` },
           { label: "close the PR", detail: "Close it if the work is redundant or no longer needed." },
