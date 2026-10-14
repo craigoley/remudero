@@ -867,6 +867,7 @@ import {
   approveBatch,
   approveBatchCommitMessage,
   approveCommitMessage,
+  approvePrTitle,
   approveProposal,
   classifyProposal,
   draftAttemptKey,
@@ -52933,7 +52934,7 @@ export async function approveCommand(
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
   const preflightApprovePush = (path: string, branch: string, id: string): void =>
-    refuseRedPlanPr(planPrPreflight({ cwd: path, title: `chore(plan): ratify ${id} via rmd approve`, body: "" }), { lane: "approve", branch, log });
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }), { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -53095,7 +53096,7 @@ export async function approveCommand(
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
       const created = createPlanPrRest(ghJson, owner, repo, {
-        title: `chore(plan): ratify ${id} via rmd approve`,
+        title: approvePrTitle(id),
         body,
         head: branch,
         base: "main",

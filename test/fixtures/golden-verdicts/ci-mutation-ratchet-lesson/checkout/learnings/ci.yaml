@@ -1,0 +1,6 @@
+- id: mutation-ratchet-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/classify.ts, stryker.conf.json, scripts/mutation-baseline.json]
+  fact: Run the mutation gate before pushing and kill a surviving mutant with a test; never raise the baseline.
+  src: "ci-learning:10954:mutation-ratchet"

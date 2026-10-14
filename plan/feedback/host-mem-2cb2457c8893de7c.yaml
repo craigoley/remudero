@@ -14,11 +14,10 @@ raw: >-
   container.
 attachments: []
 origin: incident#2cb2457c8893de7c4a5514f0c014b2060347e8db6cd495f359a8686009529b8a
-status: rejected
+status: new
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
-answered_by: null

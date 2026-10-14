@@ -1166,6 +1166,16 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
   fi
+  # W1-T9409 -- A RECYCLE PAUSE WHOSE WRITER DIED BEFORE IT STOPPED THE CONTAINER IS RELEASED. On
+  # 2026-10-14 the recycle this tick ran died in its wait (rc=2) and its PAUSE held core dispatch for
+  # ~2h45m; SIGKILL runs no trap at all. Only proof releases it (writer dead by pid + start time, phase
+  # waiting, this host, the recorded container still running); an operator PAUSE is never touched.
+  # BEFORE the unchanged-tick exit, which a paused daemon reads as healthy. Bounded, never fatal.
+  if [ "\$BOOT" -eq 0 ] && [ -f "\$CHECKOUT/deploy/release-orphan-recycle-pause.sh" ]; then
+    ORP_TMO=(); command -v timeout >/dev/null 2>&1 && ORP_TMO=(timeout 60)
+    \${ORP_TMO[@]+"\${ORP_TMO[@]}"} bash "\$CHECKOUT/deploy/release-orphan-recycle-pause.sh" \\
+      --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+  fi
   if [ "\$BOOT" -eq 0 ] && watchdog_unchanged_tick '${CONTAINER_NAME}'; then exit 0; fi
   rm -f "\$WATCHDOG_SNAPSHOT" 2>/dev/null || true
   WATCHDOG_UNCHANGED_TICKS=0

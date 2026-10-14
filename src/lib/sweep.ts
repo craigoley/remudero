@@ -17275,7 +17275,16 @@ export async function runSweep(
               const noCommitRound = fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).noCommitRounds.at(-1);
               const rerunAttempted = ledgerLines.some(row => row.step === "sweep.disposed" &&
                 row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true);
-              if (noCommitRound !== undefined && !rerunAttempted &&
+              // W1-T8041: a requeue GitHub deferred at this head is retried FIRST, by the requeue arms
+              // below, which hold while its run is in flight. The no-commit rerun's one-shot receipt is
+              // never spent ahead of it.
+              const pendingDeferral = [...(isBlockedCi(pr) ? pr.ciFailures ?? [] : []), ...(isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [])].some((check) => {
+                const key = `${pr.headSha}@${check.name}`;
+                return checkDeferrals.has(key) && !checkDeferrals.get(key)!.escalated && !requeuedCheckKeys.has(key);
+              });
+              // W1-T8041: an "unavailable" rerun answers nothing, so its pass still reaches the requeue arms.
+              let unavailableRerunStandDown: string | undefined;
+              if (noCommitRound !== undefined && !rerunAttempted && !pendingDeferral &&
                   flakeClaimsForHead(ledgerLines, pr.taskId, pr.headSha, pr.prNumber).length === 0) {
                 acted = false;
                 if (!deps.rerunFailedChecks) {
@@ -17305,7 +17314,8 @@ export async function runSweep(
                   no_commit_rerun_outcome: result.outcome, no_commit_rerun_run_ids: result.runIds,
                   no_commit_rerun_reason: result.reason };
                 standDownReason = `no-commit CI fix: failed-job rerun ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
-                break;
+                if (result.outcome !== "unavailable") break;
+                unavailableRerunStandDown = standDownReason;
               }
               if (noCommitRound !== undefined && rerunAttempted && deps.fixProgressJudge) {
                 progressParkedReason = "rerun-still-red: failed-job rerun left this head red";
@@ -17757,6 +17767,11 @@ export async function runSweep(
                   standDownReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   break;
                 }
+              }
+              // W1-T8041: no requeue arm took this pass, so an unavailable rerun stands down exactly as it did before.
+              if (unavailableRerunStandDown !== undefined) {
+                standDownReason = unavailableRerunStandDown;
+                break;
               }
               const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
               if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
