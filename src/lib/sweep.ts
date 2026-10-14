@@ -21382,10 +21382,37 @@ export async function runStaleEscalationRejudge(
 // kept every row, and copied that array once per open issue. The rung reads only the slice below.
 
 /** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
-const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
+export const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
 
-/** The escalation-triage rung's slice of the ledger union, as a whole-corpus read would answer it. */
-export type EscalationTriageHistoryReader = (stateDir: string) => Promise<LedgerUnionRecordRead>;
+/** One holder's slice of the ledger union: the steps it reads, and the name its durable digest is kept under. */
+export interface EscalationTriageSlice {
+  holder: string;
+  steps: readonly string[];
+}
+
+/** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
+export const ESCALATION_TRIAGE_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.escalation-triage-history", steps: [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP],
+};
+
+/**
+ * W1-T9406: the slice buildEscalationTriageRuntime's `evidence` reads — the fix strikes, the re-kicks already
+ * attempted, the births carrying `triage_subject` and `issue_url`, and the dispositions escalationClassSignal
+ * counts. Before W1-T9406 that callback read every row of every rotation, synchronously, once per escalation.
+ */
+export const ESCALATION_TRIAGE_EVIDENCE_SLICE: EscalationTriageSlice = {
+  holder: "run-task.escalation-triage-evidence",
+  steps: ["fix.dispatch", "escalation.auto_resolve_attempted", ...ESCALATION_TRIAGE_BIRTH_STEPS, "panel.escalation_marked_handled"],
+};
+
+/**
+ * A holder's slice of the ledger union, as a whole-corpus read would answer it. Calling it loads every rotation
+ * not yet seen OFF the loop, then answers; `current` answers synchronously from what the last call loaded, reading
+ * only the live bytes written since (a rotation no call has loaded yet is read inline, as the union reads it).
+ */
+export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<LedgerUnionRecordRead>) & {
+  current(stateDir: string): LedgerUnionRecordRead;
+};
 
 /**
  * Builds the rung's history reader, once per daemon start (`buildSweepHook`), or once per call where no
@@ -21394,14 +21421,17 @@ export type EscalationTriageHistoryReader = (stateDir: string) => Promise<Ledger
  * {@link createIncrementalLedgerUnion} read that follows answers those rotations from their digests, keeps
  * them in memory, and reads the live file from where the previous pass stopped. No time window: an issue
  * born in the oldest rotation is still found. `refuseIncomplete` holds: an unread rotation gives no rows.
+ * `slice` (W1-T9406) names the steps and the digest holder; absent, it is the rung's own
+ * {@link ESCALATION_TRIAGE_HISTORY_SLICE}. Each holder keeps its own durable digest and incremental union.
  */
 export function createEscalationTriageHistoryReader(
-  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer> } = {},
+  io: { fs?: LedgerGrepFsDeps; readFile?: (path: string) => Promise<Buffer>; slice?: EscalationTriageSlice } = {},
 ): EscalationTriageHistoryReader {
   const fsDeps = io.fs ?? realLedgerFs;
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
-  const steps = [...ESCALATION_TRIAGE_BIRTH_STEPS, ESCALATION_REJUDGED_STEP];
-  const identity = { holder: "sweep.escalation-triage-history", reducerVersion: "1" };
+  const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
+  const steps = [...slice.steps];
+  const identity = { holder: slice.holder, reducerVersion: "1" };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -21412,14 +21442,15 @@ export function createEscalationTriageHistoryReader(
     return `${s.size}:${s.mtimeMs}`;
   };
   let loaded = new Map<string, string>();
-  return async (stateDir) => {
+  const current = (stateDir: string): LedgerUnionRecordRead => union(stateDir, { step: steps, refuseIncomplete: true });
+  return Object.assign(async (stateDir: string): Promise<LedgerUnionRecordRead> => {
     let names: string[] = [];
     try {
       names = fsDeps.readdirSync(stateDir);
     } catch {
       // deliberate: the union read below lists the directory itself and answers for an unreadable one.
     }
-    const current = new Map<string, string>();
+    const stats = new Map<string, string>();
     const fresh: LedgerCorpusEntry[] = [];
     for (const entry of ledgerRotationEntries(names, stateDir)) {
       let key: string;
@@ -21429,7 +21460,7 @@ export function createEscalationTriageHistoryReader(
         // deliberate: an unstattable rotation is left to the union read, which reports it unread.
         continue;
       }
-      current.set(entry.path, key);
+      stats.set(entry.path, key);
       if (loaded.get(entry.path) !== key) fresh.push(entry);
     }
     if (fresh.length > 0) {
@@ -21438,9 +21469,9 @@ export function createEscalationTriageHistoryReader(
       });
       await memo.load(fresh);
     }
-    loaded = current;
-    return union(stateDir, { step: steps, refuseIncomplete: true });
-  };
+    loaded = stats;
+    return current(stateDir);
+  }, { current });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
