@@ -481,6 +481,7 @@ import {
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
   pendingWorkerBoundaryHandoffs,
+  receivePackCredentialProbe,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -40110,6 +40111,8 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
+        // W1-T9680: the token the daemon's own pushes send (GH_TOKEN, re-minted in process by the App refresh).
+        probeFleetCredential: receivePackCredentialProbe({ owner: target.owner, repo: target.repo, token: () => process.env.GH_TOKEN }),
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
