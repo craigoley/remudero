@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { age as fixtureAge, fixture, git, repos, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
 const SCRIPT = join(process.cwd(), "deploy/mac/remudero-janitor.sh");
-// The child shell uses the OS clock, including under the clock-shift lane.
+// The clock-shift preload moves Date and fs timestamps together. fixtureAge
+// already maps its shifted Date back to the OS clock used by the child shell.
 function age(path: string, hours = 7) {
-  const realNow = Number(execFileSync("date", ["+%s"], { encoding: "utf8" }).trim()) * 1000;
-  fixtureAge(path, hours + (Date.now() - realNow) / 3600_000);
+  fixtureAge(path, hours);
 }
 
 const native = (name: string) => execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim();
