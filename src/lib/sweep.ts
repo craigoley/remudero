@@ -28,7 +28,7 @@ import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason,
   baseReproductionFiles, ciContradictedProbeFiles, decideBaseReproduction, failingRuleSuitesFromCiFailures, failingTestFilesFromCiFailures,
-  isMainGreenOnItsOwnHead, mainFailingTestFiles, RULE_CHECKS_CHECK,
+  isMainGreenOnItsOwnHead, mainFailingTestFiles, mainFormerlyFailingTestFiles, RULE_CHECKS_CHECK,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile, type BaseProbeResult,
   assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshClearanceKey,
   refreshedOnSameRed, refreshRecordsFromLedger, refusedRefreshClearancesFromLedger,
@@ -8787,20 +8787,24 @@ export const BASE_RED_REFRESH_STEP = "sweep.base_red.refresh";
 /** W1-T6405 — a red head behind main whose failing test files all pass on current main took that
  *  main: one update-branch per `pr@head`, shared with {@link BASE_RED_REFRESH_STEP}'s once-per-head key. */
 export const BASE_FIXED_REFRESH_STEP = "sweep.base_fixed.refresh";
+export const BASE_FIXED_INHERITED_STEP = "sweep.base_fixed.inherited";
 /** remudero-console #2035 — an escalated head whose task contract was amended on main took main once. */
 export const CONTRACT_AMENDED_REFRESH_STEP = "sweep.contract_amended.refresh";
 
 /** W1-T6405 — the failing test files of a red head that is BEHIND main and whose every failing test file
- *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else
- *  `undefined`. Behind 0 or unknown is no evidence: the head already carries main, or nothing says. */
+ *  a recorded probe found passing at main's CURRENT tip (`clear`, never partial or unrunnable); else `undefined`.
+ *  Behind 0 is no evidence (the head carries main); unknown counts only when main once failed every one of them. */
 export function fixedOnMainTestFiles(
   pr: OpenPrView,
   mainTipSha: string | undefined,
   behindMainByPr: ReadonlyMap<number, number> | undefined,
   probes: ReadonlyMap<string, BaseProbeFile>,
+  formerlyFailingOnMain: ReadonlySet<string> = new Set(),
 ): string[] | undefined {
   const files = baseReproductionFiles(pr.ciFailures ?? []);
-  if (mainTipSha === undefined || files.length === 0 || (behindMainByPr?.get(pr.prNumber) ?? 0) <= 0) return undefined;
+  const behind = behindMainByPr?.get(pr.prNumber);
+  const inherited = behind === undefined && files.every((file) => formerlyFailingOnMain.has(file));
+  if (mainTipSha === undefined || files.length === 0 || ((behind ?? 0) <= 0 && !inherited)) return undefined;
   const recorded = files.map((file) => probes.get(probeCacheKey(mainTipSha, file)));
   if (recorded.some((probe) => probe === undefined)) return undefined;
   return decideBaseReproduction(files, recorded as BaseProbeFile[]) === "clear" ? files : undefined;
@@ -15303,7 +15307,7 @@ export async function runSweep(
     // that main, is not this PR's red: take main once instead of escalating, and let the refreshed
     // head's own CI decide. A red that survives the refresh is a new own-red stage and escalates.
     const fixedFiles = fields.blocker === "own-red"
-      ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache) : undefined;
+      ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache, formerlyFailingOnMain) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
       readRefreshHistory(pr);
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
@@ -15647,6 +15651,8 @@ export async function runSweep(
   }
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
+  const formerlyFailingOnMain = mainTipSha === undefined ? new Set<string>() : mainFormerlyFailingTestFiles(ledgerLines, mainTipSha);
+  const inheritedRedNoted = new Set(ledgerLines.flatMap((row) => row.step === BASE_FIXED_INHERITED_STEP ? [`${String(row.pr_number)}@${String(row.head_sha)}`] : []));
   // W1-T7848: one `main.rule_checks.observed` row per main sha and suite set, across passes.
   const ruleObservations = new Set(ledgerLines.filter((line) => line.step === MAIN_RULE_CHECKS_OBSERVED_STEP).map((line) =>
     ruleChecksObservationKey(line.main_sha, (Array.isArray(line.failing_suites) ? line.failing_suites : Array.isArray(line.suites) ? line.suites : [])
@@ -18454,9 +18460,17 @@ export async function runSweep(
                 }
                 const previouslyReproduced = reproductionHistory.some((line) => line.step === "sweep.base_reproduction" &&
                   line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.verdict === "reproduced" && line.main_sha !== mainTipSha);
-                // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever
-                // reproduced — a head BEHIND that main still takes it once before any fix round.
-                const fixedOnMain = !previouslyReproduced && (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0;
+                // W1-T6405: main's fix can land BEFORE this head's first probe, so nothing was ever reproduced — a head
+                // behind that main, or of unread distance on a red main held or once failed, still takes it once.
+                const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+                const inheritedBasis = behindBy !== undefined || verdict !== "clear" ? undefined : baseRedHistory.stoodDown.has(key) ? "stood-down"
+                  : reproductionFiles.every((file) => formerlyFailingOnMain.has(file)) ? "main-formerly-failing" : undefined;
+                const fixedOnMain = !previouslyReproduced && ((behindBy ?? 0) > 0 || inheritedBasis !== undefined);
+                if (fixedOnMain && inheritedBasis !== undefined && !inheritedRedNoted.has(key)) {
+                  inheritedRedNoted.add(key);
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: BASE_FIXED_INHERITED_STEP, pr_number: pr.prNumber,
+                    head_sha: pr.headSha, main_sha: mainTipSha, basis: inheritedBasis, test_files: reproductionFiles });
+                }
                 if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) readRefreshHistory(pr);
                 const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
                 // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
@@ -19108,7 +19122,7 @@ export async function runSweep(
             case "dep-review":
               if (deps.depReview) {
                 const refresh = dependabotRefreshVerdict(decideBaseRed(pr, mainLatestRun, baseRedHistory),
-                  fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache));
+                  fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache, formerlyFailingOnMain));
                 if (refresh.kind === "wait" && !baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) {
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber,
                     head_sha: pr.headSha, check_name: refresh.check, main_sha: mainLatestRun?.sha ?? "unread", step: BASE_RED_STOOD_DOWN_STEP });
