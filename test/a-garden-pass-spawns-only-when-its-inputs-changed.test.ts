@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { gitRepo } from "./helpers/git-repo.js";
+import * as machine from "../src/lib/machine-filing-judge.js";
+import * as registry from "../src/lib/garden-registry.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -157,7 +162,7 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
   for (const name of ["evidence-coverage", "selector-shadow", "machine-judge"] as const) {
     const pass = await buildRegisteredGarden(name, ctx);
     assert.equal(typeof pass.due, "function", `${name} exposes a due probe`);
-    assert.equal(pass.due!(), true, `${name} with nothing recorded is due`);
+    assert.equal(await pass.due!(), true, `${name} with nothing recorded is due`);
   }
   writeFileSync(evidenceCoverageStatePath(stateDir), JSON.stringify({ version: 1, cells: {}, lastPassAt: new Date().toISOString() }));
   assert.equal((await buildRegisteredGarden("evidence-coverage", ctx)).due!(), false, "measured just now");
@@ -166,9 +171,9 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
     lastPassAt: new Date(Date.now() - 60_000).toISOString(), lastNewAt: new Date(Date.now() - 3_600_000).toISOString(),
     inputs: machineJudgeInputs(process.cwd(), stateDir),
   }));
-  assert.equal(judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
+  assert.equal(await judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
   writeFileSync(join(stateDir, "operator-releases.json"), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));
-  assert.equal(judge.due!(), true, "an operator release is judged now");
+  assert.equal(await judge.due!(), true, "an operator release is judged now");
 });
 
 test("the daemon's export garden paces a pending PR on the board's open-PR snapshot", async (t) => {
@@ -194,4 +199,53 @@ test("the daemon's export garden paces a pending PR on the board's open-PR snaps
   assert.equal(pass.due!(), false, "a quiet pending PR whose snapshot row has not moved is not due");
   snapshot("bbb");
   assert.equal(pass.due!(), true, "a moved head in the daemon's own snapshot makes it due");
+});
+
+function daemonInputFixture(t: { after: (fn: () => void) => void }) {
+  const repo = gitRepo({ kind: "async-daemon-inputs" });
+  t.after(() => repo.cleanup());
+  for (const area of ["src", "scripts", "plan", "state"]) mkdirSync(join(repo.dir, area), { recursive: true });
+  writeFileSync(join(repo.dir, ".gitignore"), "state/\n");
+  writeFileSync(join(repo.dir, "src/input.ts"), "export const input = 1;\n");
+  writeFileSync(join(repo.dir, "scripts/unicode.json"), '{"text":"café 🐾"}\n');
+  writeFileSync(join(repo.dir, "scripts/example-baseline.json"), "{}\n");
+  writeFileSync(join(repo.dir, "plan/policy.yaml"), "rules: []\n");
+  repo.git("add", ".gitignore", "src", "scripts", "plan");
+  repo.git("commit", "-m", "fixture: daemon input readers");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  return { repo, stateDir: join(repo.dir, "state") };
+}
+
+async function withoutSyncChildren<T>(run: () => Promise<T>): Promise<{ value: T; beats: number }> {
+  const names = ["execFileSync", "execSync", "spawnSync"] as const;
+  const original = Object.fromEntries(names.map((name) => [name, childProcess[name]]));
+  for (const name of names) childProcess[name] = (() => { throw new Error("synchronous child was reached"); }) as never;
+  syncBuiltinESMExports();
+  let beats = 0;
+  const timer = setInterval(() => beats++, 1);
+  try { return { value: await run(), beats }; }
+  finally {
+    clearInterval(timer);
+    for (const name of names) childProcess[name] = original[name] as never;
+    syncBuiltinESMExports();
+  }
+}
+
+test("daemon input reads: the real machine stamp and registered due probe avoid sync git and retain release and unreadable states", async (t) => {
+  const { repo, stateDir } = daemonInputFixture(t);
+  const sync = machine.machineJudgeInputs(repo.dir, stateDir);
+  const result = await withoutSyncChildren(() => machine.machineJudgeInputsAsync(repo.dir, stateDir));
+  assert.equal(result.value, sync);
+  assert.ok(result.beats > 0);
+  const now = Date.now();
+  writeFileSync(registry.gardenPacingPath(stateDir, "machine-judge"), JSON.stringify({ inputs: sync,
+    lastPassAt: new Date(now).toISOString(), lastNewAt: new Date(now - 3_600_000).toISOString() }));
+  const ctx = { config: { root: repo.dir }, repoRoot: repo.dir, owner: "fixture", repo: "fixture", log: () => {}, raiseDuplicate: () => "" } as unknown as GardenBuildContext;
+  const pass = await buildRegisteredGarden("machine-judge", ctx);
+  const held = await withoutSyncChildren(async () => await pass.due!());
+  assert.equal(held.value, false);
+  writeFileSync(join(stateDir, "operator-releases.json"), "{}\n");
+  const changed = await withoutSyncChildren(async () => await pass.due!());
+  assert.equal(changed.value, true);
+  assert.equal(await machine.machineJudgeInputsAsync(join(repo.dir, "missing"), stateDir), machine.machineJudgeInputs(join(repo.dir, "missing"), stateDir));
 });
