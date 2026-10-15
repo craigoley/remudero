@@ -12,12 +12,6 @@ obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
 VERBATIM in the body of the live rule carrying its instruction, its id (and a moved body's old path)
 aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the earning PR.
 
-## Workspace cleanup
-
-- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
-  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
-  worktree retirement to the harness.** → doctrine/workspace-cleanup/finish-owned-work.md
-
 ## Before you push
 
 - **Before your FIRST push (not every commit), run `node --import tsx scripts/preflight-author.mjs` on the
@@ -60,6 +54,10 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
   file's identical line number and returns a FALSE `OK`.** → doctrine/coverage-traps/zero-inside-own-sf-block.md
 
 ## Plan and task hygiene
+
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.** → doctrine/plan-and-task-hygiene/finish-owned-work.md
 
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
   `run-<taskId>-*` branch — never from ledger verdict lines.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
