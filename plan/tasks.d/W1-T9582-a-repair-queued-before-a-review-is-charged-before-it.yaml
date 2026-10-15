@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-repair-queued-before-a-review-is-charged-before-it.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
