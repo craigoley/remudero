@@ -40252,8 +40252,6 @@ export async function daemonCommand(
           servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
             () => tickReadGeneration),
-          // W1-T8511: only the self-target daemon owns plan/feedback/ — the same gate as its landing sweep, which drains
-          // this queue under config.root.
           target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
@@ -48029,8 +48027,6 @@ export function buildSweepHook(
   // W1-T7734: `servedPublishedAtMs` is when the generation these facts came from was published.
   tickReadFor?: () => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
     Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>,
-  // W1-T8511: the landing deps POST /v1/feedback uses, so an operator's reply on a `TRIAGE-<feedback id>` GRILL issue
-  // also answers the grilled record. Omitted ⇒ replies land only in the question store, as before.
   escalationFeedbackReply?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
