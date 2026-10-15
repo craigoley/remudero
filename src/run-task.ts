@@ -14359,7 +14359,7 @@ export async function runFixRung(opts: {
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
       // repaired; re-read the PR once at this head rather than stand down for a person.
-      if (shouldRecheckAfterNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
+      if (shouldSelfHealNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
         deps.say("fix rung: the worker reported FIXED but changed nothing — re-reading the PR once before standing down");
         continue;
       }
@@ -58009,4 +58009,10 @@ export {
 /** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
 export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
   return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
+}
+
+/** W1-T5334: first "changed nothing" refusal at a head: FIXED, FLAKE or unstated re-reads once; BASE_RED and repeats stand down. */
+export function shouldSelfHealNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  if (shouldRecheckAfterNothingChanged(fixKind, reason, refusedAtHead)) return true;
+  return reason === "the worker changed nothing" && refusedAtHead <= 1 && (fixKind === undefined || fixKind === "FLAKE");
 }
