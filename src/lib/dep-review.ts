@@ -1021,17 +1021,12 @@ export function reconcileDependabotRefresh(args: {
   return "requested";
 }
 
-// ── W1-T9586 — an own red on a minor/patch Dependabot head becomes a migration proposal the fleet builds.
-// A companion edit (a test pinning the old literal, a derived image pin) cannot ride the bot branch:
-// offendingFiles refuses it. So the W1-T2705 capture path files the bumps for an owned task branch,
-// with no Dependabot command and no close; the superseded-by row or Dependabot itself closes the PR.
+// ── W1-T9586 — an own red on a minor/patch Dependabot head becomes a migration proposal (W1-T2705's capture path).
 
-/** The sweep's reading of an `own` verdict: `main-passes` when main's newest genuine run passes a
- *  check this head fails, `unclassified` when nothing says whose red it is. */
+/** `main-passes`: main's newest genuine run passes a check this head fails; `unclassified`: nothing says whose red it is. */
 export type DependabotOwnRedSignal = "main-passes" | "unclassified";
 export const DEPENDABOT_OWN_RED_SIGNALS: readonly DependabotOwnRedSignal[] = ["main-passes", "unclassified"];
 
-/** Structural main reading, so no sweep import: the census main's run observed, and what it failed. */
 export function dependabotOwnRedSignal(
   verdict: DependabotRefreshVerdict | undefined,
   main: { state: string; failingChecks: readonly string[]; observedChecks?: readonly string[] } | undefined,
@@ -1043,7 +1038,6 @@ export function dependabotOwnRedSignal(
     ? "main-passes" : "unclassified";
 }
 
-/** The `rmd dep-review` flags a sweep verdict carries: a refresh cause, or an own-red signal. */
 export function dependabotReviewArgs(refresh: DependabotRefreshVerdict | undefined, ownRed: DependabotOwnRedSignal | undefined): string[] {
   if (refresh?.kind === "request") return ["--dependabot-refresh", refresh.cause];
   return ownRed === undefined ? [] : ["--dependabot-own-red", ownRed];
@@ -1057,7 +1051,6 @@ interface DependabotOwnRedRecord {
   redChecks: string[];
   firstSeenMs: number;
   lastSeenMs: number;
-  /** The proposal that carries this head's bumps: filed from this PR, or one it was folded into. */
   feedbackId?: string;
 }
 
@@ -1073,7 +1066,6 @@ function ownRedBumpText(b: DependabotOwnRedBump): string {
   return `${b.dependency} ${b.fromVersion} -> ${b.toVersion}`;
 }
 
-/** Submission key = (owner, repo, sorted bumps): a regrouped PR with the same bumps files nothing new. */
 export function depReviewOwnRedSubmissionKey(owner: string, repo: string, bumps: readonly DependabotOwnRedBump[]): string {
   const targets = [...new Set(bumps.map(ownRedBumpKey))].sort().join(",");
   return `dep-review:own-red:${owner.trim().toLowerCase()}/${repo.trim().toLowerCase()}:${targets}`;
@@ -1125,16 +1117,16 @@ function isOwnRedRecord(r: unknown): r is DependabotOwnRedRecord {
 
 function readOwnRedProposals(path: string): DependabotOwnRedProposal[] {
   if (!existsSync(path)) return [];
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as { proposals?: unknown };
-  if (!Array.isArray(parsed?.proposals) || parsed.proposals.some((p: DependabotOwnRedProposal) =>
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { proposals?: unknown } | null;
+  const proposals = parsed === null || typeof parsed !== "object" ? undefined : parsed.proposals;
+  if (!Array.isArray(proposals) || proposals.some((p: DependabotOwnRedProposal) =>
     !p || typeof p.feedbackId !== "string" || !Array.isArray(p.bumps) || !Array.isArray(p.prNumbers))) {
     throw new Error("invalid dependency own-red proposals; refusing to file a duplicate");
   }
-  return parsed.proposals;
+  return proposals;
 }
 
-/** Siblings held own-red on their current head, seen since this head was first seen, and not yet proposed.
- *  A sibling whose state cannot be read is left out: its own pass reports it, and naming one is advisory. */
+/** Siblings held own-red on their current head since this head was first seen; an unreadable one is not named. */
 function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> {
   const siblings: Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> = [];
   for (const name of readdirSync(dir).sort()) {
@@ -1144,7 +1136,7 @@ function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{
     try {
       state = JSON.parse(readFileSync(join(dir, name), "utf8"));
     } catch (error) {
-      void error; // an unreadable sibling is not named; its own dep-review pass fails on the same file
+      void error; // its own dep-review pass fails on the same file
       continue;
     }
     const own = state?.ownRed;
@@ -1158,9 +1150,8 @@ function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{
 
 export type DependabotOwnRedOutcome = "none" | "observed" | "captured" | "folded" | "proposed" | "unkeyed" | "failed";
 
-/** Runs after {@link reconcileDependabotRefresh} on the same pass and state file. The first own-red pass on a
- *  head records it, so every sibling held in the same cycle is recorded too; the next pass files ONE proposal
- *  naming them all, and a sibling whose bumps a proposal already names is folded into it. */
+/** After {@link reconcileDependabotRefresh}: the first own-red pass records the head so held siblings register, the
+ *  next files ONE proposal naming them all, and bumps a proposal already names fold into it. */
 export function reconcileDependabotOwnRed(args: {
   statePath: string;
   owner: string;

@@ -28,7 +28,7 @@ import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
+import { buildSweepEffects, depReviewCommand, type DepReviewDeps } from "./helpers/run-task-test.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-15T09:00:00.000Z");
