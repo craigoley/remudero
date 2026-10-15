@@ -154,7 +154,7 @@ test("W1-T4351: a red that main also carries refreshes the branch instead of dis
   assert.deepEqual(after.dispatched, [6854]);
 });
 
-test("W1-T4351: a base red spends ONE update-branch press per pass, and a thrown press is ledgered", async () => {
+test("W1-T4351: base-red presses go through the refresh admission, and a thrown press is ledgered", async () => {
   const first = redPr();
   const second = redPr({ prNumber: 6855, prUrl: "https://github.com/acme/remudero/pull/6855", headSha: "f".repeat(40) });
   const ledger: Record<string, unknown>[] = [
@@ -168,9 +168,10 @@ test("W1-T4351: a base red spends ONE update-branch press per pass, and a thrown
     },
   });
   assert.deepEqual(r.dispatched, []);
-  assert.equal(ledger.filter((l) => l.step === BASE_RED_REFRESH_STEP).length, 1);
+  // W1-T9595: no earlier admission waits for CI, so both held heads are pressed; neither stands down on a slot.
+  assert.equal(ledger.filter((l) => l.step === BASE_RED_REFRESH_STEP).length, 2);
   assert.match(String(r.disposed(6854)?.stand_down_reason), /requested \(error: 422 merge conflict\)/);
-  assert.match(String(r.disposed(6855)?.stand_down_reason), /one branch refresh is spent or unwired/);
+  assert.match(String(r.disposed(6855)?.stand_down_reason), /requested \(error: 422 merge conflict\)/);
 });
 
 test("W1-T4351: a red that is the PR's own still dispatches the fix lane", async () => {
