@@ -73,7 +73,26 @@ export interface CensusCalibration {
 
 /** Written by `scripts/daemon-heap-census.mts --write-calibration`; edit only through it. */
 // census-calibration:begin
-export const DAEMON_MEMORY_CALIBRATION: Readonly<Record<string, CensusCalibration>> = {};
+export const DAEMON_MEMORY_CALIBRATION: Readonly<Record<string, CensusCalibration>> = {
+  "source-maps.module": {
+    per_entry_bytes: 240547,
+    entries: 587,
+    census_sha: "5d7c583ad975",
+    census_date: "2026-10-15"
+  },
+  "plan.task": {
+    per_entry_bytes: 9915,
+    entries: 4112,
+    census_sha: "5d7c583ad975",
+    census_date: "2026-10-15"
+  },
+  "board.closed-pr": {
+    per_entry_bytes: 3181,
+    entries: 12000,
+    census_sha: "5d7c583ad975",
+    census_date: "2026-10-15"
+  }
+};
 // census-calibration:end
 
 /** How a holder's bytes were found. */
@@ -661,10 +680,24 @@ export interface CensusMeasurement {
   error?: string;
 }
 
+/** A macrotask first: V8 keeps every object a WeakRef was made for alive until the current job ends (a ledger memo
+ *  enters ledger-union.ts's weak book as it is built), so a collection inside the same job could not free it. */
 async function settle(io: CensusMeasureIo): Promise<number> {
-  await io.collect();
-  await io.collect();
+  for (let round = 0; round < 2; round++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await io.collect();
+  }
   return io.heapUsed();
+}
+
+/** Build one holder and read the heap while it is held. Its own call frame: once it returns, nothing of the built
+ *  value outlives it (a long-lived async frame can keep a stale reference in a register across awaits). */
+async function holdOne(build: NonNullable<CensusHolderSpec["build"]>, io: CensusMeasureIo): Promise<{ entries: number; withHolder: number; before: number }> {
+  const before = await settle(io);
+  const built = await build();
+  const withHolder = await settle(io);
+  // `built` is read AFTER the settled reading, so it is live (and held) across that await.
+  return { entries: built.entries, withHolder, before };
 }
 
 /**
@@ -681,18 +714,17 @@ export async function measureHeapHolders(specs: readonly CensusHolderSpec[], io:
         continue;
       }
       if (!spec.build) throw new Error("a census holder needs build or measure");
-      const before = await settle(io);
-      let built: { value: unknown; entries: number } | undefined = await spec.build();
-      const entries = built.entries;
-      const withHolder = await settle(io);
-      built = undefined;
+      const held = await holdOne(spec.build, io);
       spec.drop?.();
       const after = await settle(io);
+      const { entries, withHolder, before } = held;
       measured.push({ ...base, entries, retained_bytes: Math.max(0, withHolder - after), grown_bytes: withHolder - before });
       io.log?.(`${spec.name}: entries=${entries} retained=${Math.round((withHolder - after) / MIB)} MiB`);
     } catch (error) {
       spec.drop?.();
-      measured.push({ ...base, entries: 0, retained_bytes: 0, grown_bytes: 0, error: String((error as Error)?.message ?? error).slice(0, 300) });
+      const reason = String((error as Error)?.message ?? error).slice(0, 300);
+      io.log?.(`${spec.name}: error ${reason}`);
+      measured.push({ ...base, entries: 0, retained_bytes: 0, grown_bytes: 0, error: reason });
     }
   }
   return measured;

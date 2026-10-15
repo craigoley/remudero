@@ -8,7 +8,7 @@
 // Heap snapshots and forced collections are allowed HERE only (operator rule, 2026-10-15).
 //
 //   node --expose-gc --import tsx scripts/daemon-heap-census.mts --out <dir> (--synthetic <work dir> | --state <private copy root>)
-//        [--plan plan/plan.yaml] [--live-set-bytes N] [--rotations N] [--rows-per-rotation N] [--closed-prs N]
+//        [--plan plan/tasks.yaml] [--live-set-bytes N] [--rotations N] [--rows-per-rotation N] [--closed-prs N]
 //        [--body-chars N] [--issues N] [--owner o --repo r] [--write-calibration] [--snapshot] [--skip <name,...>]
 //
 // --synthetic writes a production-scale corpus into <work dir>/state: N gzipped rotations of the daemon-read steps
@@ -167,7 +167,7 @@ const liveSetBytes = num("--live-set-bytes", 867 * 1024 * 1024);
 
 // ── the holders ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-const planPath = resolve(flag("--plan") ?? join(ROOT, "plan", "plan.yaml"));
+const planPath = resolve(flag("--plan") ?? join(ROOT, "plan", "tasks.yaml"));
 let heldPlan: { tasks: unknown[] } | undefined;
 const planFiles = ["src/lib/plan.ts", "src/lib/daemon.ts", "src/run-task.ts", "src/lib/read-plane.ts"];
 
@@ -257,7 +257,9 @@ const specs: import("../src/lib/daemon-memory-census.ts").CensusHolderSpec[] = [
     },
   },
   {
-    name: "board snapshot cache, issue rows (rows().issues)", holder: "board-snapshot.issues", calibrationKey: "board.issue",
+    // NOT calibrated: with the daemon's module graph loaded, this reading swings between ~1 and ~37 MiB from run to run
+    // (a deferred release of the snapshot just loaded, mechanism not traced), so the live row walks the ~600 rows.
+    name: "board snapshot cache, issue rows (rows().issues)", holder: "board-snapshot.issues",
     files: ["src/lib/board-snapshot-cache.ts", "src/lib/open-prs-rest.ts"],
     build: () => {
       const issues = createBoardSnapshotCache(corpusRoot, owner, repo).rows!().issues;
@@ -288,6 +290,32 @@ const specs: import("../src/lib/daemon-memory-census.ts").CensusHolderSpec[] = [
     },
   },
 ].filter((spec) => !skip.has(spec.holder) && !skip.has(spec.name));
+
+// EACH IN-PROCESS HOLDER IS MEASURED IN A FRESH CHILD (`--only <name>`): measured one after another in one process,
+// a holder's figure moved with the holders measured before it (issue rows read 0 MiB alone and 37 MiB after the
+// closed rows), so no holder's reading may depend on another's.
+const only = flag("--only");
+if (only !== undefined) {
+  const spec = specs.find((candidate) => candidate.name === only);
+  if (!spec) throw new Error(`no census holder named ${only}`);
+  const [reading] = await census.measureHeapHolders([spec], { collect: () => gc(), heapUsed: () => process.memoryUsage().heapUsed, log });
+  process.stdout.write(`CENSUS-READING ${JSON.stringify(reading)}\n`);
+  process.exit(0);
+}
+const childArgs = (name: string): string[] => [...process.execArgv, fileURLToPath(import.meta.url), ...args.filter((arg) => arg !== "--write-calibration" && arg !== "--snapshot"), "--only", name];
+for (const spec of specs) {
+  if (spec.measure) continue;
+  const name = spec.name;
+  spec.measure = async () => {
+    const run = spawnSync(process.execPath, childArgs(name), { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const line = run.stdout.split("\n").find((candidate) => candidate.startsWith("CENSUS-READING "));
+    if (run.status !== 0 || !line) throw new Error(`census child for ${name} failed (${run.status}): ${run.stderr.slice(-400)}`);
+    const reading = JSON.parse(line.slice("CENSUS-READING ".length)) as { entries: number; retained_bytes: number; grown_bytes: number; error?: string };
+    if (reading.error) throw new Error(reading.error);
+    log(`${name}: entries=${reading.entries} retained=${Math.round(reading.retained_bytes / 1048576)} MiB (own process)`);
+    return { entries: reading.entries, retained_bytes: reading.retained_bytes, grown_bytes: reading.grown_bytes };
+  };
+}
 
 // ── run ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
