@@ -192,6 +192,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
+import { dependabotRefreshVerdict, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -2743,9 +2744,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // is judged unattended. The command's exit code conflates hold/escalate, so
     // the DECISION is read back off the dep-review.decided ledger line it just
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
-    depReview: async (pr) => {
+    depReview: async (pr, refresh) => {
       await observePr(pr, "review");
-      await depReviewCommand(String(pr.prNumber), ["--repo", repo]);
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...(refresh?.kind === "request" ? ["--dependabot-refresh", refresh.cause] : [])]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
@@ -11083,7 +11084,7 @@ export function selectUpdateBranchDecision(
   queuedPrNumbers: ReadonlySet<number> = new Set(),
   baseChangedFilesByPr?: ReadonlyMap<number, BaseChangedFiles>,
   ready?: ReadyRefreshFacts,
-): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr } {
+): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr; dependabotDeferred?: ArmedStalledPr[] } {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
@@ -11098,14 +11099,20 @@ export function selectUpdateBranchDecision(
   const candidates = [...combined.values()];
   if (candidates.length === 0) return { target: undefined };
   const byNumber = new Map<number, OpenPrView>(prs.map((pr) => [pr.prNumber, pr]));
+  const dependabotDeferred: ArmedStalledPr[] = [];
   const commonEligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
+    if (view.isDependabot === true) { // W1-T9584: a fleet merge ends Dependabot's management of its branch
+      dependabotDeferred.push(s);
+      return false;
+    }
     return true;
   });
+  const deferredField = dependabotDeferred.length > 0 ? { dependabotDeferred } : {};
   // Hold only positively pending input snapshots; all other eligibility guards remain in force.
   const eligible = commonEligible.filter((s) => byNumber.get(s.prNumber)!.checksState !== "pending");
   const winnerView = oldestActivityFirst(eligible.map((s) => byNumber.get(s.prNumber)!), now);
@@ -11115,7 +11122,7 @@ export function selectUpdateBranchDecision(
     ? oldestActivityFirst(commonEligible.map((s) => byNumber.get(s.prNumber)!), now) : undefined;
   const pendingGuard = withoutPendingGuard?.checksState === "pending"
     ? commonEligible.find((s) => s.prNumber === withoutPendingGuard.prNumber) : undefined;
-  return { target, ...(pendingGuard ? { pendingGuard } : {}) };
+  return { target, ...(pendingGuard ? { pendingGuard } : {}), ...deferredField };
 }
 
 /** One PR {@link redPrWithStaleGate} selected — sibling to {@link ArmedStalledPr}, carrying the
@@ -12390,7 +12397,7 @@ export interface SweepDeps {
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold", which re-runs next sweep because a red check can go green on the SAME sha. */
-  depReview?: (pr: OpenPrView) => string | void | Promise<string | void>;
+  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
@@ -18935,7 +18942,14 @@ export async function runSweep(
               break;
             case "dep-review":
               if (deps.depReview) {
-                depReviewOutcome = (await deps.depReview(pr)) ?? "unknown";
+                const refresh = dependabotRefreshVerdict(decideBaseRed(pr, mainLatestRun, baseRedHistory),
+                  fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache));
+                if (refresh.kind === "wait" && !baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) {
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
+                    head_sha: pr.headSha, check_name: refresh.check, main_sha: mainLatestRun?.sha ?? "unread", step: BASE_RED_STOOD_DOWN_STEP });
+                }
+                if (isBlockedCi(pr)) extraDisposedFields = { ...extraDisposedFields, dependabot_refresh: refresh.kind === "request" ? refresh.cause : refresh.kind };
+                depReviewOutcome = (await deps.depReview(pr, refresh)) ?? "unknown";
               } else {
                 acted = false;
                 standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
@@ -19419,6 +19433,7 @@ export async function runSweep(
       readyFacts,
     );
     const { target, pendingGuard } = decision;
+    ledgerDependabotDeferrals(decision.dependabotDeferred ?? [], ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId);
     if (pendingGuard && !recordedPendingGuards.has(JSON.stringify([pendingGuard.prUrl, pendingGuard.prNumber, pendingGuard.headSha]))) {
       appendLine(deps.ledgerPath, {
         run_id: deps.runId, task_id: pendingGuard.taskId ?? "SWEEP",
@@ -19502,6 +19517,20 @@ export async function runSweep(
   return summary;
 }
 
+export const DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP = "sweep.update_branch.dependabot_deferred";
+
+function ledgerDependabotDeferrals(
+  deferred: readonly ArmedStalledPr[], ledgerLines: readonly Record<string, unknown>[],
+  append: (row: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void, runId: string, source?: string,
+): void {
+  for (const c of deferred) {
+    if (ledgerLines.some((l) => l.step === DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP && l.pr_number === c.prNumber && l.head_sha === c.headSha)) continue;
+    append({ run_id: runId, task_id: c.taskId ?? "SWEEP", step: DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP, pr_number: c.prNumber,
+      head_sha: c.headSha, ...(c.updateReason === undefined ? {} : { update_reason: c.updateReason }),
+      ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }), ...(source === undefined ? {} : { source }) });
+  }
+}
+
 let lightPassReadyRefreshInFlight = false;
 
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
@@ -19556,10 +19585,12 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     }
     const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
     const inFlight = deps.inFlightTaskIds ?? new Set<string>();
+    const dependabotDeferred = candidates.filter((c) => byNumber.get(c.prNumber)!.isDependabot === true);
+    ledgerDependabotDeferrals(dependabotDeferred, ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId, "light_pass");
     const eligible = candidates.filter((c) => {
       const view = byNumber.get(c.prNumber)!;
       const runTaskId = taskIdFromRunBranch(view.headRefName);
-      return view.checksState !== "pending" && (runTaskId === undefined || !inFlight.has(runTaskId));
+      return view.checksState !== "pending" && view.isDependabot !== true && (runTaskId === undefined || !inFlight.has(runTaskId));
     });
     const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
     const target = eligible.find((c) => c.prNumber === winner?.prNumber);
