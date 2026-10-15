@@ -198,6 +198,8 @@ export interface LandFeedbackResult {
   refused?: FeedbackRefusal[];
   /** Paths staged under `stateRoot` for the daemon sweep this call — never pushed by it. */
   queued?: string[];
+  /** Set when a push lost its lease: the tip it expected, the tip it then found, and who made that tip. */
+  leaseMoved?: { expected?: string; observed?: string; by?: string };
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -952,14 +954,11 @@ function* ensurePrOpen(
  * Never throws — callers already fold any error into `{ landed: false, error }`, except a
  * `gh pr create` failure, which still counts as `landed: true` since the push succeeded.
  *
- * W1-T3560: the push is a compare-and-swap (`--force-with-lease`) against exactly the ref value
- * `build.branchTipSha` was read at, never a bare `--force`. A lost lease means some OTHER owner's
- * tip moved between our read and our push — re-derive the union ONCE against the new tip
- * (`rebuild`) and retry; a second loss means a third writer squeezed in even under the retry, and
- * this call REFUSES rather than force-replacing a tip it never read. `ensurePrOpen` (the one
- * arm-origin site) is only ever reached once a push has actually landed under a held lease, or the
- * short-circuit proved the existing head already IS this exact tree — so whatever tree gets armed
- * is always the complete union as of the ref state it was computed against, never a partial one.
+ * W1-T3560: the push is a `--force-with-lease` compare-and-swap against `build.branchTipSha`. A lost
+ * lease (another writer moved the tip) re-derives the union ONCE against the new tip and retries; a
+ * second loss REFUSES rather than force-replacing a tip it never read. `ensurePrOpen` (the one
+ * arm-origin site) is reached only after a push landed under a held lease or the short-circuit proved
+ * the head already IS this tree, so the armed tree is always the complete union it was computed from.
  */
 function* finishLanding(
   kind: LandingKind,
@@ -1042,32 +1041,37 @@ function* finishLanding(
     yield* net.git(["push", lease, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
   };
 
+  let leaseMoved: LandFeedbackResult["leaseMoved"];
+  const moved = (result: LandFeedbackResult): LandFeedbackResult => (leaseMoved ? { ...result, leaseMoved } : result);
   try {
     yield* pushOnce(build);
   } catch (firstErr) {
     if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build.refused);
+    if (!lostLease(firstErr)) return withRefused({ landed: false, files: [], error: pushFailure(kind.branch, firstErr) }, build.refused);
     // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
-    // against the NEW tip rather than force-replacing a tip we never read — the defect this task
-    // fixes (W1-T3560 design (i)).
+    // against the NEW tip rather than force-replacing a tip we never read (W1-T3560 design (i)).
+    // Any other push failure (credentials, network) moved no tip, so it is reported as itself.
     let retried: LandingTreeBuild;
     try {
       retried = yield* rebuild();
     } catch (e) {
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
+    leaseMoved = { expected: build.branchTipSha, observed: retried.branchTipSha, by: tipAuthor(git, retried.branchTipSha) };
     yield* observePublication(retried);
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(retried), requestReview);
-      return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
+      return moved(withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused));
     }
     try {
       yield* pushOnce(retried);
     } catch (secondErr) {
       if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried.refused);
+      if (!lostLease(secondErr)) return moved(withRefused({ landed: false, files: [], error: pushFailure(kind.branch, secondErr) }, retried.refused));
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
       // than force-replacing a tip this call never actually read. Surfaced via `error`, never
       // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
-      return withRefused(
+      return moved(withRefused(
         {
           landed: false,
           files: [],
@@ -1077,7 +1081,7 @@ function* finishLanding(
             `${String((firstErr as Error)?.message ?? firstErr)}`,
         },
         retried.refused,
-      );
+      ));
     }
     build = retried;
   }
@@ -1085,12 +1089,30 @@ function* finishLanding(
   const { prUrl, error } = yield* ensurePrOpen(kind, net, bodyOf(build), requestReview, true);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
-    return withRefused(
+    return moved(withRefused(
       { landed: true, files: build.unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true },
       build.refused,
-    );
+    ));
   }
-  return withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build.refused);
+  return moved(withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build.refused));
+}
+
+/** git names a lost `--force-with-lease` "(stale info)"; a push that failed for any other reason moved no tip. */
+function lostLease(e: unknown): boolean {
+  return /\(stale info\)/.test(`${String((e as Error)?.message ?? e)}\n${String((e as { stderr?: unknown })?.stderr ?? "")}`);
+}
+
+function pushFailure(branch: string, e: unknown): string {
+  return `${branch} was not pushed, and no lease was lost, so nothing was re-derived: ${String((e as Error)?.message ?? e)}`;
+}
+
+function tipAuthor(git: GitExec, sha: string | undefined): string | undefined {
+  if (!sha) return "deleted on the remote";
+  try {
+    return git(["log", "-1", "--format=%an <%ae> %cI %s", sha]).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Land untracked or modified inbox writes, never clean PR files; scanning disk preserves offline captures. */
@@ -1332,6 +1354,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
     // never swallowed into just `acknowledgementEvidence`'s silence, regardless of whether this
     // pass also happened to push something else.
     const refusalEvidence = result.refused && result.refused.length > 0 ? { refused: result.refused } : {};
+    const leaseEvidence = result.leaseMoved ? { lease_moved: result.leaseMoved } : {};
     if (result.pushed) {
       log("feedback.landing_sweep", {
         pushed: true,
@@ -1341,6 +1364,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
         error: result.error,
         ...acknowledgementEvidence,
         ...refusalEvidence,
+        ...leaseEvidence,
       });
     } else {
       // W1-T3560: a refusal (the ref moved twice under a lost lease, or its pending content
@@ -1354,6 +1378,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
         error: result.error,
         ...acknowledgementEvidence,
         ...refusalEvidence,
+        ...leaseEvidence,
       });
     }
   }
