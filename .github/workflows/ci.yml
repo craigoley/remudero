@@ -1437,8 +1437,8 @@ jobs:
           CHOICE_NAME="coverage-ledger-choice-${GITHUB_RUN_ID}"
           INCOMING="${RUNNER_TEMP}/coverage-ledger-choice"
           mkdir -p "$INCOMING"
-          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" --paginate --slurp \
-            | jq -r "[.[].artifacts[] | select(.name == \"${CHOICE_NAME}\")] | if length == 0 then empty elif length == 1 then .[0].id else error(\"multiple run ledger choices\") end")" \
+          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" --paginate \
+            | jq -sr "[.[].artifacts[] | select(.name == \"${CHOICE_NAME}\")] | if length == 0 then empty elif length == 1 then .[0].id else error(\"multiple run ledger choices\") end")" \
             || die "cannot read this run's published choice; refusing to resolve another ledger"
           if [ -n "$EXISTING" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXISTING}/zip" > "$INCOMING/choice.zip" \
@@ -1457,8 +1457,8 @@ jobs:
             || die "cannot read run creation time"
           [ -n "$CREATED" ] && [ "$CREATED" != "null" ] || die "run creation time is missing"
           CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ)" || die "run creation time is invalid"
-          LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" --paginate --slurp \
-            | jq -r "[.[].artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty")" \
+          LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" --paginate \
+            | jq -sr "[.[].artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty")" \
             || die "cannot enumerate eligible proposals; unreadable is not absence"
           PUBLISH="${RUNNER_TEMP}/coverage-ledger-publish"
           mkdir -p "$PUBLISH"

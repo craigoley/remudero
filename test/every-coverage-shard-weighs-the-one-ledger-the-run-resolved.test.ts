@@ -194,7 +194,7 @@ test("the real strict selection CLI partitions all files on either one snapshot 
 
 const currentArtifacts = "actions/runs/42/artifacts?per_page=100";
 const proposalArtifacts = "actions/artifacts?name=test-tier-coverage-manifest-proposal";
-const artifactPages = (...artifacts: object[]) => JSON.stringify([{ artifacts }]);
+const artifactPages = (...artifacts: object[]) => JSON.stringify({ artifacts });
 const existingChoicePage = artifactPages({ id: 88, name: "coverage-ledger-choice-42" });
 const defaults: GhShimRoute[] = [
   { when: currentArtifacts, stdout: artifactPages() },
@@ -297,12 +297,12 @@ function lookupParts(name: "EXISTING" | "LEDGER_ID", body: string) {
   const end = body.indexOf(')" \\\n', start);
   assert.ok(end > start, `${name} must retain its refusing command substitution`);
   const command = body.slice(start + `${name}="$(`.length, end).replace(/\\\n/g, " ");
-  const parsed = /^gh api "[^"]+"\s+([^]*?)\s+(--jq|\|\s*jq\s+-r)\s+"([^]*)"\s*$/.exec(command);
+  const parsed = /^gh api "[^"]+"\s+([^]*?)\s+(--jq|\|\s*jq\s+(-sr|-r))\s+"([^]*)"\s*$/.exec(command);
   assert.ok(parsed, `${name} must expose the actual CLI flags and global JSON query`);
-  const query = parsed[3]!.replaceAll('\\"', '"')
+  const query = parsed[4]!.replaceAll('\\"', '"')
     .replaceAll("${CHOICE_NAME}", "coverage-ledger-choice-42").replaceAll("${CUTOFF}", "2026-10-15T15:33:14Z");
   assert.doesNotMatch(query, /\$\{/);
-  return { flags: parsed[1]!.trim().split(/\s+/), query, embedded: parsed[2] === "--jq" };
+  return { flags: parsed[1]!.trim().split(/\s+/), query, embedded: parsed[2] === "--jq", jqFlag: parsed[3] };
 }
 
 test("real gh pagination and external jq resolve the emitted global ledger queries over loopback", async () => {
@@ -355,7 +355,7 @@ test("real gh pagination and external jq resolve the emitted global ledger queri
     assert.match(ghVersion.stdout, /^gh version /); assert.match(jqVersion.stdout, /^jq-/);
     const rejected = spawnSync(gh, ["api", endpoint("/choice"), "--paginate", "--slurp", "--jq", "."], { env, encoding: "utf8", timeout: 10_000 });
     assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, /--slurp.*not supported.*--jq/);
+    assert.match(rejected.stderr, /--slurp.*not supported.*--jq|unknown flag: --slurp/);
     assert.equal(readFileSync(requests, "utf8"), "", "the real CLI rejects the old flags before any HTTP call");
     const body = workflow().jobs["coverage-ledger"].steps.find((s: { id?: string }) => s.id === "resolve").run as string;
     const run = (name: "EXISTING" | "LEDGER_ID", path: string) => {
@@ -363,7 +363,8 @@ test("real gh pagination and external jq resolve the emitted global ledger queri
       const pages = spawnSync(gh, ["api", endpoint(path), ...parts.flags, ...(parts.embedded ? ["--jq", parts.query] : [])], { env, encoding: "utf8", timeout: 10_000 });
       assert.equal(pages.error, undefined); assert.equal(pages.signal, null);
       if (pages.status !== 0 || parts.embedded) return pages;
-      const filtered = spawnSync(jq, ["-r", parts.query], { env, input: pages.stdout, encoding: "utf8", timeout: 10_000 });
+      assert.ok(parts.jqFlag);
+      const filtered = spawnSync(jq, [parts.jqFlag, parts.query], { env, input: pages.stdout, encoding: "utf8", timeout: 10_000 });
       assert.equal(filtered.error, undefined); assert.equal(filtered.signal, null);
       return filtered;
     };
@@ -383,6 +384,10 @@ test("real gh pagination and external jq resolve the emitted global ledger queri
     }
     const calls = readFileSync(requests, "utf8");
     assert.match(calls, /\/choice\?page=2/); assert.match(calls, /\/proposal\?page=2/);
+    for (const name of ["EXISTING", "LEDGER_ID"] as const) {
+      assert.deepEqual(lookupParts(name, body).flags, ["--paginate"], "both native CLI versions support the emitted pagination flags");
+      assert.equal(lookupParts(name, body).jqFlag, "-sr", "external jq slurps the complete per-page JSON stream exactly once");
+    }
   } finally {
     clearTimeout(startup);
     if (server.exitCode === null && server.signalCode === null) server.kill("SIGTERM");
