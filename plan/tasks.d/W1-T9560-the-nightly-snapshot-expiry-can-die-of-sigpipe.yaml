@@ -13,7 +13,7 @@
   files:
     - deploy/host-update.sh
     - test/the-state-snapshot-actually-runs-on-this-host.test.ts
-  status: queued
+  status: merged
   priority: 1.2  # a nondeterministic red on an unrelated PR's required check; the same race can abort the production nightly before its reclaim and off-host copy
   attempts: 0
   rationale: |

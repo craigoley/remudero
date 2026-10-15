@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14/15: 'go with all recommended follow ups' — the sync-spawn filing's unfiled attribution lead (#11818 report)"
   plan_refs: [W1-T5718, W1-T7745, W1-T9554, W1-T9544, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T7744]
   files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-freeze-names-every-caller-that-held-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

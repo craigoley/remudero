@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925)"
   plan_refs: [W1-T1046, W1-T2598, W1-T4766, W1-T6597, W1-T7691]
   files: [deploy/recycle-container.sh, test/a-recycle-drain-counts-each-worker-once.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
