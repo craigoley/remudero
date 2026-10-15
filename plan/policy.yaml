@@ -149,13 +149,16 @@ workerAbandon:
 # p90 / max, n=20), and 21 healthy passes were abandoned at 559s; no hang was observed. This
 # value now FIRES ON HEALTHY PASSES and is not claimed otherwise. The full pass's bound is
 # LEARNED instead: `learnedSweepBound` (src/lib/daemon.ts) takes nearest-rank p90 x 3 of the
-# last 40 `daemon.sweep.settled` durations, seeded at boot from the live ledger file, and
-# writes `bound_basis` on every `daemon.sweep.started`/`.abandoned` row. At 10-14 12-24Z's
+# last 40 `daemon.sweep.settled` durations, seeded at boot from the ledger union (W1-T9632:
+# the boot's restart-history read carries the step, so an hourly restart no longer resets the
+# sample), and writes `bound_basis` on every `daemon.sweep.started`/`.abandoned` row. At 10-14 12-24Z's
 # sample that is 101.1 min, under the 165.5 min hang. The learned value is never clamped to
 # this row's max.
 #
 # WHAT THIS ROW STILL BOUNDS: (1) the COLD START, only while fewer than 5 passes have settled
-# (`bound_basis: no_history_fallback`); after the abandon stopped closing the review pool, a
+# AND none of them x3 outlasts this value (`bound_basis: no_history_fallback`); otherwise the
+# cold start is 3x the longest settled pass (`settled_max_fallback`, W1-T9632: on 2026-10-15
+# passes of 1,384-4,995 s were each abandoned at 559 s). After the abandon stopped closing the review pool, a
 # cold-start abandon costs only that pass's attributed outcome, and the pass still settles and
 # seeds the learner. (2) `drainInFlightReviews` in the stop and restart paths (W1-T8172), a
 # review drain, not a pass. The value is deliberately NOT raised to the measured population:
