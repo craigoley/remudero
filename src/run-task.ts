@@ -1599,7 +1599,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -2656,19 +2656,9 @@ export function buildSweepEffects(
 
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
-      const prior = readLedgerLines(deps.ledgerPath)
-        .filter((line) => line.step === "review.posted" && reviewRowNamesPr(line, pr.taskId, pr.prUrl) && line.decision_verdict)
-        .at(-1)?.decision_verdict as ReviewVerdict | undefined;
-      if (
-        !pr.taskId ||
-        !prior ||
-        (prior.state !== "success" && prior.state !== "failure") ||
-        !Array.isArray(prior.criteria) ||
-        reuseInputs.currentOwnDiffDigest === undefined ||
-        reuseInputs.currentMergeBaseSha === undefined
-      ) {
-        return fallbackToFullReview("prior verdict, task identity, or current reuse facts are unreadable");
-      }
+      const prior = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
+      const missing = missingReviewReuseFact(prior, reuseInputs);
+      if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
 
       let worktreePath: string | undefined;
       let baseProof: BaseProofDir | undefined;
@@ -2700,7 +2690,7 @@ export function buildSweepEffects(
               baseUnreadablePaths: baseProof.baseUnreadablePaths,
               baseIsCheckout: baseProof.baseIsCheckout,
               addedTestFiles: baseProof.addedTestFiles,
-              taskDeclaredFiles: deps.plan.byId.get(pr.taskId)?.files,
+              taskDeclaredFiles: pr.taskId === undefined ? undefined : deps.plan.byId.get(pr.taskId)?.files,
               execProof: reviewReuseExecProof,
             });
             if (!discriminated.ok) {
@@ -2782,11 +2772,8 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    const prior = readLedgerLines(deps.ledgerPath)
-      .filter((line) => line.step === "review.posted" && reviewRowNamesPr(line, pr.taskId, pr.prUrl) && line.decision_verdict)
-      .at(-1);
-    const verdict = prior?.decision_verdict as ReviewVerdict | undefined;
-    if (!pr.taskId || !verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
+    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
+    if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
     }
