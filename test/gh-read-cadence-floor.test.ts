@@ -30,7 +30,7 @@ function fire(command: string, cacheHome: string): Fired {
   const r = spawnSync("bash", [HOOK_PATH], {
     input,
     encoding: "utf8",
-    env: { ...process.env, XDG_CACHE_HOME: cacheHome, RMD_GH_COOLDOWN_S: "" },
+    env: { ...process.env, RMD_GH_CACHE_HOME: cacheHome, XDG_CACHE_HOME: cacheHome, RMD_GH_COOLDOWN_S: "" },
   });
   return { status: r.status, stderr: r.stderr };
 }
@@ -107,6 +107,52 @@ test("W1-T3275: the window EXPIRES, and a refusal never extends its own window",
     const before = statSync(stamp).mtimeMs;
     assert.equal(fire("gh pr checks 4853", c).status, 2, "10s after a read is inside the floor");
     assert.equal(statSync(stamp).mtimeMs, before, "a REFUSED call must not re-stamp");
+  });
+});
+
+test("a cadence refusal never releases another reader's lock", () => {
+  withCache((c) => {
+    backdate(c, 10);
+    const stamp = join(c, STAMP_REL);
+    const lock = `${stamp}.lock`;
+    mkdirSync(lock);
+    const before = statSync(stamp).mtimeMs;
+    const owner = statSync(lock).ino;
+    const result = fire("gh pr checks 4853", c);
+    assert.equal(result.status, 2, "contention must not waive the 180-second floor");
+    assert.equal(statSync(stamp).mtimeMs, before, "a refused read must not extend admission");
+    assert.ok(existsSync(lock), "a contender did not acquire the existing owner's lock");
+    assert.equal(statSync(lock).ino, owner, "the original lock must remain owned, not be recreated");
+  });
+});
+
+test("an admitted fail-open read never releases another reader's lock", () => {
+  withCache((c) => {
+    backdate(c, 200);
+    const stamp = join(c, STAMP_REL);
+    const lock = `${stamp}.lock`;
+    mkdirSync(lock);
+    const before = statSync(stamp).mtimeMs;
+    const owner = statSync(lock).ino;
+    const result = fire("gh pr checks 4853", c);
+    assert.equal(result.status, 0, "retain the existing bounded lock-contention fail-open contract");
+    assert.ok(statSync(stamp).mtimeMs > before, "an admitted read records its actual admission");
+    assert.ok(existsSync(lock), "an allowed contender still must not release someone else's lock");
+    assert.equal(statSync(lock).ino, owner);
+  });
+});
+
+test("a cadence reader releases only the lock it acquired or reclaimed", () => {
+  withCache((c) => {
+    const lock = join(c, `${STAMP_REL}.lock`);
+    assert.equal(fire("gh pr checks 4853", c).status, 0);
+    assert.ok(!existsSync(lock), "the hook releases its own acquired lock");
+    backdate(c, 200);
+    mkdirSync(lock);
+    const old = new Date(Date.now() - 40_000);
+    utimesSync(lock, old, old);
+    assert.equal(fire("gh pr checks 4853", c).status, 0);
+    assert.ok(!existsSync(lock), "a genuinely stale lock is reclaimed, acquired and released");
   });
 });
 
