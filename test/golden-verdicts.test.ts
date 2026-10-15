@@ -453,3 +453,16 @@ test("GOLDEN — KNOWLEDGE RETIRE: the gardener's own retire pass (active to sup
   assert.equal(checkTroubleshootingCoverage(diff).pass, true);
   assert.equal(checkDrillCoverage(diff).pass, true);
 });
+
+test("GOLDEN — TASK-ID-EXISTENCE LESSON: the cited incident executes and the id-citing lanes receive the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-task-id-existence-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T8446.yaml", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "task-id-existence-cites-must-resolve"), taskFile);
+  }
+});

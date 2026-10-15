@@ -647,3 +647,15 @@
   evidence: "ci-learning:11388:docs-index-check: the docs-index-check gate refused #11388 and #11524 because docs/docs-index.json did not match a fresh regeneration from docs/**/*.md (scripts/generate-docs-index.mjs --check exits 1 with 'is STALE'). The ci-learning note records the #11388 repair as regenerating docs/docs-index.json, editing docs/README.md, and touching three tests (a-refused-green-merge-records-why-and-reruns-a-stale-check, daemon-worktrees-pushes-and-arms-never-block-the-loop, run-task); that repair was NOT re-read from the PRs in this run. Also run `npm run --silent docs-index:check-paths` when a mermaid block cites a path."
   src: "ci-learning:11388:docs-index-check"
   cited: "2026-10-14"
+
+# ── task-id-existence refusal (ci-learning:10904:task-id-existence, PR #10904) ──
+- id: task-id-existence-cites-must-resolve
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]
+  error_signatures: ["task-id-existence"]
+  fact: >-
+    The task-id-existence gate refuses any W1-T<n> id cited under src/, deploy/ or plan/ that resolves to neither a refs/rmd-id/W1-T<n> reservation on origin nor a `- id:` record in plan/tasks.yaml or plan/tasks.d/*.yaml; before pushing, write a placeholder W1-T<n> in prose, or mint and declare the id in the same PR, and run `npm run --silent task-id-existence:check`.
+  evidence: "scripts/task-id-existence-check.mjs (header: resolves to a reservation ref or a declared plan record, existence not ownership) and src/lib/task-id-reservation.ts. The ci-learning note for PR #10904 records that the gate went red and was repaired by editing plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml; the exact id that failed to resolve in that run was NOT read from the CI log in this entry, so the trigger is not verified here."
+  src: "ci-learning:10904:task-id-existence"
+  cited: "2026-10-14"
