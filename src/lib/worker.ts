@@ -4478,6 +4478,44 @@ export function wireCredentialHelperSocket(
   writeConfig(["--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`]);
 }
 
+/** The harness's own checkout is where the daemon's own git runs (the feedback landing pushes from it), so a per-run
+ *  wiring written there outlives the run and routes the daemon's pushes through a socket that is not listening yet at
+ *  boot: on 2026-10-15 a head-rehome judgment spawned there and every boot-time landing push then failed. */
+export function sharesHarnessCheckout(cwd: string, harnessCheckout: string): boolean {
+  const real = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      // A path that does not exist yet still compares by its resolved form.
+      return resolve(path);
+    }
+  };
+  return real(cwd) === real(harnessCheckout);
+}
+
+/** Undo {@link wireCredentialHelperSocket} on `cwd` and return the helpers removed. Touches nothing and returns `[]`
+ *  when `cwd`'s worktree config routes git to no credential socket. The daemon runs it on its own checkout at boot. */
+export function unwireCredentialHelperSocket(
+  cwd: string,
+  git: (args: string[]) => string = (args) => hostWorktreeGit(cwd, ["config", "--worktree", ...args]),
+): string[] {
+  let helpers: string[];
+  try {
+    helpers = git(["--get-all", "credential.helper"]).replace(/\n$/, "").split("\n");
+  } catch {
+    // No worktree-scope helper (git exits 1) or an unpinnable checkout: either way there is no wiring to undo.
+    return [];
+  }
+  if (!helpers.some((h) => h.includes("git-credential-socket-helper.mjs"))) return [];
+  git(["--unset-all", "credential.helper"]);
+  try {
+    git(["--unset", "credential.useHttpPath"]);
+  } catch {
+    // Already absent: the helper list alone was the wiring.
+  }
+  return helpers;
+}
+
 /** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5).
  *  W1-T6133: read through the leaf. An unset key (exit 1) reads as empty, as spawnSync's stdout did; a refused
  *  pointer reads NOT wired, so the writer runs, refuses, and the refusal is surfaced rather than skipped. */

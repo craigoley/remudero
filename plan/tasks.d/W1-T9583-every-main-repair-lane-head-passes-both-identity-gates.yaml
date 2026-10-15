@@ -15,7 +15,7 @@
     - test/a-red-main-on-a-ratified-ceiling-records-itself.test.ts
     - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
     - test/helpers/identity-gates.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

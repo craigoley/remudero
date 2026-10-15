@@ -14,7 +14,7 @@
   
     spans proofExecutor and review subsystems
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=cd651b44e88b62c3
   attempts: 0
   files:
