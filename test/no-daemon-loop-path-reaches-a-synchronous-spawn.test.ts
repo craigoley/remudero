@@ -221,7 +221,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readyDraftViaGh: 1,
   realArmDeps: 7, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over); +1 W1-T9536: the sync own-files compare reader (realArmDepsAsync overrides it)
   realDeployDeps: 1,
-  realGitRemoteDeps: 1, // W1-T9660: daemonCommand > realDeps > composeRealDeps; no conversion filed
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
@@ -566,7 +565,7 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
 });
 
 /** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody", "realGitRemoteDeps"] as const;
+const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
   const fns = censusFunctions();
