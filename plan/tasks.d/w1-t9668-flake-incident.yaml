@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   status: blocked
   retirement: retired  # not a flake: a deterministic main red, superseded by W1-T9551 (the gardener routes a no-recovery red to main-health). #11987 (W1-T9503) and #11997 collided; main was red on this test from 037a58d8f until #12034 (cd482d436); its own evidence reads "0 recovered on retry, 9 also failed"; operator 2026-10-15 via the filing session
@@ -24,3 +24,14 @@
     CI runs: 38750735314, 38750971388, 38751694432, 38751959163, 38752153481, 38752869177, 38752968454, 38753085729, 38756303504.
     Retry outcomes: 0 recovered on retry, 9 also failed on retry (the case that reds a PR).
     Evidence: test.flake_retry ledger rows, 9 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared files list contains a single test file, and the record states that 1 of 1 declared file exists at the base. That keeps the scope narrow, and it does not touch secrets, auth, merge/deploy policy, or infrastructure."
+      - "The task asks for a flake fix in that test plus a pinning test placed beside the failing one. Both acceptance criteria are checkable by unit test and grep, so the outcome can be verified from what is shown."
+      - "The rationale cites 9 distinct PRs and 9 CI runs where the test failed on retry, and none of those PRs touched the test or its imports. That is consistent with a genuine flake incident, not with a drift from the plan."
+      - "The family track record is 7 merged and 1 declined (Beta mean 0.80), which is a reasonably healthy record. The change still has to pass CI and review, and the task asks for no deletion, irreversible action, or operator-only decision."
+    judged_at: "2026-10-15T16:35:05.985Z"
+    pin: "f4c8dc124a9dc6425505cfe419b9f1a5d3afd2ff85a2f3571c8c5355e4a3cda4"

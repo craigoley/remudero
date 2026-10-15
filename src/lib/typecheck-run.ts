@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { acquireTestSlot, readMemoryHeadroom, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
@@ -101,6 +101,10 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
     if (cold) {
       slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
         : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...opts.testSlot });
+      if (!testSlotExecutionAllowed(slot)) {
+        log(JSON.stringify({ step: "typecheck.not_run", note: slot.note }));
+        return 75;
+      }
       log(JSON.stringify({ step: "typecheck.cold", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     }
     // Read after any wait for a slot: a tight container runs tsc with fewer checkers, same diagnostics.

@@ -3120,7 +3120,8 @@ import {
   unwireCredentialHelperSocket,
 } from "./lib/worker.js";
 import {
-  QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
+  QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
+  runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
@@ -3764,6 +3765,9 @@ export function dispatchStreamObserver(
   };
 }
 
+/** W1-T9527: the process's one quiet-bound history; every dispatch spawn's watchdog reads through it. */
+export const quietBoundHistory = createQuietBoundHistory({ holder: "run-task.quiet-worker-bound", createReader: createEscalationTriageHistoryReader });
+
 /** W1-T7807: run `rawSpawn` under the quiet-worker watchdog when `watch.enabled` (a real dispatch spawn has a process tree to
  * read; an injected one has none). `seams` default to the real ledger read, judge, nudge and checkpoint-and-push path. */
 export function watchDispatchSpawn(
@@ -3785,7 +3789,8 @@ export function watchDispatchSpawn(
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
-    readRows?: typeof readLedgerUnionRecordsSync;
+    readRows?: typeof readLedgerUnionRecordsSync; // tests only, and only with no `history`: no default reads the union inline
+    history?: QuietBoundHistory;
     judge?: QuietWorkerJudge;
     deliver?: typeof deliverOperatorAnswerToRunningWorker;
     hasUncommittedChanges?: typeof worktreeHasUncommittedChanges;
@@ -3798,15 +3803,18 @@ export function watchDispatchSpawn(
   const { taskId, spawnArgs, task, log } = watch;
   const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
   const abort = new AbortController();
+  const readRows = seams.history ? undefined : seams.readRows;
   const watchdogOptions: Parameters<typeof runQuietWorkerWatchdog>[0] = {
     taskId,
     runId: watch.runId,
     rootPid: () => state.rootPid,
     provider: watch.provider,
-    history: () => {
-      const read = (seams.readRows ?? readLedgerUnionRecordsSync)(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
-      return read.ok ? read.rows : [];
-    },
+    ...(readRows ? {
+      history: () => {
+        const read = readRows(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
+        return read.ok ? read.rows : [];
+      },
+    } : quietHistoryOptions(dirname(watch.ledgerPath), seams.history ?? quietBoundHistory)),
     fallbackBoundMs: watch.fallbackBoundMs,
     quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
     ledger: (step, fields) => log(step, fields),
@@ -11901,6 +11909,7 @@ export async function runFixRung(opts: {
     startShellLessMergeConflictMerge?: typeof startShellLessMergeConflictMerge;
     /** W1-T4458 (ii): test seam; production reads `git rev-list --count <roundStart>..HEAD`. */
     commitsAhead?: (worktreePath: string, base: string) => number;
+    readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9618: production runs `git ls-remote`
     /**
      * W1-T2804: the return is a UNION — a {@link CiGateOutcome} carrying the sha the gate was read
      * for, or the bare verdict every pre-existing stub already returns. Read it through
@@ -12354,13 +12363,19 @@ export async function runFixRung(opts: {
   let pushRefusal: CensusPushRefusal | undefined;
   const censusRefusalIsCurrent = () => pushRefusal !== undefined && noReviewYet && (currentCiFailures ?? []).some((f) => f.name === CENSUS_PUSH_CHECK);
   const offeredCensusBaselines = () => (censusRefusalIsCurrent() ? pushRefusal!.offeredBaselines : []);
+  let roundPushFailure: Extract<FixRoundLanding, { landed: false }> | undefined;
+  let roundPushReceipt: FixRoundPushReceipt | undefined;
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
+    roundPushFailure = undefined;
+    roundPushReceipt = undefined;
     try {
-      await push();
+      const pushed = await push();
+      if (isFixRoundPushReceipt(pushed)) roundPushReceipt = pushed;
       return undefined;
     } catch (e) {
       if (!(e instanceof FixRoundPushError)) throw e;
       const text = (e.refusal?.text ?? e.detail).slice(0, 2000);
+      roundPushFailure = { landed: false, outcome: e.refusal ? "refused" : "failed", cause: e.pushCause, reason: text.slice(0, 500) };
       if (e.refusal) {
         deps.log("fix.push_refused", { site, strike: strikes, censuses: e.refusal.censuses, refusal: text, head_sha: headSha, pr_head_sha: review.headSha });
         deps.say(`fix rung: strike ${strikes}/${opts.strikeCap} push REFUSED by the pre-push census (${e.refusal.censuses.join(", ")}) — the next strike gets the refusal`);
@@ -12378,6 +12393,26 @@ export async function runFixRung(opts: {
       deps.say(`fix rung: ${reason} — standing down without waiting on CI for the old head`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: `${reason}: ${text}` };
     }
+  };
+  const lsRemoteBranchHead = async (wt: string, branch: string) =>
+    (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0] || undefined;
+  const roundLanding = async (committed: string | undefined): Promise<FixRoundLanding> => {
+    const failure = roundPushFailure;
+    const receipt = roundPushReceipt;
+    roundPushFailure = roundPushReceipt = undefined;
+    if (failure) return failure;
+    const readRemoteBranchHead = deps.readRemoteBranchHead ?? (receipt ? lsRemoteBranchHead : undefined);
+    if (!readRemoteBranchHead) return { landed: true }; // a push double that names no head never reached a remote to read
+    const headSha = receipt?.fixRoundPushedHead ?? committed;
+    const read = await Promise.resolve().then(() => readRemoteBranchHead(opts.worktreePath, opts.branch)).then(
+      (head) => ({ head, unreadable: undefined }), (error: unknown) => ({ head: undefined, unreadable: String((error as Error)?.message ?? error).slice(0, 500) }));
+    const remoteHead = read.head;
+    const unreadable = read.unreadable;
+    const seen = remoteHead === undefined ? {} : { remoteHead };
+    if (headSha !== undefined && remoteHead === headSha) return { landed: true, remoteHead };
+    if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable };
+    return { landed: false, outcome: "not_on_remote", ...seen,
+      reason: `refs/heads/${opts.branch} holds ${remoteHead ?? "<absent>"}, not the round's commit ${headSha ?? "<unread>"}` };
   };
 
   // W1-T7096: every completed round, including retriggers, returns to the progress judge.
@@ -14158,7 +14193,7 @@ export async function runFixRung(opts: {
       releasedClaimId ??= deps.branchClaim?.id();
       deps.branchClaim?.release();
     };
-    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
@@ -14173,6 +14208,7 @@ export async function runFixRung(opts: {
       ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
       ...(fixWorkerEndedBySignal(fixResult)
         ? { worker_exit: "signal", worker_exit_signal: fixResult.exit.signal } : {}),
+      ...fixRoundLandingFields(landing, fixResult.subtype, fixOutcome?.kind ?? "unstated"),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
@@ -14187,10 +14223,18 @@ export async function runFixRung(opts: {
       ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
     });
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
-    const logFixDone = (pushedHeadSha?: string, subtype?: string): void => {
-      logFixDoneRow(pushedHeadSha, subtype);
+    const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
+      logFixDoneRow(pushedHeadSha, subtype, landing);
       releaseRoundClaim();
     };
+    const logPushedRoundDone = (landing: FixRoundLanding): void => { // W1-T9618: only a landed round is FIXED; one that did not land spends no strike
+      logFixDone(landing.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing);
+      if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
+    };
+    const pushThrew = (error: unknown): FixRoundLanding => ({ landed: false, outcome: "failed", reason: String((error as Error)?.message ?? error).slice(0, 500) });
+    const unlandedStrikes = () => (strikes === attempt ? attempt - 1 : strikes);
+    const notLandedOutcome = (landing: Extract<FixRoundLanding, { landed: false }>): FixRungOutcome => ({ outcome: "stood_down", review,
+      strikes: unlandedStrikes(), retriggers, reason: `fix round push did not land (${landing.outcome})`, standDownReason: `fix round push did not land (${landing.outcome}): ${landing.reason}` });
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
     // above `runTask`. Design note (i): "EVERY FIX WORKER EXIT" — keyed on `attempt` (this
@@ -14368,12 +14412,15 @@ export async function runFixRung(opts: {
         reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
-        let pushedHead: string | undefined;
+        let landing: FixRoundLanding | undefined;
         try {
           const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
-          if (pushed === undefined) pushedHead = expectedHeadShaForPush;
+          landing = await roundLanding(expectedHeadShaForPush);
           if (pushed && pushed !== "refused") return pushed;
-        } finally { logFixDone(pushedHead); }
+        } catch (error) {
+          landing = pushThrew(error);
+          throw error;
+        } finally { logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing); }
       } else logFixDone();
       return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
     }
@@ -14433,15 +14480,19 @@ export async function runFixRung(opts: {
     }
 
     let roundPush: FixRungOutcome | "refused" | undefined;
-    let pushedHeadSha: string | undefined;
+    let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
       roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? roundBase.baseSha : undefined), expectedHeadShaForPush, "rung.strike");
-      if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
+      landing = await roundLanding(expectedHeadShaForPush);
+    } catch (error) {
+      landing = pushThrew(error);
+      throw error;
     } finally {
-      logFixDone(pushedHeadSha);
+      logPushedRoundDone(landing);
     }
     if (roundPush === "refused") continue;
-    if (roundPush) return roundPush;
+    if (roundPush) return { ...roundPush, strikes: unlandedStrikes() };
+    if (!landing.landed) return notLandedOutcome(landing);
 
     recordHeadProviderAfterPush(
       {
@@ -18980,13 +19031,27 @@ export class FixRoundPushError extends RmdError {
   }
 }
 
+export type FixRoundPushReceipt = { fixRoundPushedHead: string | undefined }; // W1-T9618: a real push names the head it sent to origin
+const isFixRoundPushReceipt = (value: unknown): value is FixRoundPushReceipt =>
+  typeof value === "object" && value !== null && "fixRoundPushedHead" in value;
+export type FixRoundLanding = { landed: true; remoteHead?: string } // W1-T9618: did the round's commit reach the remote branch?
+  | { landed: false; outcome: "failed" | "refused" | "not_on_remote" | "remote_unreadable"; cause?: string; reason: string; remoteHead?: string };
+
+export function fixRoundLandingFields(landing: FixRoundLanding | undefined, workerSubtype: string, workerFixOutcome: string): Record<string, unknown> {
+  if (landing === undefined) return {};
+  if (landing.landed) return landing.remoteHead === undefined ? { push_outcome: "unverified" } : { push_outcome: "landed", remote_head_sha: landing.remoteHead };
+  return { subtype: "push_failed", worker_subtype: workerSubtype, fix_outcome: "NOT_LANDED", worker_fix_outcome: workerFixOutcome,
+    push_outcome: landing.outcome, ...(landing.cause === undefined ? {} : { push_failure_cause: landing.cause }),
+    push_failure_reason: landing.reason.slice(0, 500), ...(landing.remoteHead === undefined ? {} : { remote_head_sha: landing.remoteHead }) };
+}
+
 /** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
  *  still raises; the only silent failure is a remote that already holds this exact head. W1-T5284: every git
  *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
 export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
   deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts } = {},
-): Promise<void> {
+): Promise<FixRoundPushReceipt> {
   // W1-T5658: BOTH fix paths (the run loop's and the sweep's) push through here, so this is the one place a head
   // that compiles alone but not merged with main is refused before it leaves the worktree.
   const merged = await mergedHeadTypechecks(wt, deps.mergedTypecheck);
@@ -19008,12 +19073,13 @@ export async function pushFixRound(
         if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
       }
     } });
+    return { fixRoundPushedHead: expectedHeadSha };
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
       .then((stdout) => stdout.split(/\s/)[0], () => undefined);
-    if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
+    if (expectedHeadSha !== undefined && remote === expectedHeadSha) return { fixRoundPushedHead: expectedHeadSha };
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
 }
@@ -19227,10 +19293,10 @@ export async function pushFixRoundPrechecked(
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
-  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
+  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown = pushFixRound,
   priorHeadSha?: string,
   reapply: { ports?: FixRoundReapplyPorts; attempted?: boolean } = {},
-): Promise<void> {
+): Promise<unknown> {
   // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
   let markerFiles: string[] = [];
   try {
@@ -19248,7 +19314,7 @@ export async function pushFixRoundPrechecked(
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   try {
-    await push(wt, branch, expectedHeadSha, priorHeadSha);
+    return await push(wt, branch, expectedHeadSha, priorHeadSha);
   } catch (error) {
     // A census refusal is the round's own red; only a leased push the remote outran may be re-applied, once.
     if (!(error instanceof FixRoundPushError) || error.refusal !== undefined || reapply.attempted ||
@@ -19256,7 +19322,7 @@ export async function pushFixRoundPrechecked(
     const result = await reapplyFixRoundOnMovedTip({ wt, branch, leaseBaseSha: priorHeadSha, committedSha: expectedHeadSha },
       reapply.ports ?? realFixRoundReapplyPorts, log);
     if (!result.reapplied) throw error;
-    await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
+    return await pushFixRoundPrechecked(log, wt, branch, result.mergedHeadSha, ports, push, result.remoteTip, { ...reapply, attempted: true });
   }
 }
 
