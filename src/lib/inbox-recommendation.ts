@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 
-import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent } from "./feedback.js";
+import { systemClock, type Clock } from "./clock.js";
+import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent, type SummarizeInput } from "./feedback.js";
 import { readClassificationSnapshot } from "./fleet-lane.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
-import { INBOX_SPEAKER, optionAction, plainInboxMessage, plainStorePath, readPlainStore, type InboxOptionLane, type PlainOptionAction } from "./inbox-plain.js";
+import { INBOX_SPEAKER, optionAction, plainInboxMessage, plainStorePath, readPlainStore, type InboxOptionLane, type PlainBackfillDeps, type PlainOptionAction } from "./inbox-plain.js";
 import type { Mount } from "./mounts.js";
 import { checkOperatorMessage } from "./operator-message.js";
 import { spawnWorker } from "./worker.js";
@@ -50,8 +51,12 @@ export interface ServedRecommendation extends InboxRecommendation {
 
 export type RecommendationStore = Record<string, StoredRecommendation>;
 
-export const RECOMMENDATION_SEED_PATH = "plan/seeds/inbox-recommendations-2026-10-13.json";
 const SEED_NAME = "inbox-recommendations-2026-10-13";
+
+/** The committed operator-session seed, under the plan directory. */
+export function recommendationSeedPath(planDir: string): string {
+  return `${planDir}/seeds/${SEED_NAME}.json`;
+}
 
 export function recommendationStorePath(stateDir: string): string {
   return `${stateDir}/inbox-recommendations.json`;
@@ -128,7 +133,7 @@ export type EvidenceKind = "pr" | "sha" | "task" | "path";
 
 /** What the writer and the checker read from origin/main. */
 export interface RecommendationEvidence {
-  /** Every task record under plan/tasks.d on main, by task id: its path and blob. */
+  /** Every task record in the plan's shard directory on main, by task id: its path and blob. */
   shards(): Promise<Map<string, { path: string; blob: string }>>;
   shardText(path: string): Promise<string | undefined>;
   /** Commits on main that name the task, newest first, as "sha subject" lines. */
@@ -149,15 +154,19 @@ async function succeeds(run: Promise<unknown>): Promise<boolean> {
   }
 }
 
-/** {@link RecommendationEvidence} over git against origin/main. */
-export function gitRecommendationEvidence(git: GitRunner): RecommendationEvidence {
+/** {@link RecommendationEvidence} over git against origin/main; `plan` names the plan monolith and its directory,
+ *  repo-relative, as the repo layout resolves them. */
+export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: string; planMonolith: string }): RecommendationEvidence {
+  const shardDir = `${plan.planDir}/tasks.d/`;
   return {
     shards: async () => {
-      const out = await git(["ls-tree", "origin/main", "plan/tasks.d/"]);
+      const out = await git(["ls-tree", "origin/main", shardDir]);
       const shards = new Map<string, { path: string; blob: string }>();
       for (const line of out.split("\n")) {
-        const m = /^\d+ blob ([0-9a-f]+)\t(plan\/tasks\.d\/([A-Z][A-Z0-9]*-T[A-Za-z0-9]+)-[^/]*\.ya?ml)$/.exec(line);
-        if (m) shards.set(m[3]!, { path: m[2]!, blob: m[1]! });
+        const [meta, path] = line.split("\t");
+        const blob = /^\d+ blob ([0-9a-f]+)$/.exec(meta ?? "")?.[1];
+        const id = path?.startsWith(shardDir) ? /^([A-Z][A-Z0-9]*-T[A-Za-z0-9]+)-[^/]*\.ya?ml$/.exec(path.slice(shardDir.length))?.[1] : undefined;
+        if (blob && id) shards.set(id, { path: path!, blob });
       }
       return shards;
     },
@@ -187,7 +196,7 @@ export function gitRecommendationEvidence(git: GitRunner): RecommendationEvidenc
       }
       if (/^[0-9a-f]{7,40}$/.test(value)) return (await succeeds(git(["merge-base", "--is-ancestor", value, "origin/main"]))) ? "sha" : undefined;
       if (/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(value)) {
-        return (await succeeds(git(["grep", "-q", "-e", `^- id: ${value}[[:space:]]*$`, "origin/main", "--", "plan/tasks.yaml", "plan/tasks.d/"]))) ? "task" : undefined;
+        return (await succeeds(git(["grep", "-q", "-e", `^- id: ${value}[[:space:]]*$`, "origin/main", "--", plan.planMonolith, shardDir]))) ? "task" : undefined;
       }
       const path = value.replace(/:\d+(?:-\d+)?$/, "");
       if (!/^[\w.-]+(?:\/[\w.-]+)+$/.test(path) || path.split("/").includes("..")) return undefined;
@@ -271,9 +280,9 @@ export function buildRecommendationPrompt(ctx: RecommendationContext, retryProbl
 }
 
 /** The production writer: the summarize lane's mount, with this module's prompt. Untested by unit, like every real spawn. */
-export function realRecommendationWriter(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (prompt: string) => Promise<unknown> {
+export function realRecommendationWriter(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
-  return async (prompt) => {
+  return async ({ context: prompt }) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt });
     const match = /\{[\s\S]*\}/.exec(result.text);
@@ -287,18 +296,18 @@ export function realRecommendationWriter(opts: { mount: Mount; cwd: string; sett
   };
 }
 
-export interface RecommendationBackfillDeps {
-  stateDir: string;
-  readProposals: () => Array<{ id: string; summary: string }>;
+/** What the writer reads beyond the plain backfill's seam, whose `summarize` it takes as the writer: each prompt
+ *  arrives as `context`, whole. Absent `summarize`, only the seed is imported. */
+export interface RecommendationSources {
   evidence: RecommendationEvidence;
-  /** The summarize lane; absent, only the seed is imported. */
-  ask?: (prompt: string) => Promise<unknown>;
   /** The committed seed's text; absent or unreadable, nothing is seeded. */
   readSeed?: () => string | undefined;
   /** Each proposal's lane, from serve's classification snapshot by default. */
   readLanes?: () => Record<string, InboxOptionLane>;
-  now?: () => number;
+  clock?: Clock;
 }
+
+export type RecommendationBackfill = PlainBackfillDeps & RecommendationSources;
 
 const LANE_OF_STATE: Readonly<Record<string, InboxOptionLane>> = {
   ready: "ready", drafting: "drafting", not_ready: "notReady", deferred_with_trigger: "notReady", declined: "declined",
@@ -334,7 +343,7 @@ function parseSeed(raw: string | undefined): Record<string, unknown> {
 
 /** Import the operator-session seed once: each entry whose item is still a current operator item with no stored
  *  recommendation, at the item's current fingerprint. The checker is not applied. Returns how many it imported. */
-function importSeedOnce(deps: RecommendationBackfillDeps, items: Map<string, CurrentItem>, store: RecommendationStore): number {
+function importSeedOnce(deps: RecommendationBackfill, items: Map<string, CurrentItem>, store: RecommendationStore): number {
   if (!deps.readSeed) return 0;
   const markers = readJsonObject<{ importedAt: string; ids: string[] }>(seedMarkerPath(deps.stateDir));
   if (markers[SEED_NAME] !== undefined) return 0;
@@ -347,12 +356,12 @@ function importSeedOnce(deps: RecommendationBackfillDeps, items: Map<string, Cur
     store[id] = {
       action: r.action, ...(typeof r.text === "string" ? { text: r.text } : {}), why: r.why, evidence: r.evidence, obsolete: r.obsolete,
       ...(typeof r.group === "string" ? { group: r.group } : {}),
-      generatedAt: typeof r.generatedAt === "string" ? r.generatedAt : new Date((deps.now ?? Date.now)()).toISOString(),
+      generatedAt: typeof r.generatedAt === "string" ? r.generatedAt : (deps.clock ?? systemClock).iso(),
       source: "operator-session-seed", sourceFingerprint: item.fingerprint, ...(item.shard ? { shardBlob: item.shard.blob } : {}),
     };
     imported.push(id);
   }
-  markers[SEED_NAME] = { importedAt: new Date((deps.now ?? Date.now)()).toISOString(), ids: imported };
+  markers[SEED_NAME] = { importedAt: (deps.clock ?? systemClock).iso(), ids: imported };
   writeAtomic(seedMarkerPath(deps.stateDir), JSON.stringify(markers, null, 2) + "\n");
   return imported.length;
 }
@@ -366,7 +375,7 @@ export interface RecommendationTick {
 
 /** One tick: drop recommendations whose task record changed on main, import the seed once, then write at most `max`
  *  items with no current recommendation, oldest registry order first. */
-export async function backfillRecommendations(deps: RecommendationBackfillDeps, max: number): Promise<RecommendationTick> {
+export async function backfillRecommendations(deps: RecommendationBackfill, max: number): Promise<RecommendationTick> {
   const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0 };
   const lanes = (deps.readLanes ?? (() => snapshotLanes(deps.stateDir)))();
   const shards = await deps.evidence.shards();
@@ -391,7 +400,8 @@ export async function backfillRecommendations(deps: RecommendationBackfillDeps, 
   }
   tick.seeded = importSeedOnce(deps, items, store);
   if (changed || tick.seeded > 0) writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
-  if (!deps.ask) return tick;
+  const ask = deps.summarize;
+  if (!ask) return tick;
   const refusals = readJsonObject<string>(refusalsPath(deps.stateDir));
   const pending = [...items.values()]
     .filter((item) => store[item.proposal.id]?.sourceFingerprint !== item.fingerprint && refusals[item.proposal.id] !== item.fingerprint)
@@ -408,7 +418,7 @@ export async function backfillRecommendations(deps: RecommendationBackfillDeps, 
     let problems: string[] = [];
     let accepted: Record<string, unknown> | undefined;
     for (let attempt = 0; attempt < 2 && accepted === undefined; attempt += 1) {
-      const answer = await deps.ask(buildRecommendationPrompt(ctx, problems));
+      const answer = await ask({ context: buildRecommendationPrompt(ctx, problems) });
       const check = await checkRecommendation(answer, { id: item.proposal.id, lane: item.lane, ifNothingHappens: plain.ifNothingHappens }, deps.evidence);
       if (check.ok) accepted = answer as Record<string, unknown>;
       else problems = check.problems;
@@ -425,7 +435,7 @@ export async function backfillRecommendations(deps: RecommendationBackfillDeps, 
     latest[item.proposal.id] = {
       action: a.action, ...(typeof a.text === "string" && a.text.trim() !== "" ? { text: a.text } : {}), why: a.why, evidence: a.evidence, obsolete: a.obsolete,
       ...(typeof a.group === "string" && a.group.trim() !== "" ? { group: a.group } : {}),
-      generatedAt: new Date((deps.now ?? Date.now)()).toISOString(), source: "writer",
+      generatedAt: (deps.clock ?? systemClock).iso(), source: "writer",
       sourceFingerprint: item.fingerprint, ...(item.shard ? { shardBlob: item.shard.blob } : {}),
     };
     writeAtomic(path, JSON.stringify(latest, null, 2) + "\n");
@@ -437,7 +447,7 @@ export async function backfillRecommendations(deps: RecommendationBackfillDeps, 
 /** Run {@link backfillRecommendations} on its own timer, one item per tick, never two at once, beside the plain
  *  backfill (the W1-T4077 pump pattern), so a busy daemon main loop never delays it. */
 export function startRecommendationBackfill(
-  deps: RecommendationBackfillDeps,
+  deps: RecommendationBackfill,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): { stop: () => void; settled: () => Promise<void>; isBusy: () => boolean } {

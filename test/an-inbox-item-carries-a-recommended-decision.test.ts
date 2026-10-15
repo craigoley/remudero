@@ -148,7 +148,7 @@ test("W1-T8950: the checker refuses unproven obsolete claims and unroutable acti
       stateDir, evidence,
       readProposals: () => [{ id: OBSOLETE_ID, summary: OBSOLETE_SUMMARY }],
       readLanes: () => ({ [OBSOLETE_ID]: "notReady" as const }),
-      ask: async (prompt: string) => {
+      summarize: async ({ context: prompt }: { context: string }) => {
         prompts.push(prompt);
         return { ...good, evidence: ["W1-T8918"] };
       },
@@ -161,7 +161,7 @@ test("W1-T8950: the checker refuses unproven obsolete claims and unroutable acti
     assert.equal((await backfillRecommendations(deps, 1)).refused, 0, "a refused item is not re-asked until its source changes");
 
     // control: an answer that passes is stored, with this item's fingerprint, and served.
-    const ok = await backfillRecommendations({ ...deps, readProposals: () => [{ id: READY_ID, summary: READY_SUMMARY }], readLanes: () => ({ [READY_ID]: "ready" as const }), ask: async () => ({ ...good, action: "approve", obsolete: false }) }, 1);
+    const ok = await backfillRecommendations({ ...deps, readProposals: () => [{ id: READY_ID, summary: READY_SUMMARY }], readLanes: () => ({ [READY_ID]: "ready" as const }), summarize: async () => ({ ...good, action: "approve", obsolete: false }) }, 1);
     assert.equal(ok.written, 1);
     const row = readRecommendationStore(recommendationStorePath(stateDir))[READY_ID]!;
     assert.equal(row.source, "writer");
@@ -214,7 +214,7 @@ test("W1-T8950: a changed task record on main drops the recommendation and the w
   const asked: string[] = [];
   const deps = {
     stateDir, evidence: mainEvidence({ "W1-T6088": "task" }, { "W1-T6088": "new-blob" }), readProposals: () => [proposal], readLanes: () => ({ [OBSOLETE_ID]: "notReady" as const }),
-    ask: async (prompt: string) => {
+    summarize: async ({ context: prompt }: { context: string }) => {
       asked.push(prompt);
       return { action: "reframe", text: "Restate it against the new record.", why: "The task record changed on main.", evidence: ["W1-T6088"], obsolete: false };
     },
@@ -241,7 +241,7 @@ test("W1-T8950: the evidence resolves against origin/main", async () => {
     repo.git("update-ref", "refs/remotes/origin/main", merged);
     repo.git("commit", "--quiet", "--allow-empty", "-m", "local only (#11200)");
     const local = repo.git("rev-parse", "HEAD");
-    const evidence = gitRecommendationEvidence(async (args) => repo.git(...args));
+    const evidence = gitRecommendationEvidence(async (args) => repo.git(...args), { planDir: "plan", planMonolith: "plan/tasks.yaml" });
 
     const shards = await evidence.shards();
     assert.deepEqual([...shards.keys()], ["W1-T6088"]);
@@ -267,7 +267,7 @@ test("W1-T8950: the backfill runs on its own timer and logs what it wrote", asyn
   const rows: string[] = [];
   const pump = startRecommendationBackfill({
     stateDir, evidence: mainEvidence({ "#11199": "pr" }), readProposals: () => [{ id: READY_ID, summary: READY_SUMMARY }], readLanes: () => ({ [READY_ID]: "ready" as const }),
-    ask: async () => ({ action: "approve", why: "Its proof passed.", evidence: ["#11199"], obsolete: false }),
+    summarize: async () => ({ action: "approve", why: "Its proof passed.", evidence: ["#11199"], obsolete: false }),
   }, 60_000, (step) => rows.push(step));
   await pump.settled();
   pump.stop();

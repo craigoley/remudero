@@ -16,7 +16,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
-import { startRecommendationBackfill, type RecommendationBackfillDeps } from "./inbox-recommendation.js";
+import { startRecommendationBackfill, type RecommendationBackfill } from "./inbox-recommendation.js";
 import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
@@ -1429,7 +1429,7 @@ export interface DaemonDeps {
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
   /** W1-T8950: writes a recommended decision for each operator inbox item, on its own timer beside the plain backfill. */
-  recommendationBackfill?: RecommendationBackfillDeps;
+  recommendationBackfill?: RecommendationBackfill;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps<number | Promise<number>>;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
