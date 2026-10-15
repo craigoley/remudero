@@ -186,6 +186,7 @@ test("a refused saved edit is never committed or pushed, and the next fix round 
     reason: "red", proof_exec: "not_executable" }], testTheater: false, summary: "red", floorDegraded: false,
     capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "failure" };
   const prompts: string[] = [];
+  let snapshotReady = false;
   const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000, provider: "claude" };
   const result = await harness.runFixRung({ taskId: "W1-T7182", runId: "snapshot-round",
     task: { id: "W1-T7182", title: "census", files: ["test/new.test.ts"] },
@@ -194,8 +195,16 @@ test("a refused saved edit is never committed or pushed, and the next fix round 
     config: { root: f.root, workerProviders: { harnessCommitsFix: true } }, budgetUsd: 1, strikeCap: 2,
     initialReview: review, reviewBase: { owner: "fixture", repo: "remudero", headCheckoutDir: f.root, reviewerMount: mount },
     deps: {
-      writeFixCensusSnapshot: harness.writeFixCensusSnapshot,
+      writeFixCensusSnapshot: async (root: string, log: Parameters<typeof harness.writeFixCensusSnapshot>[1]) => {
+        snapshotReady = false;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const snapshot = harness.writeFixCensusSnapshot(root, log);
+        snapshotReady = true;
+        return snapshot;
+      },
       spawn: async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+        assert.equal(snapshotReady, true, "the snapshot finishes before the worker is called");
+        assert.equal(typeof args.env?.[SNAPSHOT_ENV], "string", "the worker receives a path, never a pending read");
         prompts.push(args.prompt);
         assert.ok(args.env?.[SNAPSHOT_ENV]);
         writeFileSync(join(f.root, "test/new.test.ts"), IMPORT_CLI);

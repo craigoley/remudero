@@ -1602,6 +1602,9 @@ import {
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
   reconcileDepReviewHold,
+  reconcileDependabotRefresh,
+  DEPENDABOT_REFRESH_CAUSES,
+  type DependabotHeadCommit,
   decideDepReview,
   isDependabotAuthor,
   syncNodePinForImageBump,
@@ -2841,7 +2844,7 @@ export function buildSweepEffects(
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
-      const deps = { ...opts.deps, writeFixCensusSnapshot };
+      const deps = { ...opts.deps, writeFixCensusSnapshot: writeFixCensusSnapshotAsync };
       return runFixRung({ ...opts, deps });
     },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
@@ -11873,7 +11876,7 @@ export async function runFixRung(opts: {
     fixProgressJudge?: FixProgressJudge;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
-    writeFixCensusSnapshot?: typeof writeFixCensusSnapshot;
+    writeFixCensusSnapshot?: (...args: Parameters<typeof writeFixCensusSnapshot>) => string | undefined | Promise<string | undefined>;
     readMainTip?: () => string | Promise<string>;
     reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
     requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
@@ -13620,7 +13623,7 @@ export async function runFixRung(opts: {
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
     const fixCensusApplies = fixCensusAppliesToRepo(opts.reviewBase.repo, deps.log);
-    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? await deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
     if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
@@ -18761,28 +18764,38 @@ export function fixCensusAppliesToRepo(
   return false;
 }
 
-export function writeFixCensusSnapshot(
+export function writeFixCensusSnapshot(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: typeof hostWorktreeGit = hostWorktreeGit): string | undefined {
+  return runStepsSync(writeFixCensusSnapshotSteps(root, log, runGit));
+}
+
+export function writeFixCensusSnapshotAsync(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string> = hostWorktreeGitAsync): Promise<string | undefined> {
+  return runStepsAsync(writeFixCensusSnapshotSteps(root, log, runGit));
+}
+
+function* writeFixCensusSnapshotSteps(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  runGit: typeof hostWorktreeGit = hostWorktreeGit,
-): string | undefined {
+  runGit: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>,
+): Steps<string | undefined> {
   try {
-    const headSha = runGit(root, ["rev-parse", "HEAD"]).trim();
-    const mainSha = runGit(root, ["rev-parse", "origin/main"]).trim();
-    const mergeBase = runGit(root, ["merge-base", headSha, mainSha]).trim();
+    const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
+    const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
+    const mergeBase = (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
-    const paths = (args: string[]) => runGit(root, args).split("\n").filter((p) => p && censusPath(p));
-    const headPaths = paths(["ls-files"]);
-    const basePaths = paths(["ls-tree", "-r", "--name-only", mergeBase]);
-    const mainPaths = paths(["ls-tree", "-r", "--name-only", mainSha, "--", "scripts"])
+    function* paths(args: string[]): Steps<string[]> {
+      return (yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p));
+    }
+    const headPaths = yield* paths(["ls-files"]);
+    const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
+    const mainPaths = (yield* paths(["ls-tree", "-r", "--name-only", mainSha, "--", "scripts"]))
       .filter((p) => p.endsWith("baseline.json"));
-    const blobs = (ref: string, names: string[]): Record<string, string> => {
+    function* blobs(ref: string, names: string[]): Steps<Record<string, string>> {
       if (names.length === 0) return {};
-      const output = Buffer.from(runGit(root, ["cat-file", "--batch"], {
+      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], {
         input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
-      }));
+      })));
       const texts: Record<string, string> = {};
       let offset = 0;
       for (const path of names) {
@@ -18799,7 +18812,7 @@ export function writeFixCensusSnapshot(
       return texts;
     };
     const snapshot = { version: 1, root: resolve(root), headSha, mainSha, mergeBase, headPaths, basePaths,
-      baseBlobs: blobs(mergeBase, basePaths), mainBlobs: blobs(mainSha, mainPaths),
+      baseBlobs: yield* blobs(mergeBase, basePaths), mainBlobs: yield* blobs(mainSha, mainPaths),
       instrumentSurface: INSTRUMENT_SURFACE, instrumentExclusions: INSTRUMENT_SURFACE_EXCLUSIONS };
     mkdirSync(join(root, "state"), { recursive: true });
     if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
@@ -19218,7 +19231,7 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? writeFixCensusSnapshot(cwd, log) : undefined;
+    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? await writeFixCensusSnapshotAsync(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,
@@ -21568,7 +21581,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
-          writeFixCensusSnapshot,
+          writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
@@ -23855,7 +23868,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
   ]) as {
     number: number;
     url: string;
@@ -23865,6 +23878,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     headRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
+    commits?: DependabotHeadCommit[];
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -23911,9 +23925,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
-      statePath: join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`),
+      statePath: holdStatePath,
       prUrl: view.url,
       prNumber: view.number,
       title: view.title ?? "",
@@ -23940,6 +23955,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 2;
   }
   if (result.decision === "hold") {
+    const refreshFlag = flagValue(rest, "--dependabot-refresh");
+    try {
+      const refresh = reconcileDependabotRefresh({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, result,
+        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), commits: view.commits, nowMs: clock.now(),
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body), log,
+      });
+      if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
