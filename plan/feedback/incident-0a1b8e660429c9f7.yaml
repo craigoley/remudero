@@ -1,0 +1,29 @@
+id: incident-0a1b8e660429c9f7
+ts: 2026-10-15T05:19:12.059Z
+raw: >-
+  Incident 0a1b8e660429: intervention
+  automerge-hold:bounded-reopen-of-observe-one-fix-round
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=automerge.hold_engaged target=pr#10166 actor=operator_human cause=automerge-hold:bounded-reopen-of-observe-one-fix-round — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#0a1b8e660429c9f7190c3c2a44d67b95699c75af1fdb56bf8529343631f02454
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

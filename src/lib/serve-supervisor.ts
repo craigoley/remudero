@@ -13,6 +13,8 @@
  * W1-T8311: memory headroom is the container's cgroup AND a fresh host reading (MemAvailable, swap-in, PSI)
  * against the candidate's measured peak. A refusal (`serve.handoff_deferred` with a named `hold`) keeps the
  * active generation serving and retries; pressure never exits the supervisor. Unknown evidence is a hold.
+ * W1-T9542: that need is the overlap a handoff measured (else the boot peak) times a margin, and the cgroup's
+ * headroom is read below memory.high, where the kernel starts to reclaim and throttle.
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
  * A COLD start, or replacing the only generation after a crash, has nothing to protect, so it promotes once
@@ -41,8 +43,37 @@ export const COLD_START_STILL_DEGRADED_EVERY_MS = STANDBY_READY_BOUND_MS / 5;
 export const DRAIN_BACKSTOP_MS = 30_000;
 /** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
 export const SHED_BACKSTOP_MS = 10_000;
+/**
+ * W1-T9570: AFTER AN ANSWERED TIER-2 SHED, FREE MEMORY IS READ THIS OFTEN until it fits the need or
+ * {@link SHED_SETTLE_CAP_MS} passes. A new constant, not a change to any threshold. On 2026-10-15 a 1 s sampler of
+ * serve's cgroup resolved the first live answered tier-2 shed (02:25:43Z): the release came as one +1.17 GB step
+ * between two reads a second apart (02:25:50Z to 02:25:51Z). Each read is three small cgroup files.
+ */
+export const SHED_SETTLE_READ_INTERVAL_MS = 1_000;
+/**
+ * W1-T9570: BACKSTOP, THE LONGEST AN ANSWERED TIER-2 SHED WAITS FOR ITS FREED MEMORY TO SHOW, before a still-short
+ * reading restores the workers and defers; the primary stop is a reading that fits the need. A new constant, not a
+ * change to any threshold. Measured: the 02:25:43Z shed's reply-time read was 4.30 GB against a 4.94 GB need (both
+ * before W1-T9542's reader and need); the workers were restored 4 ms later, yet the cgroup read a flat or falling
+ * plateau for 7 s, then +1.17 GB at +8 s. On 2026-10-14
+ * read-model worker recycles first showed +0.41 to +0.85 GB at 6-8 s and up to +2.30 GB at 21-30 s. 30 s covers the
+ * +8 s release and the 21-30 s samples, and bounds the degraded wait of a shed that never fits. No stability stop:
+ * consecutive reads agreed within 30 MiB for the plateau's first 3 s, so "two reads agree" would judge too early.
+ */
+export const SHED_SETTLE_CAP_MS = 30_000;
 /** W1-T8873: tier 2 (worker threads) runs at most once in this window, however many memory deferrals retry inside it. */
 export const WORKER_SHED_MIN_INTERVAL_MS = 15 * 60_000;
+/**
+ * W1-T9542: THE SAFETY MARGIN ON A HANDOFF'S NEED, applied to the largest overlap this supervisor measured (or,
+ * before one is measured, to the boot peak sampled at promotion). A new constant, not a change to any threshold.
+ * Measured 2026-10-02 to 10-12 (146 serve.memory samples inside a fork-to-done window): the overlap a handoff
+ * added was p50 0.86 GB, p95 1.60, max 2.37, and max/p95 is 1.48. It exceeded the standby's own boot peak in 5
+ * samples, by at most 1.34x (10-06 18:45Z), because the old generation keeps allocating through the overlap.
+ * 1.5 covers both ratios; the largest measured overlap, 2.37 GB, prices at 3.56 GB.
+ */
+export const HANDOFF_NEED_MARGIN = 1.5;
+/** What a handoff's need was sized on: a measured overlap, the boot-peak fallback, or nothing (a `peak_unknown` hold). */
+export type NeedBasis = "measured_overlap" | "boot_peak" | "unknown";
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
 /** The shortest gap between two handoffs: serve.ts's SERVE_HANDOFF_COALESCE_MS, the operator's 15-minute window. */
@@ -114,7 +145,10 @@ export interface ServeSupervisorOptions {
   spawn?: (command: GenerationCommand, env: Record<string, string>) => GenerationProcess;
   /** One HTTP GET over a generation's private socket. */
   get?: (socketPath: string, path: string) => Promise<{ status: number; body: string }>;
-  /** Bytes this container's memory cgroup can still hold once its clean page cache is reclaimed, or undefined when unbounded or unreadable. */
+  /**
+   * Bytes this container's memory cgroup can still hold once its clean page cache is reclaimed, or undefined when
+   * unbounded or unreadable. W1-T9542: defaults to {@link cgroupSoftFreeMemory}, below memory.high.
+   */
   freeMemory?: () => number | undefined;
   /** A generation's resident bytes now (VmRSS), or undefined when unreadable. */
   rss?: (pid: number) => number | undefined;
@@ -136,11 +170,24 @@ export interface ServeSupervisorOptions {
   /** W1-T8311: the host memory budget's thresholds; defaults to the active slot's plan/policy.yaml. */
   upgradeThresholds?: (activeDir: string) => ServeUpgradeThresholds | { unread: string };
   shedBackstopMs?: number;
+  /** W1-T9570: the tier-2 settle reads' spacing and cap; default {@link SHED_SETTLE_READ_INTERVAL_MS} and {@link SHED_SETTLE_CAP_MS}. */
+  shedSettleIntervalMs?: number;
+  shedSettleCapMs?: number;
+  /** W1-T9570: the container cgroup's bytes in swap, or undefined when unreadable; defaults to {@link cgroupSwapCurrent}. */
+  swapMemory?: () => number | undefined;
   /** W1-T8873: the least gap between two worker-thread sheds; defaults to {@link WORKER_SHED_MIN_INTERVAL_MS}. */
   workerShedIntervalMs?: number;
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
+}
+
+/** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
+interface SettledFree {
+  first: number | undefined;
+  last: number | undefined;
+  reads: number;
+  settle: "fits" | "cap" | "unread" | "unanswered";
 }
 
 interface Generation {
@@ -212,6 +259,20 @@ export function socketGet(socketPath: string, path: string, timeoutMs = 30_000):
  * Without a readable `memory.stat` all of `memory.current` counts. Undefined when unbounded or absent.
  */
 export function cgroupFreeMemory(read: (path: string) => string = (path) => readFileSync(path, "utf8"), root = "/sys/fs/cgroup"): number | undefined {
+  return cgroupFree(read, root, false);
+}
+
+/**
+ * W1-T9542: {@link cgroupFreeMemory} below the SOFT limit, `min(memory.high, memory.max)`: the kernel reclaims
+ * and throttles at memory.high (5632 MiB of an 8 GB memory.max on 2026-10-14), so a standby booting past it
+ * swaps. When memory.high reads `max` or is unreadable the ceiling is memory.max, as before. The supervisor's
+ * handoff judges with this; serve.memory's free_bytes and its relief keep {@link cgroupFreeMemory}.
+ */
+export function cgroupSoftFreeMemory(read: (path: string) => string = (path) => readFileSync(path, "utf8"), root = "/sys/fs/cgroup"): number | undefined {
+  return cgroupFree(read, root, true);
+}
+
+function cgroupFree(read: (path: string) => string, root: string, soft: boolean): number | undefined {
   let max: number;
   let current: number;
   try {
@@ -220,8 +281,21 @@ export function cgroupFreeMemory(read: (path: string) => string = (path) => read
   } catch {
     return undefined; // no cgroup v2 here (macOS, or a host process): headroom is not measurable, so nothing defers
   }
-  if (!Number.isFinite(max) || !Number.isFinite(current)) return undefined;
-  return max - (current - reclaimableFileBytes(read, root));
+  const high = soft ? softLimitBytes(read, root) : undefined;
+  // A memory.max of `max` is NaN here: a finite memory.high is then the only ceiling.
+  const ceiling = high !== undefined && !(max <= high) ? high : max;
+  if (!Number.isFinite(ceiling) || !Number.isFinite(current)) return undefined;
+  return ceiling - (current - reclaimableFileBytes(read, root));
+}
+
+function softLimitBytes(read: (path: string) => string, root: string): number | undefined {
+  let text: string;
+  try {
+    text = read(join(root, "memory.high")).trim();
+  } catch {
+    return undefined; // no memory.high to read: memory.max stays the ceiling, the reading before W1-T9542
+  }
+  return /^\d+$/.test(text) ? Number(text) : undefined; // `max` is no soft limit
 }
 
 function reclaimableFileBytes(read: (path: string) => string, root: string): number {
@@ -242,6 +316,21 @@ export function procRss(pid: number, read: (path: string) => string = (path) => 
   } catch {
     return undefined; // no procfs (macOS) or the process is gone: this sample simply is not taken
   }
+}
+
+/**
+ * W1-T9570: cgroup v2 `memory.swap.current`, the bytes this container holds in swap. A heap page in swap is released
+ * from here, not from `memory.current`, so a shed that freed swapped pages shows here. Undefined when the file is
+ * absent (no swap accounting), unreadable or not a byte count: no reading, never a zero.
+ */
+export function cgroupSwapCurrent(read: (path: string) => string = (path) => readFileSync(path, "utf8"), root = "/sys/fs/cgroup"): number | undefined {
+  let text: string;
+  try {
+    text = read(join(root, "memory.swap.current")).trim();
+  } catch {
+    return undefined; // no swap accounting here, or the file is unreadable: this field is not recorded
+  }
+  return /^\d+$/.test(text) ? Number(text) : undefined;
 }
 
 /**
@@ -429,7 +518,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const command = opts.command ?? generationCommand(opts.serveArgs ?? ["serve"]);
   const spawn = opts.spawn ?? clusterSpawn;
   const get = opts.get ?? socketGet;
-  const freeMemory = opts.freeMemory ?? (() => cgroupFreeMemory());
+  const freeMemory = opts.freeMemory ?? (() => cgroupSoftFreeMemory());
   const rss = opts.rss ?? ((pid: number) => procRss(pid));
   const peakRss = opts.peakRss ?? ((pid: number) => procRss(pid, undefined, "VmHWM"));
   const handoffEnabled = opts.handoffEnabled ?? (() => true);
@@ -444,6 +533,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const deferMs = opts.deferMs ?? 60_000;
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
   const workerShedIntervalMs = opts.workerShedIntervalMs ?? WORKER_SHED_MIN_INTERVAL_MS;
+  const shedSettleIntervalMs = opts.shedSettleIntervalMs ?? SHED_SETTLE_READ_INTERVAL_MS;
+  const shedSettleReads = 1 + Math.floor((opts.shedSettleCapMs ?? SHED_SETTLE_CAP_MS) / Math.max(1, shedSettleIntervalMs));
+  const swapMemory = opts.swapMemory ?? (() => cgroupSwapCurrent());
   const spacingBaseMs = opts.spacingBaseMs ?? 0;
   const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
   const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
@@ -462,9 +554,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let retryPending = false;
   let largestRss = 0;
   let largestRssGeneration: number | undefined;
-  // W1-T8378: the largest positive high-water mark read from an active generation. Monotone: it only grows.
-  let observedPeak = 0;
-  let observedPeakGeneration: number | undefined;
+  // W1-T9542: the largest positive overlap a completed handoff measured. Monotone: it only grows.
+  let largestOverlap = 0;
+  let largestOverlapGeneration: number | undefined;
   let crashes = 0;
   const failed = new Set<string>();
   let pressure: HandoffPressure | undefined;
@@ -491,11 +583,12 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   };
 
   /** Ready means `/v1/ready` answered 200 and every smoke route answered 200 at the target sha. */
-  const awaitReady = async (generation: Generation, bodies: number): Promise<{ ok: true } | { ok: false; criterion: string; detail?: unknown }> => {
+  const awaitReady = async (generation: Generation, bodies: number, sample: () => void): Promise<{ ok: true } | { ok: false; criterion: string; detail?: unknown }> => {
     const deadline = clock.now() + readyBoundMs;
     let last: unknown;
     for (;;) {
       if (!generation.isAlive()) return { ok: false, criterion: "exited", detail: last };
+      sample();
       const reply = await get(generation.socketPath, `${SERVE_READY_PATH}?bodies=${bodies}`).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
       if (reply.status === 200) {
         const smoke = await smokeFailure(generation);
@@ -605,18 +698,41 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     return clock.now() - startedAt;
   };
 
-  /** Fork, wait for readiness, promote; the caller decides what a failure means. */
-  const bringUp = async (slot: PreparedSlot): Promise<{ generation?: Generation; criterion?: string; detail?: unknown; readyMs: number }> => {
+  /** Fork, wait for readiness, promote; the caller decides what a failure means. `sample` reads the overlap at each step. */
+  const bringUp = async (slot: PreparedSlot, sample: () => void): Promise<{ generation?: Generation; criterion?: string; detail?: unknown; readyMs: number }> => {
     const startedAt = clock.now();
     const bodies = await activeBodies();
     const generation = fork(slot);
-    const ready = await awaitReady(generation, bodies);
+    sample();
+    const ready = await awaitReady(generation, bodies, sample);
     if (!ready.ok) {
       generation.process.kill("SIGKILL");
       return { criterion: ready.criterion, detail: ready.detail, readyMs: clock.now() - startedAt };
     }
     if (!(await promote(generation))) return { criterion: "promote", readyMs: clock.now() - startedAt };
+    sample();
     return { generation, readyMs: clock.now() - startedAt };
+  };
+
+  /**
+   * W1-T9542: the free memory one handoff's overlap took, from just before the fork until the old generation has
+   * exited, read with the same reader the handoff is judged with. Overlap is the pre-fork reading less the lowest
+   * in the window; with no pre-fork reading or no reading in the window there is none, never a zero.
+   */
+  const overlapWindow = (): { sample: () => void; result: () => { overlapPeakBytes?: number; overlapSamples: number } } => {
+    const usable = (bytes: number | undefined): bytes is number => bytes !== undefined && Number.isFinite(bytes);
+    const before = freeMemory();
+    let lowest: number | undefined;
+    let samples = 0;
+    return {
+      sample: () => {
+        const free = freeMemory();
+        if (!usable(free)) return;
+        samples += 1;
+        lowest = lowest === undefined ? free : Math.min(lowest, free);
+      },
+      result: () => ({ overlapPeakBytes: usable(before) && lowest !== undefined ? before - lowest : undefined, overlapSamples: samples }),
+    };
   };
 
   /** Nothing is serving (a cold start, or the only generation died): promote once it listens; the gate is reported, never enforced. */
@@ -669,23 +785,51 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
    * W1-T8873, tier 2: tier 1 frees only the main heap, while the active generation's rebuildable worker threads hold
    * most of its resident bytes. A handoff already deferred for memory asks it to terminate them; it keeps answering
    * from the bodies it holds. Free memory is measured again; {@link restoreWorkers} ends the degraded mode.
+   * W1-T9570: a thread's exit does not return its heap to the cgroup at once, so an answered shed reads free memory
+   * until it is no longer `short` or the cap passes ({@link settleFree}); the row keeps the first reading and swap.
    */
-  const shedWorkers = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
+  const shedWorkers = async (generation: Generation, freeBefore: number, short: (bytes: number | undefined) => boolean): Promise<number | undefined> => {
     const startedAt = clock.now();
     lastWorkerShedAt = startedAt;
     generation.workersShedAt = startedAt;
+    const swapBefore = swapMemory();
     const reply = awaitReply(generation, GENERATION_MESSAGES.shed_workers_done);
     generation.process.send({ type: GENERATION_MESSAGES.shed_workers });
     const done = await reply;
-    const freeAfter = freeMemory();
+    const settleStartedAt = clock.now();
+    // A generation that never answered already spent the backstop: one reading, as before W1-T9570.
+    const settled = done === undefined ? unanswered(freeMemory()) : await settleFree(short);
+    const freeAfter = settled.last;
+    const swapAfter = swapMemory();
     const before = done?.beforeBytes;
     const after = done?.afterBytes;
     opts.log("serve.handoff_shed", {
       tier: 2, phase: "shed", generation: generation.id, answered: done !== undefined, workers: done?.workers, workerHeapBytes: done?.heapBytes, error: done?.error,
       beforeBytes: before, afterBytes: after, freedBytes: typeof before === "number" && typeof after === "number" ? Math.max(0, before - after) : undefined,
-      freeBefore, freeAfter, needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
+      freeBefore, freeAfter, freeAfterFirst: settled.first, freeReads: settled.reads, settle: settled.settle, settleMs: clock.now() - settleStartedAt,
+      ...(swapBefore === undefined ? {} : { swapBefore }), ...(swapAfter === undefined ? {} : { swapAfter }),
+      needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
     });
     return freeAfter;
+  };
+
+  /** W1-T9570: the one reading taken after a tier-2 request that was never answered. */
+  const unanswered = (free: number | undefined): SettledFree => ({ first: free, last: free, reads: 1, settle: "unanswered" });
+
+  /**
+   * W1-T9570: free memory read every {@link SHED_SETTLE_READ_INTERVAL_MS} until the reading is not `short` (it fits,
+   * or it is unreadable and judges nothing, as before) or the cap's reads are spent. `settle` names which ended it.
+   */
+  const settleFree = async (short: (bytes: number | undefined) => boolean): Promise<SettledFree> => {
+    const first = freeMemory();
+    let last = first;
+    let reads = 1;
+    while (short(last) && reads < shedSettleReads) {
+      await sleep(shedSettleIntervalMs);
+      last = freeMemory();
+      reads += 1;
+    }
+    return { first, last, reads, settle: last === undefined ? "unread" : short(last) ? "cap" : "fits" };
   };
 
   /** Ends tier 2's degraded mode on the active generation: its worker threads start again. A no-op when none was shed. */
@@ -702,32 +846,34 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   };
 
   /**
-   * What a standby needs: its boot peak. The active's own distance to its high-water mark is ledgered, not
-   * added: GC swings its RSS over 1 GB in 10 s, yet the 07:33Z 2026-10-02 overlap passed with no memory.max event.
+   * What a standby needs ({@link candidateNeed}), with the evidence beside it. The active generation's resident bytes
+   * and lifetime high-water mark are ledgered, never added: GC swings its RSS over 1 GB in 10 s, and its lifetime
+   * peak includes its own growth after the generation before it exited.
    */
-  const need = (generation: Generation): { needBytes?: number; activeRssBytes?: number; activePeakBytes?: number } => {
+  const need = (generation: Generation): { needBytes?: number; needBasis: NeedBasis; needMargin: number; overlapPeakBytes?: number; bootPeakBytes?: number; activeRssBytes?: number; activePeakBytes?: number } => {
     const pid = generation.process.pid;
-    return { needBytes: candidatePeak(generation).bytes, activeRssBytes: pid === undefined ? undefined : rss(pid), activePeakBytes: pid === undefined ? undefined : peakRss(pid) };
+    const candidate = candidateNeed();
+    return {
+      needBytes: candidate.bytes, needBasis: candidate.basis, needMargin: HANDOFF_NEED_MARGIN, overlapPeakBytes: largestOverlap || undefined, bootPeakBytes: largestRss || undefined,
+      activeRssBytes: pid === undefined ? undefined : rss(pid), activePeakBytes: pid === undefined ? undefined : peakRss(pid),
+    };
   };
 
   /**
-   * W1-T8311: the candidate's peak, positively measured: the largest boot peak a generation of this supervisor
-   * reached (sampled at its promotion), else the active generation's own high-water mark, which covers its boot.
-   * Neither readable is UNKNOWN, never a zero-sized candidate.
+   * W1-T9542: what a planned handoff needs is what its OVERLAP takes, both generations resident from fork until
+   * the old one exits: the largest overlap this supervisor measured, times {@link HANDOFF_NEED_MARGIN}. Before
+   * one is measured, the largest boot peak a generation reached (sampled at its promotion, a cold start's too)
+   * times the same margin. Neither is UNKNOWN, never a zero-sized candidate. This supersedes W1-T8378's pricing by
+   * the active generation's lifetime high-water mark (5.31 GB on 10-14 against a measured overlap p95 of 1.60 GB).
    */
-  const candidatePeak = (generation: Generation): { bytes?: number; basis: string } => {
-    const pid = generation.process.pid;
-    const hwm = pid === undefined ? undefined : peakRss(pid);
-    // A missing or invalid reading contributes nothing: never a zero, and never a shrink of a known peak.
-    if (hwm !== undefined && Number.isFinite(hwm) && hwm > observedPeak) {
-      observedPeak = hwm;
-      observedPeakGeneration = generation.id;
+  const candidateNeed = (): { bytes?: number; basis: NeedBasis; detail: string } => {
+    if (largestOverlap > 0) {
+      return { bytes: Math.ceil(largestOverlap * HANDOFF_NEED_MARGIN), basis: "measured_overlap", detail: `largest measured overlap ${largestOverlap} B (the handoff to generation ${largestOverlapGeneration}) x ${HANDOFF_NEED_MARGIN}` };
     }
-    if (observedPeak > 0 && observedPeak >= largestRss) {
-      return { bytes: observedPeak, basis: `generation ${observedPeakGeneration} high-water mark (refreshed before this handoff, later than promotion)` };
+    if (largestRss > 0) {
+      return { bytes: Math.ceil(largestRss * HANDOFF_NEED_MARGIN), basis: "boot_peak", detail: `generation ${largestRssGeneration} boot peak ${largestRss} B (sampled at promotion) x ${HANDOFF_NEED_MARGIN}; no overlap measured yet` };
     }
-    if (largestRss > 0) return { bytes: largestRss, basis: `generation ${largestRssGeneration} boot peak (sampled at promotion)` };
-    return { basis: "no generation's boot peak or high-water mark was readable" };
+    return { basis: "unknown", detail: "no handoff overlap was measured and no generation's boot peak was readable" };
   };
 
   /** Is the kept generation positively healthy: alive, with its readiness answering 200? */
@@ -796,15 +942,15 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       opts.log("serve.handoff_skipped", { sha: slot.sha, reason: slot.sha === from.slot.sha ? "already_serving" : "failed_before" });
       return;
     }
-    const peak = candidatePeak(from);
-    if (peak.bytes === undefined) return deferUpgrade(from, slot, { hold: "peak_unknown", detail: peak.basis });
+    const peak = candidateNeed();
+    if (peak.bytes === undefined) return deferUpgrade(from, slot, { hold: "peak_unknown", detail: peak.detail });
     const peakBytes = peak.bytes;
     const short = (bytes: number | undefined): bytes is number => bytes !== undefined && bytes < peakBytes;
     let free = freeMemory();
     if (short(free)) free = await shedActive(from, free);
     // Tier 2 only once an earlier attempt was deferred for memory, and at most once per interval.
     if (short(free) && deferrals > 0 && (lastWorkerShedAt === undefined || clock.now() - lastWorkerShedAt >= workerShedIntervalMs)) {
-      free = await shedWorkers(from, free ?? 0);
+      free = await shedWorkers(from, free ?? 0, short);
       // Still short: the workers come back before the deferral, so the generation is not left degraded for nothing.
       if (short(free)) await restoreWorkers("still_short");
     }
@@ -814,11 +960,14 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       opts.log("serve.host_pressure_unread", { reason: errorText(err) });
       return undefined;
     });
-    const admission = judgeServeUpgradeAdmission({ reading, thresholds: upgradeThresholds(from.slot.dir), candidatePeakBytes: peakBytes, peakBasis: peak.basis, nowMs: clock.now() });
+    const admission = judgeServeUpgradeAdmission({ reading, thresholds: upgradeThresholds(from.slot.dir), candidatePeakBytes: peakBytes, peakBasis: peak.detail, nowMs: clock.now() });
     if (!admission.admit) return deferUpgrade(from, slot, { hold: admission.hold, detail: admission.detail, freeBytes: free });
-    opts.log("serve.handoff_admitted", { sha: slot.sha, availableBytes: admission.availableBytes, needBytes: admission.needBytes, peakBasis: admission.peakBasis, deferrals });
+    // needBytes here is the host's need (reserve + candidate); the candidate's own is candidateNeedBytes.
+    const { needBytes: candidateNeedBytes, ...evidence } = need(from);
+    opts.log("serve.handoff_admitted", { sha: slot.sha, availableBytes: admission.availableBytes, needBytes: admission.needBytes, peakBasis: admission.peakBasis, candidateNeedBytes, ...evidence, freeBytes: free, deferrals });
     deferrals = 0;
-    const up = await bringUp(slot);
+    const overlap = overlapWindow();
+    const up = await bringUp(slot, overlap.sample);
     if (!up.generation) {
       failed.add(slot.sha);
       opts.log("serve.handoff_aborted", { sha: slot.sha, fromSha: from.slot.sha, criterion: up.criterion, detail: up.detail, readyMs: up.readyMs });
@@ -828,10 +977,17 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     activate(up.generation);
     crashes = 0;
     const drainMs = await drainOld(from, "handoff");
+    overlap.sample();
+    const measured = overlap.result();
+    if (measured.overlapPeakBytes !== undefined && measured.overlapPeakBytes > largestOverlap) {
+      largestOverlap = measured.overlapPeakBytes;
+      largestOverlapGeneration = up.generation.id;
+    }
     lastDoneAt = clock.now();
     pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
     opts.log("serve.handoff_done", {
       fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
+      overlapPeakBytes: measured.overlapPeakBytes, overlapSamples: measured.overlapSamples,
       ...(from.workersShedAt === undefined ? {} : { workersShedMs: lastDoneAt - from.workersShedAt }),
     });
   };

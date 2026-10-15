@@ -76,7 +76,7 @@ const {
       assertComplete?: () => void;
       recordedPopulationByFile?: Record<string, number>;
       env?: NodeJS.ProcessEnv;
-    }) => number;
+    }) => Promise<number>;
   };
 
 // W1-T3272 — THE REFUSAL FOR A RULE THAT BOUND NOTHING TWICE.
@@ -285,10 +285,10 @@ test("W1-T3272: a hardcoded date that NO threshold ages is not reported — the 
   assert.equal(r.population, 0, "and they are not even counted, so the population figure stays meaningful");
 });
 
-test("W1-T3272: main reads the real test-file population and sweep staleDays policy through the CLI seams", () => {
+test("W1-T3272: main reads the real test-file population and sweep staleDays policy through the CLI seams", async () => {
   const calls: string[] = [];
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd, args) => {
       calls.push(`${cmd} ${args.join(" ")}`);
       if (cmd === "git") return "test/a.test.ts\n";
@@ -317,9 +317,9 @@ test("W1-T3272: main reads the real test-file population and sweep staleDays pol
   assert.match(output.join("\n"), /OK -- 1 fixture stamp/);
 });
 
-test("W1-T3272: main returns a blocking exit code when its census reports an expiring fixture", () => {
+test("W1-T3272: main returns a blocking exit code when its census reports an expiring fixture", async () => {
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd) => (cmd === "git" ? "test/a.test.ts\n" : JSON.stringify({ staleDays: THRESHOLD })),
     readFile: () => `lastActivityAt: "${at(-13 * DAY)}",`,
     now: () => NOW,
@@ -398,9 +398,9 @@ lastActivityAt: "${at(-1 * DAY)}",
   assert.match(formatReport({ ...grown, populationDrop: [] }), /OK -- 2 fixture stamp\(s\) measured/);
 });
 
-test("W1-T3334: main exits nonzero when the measured population falls below the recorded ledger", () => {
+test("W1-T3334: main exits nonzero when the measured population falls below the recorded ledger", async () => {
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd) => (cmd === "git" ? "test/a.test.ts\n" : JSON.stringify({ staleDays: THRESHOLD })),
     readFile: () => `const movedBehindHelper = "${at(-40 * DAY)}";\nlastActivityAt: helper(),\n`,
     now: () => NOW,
@@ -596,12 +596,12 @@ test("W1-T3388: attribution names the owner and does NOT hide an inherited cross
   assert.equal(isBlocked(r), false, "the inherited crossing stays visible but does not charge this PR");
 });
 
-test("W1-T3388: a file absent at the base is read as this diff's own, not as an error", () => {
+test("W1-T3388: a file absent at the base is read as this diff's own, not as an error", async () => {
   // COVERS THE INNER CATCH. `git show <base>:<path>` exits non-zero when the file does not exist at
   // the base — which is not a failure, it is the answer: the file is new, so every stamp in it is
   // this diff's. Every other test here injects a readBaseFile directly and can never reach this arm.
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd, args) => {
       if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
       if (args[0] === "ls-files") return "test/a.test.ts\n";
@@ -620,12 +620,12 @@ test("W1-T3388: a file absent at the base is read as this diff's own, not as an 
   assert.doesNotMatch(output.join("\n"), /inherited from the base/, "absent at base is not inherited");
 });
 
-test("W1-T3388: an unreadable base ref turns attribution off rather than refusing everything", () => {
+test("W1-T3388: an unreadable base ref turns attribution off rather than refusing everything", async () => {
   // COVERS THE OUTER CATCH. A shallow clone or a fresh local repo has no origin/main. The gate must
   // then behave exactly as it did before attribution existed — strict, and silent about ownership —
   // rather than either crashing or excusing every crossing for lack of evidence.
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd, args) => {
       if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
       if (args[0] === "ls-files") return "test/a.test.ts\n";
@@ -644,13 +644,13 @@ test("W1-T3388: an unreadable base ref turns attribution off rather than refusin
   assert.doesNotMatch(output.join("\n"), /inherited from the base/, "no base ⇒ no ownership claim");
 });
 
-test("W1-T5826: a pull_request run names an inherited crossing in its report but publishes no warning annotation", () => {
+test("W1-T5826: a pull_request run names an inherited crossing in its report but publishes no warning annotation", async () => {
   // The `::warning` channel is the push-to-main lane's lead time for a crossing no push planted.
   // On a PR the same crossing is already NAMED in the report as the base's; annotating it on
   // every open PR would repeat W1-T3388's one-stamp-many-PRs noise in a new channel.
   const line = `  lastActivityAt: "${at(-13 * DAY)}",\n`;
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: (cmd, args) => {
       if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
       if (args[0] === "ls-files") return "test/a.test.ts\n";

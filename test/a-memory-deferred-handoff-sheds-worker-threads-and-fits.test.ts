@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createServeSupervisor, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
+import { createServeSupervisor, HANDOFF_NEED_MARGIN, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
 import { GENERATION_MESSAGES, onShedWorkersRequest, type GenerationChannel, type GenerationMessage } from "../src/lib/serve-generation.js";
 
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,6 +84,9 @@ function harness(opts: { workersFree: boolean; neverReady?: boolean; extra?: Par
     sleep: (ms) => (ms === BACKSTOP_MS ? new Promise<void>(() => {}) : ms >= DEFER_MS ? new Promise<void>((resolve) => void retries.push(resolve)) : Promise.resolve()),
     pollMs: 1,
     drainBackstopMs: 1,
+    // W1-T9570: a short shed's settle reads end at once here; their spacing and cap are that task's own test's.
+    shedSettleIntervalMs: 1,
+    shedSettleCapMs: 3,
     // Free memory is short until the worker threads are gone and, once they are back, short again.
     freeMemory: () => (opts.workersFree && workersShed() && !workersBack() ? FITS : SHORT),
     rss: () => NEED,
@@ -115,7 +118,7 @@ test("W1-T8873: a memory-deferred handoff sheds worker threads and fits", async 
   const shed = h.logs.find((l) => l.step === "serve.handoff_shed" && l.extra?.tier === 2)?.extra;
   assert.deepEqual(
     { answered: shed?.answered, workers: shed?.workers, workerHeapBytes: shed?.workerHeapBytes, freedBytes: shed?.freedBytes, freeBefore: shed?.freeBefore, freeAfter: shed?.freeAfter, needBytes: shed?.needBytes },
-    { answered: true, workers: 7, workerHeapBytes: 2_600, freedBytes: 2_600, freeBefore: SHORT, freeAfter: FITS, needBytes: NEED },
+    { answered: true, workers: 7, workerHeapBytes: 2_600, freedBytes: 2_600, freeBefore: SHORT, freeAfter: FITS, needBytes: NEED * HANDOFF_NEED_MARGIN },
     "the tier-2 row carries the freed bytes and the candidate need they were measured against",
   );
   assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.shed", "rmd.shed", "rmd.shed_workers", "rmd.drain"], "the shed generation is drained only after the new one is promoted; its workers are not restored");

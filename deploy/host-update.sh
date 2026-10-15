@@ -1100,12 +1100,20 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     snap_all="$(list_snapshots "${snap_backups}")"
     snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
     snap_excess=$((snap_count - STATE_BACKUP_KEEP))
+    # NO PIPE (W1-T9560): `printf | head -n <excess> | while` let head exit while printf still had
+    # names to write, so printf died of SIGPIPE, pipefail made 141 the pipeline's status and set -e
+    # ended the rung before the reclaim and the off-host copy. The loop reads the whole list from a
+    # here-string, which bash writes before the loop starts, and counts its own way to the excess.
+    # Never `|| true` or a 141 exemption here: either hides the next real failure of this expiry.
     if [ "${snap_excess}" -gt 0 ]; then
-      printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
+      snap_seen=0
+      while IFS= read -r old_snap; do
+        snap_seen=$((snap_seen + 1))
+        [ "${snap_seen}" -le "${snap_excess}" ] || break
         [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
         rm -rf -- "${snap_backups:?}/${old_snap}"
         echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
-      done
+      done <<<"${snap_all}"
     fi
   done <<<"${snap_roots}"
   # ── 3b. THE OFF-HOST COPY (W1-T5546) ──────────────────────────────────────────────────────
@@ -1147,7 +1155,7 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     done
   }
   offhost_disk_snapshot() { # <resource group> <disk>
-    local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
+    local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old seen=0
     if ! out="$(sync 2>&1)"; then
       offhost_fail "sync failed, so a disk snapshot could miss tonight's archives:" "${out}"
       return
@@ -1186,14 +1194,18 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     count="$(printf '%s\n' "${all}" | grep -c . || true)"
     excess=$((count - OFFHOST_KEEP))
     [ "${excess}" -gt 0 ] || return 0
+    # The same shape as section 3a's expiry (W1-T9560): no `printf | head` that a short read can
+    # kill mid-list. This one's status was already discarded by the here-string, so it is consistency.
     while IFS= read -r old; do
+      seen=$((seen + 1))
+      [ "${seen}" -le "${excess}" ] || break
       [ -n "${old}" ] && [ "${old}" != "${name}" ] || continue
       if out="$("${OFFHOST_AZ}" snapshot delete -g "${rg}" -n "${old}" 2>&1)"; then
         echo "  expired azure disk snapshot ${rg}/${old} (keeping the newest ${OFFHOST_KEEP})"
       else
         offhost_fail "az snapshot delete -g ${rg} -n ${old} failed; it is still billed:" "${out}"
       fi
-    done <<<"$(printf '%s\n' "${all}" | head -n "${excess}")"
+    done <<<"${all}"
   }
   offhost_blob() { # <account> <container>
     local account="$1" container="$2" archive backups name blob size remote out rc

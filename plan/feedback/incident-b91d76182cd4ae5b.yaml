@@ -1,0 +1,28 @@
+id: incident-b91d76182cd4ae5b
+ts: 2026-10-15T04:21:21.940Z
+raw: >-
+  Incident b91d76182cd4: flow stranded-task
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task=W1-T6117 since=2026-10-10T10:17:30.120Z causes=node_modules:1 breaker=clear passed_over=0 stranded_minutes=6816.18 stranded_bound=346.53948333333335 pass_over_bound=35 — no worker failure, interrupted only by the harness, beyond the fleet's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b91d76182cd4ae5bb7d38e18ef2dfd1409dd50915b95e597e6fc8ade50fd36b8
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
