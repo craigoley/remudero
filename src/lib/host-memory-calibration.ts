@@ -77,7 +77,7 @@ export interface MemoryForecast {
   projectedMib: number; initialMib: number; basis: "cgroup-current-mib";
 }
 export interface MemoryObservation { at: number; mib: number | null; peakMib?: number | null; generation: string; reason?: string }
-export interface MemoryOutcome extends MemoryForecast { closedAt: number; observedMaxMib: number | null; miss: boolean | null; complete: boolean; reason?: string }
+export interface MemoryOutcome extends MemoryForecast { closedAt: number; windowPeakUpperBoundMib: number | null; upperBoundExceedsForecast: boolean | null; complete: boolean; reason?: string }
 export interface CalibrationState {
   version: 1; startedAt: number; coveredSince: number; lastAt: number; generation: string;
   observations: MemoryObservation[]; outcomes: MemoryOutcome[]; issues: Array<{ at: number; reason: string }>;
@@ -93,7 +93,7 @@ export function gradeMemoryForecast(forecast: MemoryForecast, observations: read
   // It may overstate this window; periodic memory.current alone cannot prove absence of a short peak.
   const measured = rows.flatMap(o => o.mib === null ? [] : [o.mib]);
   if (after?.peakMib !== null && after?.peakMib !== undefined) measured.push(after.peakMib);
-  const observedMaxMib = measured.length ? Math.max(...measured) : null;
+  const windowPeakUpperBoundMib = measured.length ? Math.max(...measured) : null;
   const reason = !after || after.at - end > OBSERVATION_MAX_GAP_MS ? "missing closing observation"
     : rows.some(o => o.generation !== forecast.generation) ? "generation changed"
       : rows.some((o, i) => o.mib === null || (i > 0 && o.at - rows[i - 1]!.at > OBSERVATION_MAX_GAP_MS)) ? "observation gap or unreadable charge"
@@ -101,7 +101,7 @@ export function gradeMemoryForecast(forecast: MemoryForecast, observations: read
           (o.peakMib == null || o.peakMib < (o.mib ?? 0) || (i > 0 && observations[i - 1]!.peakMib != null && o.peakMib < observations[i - 1]!.peakMib!)))
           ? "kernel high-water coverage unavailable or reset"
           : forecast.scenario === "unknown" ? "unknown scenario" : undefined;
-  return { ...forecast, closedAt: now, observedMaxMib, miss: observedMaxMib === null ? null : observedMaxMib > forecast.projectedMib,
+  return { ...forecast, closedAt: now, windowPeakUpperBoundMib, upperBoundExceedsForecast: windowPeakUpperBoundMib === null ? null : windowPeakUpperBoundMib > forecast.projectedMib,
     complete: reason === undefined, ...(reason ? { reason } : {}) };
 }
 
@@ -109,9 +109,9 @@ export function calibrationReport(state: CalibrationState, now: number, quantile
   const closed = state.outcomes.filter(o => o.at >= now - CALIBRATION_DAY_MS && o.at + BACKTEST_WINDOW_MS <= now);
   const scenarios = Object.fromEntries([...new Set(closed.map(o => o.scenario))].map(scenario => {
     const rows = closed.filter(o => o.scenario === scenario), valid = rows.filter(o => o.complete && o.model === JOINT_MODEL && o.quantile === quantile &&
-      o.observedMaxMib !== null && o.miss === (o.observedMaxMib > o.projectedMib));
+      o.windowPeakUpperBoundMib !== null && o.upperBoundExceedsForecast === (o.windowPeakUpperBoundMib > o.projectedMib));
     return [scenario, { forecasts: rows.length, complete: valid.length, unknown: rows.length - valid.length,
-      misses: rows.filter(o => o.miss === true).length, missRate: valid.length ? valid.filter(o => o.miss).length / valid.length : null }];
+      upperBoundExceedances: rows.filter(o => o.upperBoundExceedsForecast === true).length, exceedanceRateUpperBound: valid.length ? valid.filter(o => o.upperBoundExceedsForecast).length / valid.length : null }];
   }));
   const reasons = state.issues.filter(i => i.at >= now - CALIBRATION_DAY_MS).map(i => i.reason);
   if (now - state.coveredSince < CALIBRATION_DAY_MS || now - state.startedAt < CALIBRATION_DAY_MS) reasons.push("less than24h continuous coverage");
@@ -121,9 +121,11 @@ export function calibrationReport(state: CalibrationState, now: number, quantile
   if (!latest || latest.mib === null || latest.at !== state.lastAt || latest.generation !== state.generation) reasons.push("no current readable observation positive control");
   if (!(quantile >= 0.5 && quantile < 1 && maxMissRate >= 0 && maxMissRate <= 1)) reasons.push("invalid qualification policy");
   for (const [scenario, s] of Object.entries(scenarios)) {
-    if (s.unknown || s.complete < Math.ceil(1 / (1 - quantile) - 1e-8) || s.missRate === null || s.missRate > maxMissRate) reasons.push(`unqualified scenario: ${scenario}`);
+    if (s.unknown || s.complete < Math.ceil(1 / (1 - quantile) - 1e-8) || s.exceedanceRateUpperBound === null || s.exceedanceRateUpperBound > maxMissRate) reasons.push(`unqualified scenario: ${scenario}`);
   }
-  return { model: JOINT_MODEL, quantile, maxMissRate, basis: "cgroup.current plus unchanged-generation monotonic lifetime memory.peak upper bound; may overstate the30minute window, never reset by this collector",
+  return { model: JOINT_MODEL, quantile, maxMissRate,
+    rateKind: "conservative-upper-bound-exceedances-not-confirmed-window-misses" as const,
+    basis: "cgroup.current plus unchanged-generation monotonic lifetime memory.peak upper bound; may overstate the30minute window, never reset by this collector",
     coveredSince: state.coveredSince, lastAt: state.lastAt, scenarios, qualified: reasons.length === 0, reasons };
 }
 
@@ -180,8 +182,8 @@ export function readCalibrationState(stateDir: string, io: Pick<CalibrationIo, "
   if (raw.startedAt > raw.lastAt || raw.coveredSince > raw.lastAt) throw new Error("invalid calibration coverage clock");
   if (raw.observations.some(o => !o || !finite(o.at) || !(o.mib === null || finite(o.mib)) || !(o.peakMib == null || finite(o.peakMib)) || typeof o.generation !== "string") ||
       raw.outcomes.some(o => !validForecast(o) || !finite(o.closedAt) || o.closedAt < o.at + BACKTEST_WINDOW_MS || o.closedAt > raw.lastAt ||
-        !(o.observedMaxMib === null || finite(o.observedMaxMib)) || typeof o.complete !== "boolean" ||
-        !(o.miss === null || typeof o.miss === "boolean") || o.miss !== (o.observedMaxMib === null ? null : o.observedMaxMib > o.projectedMib)) ||
+        !(o.windowPeakUpperBoundMib === null || finite(o.windowPeakUpperBoundMib)) || typeof o.complete !== "boolean" ||
+        !(o.upperBoundExceedsForecast === null || typeof o.upperBoundExceedsForecast === "boolean") || o.upperBoundExceedsForecast !== (o.windowPeakUpperBoundMib === null ? null : o.windowPeakUpperBoundMib > o.projectedMib)) ||
       raw.issues.some(i => !i || !finite(i.at) || typeof i.reason !== "string")) throw new Error("invalid calibration population");
   if (new Set(raw.outcomes.map(forecastIdentity)).size !== raw.outcomes.length) throw new Error("duplicate calibration outcomes");
   try {

@@ -45,7 +45,7 @@ test("W1-T8879: the real config loader refuses unsupported joint enforcement and
   const state: CalibrationState = { version: 1, startedAt: NOW, coveredSince: NOW, lastAt: now, generation: "g1",
     observations: [{ at: now, mib: 1000, generation: "g1" }], issues: [],
     outcomes: Array.from({ length: 100 }, (_, i) => ({ ...forecast(now - BACKTEST_WINDOW_MS - i * 60_000), id: String(i),
-      closedAt: now, observedMaxMib: i < 42 ? 6000 : 3000, complete: true, miss: i < 42 })) };
+      closedAt: now, windowPeakUpperBoundMib: i < 42 ? 6000 : 3000, complete: true, upperBoundExceedsForecast: i < 42 })) };
   const doc = parseYaml(readFileSync(new URL("../plan/policy.yaml", import.meta.url), "utf8"));
   const policy = doc.sweep.hostMemoryBudget;
   const legacyPath = join(repo.dir, "legacy.yaml");
@@ -61,7 +61,7 @@ test("W1-T8879: the real config loader refuses unsupported joint enforcement and
   const observe = (at: number) => ({ at, mib: 1000, peakMib: 3000, generation: "g1" });
   writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
   assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now), observe), /joint enforce refused/);
-  state.outcomes = state.outcomes.map(o => ({ ...o, miss: false, observedMaxMib: 3000 }));
+  state.outcomes = state.outcomes.map(o => ({ ...o, upperBoundExceedsForecast: false, windowPeakUpperBoundMib: 3000 }));
   writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
   assert.equal(loadHostMemoryBudgetPolicy(path, fixedClock(now), observe).claimModel, JOINT_MODEL);
   assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now), at => ({ ...observe(at), generation: "g2" })), /current generation/);
@@ -90,11 +90,22 @@ test("W1-T8879: the existing heartbeat invokes the real bounded collector withou
 test("W1-T8879: frozen predictions grade later starts, correlated tails and incomplete windows honestly", () => {
   assert.equal(gradeMemoryForecast(forecast(), observations(), NOW + BACKTEST_WINDOW_MS - 1), undefined);
   const ordinary = gradeMemoryForecast(forecast(), observations(), NOW + BACKTEST_WINDOW_MS)!;
-  assert.equal(ordinary.complete, true); assert.equal(ordinary.miss, false);
+  assert.equal(ordinary.complete, true); assert.equal(ordinary.upperBoundExceedsForecast, false);
   const later = observations(); later[7]!.mib = 6000;
   for (const row of later.slice(7)) row.peakMib = 6000;
   const tail = gradeMemoryForecast(forecast(), later, NOW + BACKTEST_WINDOW_MS)!;
-  assert.equal(tail.miss, true, "a later start or correlated peak is never censored from the outcome");
+  assert.equal(tail.upperBoundExceedsForecast, true, "a later start or correlated peak is never censored from the outcome");
+  const oldHighWater = observations().map(o => ({ ...o, peakMib: 10_000 }));
+  const bounded = gradeMemoryForecast(forecast(), oldHighWater, NOW + BACKTEST_WINDOW_MS)!;
+  assert.equal(bounded.complete, true);
+  assert.equal(bounded.windowPeakUpperBoundMib, 10_000, "a historical peak is only an upper bound, not this window's measured peak");
+  assert.equal(bounded.upperBoundExceedsForecast, true);
+  const report = calibrationReport({ version: 1, startedAt: NOW - CALIBRATION_DAY_MS,
+    coveredSince: NOW - CALIBRATION_DAY_MS, lastAt: NOW + BACKTEST_WINDOW_MS, generation: "g1",
+    observations: oldHighWater, outcomes: [bounded], issues: [] }, NOW + BACKTEST_WINDOW_MS);
+  assert.equal(report.rateKind, "conservative-upper-bound-exceedances-not-confirmed-window-misses");
+  assert.equal(report.scenarios["serve-steady"]!.exceedanceRateUpperBound, 1);
+  assert.equal(report.qualified, false, "historical high-water never masquerades as an accurately calibrated interval rate");
   assert.equal(gradeMemoryForecast(forecast(), observations().filter((_, i) => i !== 5), NOW + BACKTEST_WINDOW_MS)!.complete, false);
   assert.equal(gradeMemoryForecast(forecast(), observations().map((o, i) => i === 5 ? { ...o, generation: "g2" } : o), NOW + BACKTEST_WINDOW_MS)!.complete, false);
   assert.equal(gradeMemoryForecast(forecast(), observations().slice(0, 9), NOW + BACKTEST_WINDOW_MS)!.complete, false);
@@ -108,10 +119,10 @@ test("W1-T8879: qualification rejects42percent misses, sparse/reset/stale stores
   const state: CalibrationState = { version: 1, startedAt: NOW, coveredSince: NOW, lastAt: now, generation: "g1",
     observations: [{ at: now, mib: 3000, generation: "g1" }], issues: [],
     outcomes: Array.from({ length: 100 }, (_, i) => ({ ...forecast(now - BACKTEST_WINDOW_MS - i * 60_000),
-      id: String(i), closedAt: now, observedMaxMib: i < 42 ? 6000 : 3000, complete: true, miss: i < 42 })) };
+      id: String(i), closedAt: now, windowPeakUpperBoundMib: i < 42 ? 6000 : 3000, complete: true, upperBoundExceedsForecast: i < 42 })) };
   assert.equal(calibrationReport(state, now).qualified, false);
-  assert.equal(calibrationReport(state, now).scenarios["serve-steady"]!.missRate, 0.42);
-  const good = { ...state, outcomes: state.outcomes.map(o => ({ ...o, miss: false, observedMaxMib: 3000 })) };
+  assert.equal(calibrationReport(state, now).scenarios["serve-steady"]!.exceedanceRateUpperBound, 0.42);
+  const good = { ...state, outcomes: state.outcomes.map(o => ({ ...o, upperBoundExceedsForecast: false, windowPeakUpperBoundMib: 3000 })) };
   assert.equal(calibrationReport(good, now).qualified, true, "a positive control prevents an always-refuse gate");
   assert.equal(calibrationReport({ ...good, startedAt: now }, now).qualified, false);
   assert.equal(calibrationReport({ ...good, lastAt: NOW }, now).qualified, false);
@@ -144,11 +155,11 @@ test("W1-T8879: default filesystem receipts, bad populations and publisher failu
     for (const row of observations()) collectMemoryCalibration(stateDir, row);
     const state = readCalibrationState(stateDir);
     assert.equal(state.outcomes.length, 1);
-    assert.equal(state.outcomes[0]!.observedMaxMib, 3000);
+    assert.equal(state.outcomes[0]!.windowPeakUpperBoundMib, 3000);
     assert.equal(statSync(calibrationStatePath(stateDir)).mode & 0o777, 0o600);
     assert.throws(() => publishMemoryForecast(stateDir, { ...forecast(), quantile: 1 }), /invalid forecast/);
     assert.equal(calibrationReport(readCalibrationState(stateDir), NOW + BACKTEST_WINDOW_MS).qualified, false);
-    state.outcomes[0]!.miss = true;
+    state.outcomes[0]!.upperBoundExceedsForecast = true;
     writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
     assert.throws(() => readCalibrationState(stateDir), /invalid calibration population/, "stored miss flags must agree with the measured outcome");
     writeFileSync(calibrationStatePath(stateDir), " ".repeat(8 * 1024 * 1024 + 1));
