@@ -15,13 +15,13 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { affectedSelectionOrFull, readAffectedSuitesInput } from "./affected-suites.js";
+import { affectedSelectionOrFullAsync, readAffectedSuitesInputAsync } from "./affected-suites.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** The off switch: while `state/CI_JUDGE_OFF` exists the daemon judges nothing and posts nothing. */
 export const CI_JUDGE_OFF_FILE = "CI_JUDGE_OFF";
@@ -196,8 +196,8 @@ export interface CiJudgePorts {
   openPrs: () => Promise<CiJudgePr[]>;
   changedFiles: (pr: CiJudgePr) => Promise<string[]>;
   diff: (pr: CiJudgePr) => Promise<string>;
-  suiteIds: () => readonly string[];
-  floor: (changed: readonly string[]) => CiJudgeFloor;
+  suiteIds: () => readonly string[] | Promise<readonly string[]>;
+  floor: (changed: readonly string[]) => CiJudgeFloor | Promise<CiJudgeFloor>;
   /** One model call: the prompt in, the raw reply out. */
   judge: (prompt: string) => Promise<string>;
   post: (pr: CiJudgePr, description: string) => Promise<void>;
@@ -252,9 +252,9 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
     heads[String(pr.number)] = pr.headSha;
     try {
       const changed = await ports.changedFiles(pr);
-      const floor = ports.floor(changed);
+      const floor = await ports.floor(changed);
       const prompt = buildCiJudgePrompt({ pr: pr.number, headSha: pr.headSha, changed, floor, diff: await ports.diff(pr) });
-      const parsed = parseCiJudgeOutput(await ports.judge(prompt), ports.suiteIds());
+      const parsed = parseCiJudgeOutput(await ports.judge(prompt), await ports.suiteIds());
       if (parsed.kind === "malformed") {
         ports.log("ci_judge.malformed", { pr: pr.number, head_sha: pr.headSha, reason: parsed.reason });
         continue;
@@ -314,7 +314,7 @@ export function productionCiJudgePorts(opts: {
   ghJson?: (args: string[]) => Promise<unknown>;
   ghText?: (args: string[]) => Promise<string>;
   spawn?: typeof spawnWorker;
-  suiteIds?: () => readonly string[];
+  suiteIds?: CiJudgePorts["suiteIds"];
   floor?: CiJudgePorts["floor"];
 }): CiJudgePorts {
   const ghJson = opts.ghJson ?? ((args: string[]) => ghJsonAsync(args));
@@ -331,10 +331,10 @@ export function productionCiJudgePorts(opts: {
     changedFiles: async (pr) =>
       (await ghText(["pr", "diff", String(pr.number), "--repo", slug, "--name-only"])).split("\n").map((l) => l.trim()).filter(Boolean),
     diff: (pr) => ghText(["pr", "diff", String(pr.number), "--repo", slug]),
-    suiteIds: opts.suiteIds ?? (() =>
-      hostWorktreeGit(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 })
+    suiteIds: opts.suiteIds ?? (async () =>
+      (await hostWorktreeGitAsync(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 }))
         .split("\n").filter((path) => SUITE.test(path))),
-    floor: opts.floor ?? ((changed) => affectedSelectionOrFull(changed, () => readAffectedSuitesInput(opts.repoRoot, changed))),
+    floor: opts.floor ?? ((changed) => affectedSelectionOrFullAsync(changed, () => readAffectedSuitesInputAsync(opts.repoRoot, changed))),
     judge: async (prompt) => {
       const mount = resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
       const rawSpawn = opts.spawn ?? spawnWorker;

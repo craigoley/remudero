@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { RmdError } from "./errors.js";
-import { parseInstanceRegistry } from "./instance-registry.js";
+import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry } from "./instance-registry.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
@@ -200,7 +200,7 @@ function objectSha(value: unknown): string {
 }
 
 function selectedRegistryText(text: string): void {
-  const fields = new Set(["repo", "github_repo", "project", "retired", "mode", "primary", "state_dir", "container_name", "service_user", "image", "max_old_space_mb", "service_name", "watchdog_service_name", "watchdog_timer_name", "launcher_path", "revival_log", "gh_app_id", "gh_app_installation_id", "gh_app_private_key_path", "claude_dir", "codex_dir", "container_config_dir"]);
+  const fields = new Set(SELECTED_INSTANCE_REGISTRY_FIELDS);
   const roots = new Set<string>();
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/\s+#.*$/, "").trimEnd();

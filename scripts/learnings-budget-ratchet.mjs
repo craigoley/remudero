@@ -35,8 +35,9 @@
 // evaluateRatchet) are exported so the falsifier fixture test can exercise the CLI process
 // directly (spawn + exit code) as well as the parsing/measurement/comparison logic in isolation.
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { learningsSourceFiles } from "./lib/learnings-files.mjs";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
@@ -93,16 +94,9 @@ export function loadShardEntries(path) {
  * corpus yet, same convention as src/lib/learnings.ts).
  */
 export function loadCorpus(dir) {
-  let filenames;
-  try {
-    filenames = readdirSync(dir)
-      .filter((f) => f.endsWith(".yaml"))
-      .sort();
-  } catch {
-    return [];
-  }
+  const sources = learningsSourceFiles(dir);
   const entries = [];
-  for (const filename of filenames) {
+  for (const { filename } of sources) {
     entries.push(...loadShardEntries(join(dir, filename)));
   }
   return entries;
