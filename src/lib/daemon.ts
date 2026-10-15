@@ -1178,7 +1178,8 @@ export interface DaemonDeps {
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
+      by_caller?: unknown[]; unnamed_ms?: number }; // W1-T9577: the interval's callers by total, and the rest
     /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
     observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
@@ -1832,10 +1833,11 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
 /** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
  *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
 function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
-  { syncSpawnTop?: unknown; syncSpawnMs?: number } {
+  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number } {
   try {
     const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
-    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms };
+    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms,
+      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms };
   } catch { return {}; /* Reason: observability only. */ }
 }
 
@@ -1876,7 +1878,7 @@ export function reportLoopLag(
     /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
     syncSpawnTop?: unknown;
     /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
-    syncSpawnMs?: number },
+    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number }, // W1-T9577
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1890,6 +1892,8 @@ export function reportLoopLag(
       last_step_before_block: sample.lastStepBeforeBlock,
       ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
       ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
+      ...(sample.syncSpawnByCaller === undefined ? {} : { sync_spawn_by_caller: sample.syncSpawnByCaller }),
+      ...(sample.syncSpawnUnnamedMs === undefined ? {} : { sync_spawn_unnamed_ms: sample.syncSpawnUnnamedMs }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.

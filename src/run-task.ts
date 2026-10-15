@@ -464,6 +464,7 @@ import {
   resolveFleetControlHold,
   runDaemon,
   RESTART_HISTORY_WINDOW_MS,
+  restartWorkHistory,
   type CrashLoopVerdict,
   type DaemonFreshness,
   type DaemonOpts,
@@ -1602,6 +1603,9 @@ import {
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
   reconcileDepReviewHold,
+  reconcileDependabotRefresh,
+  DEPENDABOT_REFRESH_CAUSES,
+  type DependabotHeadCommit,
   decideDepReview,
   isDependabotAuthor,
   syncNodePinForImageBump,
@@ -2841,7 +2845,7 @@ export function buildSweepEffects(
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: (opts) => {
-      const deps = { ...opts.deps, writeFixCensusSnapshot };
+      const deps = { ...opts.deps, writeFixCensusSnapshot: writeFixCensusSnapshotAsync };
       return runFixRung({ ...opts, deps });
     },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
@@ -11873,7 +11877,7 @@ export async function runFixRung(opts: {
     fixProgressJudge?: FixProgressJudge;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
-    writeFixCensusSnapshot?: typeof writeFixCensusSnapshot;
+    writeFixCensusSnapshot?: (...args: Parameters<typeof writeFixCensusSnapshot>) => string | undefined | Promise<string | undefined>;
     readMainTip?: () => string | Promise<string>;
     reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
     requeueCheck?: (failure: CiFailure) => boolean | JobRequeueOutcome | Promise<boolean | JobRequeueOutcome>;
@@ -13620,7 +13624,7 @@ export async function runFixRung(opts: {
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
     const fixCensusApplies = fixCensusAppliesToRepo(opts.reviewBase.repo, deps.log);
-    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
+    const censusSnapshotPath = fixHarnessOwnsGit && fixCensusApplies ? await deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log) : undefined;
     if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
@@ -18136,6 +18140,10 @@ async function runTask(
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
      *  `rmd run-task` keeps the ambient helper byte-for-byte. */
     gitCredentialSocketPath?: string;
+    /** W1-T9085: a run child's cancel, chained into every worker spawn's `signal` (W1-T5659). Omitted, no spawn gets one. */
+    abortSignal?: AbortSignal;
+    /** W1-T9085: receives the fire-and-forget paired-trial work so a run child can await it. Omitted, it is detached as before. */
+    onBackgroundWork?: (work: Promise<unknown>) => void;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -18198,9 +18206,9 @@ async function runTask(
     noteRestartPhase(restartPhase.current);
     // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
     const socketPath = runChildCredentialSocket(opts.gitCredentialSocketPath);
-    const spawnArgs = socketPath
+    const spawnArgs = chainAbortSignal(socketPath
       ? withGitCredentialSocket(requestedSpawnArgs, socketPath)
-      : requestedSpawnArgs;
+      : requestedSpawnArgs, opts.abortSignal);
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
@@ -18501,17 +18509,18 @@ async function runTask(
     }
     throw e;
   }
-  void runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
+  const detach = (work: Promise<unknown>): void => opts.onBackgroundWork?.(work);
+  detach(runPairedTrial({ ...(opts.pairedTrialHost === "daemon"
     ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo), spawn: rawSpawn,
       maxBudgetUsd: task.budget_usd ?? DEFAULT_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), ...opts.pairedTrial, task, lane: "implement", stateDir: join(config.root, "state"), log,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
+    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
   // W1-T4647: a registered prospective A/A pairs the task on its one pinned stack, subscription only; inert otherwise.
-  void runProspectiveAaPair({ ...(opts.pairedTrialHost === "daemon"
+  detach(runProspectiveAaPair({ ...(opts.pairedTrialHost === "daemon"
     ? { dispatchAttempt: sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", rawSpawn), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), task, lane: "implement", stateDir: join(config.root, "state"), config,
-    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
+    harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision }));
   return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
       restartPhase,
@@ -18756,28 +18765,38 @@ export function fixCensusAppliesToRepo(
   return false;
 }
 
-export function writeFixCensusSnapshot(
+export function writeFixCensusSnapshot(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: typeof hostWorktreeGit = hostWorktreeGit): string | undefined {
+  return runStepsSync(writeFixCensusSnapshotSteps(root, log, runGit));
+}
+
+export function writeFixCensusSnapshotAsync(root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string> = hostWorktreeGitAsync): Promise<string | undefined> {
+  return runStepsAsync(writeFixCensusSnapshotSteps(root, log, runGit));
+}
+
+function* writeFixCensusSnapshotSteps(
   root: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  runGit: typeof hostWorktreeGit = hostWorktreeGit,
-): string | undefined {
+  runGit: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>,
+): Steps<string | undefined> {
   try {
-    const headSha = runGit(root, ["rev-parse", "HEAD"]).trim();
-    const mainSha = runGit(root, ["rev-parse", "origin/main"]).trim();
-    const mergeBase = runGit(root, ["merge-base", headSha, mainSha]).trim();
+    const headSha = (yield* step(() => runGit(root, ["rev-parse", "HEAD"]))).trim();
+    const mainSha = (yield* step(() => runGit(root, ["rev-parse", "origin/main"]))).trim();
+    const mergeBase = (yield* step(() => runGit(root, ["merge-base", headSha, mainSha]))).trim();
     const censusPath = (p: string) =>
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
-    const paths = (args: string[]) => runGit(root, args).split("\n").filter((p) => p && censusPath(p));
-    const headPaths = paths(["ls-files"]);
-    const basePaths = paths(["ls-tree", "-r", "--name-only", mergeBase]);
-    const mainPaths = paths(["ls-tree", "-r", "--name-only", mainSha, "--", "scripts"])
+    function* paths(args: string[]): Steps<string[]> {
+      return (yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p));
+    }
+    const headPaths = yield* paths(["ls-files"]);
+    const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
+    const mainPaths = (yield* paths(["ls-tree", "-r", "--name-only", mainSha, "--", "scripts"]))
       .filter((p) => p.endsWith("baseline.json"));
-    const blobs = (ref: string, names: string[]): Record<string, string> => {
+    function* blobs(ref: string, names: string[]): Steps<Record<string, string>> {
       if (names.length === 0) return {};
-      const output = Buffer.from(runGit(root, ["cat-file", "--batch"], {
+      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], {
         input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
-      }));
+      })));
       const texts: Record<string, string> = {};
       let offset = 0;
       for (const path of names) {
@@ -18794,7 +18813,7 @@ export function writeFixCensusSnapshot(
       return texts;
     };
     const snapshot = { version: 1, root: resolve(root), headSha, mainSha, mergeBase, headPaths, basePaths,
-      baseBlobs: blobs(mergeBase, basePaths), mainBlobs: blobs(mainSha, mainPaths),
+      baseBlobs: yield* blobs(mergeBase, basePaths), mainBlobs: yield* blobs(mainSha, mainPaths),
       instrumentSurface: INSTRUMENT_SURFACE, instrumentExclusions: INSTRUMENT_SURFACE_EXCLUSIONS };
     mkdirSync(join(root, "state"), { recursive: true });
     if (lstatSync(join(root, "state")).isSymbolicLink()) throw new Error("census state directory is a symlink");
@@ -19213,7 +19232,7 @@ export async function repairCensusRefusedPush(input: {
   for (let strike = 1; strike <= strikeCap; strike++) {
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
     const mount = input.stepUpMount && strike > 1 && strike === strikeCap ? input.stepUpMount : input.mount;
-    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? writeFixCensusSnapshot(cwd, log) : undefined;
+    const censusSnapshotPath = harnessCommits && fixCensusAppliesToRepo(task.repo, log) ? await writeFixCensusSnapshotAsync(cwd, log) : undefined;
     const prompt = [
       renderFixPrompt({
         task,
@@ -21563,7 +21582,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
-          writeFixCensusSnapshot,
+          writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
           waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
@@ -23850,7 +23869,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
   ]) as {
     number: number;
     url: string;
@@ -23860,6 +23879,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     headRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
+    commits?: DependabotHeadCommit[];
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -23906,9 +23926,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
-      statePath: join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`),
+      statePath: holdStatePath,
       prUrl: view.url,
       prNumber: view.number,
       title: view.title ?? "",
@@ -23935,6 +23956,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 2;
   }
   if (result.decision === "hold") {
+    const refreshFlag = flagValue(rest, "--dependabot-refresh");
+    try {
+      const refresh = reconcileDependabotRefresh({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, result,
+        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), commits: view.commits, nowMs: clock.now(),
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body), log,
+      });
+      if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
@@ -38962,6 +38994,41 @@ export function daemonMemoryTelemetryReader(
   return Object.assign(read, { afterRow: () => threadHeaps.refresh() });
 }
 
+export interface RunInChildInput {
+  taskId: string;
+  config: Config;
+  repoDir: string;
+  allowStale: boolean;
+  options: RunChildSpecOptions;
+  planSync: (options: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
+export async function runInChildWhenOn(
+  input: RunInChildInput,
+  seams: { readMode?: () => RunChildMode; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+): Promise<{ settled: Promise<RunResult> } | undefined> {
+  const mode = runChildModeIsOn(seams.readMode);
+  const fallback = (reason: string): undefined => {
+    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+    return undefined;
+  };
+  if (mode.unreadable !== undefined) return fallback(`sweep.runChild.mode unreadable: ${mode.unreadable}`);
+  if (!mode.on) return undefined;
+  if (input.options.skipGitSync) return fallback("an explicit --plan is read literally; the run stays in-process");
+  const start = seams.spawn ?? ((spawnInput, spawnPorts) => spawnRunChild(spawnInput, spawnPorts));
+  const launched = await start({
+    taskId: input.taskId, stateRoot: join(input.config.root, "state"), repoDir: input.repoDir, root: input.config.root,
+    log: input.log, options: input.options,
+    plan: async () => input.planSync({ allowStale: input.allowStale }),
+  }, {
+    abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
+    ...seams.ports,
+  });
+  return launched.started ? { settled: launched.settled } : undefined;
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -39989,20 +40056,20 @@ export async function daemonCommand(
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
         checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
-        // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
-        // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
-        // owner-qualified `--repo owner/name`) never reaches `runTask` — the dispatched run
-        // would silently fall back to `resolveOwner()` (THIS checkout's own owner), cloning and
-        // opening its PR against the WRONG owner. That partial fix is worse than today's honest
-        // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
-        // refuses.
-        runOne: (taskId, runOptions) => {
-          // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
-          // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
+        // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
+        // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
+        runOne: async (taskId, runOptions) => {
+          const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
+          // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
+          const inChild = await runInChildWhenOn({
+            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
+          });
+          if (inChild) return inChild.settled;
+          // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
-            options: { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" },
+            options: childOptions,
           });
           return runTaskFn(taskId, {
             planPath: target.planPath,
@@ -40011,13 +40078,9 @@ export async function daemonCommand(
             pairedTrialHost: "daemon",
             skipGitSync: !!flagValue(rest, "--plan"),
             owner: target.owner,
-            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo. Without this each lane built
-            // its own COLD `buildBatchedGithub` and paid a full-repo walk SYNCHRONOUSLY before its
-            // first yield — so `Promise.allSettled(admitted.map(runOne))` could not even ENTER
-            // lane 2 until lane 1's walk finished, and three admitted lanes minted their run ids
-            // 78 s apart (`dispatch.concurrent_set` names all three at `lane_count: 3`). Same fix
-            // and same reason as `buildInboxDraftHook`'s once-per-daemon-start construction; see
-            // `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
+            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo — a per-lane COLD gateway paid a
+            // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
+            // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when
@@ -57048,7 +57111,12 @@ import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js"
 import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
-import { createAdmittedPlanSlot, startRunChildProbe, tapPlanSnapshot } from "./lib/run-child.js";
+import {
+  RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
+  type SpawnRunChildPorts,
+} from "./lib/run-child.js";
+import type { RunChildMode } from "./lib/policy.js";
+import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {

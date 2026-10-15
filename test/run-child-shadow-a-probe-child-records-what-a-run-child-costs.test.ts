@@ -470,8 +470,8 @@ test("W1-T9082: the run-child entry writes starting then done, and refuses what 
 
   assert.equal(await runChildMain([], { stderr }), 2);
   assert.match(errors.at(-1)!, /--run-dir/);
-  assert.equal(await runChildMain(["--run-dir", dirFor("probe-usage")], { stderr }), 2);
-  assert.match(errors.at(-1)!, /only --probe is implemented/);
+  // W1-T9085: without --probe the entry runs the task, so a directory with no spec is a failed contract, not a usage error.
+  assert.equal(await runChildMain(["--run-dir", dirFor("probe-usage")], { stderr, signals: { on() {}, off() {} } }), 1);
 
   const done = dirFor("probe-done");
   writeSpec(done, { ...base, runId: "probe-done", planSnapshotPath: snapshot.path });

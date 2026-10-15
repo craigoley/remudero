@@ -169,11 +169,36 @@ test("W1-T8484: incomplete gardener spend remains unknown rather than zero", asy
   assert.equal(foldGardenerSpend(source, repository, at).reason, "correlation_not_available");
 });
 
+test("parent-only gardener history cannot consume the cost-bearing receipt budget", async t => {
+  const { captureGardenerSpendSource, foldGardenerSpend } = await loadSpend();
+  const quiet = Array.from({ length: 700 }, (_, index) => ({ ...parent,
+    passId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` }));
+  for (const producerFirst of [false, true]) {
+    const records = producerFirst ? [child, ...quiet, parent] : [...quiet, parent, child];
+    const { dir } = await captured(t, records);
+    const inventory = runtime();
+    Object.assign(inventory.gardens[0]!, { attempts: 701, completions: 701 });
+    writeFileSync(join(dir, "gardener-runtime.json"), JSON.stringify(inventory));
+    const source = await captureGardenerSpendSource(dir);
+    assert.equal(source.reason, undefined, "uncharged lifecycle detail is not cost payload overflow");
+    assert.equal(source.compact?.passes.length, 1, "only cost-bearing passes are serialized, with their exact parent state");
+    const spend = foldGardenerSpend(source, repository, at);
+    assert.equal(spend.pricedSubtotalUsd, 2);
+    assert.equal(spend.counts.priced, 1);
+    assert.equal(spend.totalUsd, null, "unpriced parent-only attempts are not inferred zero");
+    assert.equal(spend.state, "partial");
+  }
+});
+
 test("W1-T8667: genuine compact overflow preserves independent Analytics", async t => {
   const { captureGardenerSpendSource } = await loadSpend();
   const capacity = await captured(t, [parent, ...Array.from({ length: 500 }, (_, i) => ({ ...child, run_id: `child-${i}` }))]);
   assert.equal(capacity.spend.totalUsd, 1000);
-  const overflow = await captured(t, Array.from({ length: 1000 }, (_, i) => ({ ...parent, passId: `pass-${i}` })));
+  // The payload bound separates real cost-bearing cardinality, not idle lifecycle detail.
+  const overflow = await captured(t, Array.from({ length: 1000 }, (_, i) => {
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    return [{ ...parent, passId: id }, { ...child, run_id: `child-${i}`, gardener_origin: { ...origin, passId: id } }];
+  }).flat());
   const overflowSource = await captureGardenerSpendSource(overflow.dir);
   assert.equal(overflowSource.reason, "over_budget");
   const stateDir = makeTempDir("gardener-spend-budget");

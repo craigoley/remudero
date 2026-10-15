@@ -91,8 +91,26 @@ function fixture(t: { after: (fn: () => void) => void }): Fixture {
     ].join("\n"),
     { mode: 0o755 },
   );
+  // The heartbeat is bash, so scripts/clock-shift.mjs never reaches its `date`: under a clock sweep it stamps the real
+  // time while this file judges freshness with the shifted Date.now(), a false time bomb. This shim gives the
+  // subprocess the same clock: a bare "now" read is shifted by FK_SHIFT_DAYS; a parse (-d/-r/-j/-f) passes through.
+  writeFileSync(
+    join(f.bin, "date"),
+    [
+      "#!/usr/bin/env bash",
+      'real=$(PATH=/usr/bin:/bin command -v date)',
+      'days="${FK_SHIFT_DAYS:-0}"; days="${days%.*}"',
+      'case " $* " in *" -d "*|*" -r "*|*" -j "*|*" -f "*) exec "$real" "$@" ;; esac',
+      '[ "${days:-0}" = 0 ] && exec "$real" "$@"',
+      'epoch=$(( $("$real" +%s) + days * 86400 ))',
+      'if "$real" -d @0 +%s >/dev/null 2>&1; then exec "$real" -d "@$epoch" "$@"; else exec "$real" -r "$epoch" "$@"; fi',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
   chmodSync(join(f.bin, "git"), 0o755);
   chmodSync(join(f.bin, "docker"), 0o755);
+  chmodSync(join(f.bin, "date"), 0o755);
   return f;
 }
 
