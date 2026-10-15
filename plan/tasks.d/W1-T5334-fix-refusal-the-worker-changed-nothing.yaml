@@ -12,7 +12,6 @@
   origin: "ci-friction:fix_refusal:the-worker-changed-nothing"
   files:
     - src/run-task.ts
-    - src/lib/fix-rung-classify.ts
     - test/fix-refusal-the-worker-changed-nothing.test.ts
   acceptance:
     - claim: "the harness no longer spends a fix round on fix_refusal:the-worker-changed-nothing"
