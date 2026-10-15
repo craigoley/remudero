@@ -12,6 +12,9 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 
 ## Rule Headlines
 
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.**
 - **Before your FIRST push (not every commit), run `node --import tsx scripts/preflight-author.mjs` on the
   committed tree; required hosted checks still gate merge.**
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST

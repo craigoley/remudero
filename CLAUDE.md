@@ -12,6 +12,12 @@ obey it unopened.** Its `→ doctrine/<section>/<rule>.md` body is the evidence.
 VERBATIM in the body of the live rule carrying its instruction, its id (and a moved body's old path)
 aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the earning PR.
 
+## Workspace cleanup
+
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.** → doctrine/workspace-cleanup/finish-owned-work.md
+
 ## Before you push
 
 - **Before your FIRST push (not every commit), run `node --import tsx scripts/preflight-author.mjs` on the

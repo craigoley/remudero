@@ -1,3 +1,4 @@
+import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
   workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
@@ -2349,6 +2350,7 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
+  args = { ...args, prompt: withWorkspaceCleanup(args.prompt) };
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
