@@ -7,7 +7,7 @@
  * `@dependabot rebase` on #11788 produced a rebased head in two minutes.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -19,6 +19,7 @@ import {
   dependabotRefreshCommand,
   dependabotRefreshVerdict,
   headCarriesForeignCommit,
+  reconcileDependabotRefresh,
   type DependabotHeadCommit,
   type DependabotRefreshVerdict,
 } from "../src/lib/dep-review.js";
@@ -315,4 +316,40 @@ test("W1-T9584: an own red on a Dependabot head posts no command", async (t) => 
   assert.deepEqual(f.comments, []);
   assert.equal(f.ledger().filter((r) => String(r.step).startsWith("dep-review.refresh")).length, 0);
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.decision, "hold", "the hold stands");
+});
+
+test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9584-invalid-history-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const statePath = join(root, "hold.json");
+  const prior = {
+    headSha: HEAD, command: DEPENDABOT_REBASE_COMMAND, cause: "base-red-recovered",
+    requestedAtMs: NOW, delivered: true,
+  };
+  const malformed = [
+    { description: "non-array history", refreshes: { prior } },
+    { description: "null record", refreshes: [prior, null] },
+    { description: "invalid head", refreshes: [prior, { ...prior, headSha: 123 }] },
+    { description: "invalid command", refreshes: [prior, { ...prior, command: null }] },
+    { description: "invalid timestamp", refreshes: [prior, { ...prior, requestedAtMs: "yesterday" }] },
+  ];
+  for (const { description, refreshes } of malformed) {
+    const saved = `${JSON.stringify({ headSha: HEAD, heldSinceMs: NOW, asks: [], refreshes })}\n`;
+    writeFileSync(statePath, saved);
+    const comments: string[] = [];
+    const logs: string[] = [];
+    assert.throws(() => reconcileDependabotRefresh({
+      statePath, prNumber: 11793, headSha: HEAD, nowMs: NOW + 120_000,
+      result: {
+        decision: "hold", semverLevel: "patch", pinOnly: false, offendingFiles: [],
+        redChecks: ["coverage-ratchet"], migrationBumps: [], reason: "checks are red",
+      },
+      cause: "base-red-recovered", commits: [{ oid: HEAD, authors: [DEPENDABOT_AUTHOR] }],
+      comment: (body) => { comments.push(body); },
+      log: (step) => { logs.push(step); },
+    }), { message: "invalid dependency refresh state; refusing to forget requested heads" }, description);
+    assert.equal(readFileSync(statePath, "utf8"), saved, `${description}: preserve the durable history`);
+    assert.deepEqual(comments, [], `${description}: never ask again with unreadable history`);
+    assert.deepEqual(logs, [], `${description}: never claim a refresh outcome`);
+  }
 });
