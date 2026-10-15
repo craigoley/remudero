@@ -17,7 +17,7 @@ export interface GardenerRuntimeEvent {
   queueMs: number | null;
   executionMs: number | null;
   exit: number | null;
-  reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | null;
+  reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null;
 }
 export interface GardenerRuntimeEntry extends GardenerRuntimeEvent {
   enabled: boolean;
@@ -41,7 +41,7 @@ export interface GardenerRuntimeSnapshot {
 }
 
 const phases: readonly unknown[] = ["scheduled", "queued", "running", "completed", "failed", "cancelled", "idle"];
-const reasons: readonly unknown[] = [null, "inputs-unchanged", "process-completed", "process-failed", "signal-or-cancelled", "spawn-failed"];
+const reasons: readonly unknown[] = [null, "inputs-unchanged", "process-completed", "process-failed", "signal-or-cancelled", "spawn-failed", "memory-budget-shortfall"];
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const time = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -137,7 +137,7 @@ export function createGardenerRuntimeWriter(input: {
       const entry = snapshot.gardens.find((garden) => garden.name === event.name);
       if (!entry || !entry.enabled) throw new Error("gardener event is outside the configured inventory");
       // A cheap unchanged-input observation is not a new pass and must retain its last timings.
-      if (event.phase === "idle") Object.assign(entry, { phase: event.phase, observedAt: event.observedAt,
+      if (event.phase === "idle" && event.reason === "inputs-unchanged") Object.assign(entry, { phase: event.phase, observedAt: event.observedAt,
         nextDueAt: event.nextDueAt, reason: event.reason });
       else Object.assign(entry, event);
       if (event.phase === "queued") entry.attempts++;

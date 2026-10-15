@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +10,8 @@ import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { compactRotations, rotateLedger } from "../src/lib/ledger.js";
 import {
   ACTIVITY_RING_ROWS,
+  DIR_GATE_RELIST_MS,
+  DIR_GATE_SETTLE_MS,
   FUTURE_ROW_TOLERANCE_MS,
   createLedgerProjector,
   isFactStep,
@@ -263,6 +266,104 @@ test("an unreadable archive is retried on the next tick even when the directory 
   const second = s.tick();
   assert.equal(second.listed, true, "an unread archive keeps the gate open");
   assert.deepEqual([second.unread, second.archivesRead, second.fresh], [[], 1, 1]);
+});
+
+/**
+ * A state dir as the fleet host's core one is: its mtime moves on every tick (the live ledger's sidecars are
+ * written several times a second), so the directory gate never settles. `tick` returns the projector's result
+ * and how many times it opened a rotation archive, counted on the real `fs.openSync` the projector imports.
+ */
+function busyStateDir(t: TestCtx, archives: number) {
+  const ledgerDir = scratch(t, "projector-busy");
+  for (let i = 0; i < archives; i++) {
+    writeFileSync(join(ledgerDir, `${archiveName(T0 + i * 1_000)}.gz`), gzipSync(body([line(T0 + i * 1_000, "run.start", { run_id: `r${i}` })])));
+  }
+  writeFileSync(join(ledgerDir, LIVE), body([line(T0 + archives * 1_000, "run.start")]));
+  let ms = Date.now();
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  const s = store(t, ledgerDir, clock);
+  const tick = (): { r: ReturnType<Store["tick"]>; opens: number } => {
+    ms += 250;
+    const unsettled = (ms - DIR_GATE_SETTLE_MS / 4) / 1000;
+    utimesSync(ledgerDir, unsettled, unsettled); // a sidecar was just written: never settled, never the same
+    const real = fs.openSync;
+    let opens = 0;
+    fs.openSync = ((path: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode | null) => {
+      if (basename(String(path)) !== LIVE) opens++;
+      return real(path, flags, mode);
+    }) as typeof fs.openSync;
+    syncBuiltinESMExports();
+    try {
+      return { r: s.tick(), opens };
+    } finally {
+      fs.openSync = real;
+      syncBuiltinESMExports();
+    }
+  };
+  return { ledgerDir, s, tick, advance: (by: number) => void (ms += by) };
+}
+
+test("on a state dir whose mtime moves every tick an applied archive is not opened again", (t) => {
+  const busy = busyStateDir(t, 40);
+  const first = busy.tick();
+  assert.deepEqual([first.r.archivesRead, first.opens], [40, 40], "the first listing reads every archive once");
+  const seen = count(busy.s.db, "seen");
+  for (let i = 0; i < 20; i++) {
+    const { r, opens } = busy.tick();
+    assert.equal(r.listed, true, "the gate never closes on a directory that keeps changing");
+    assert.equal(opens, 0, `tick ${i}: ${opens} applied archives were opened again though none changed`);
+  }
+  assert.equal(count(busy.s.db, "seen"), seen);
+});
+
+test("on a busy state dir a new rotation is read on the next tick", (t) => {
+  const busy = busyStateDir(t, 10);
+  busy.tick();
+  writeFileSync(join(busy.ledgerDir, `${archiveName(T0 + 60_000)}.gz`), gzipSync(body([line(T0 + 60_000, "run.start", { run_id: "new" })])));
+  const { r, opens } = busy.tick();
+  assert.deepEqual([r.archivesRead, opens, r.fresh], [1, 1, 1], "only the new archive is opened, and its row applied");
+});
+
+test("on a busy state dir an archive replaced or rewritten under its name is read again by its content", (t) => {
+  const busy = busyStateDir(t, 10);
+  busy.tick();
+  const renamed = join(busy.ledgerDir, `${archiveName(T0)}.gz`);
+  const next = `${renamed}.tmp`;
+  writeFileSync(next, gzipSync(body([line(T0 + 70_000, "run.start", { run_id: "renamed-over" })])));
+  renameSync(next, renamed); // a new inode under an applied name
+  const replaced = busy.tick();
+  assert.deepEqual([replaced.r.archivesRead, replaced.opens, replaced.r.fresh], [1, 1, 1]);
+
+  const rewritten = join(busy.ledgerDir, `${archiveName(T0 + 1_000)}.gz`);
+  const sameSize = gzipSync(body([line(T0 + 1_000, "run.start", { run_id: "r9" })]));
+  assert.equal(sameSize.length, readFileSync(rewritten).length, "the fixture keeps the archive's size");
+  writeFileSync(rewritten, sameSize); // the same inode and size, other bytes
+  utimesSync(rewritten, (T0 + 90_000) / 1000, (T0 + 90_000) / 1000); // its mtime moves, as a write's does
+  const inPlace = busy.tick();
+  assert.deepEqual([inPlace.r.archivesRead, inPlace.opens, inPlace.r.fresh], [1, 1, 1]);
+  assert.equal(busy.tick().opens, 0, "each is skipped again once applied");
+});
+
+test("on a busy state dir every archive's head is re-read once per relist interval", (t) => {
+  const busy = busyStateDir(t, 12);
+  busy.tick();
+  assert.equal(busy.tick().opens, 0);
+  busy.advance(DIR_GATE_RELIST_MS);
+  const relist = busy.tick();
+  assert.deepEqual([relist.opens, relist.r.archivesRead, relist.r.fresh], [12, 0, 0], "a recycled inode with an unchanged stat is still caught by its head");
+  assert.equal(busy.tick().opens, 0, "the interval restarts");
+});
+
+test("on a busy state dir an applied archive that stat cannot see is opened and named unread", (t) => {
+  const busy = busyStateDir(t, 3);
+  busy.tick();
+  const name = `${archiveName(T0)}.gz`;
+  rmSync(join(busy.ledgerDir, name));
+  symlinkSync("absent-target", join(busy.ledgerDir, name));
+  const { r, opens } = busy.tick();
+  assert.equal(opens, 1, "the archive is opened, not skipped");
+  assert.equal(r.unread.length, 1);
+  assert.match(r.unread[0] ?? "", new RegExp(`^${name.replace(/\./g, "\\.")}: ENOENT`));
 });
 
 test("an archive read stays on its opened file when its name is replaced", (t) => {

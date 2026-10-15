@@ -44,7 +44,7 @@ const { CENSUS_MAIN_BRANCH_RUN, emitCiReport, main } = (await import(pathToFileU
     argv?: string[];
     env?: NodeJS.ProcessEnv;
     append?: (path: string, text: string) => void;
-  }) => number;
+  }) => Promise<number>;
 };
 
 const DAY = 86_400_000;
@@ -83,11 +83,11 @@ function seams(parent: string | undefined, { parentReadable = true } = {}) {
   return { execFile, calls };
 }
 
-function runMainLane(parent: string | undefined, opts: { parentReadable?: boolean; recorded?: Record<string, number>; current?: string } = {}) {
+async function runMainLane(parent: string | undefined, opts: { parentReadable?: boolean; recorded?: Record<string, number>; current?: string } = {}) {
   const { execFile, calls } = seams(parent, opts);
   const output: string[] = [];
   const summary: string[] = [];
-  const code = main({
+  const code = await main({
     execFile,
     readFile: () => opts.current ?? CROSSING_FILE,
     now: () => NOW,
@@ -102,8 +102,8 @@ function runMainLane(parent: string | undefined, opts: { parentReadable?: boolea
   return { code, output, summary, calls };
 }
 
-test("W1-T5826: an inherited crossing on the main lane exits 0 with a warning naming file, line, threshold and crossing date", () => {
-  const { code, output, summary, calls } = runMainLane(CROSSING_FILE);
+test("W1-T5826: an inherited crossing on the main lane exits 0 with a warning naming file, line, threshold and crossing date", async () => {
+  const { code, output, summary, calls } = await runMainLane(CROSSING_FILE);
 
   assert.equal(code, 0, "a crossing already on the push's parent is the calendar's, not this push's -- main stays green");
   assert.ok(calls.includes(`git show HEAD^:${FILE}`), "the main lane attributes against the push's parent, never origin/main");
@@ -123,33 +123,33 @@ test("W1-T5826: an inherited crossing on the main lane exits 0 with a warning na
   assert.match(text, /sweep\.staleDays/);
 });
 
-test("W1-T5826: a crossing introduced or moved by the pushed commit exits non-zero on the main lane", () => {
-  const absent = runMainLane(undefined);
+test("W1-T5826: a crossing introduced or moved by the pushed commit exits non-zero on the main lane", async () => {
+  const absent = await runMainLane(undefined);
   assert.equal(absent.code, 1, "a stamp in a file the parent lacks was planted by this push");
 
-  const moved = runMainLane(`// fixture\n  lastActivityAt: "${at(-400 * DAY)}",\n`);
+  const moved = await runMainLane(`// fixture\n  lastActivityAt: "${at(-400 * DAY)}",\n`);
   assert.equal(moved.code, 1, "a stamp this push moved into the margin is this push's");
   assert.match(moved.output.join("\n"), /BLOCKED -- 1 fixture/);
   assert.ok(moved.output.some((l) => l.startsWith("::error ")), "a blocking push still publishes its error annotation");
   assert.ok(!moved.output.some((l) => l.startsWith("::warning ")), "a charged crossing is not downgraded to a warning");
 });
 
-test("W1-T5826: a population drop still blocks the main lane even when every crossing is inherited", () => {
-  const { code, output } = runMainLane(CROSSING_FILE, { recorded: { [FILE]: 1, "test/gone.test.ts": 2 } });
+test("W1-T5826: a population drop still blocks the main lane even when every crossing is inherited", async () => {
+  const { code, output } = await runMainLane(CROSSING_FILE, { recorded: { [FILE]: 1, "test/gone.test.ts": 2 } });
   assert.equal(code, 1, "a fixture moved behind a helper is not a calendar event");
   assert.match(output.join("\n"), /dropped below the recorded fixture population/);
 });
 
-test("W1-T5826: an unreadable HEAD^ keeps the main lane strict", () => {
-  const { code, output } = runMainLane(CROSSING_FILE, { parentReadable: false });
+test("W1-T5826: an unreadable HEAD^ keeps the main lane strict", async () => {
+  const { code, output } = await runMainLane(CROSSING_FILE, { parentReadable: false });
   assert.equal(code, 1, "no readable parent means no evidence the crossing was inherited -- it blocks, as before");
   assert.doesNotMatch(output.join("\n"), /inherited from the base/);
   assert.ok(!output.some((l) => l.startsWith("::warning ")));
 });
 
-test("W1-T5826: the main lane without an explicit parent stays strict and never probes a base", () => {
+test("W1-T5826: the main lane without an explicit parent stays strict and never probes a base", async () => {
   const { execFile, calls } = seams(CROSSING_FILE);
-  const code = main({
+  const code = await main({
     execFile,
     readFile: () => CROSSING_FILE,
     now: () => NOW,

@@ -365,6 +365,26 @@ test("an enforced worker start waits for memory BEFORE its worker is queried", a
   }
 });
 
+test("an enforced garden deferral retains its admission disposition without starting a child", async () => {
+  resetShadowMemoryStateForTests();
+  const root = fixtureRoot("garden-deferred-disposition-");
+  try {
+    const w = world();
+    w.state.availableMib = 2500;
+    w.running.entries = [{ id: "existing-live-work" }];
+    let reservations = 0;
+    const garden = childGardenPassSpawn({ root, execPath: "/must-not-spawn", execArgv: [], entry: "/must-not-run",
+      admission: ports(w), reserve: () => { reservations++; throw new Error("must not reserve a deferred child"); } });
+    assert.deepEqual(await garden("plan", [], { stopped: false }), { kind: "deferred", reason: "memory-budget-shortfall" });
+    assert.equal(reservations, 0);
+    assert.deepEqual(w.sleeps, []);
+    assert.ok(w.rows.some(row => row.step === "memory_budget.enforce_defer" && row.worker_class === "garden"));
+  } finally {
+    resetShadowMemoryStateForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a garden child waits its turn under enforce, holds a garden reservation for its life, and releases it at exit", async () => {
   resetShadowMemoryStateForTests();
   const root = fixtureRoot("garden-reserve-");
