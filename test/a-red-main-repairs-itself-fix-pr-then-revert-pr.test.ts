@@ -33,9 +33,11 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { identityGateVerdicts } from "./helpers/identity-gates.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 import {
   dispatchMainRepairFixRun,
+  mainRepairRevertTaskId,
   mainRepairTaskId,
   openMainRepairRevertPr,
   type AlertFixDispatchDeps,
@@ -291,7 +293,7 @@ test("W1-T6403: a fix PR that stalls is followed by one revert PR of the offendi
     assert.equal(git.originMain(), git.mainBefore, "origin/main is untouched: nothing is pushed to main");
     const pushed = git.originBranches().filter((branch) => branch !== "main");
     assert.equal(pushed.length, 1);
-    assert.match(pushed[0]!, /^main-repair-revert-[0-9a-f]{12}-\d+$/, "the push sends the lane's own new branch");
+    assert.match(pushed[0]!, /^run-main-repair-revert-[0-9a-f]{12}-\d+$/, "the push sends the lane's own new branch");
     const prs = git.prs;
     assert.equal(prs.length, 1);
     assert.equal(prs[0]!.base, "main");
@@ -301,7 +303,7 @@ test("W1-T6403: a fix PR that stalls is followed by one revert PR of the offendi
     assert.match(prs[0]!.body, new RegExp(`Reverts \`${git.offending}\``));
     assert.match(prs[0]!.body, /failing check\(s\): ci/);
     assert.match(prs[0]!.body, new RegExp(FIX_PR));
-    assert.ok(prs[0]!.body.trimEnd().endsWith(`Remudero-Task: ${mainRepairTaskId(git.offending)}`));
+    assert.ok(prs[0]!.body.trimEnd().endsWith(`Remudero-Task: ${mainRepairRevertTaskId(git.offending)}`));
     assert.equal(git.fileOnBranch(pushed[0]!, "census.txt"), "recorded 33/53\n", "the branch carries the revert");
   } finally {
     git.cleanup();
@@ -674,6 +676,7 @@ function gitFixture(opts: { conflict?: boolean } = {}) {
         }
       }
     },
+    originDir: origin,
     originMain: () => run(origin, "rev-parse", "refs/heads/main"),
     originBranches: () => run(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/").split("\n").filter(Boolean).sort(),
     fileOnBranch: (branch: string, file: string) => `${run(origin, "show", `refs/heads/${branch}:${file}`)}\n`,
@@ -683,3 +686,67 @@ function gitFixture(opts: { conflict?: boolean } = {}) {
     },
   };
 }
+
+test("W1-T9583: a revert PR head passes head-identity-gate and worker-branch-shape", async () => {
+  const git = gitFixture();
+  try {
+    assert.deepEqual(await git.revert({ ...revertRequest(git.offending), fixPrUrl: FIX_PR }), { prUrl: REVERT_PR });
+    const [branch] = git.originBranches().filter((name) => name !== "main");
+    const { headIdentity, branchShape, headMessage } = await identityGateVerdicts(git.originDir, branch!);
+    assert.equal(headIdentity.ok, true, headIdentity.message);
+    assert.equal(branchShape.ok, true, branchShape.message);
+    // The revert commit CLAIMS its id by trailer, so worker-branch-shape judged the ref rather than exempting it.
+    assert.match(branchShape.message, /carries the run-<taskId>-<epochMs> shape/);
+    assert.match(headMessage, /^Revert "test\(review\): witness timer progress \(#10092\)"$/m, "git's own revert message is kept");
+    assert.match(headMessage, new RegExp(`^Remudero-Task: ${mainRepairRevertTaskId(git.offending)}$`, "m"));
+    assert.ok(git.prs[0]!.body.trimEnd().endsWith(`Remudero-Task: ${mainRepairRevertTaskId(git.offending)}`), "the body names the same id");
+  } finally {
+    git.cleanup();
+  }
+});
+
+test("W1-T9583: a fix worker head passes head-identity-gate and worker-branch-shape, with or without its trailer", async () => {
+  const root = tmpRoot();
+  const origin = gitRepo({ bare: true, kind: "t9583-origin" });
+  const seed = gitRepo({ kind: "t9583-seed" });
+  try {
+    const branches: string[] = [];
+    const deps: AlertFixDispatchDeps = {
+      worktreeAdd: (_repoDir, _path, branch) => {
+        branches.push(branch);
+      },
+      worktreeRemove: () => {},
+      renderWorkerSettings: () => "/tmp/fake-settings.json",
+      loadMounts: () => ({}) as never,
+      resolveMount: () => MOUNT,
+      spawn: async () => workerResult(`REPORT\nPR_URL: ${FIX_PR}\n`),
+      ensureTaskTrailer: () => {},
+      checkAcceptance: () => ({ ok: true }) as never,
+    };
+    const request: MainRepairFixRequest = {
+      branch: "main", headSha: HEAD, offendingSha: RED_MERGE, offendingPr: 10092, diffStat: "", failingChecks: ["ci"],
+      failingTestTitles: [CENSUS_TITLE], testFiles: ["test/a-wall-clock-bound-declares-itself.test.ts"], logExcerpt: CENSUS_LOG,
+      reason: "required check ci failed",
+    };
+    assert.equal(await dispatchMainRepairFixRun(OWNER, "fixture-repo", { root } as Config, request, join(root, "ledger.ndjson"), "R", deps), FIX_PR);
+    const [branch] = branches;
+    assert.match(branch!, new RegExp(`^run-${mainRepairTaskId(RED_MERGE)}-\\d+$`));
+    // The worker commits on that branch: once with no trailer, as most rounds do, then with the dispatcher's own id.
+    seed.addRemote("origin", origin.dir);
+    seed.git("push", "--quiet", "origin", "main");
+    seed.git("checkout", "--quiet", "-b", branch!);
+    for (const message of ["fix(test): repair the wall-clock census", `fix(test): stamp the census\n\nRemudero-Task: ${mainRepairTaskId(RED_MERGE)}`]) {
+      writeFileSync(join(seed.dir, "census.txt"), `${message}\n`);
+      seed.git("add", "census.txt");
+      seed.git("commit", "--quiet", "-m", message);
+      seed.git("push", "--quiet", "origin", branch!);
+      const { headIdentity, branchShape } = await identityGateVerdicts(origin.dir, branch!);
+      assert.equal(headIdentity.ok, true, headIdentity.message);
+      assert.equal(branchShape.ok, true, branchShape.message);
+    }
+  } finally {
+    origin.cleanup();
+    seed.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

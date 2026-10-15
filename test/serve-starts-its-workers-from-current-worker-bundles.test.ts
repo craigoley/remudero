@@ -6,7 +6,7 @@
 // its execArgv, and from its .ts source on every doubt. These tests run a real fixture tree and real workers.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,7 @@ import { spawnSite } from "../src/lib/worker-heaps.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "build-child-entries.mjs");
 const HELPER = join(REPO_ROOT, "src", "lib", "child-entry-argv.ts");
+const HEAPS = join(REPO_ROOT, "src", "lib", "worker-heaps.ts");
 const WORKER = "src/lib/fixture-worker.ts";
 interface BuildModule { buildChildEntries(opts: { root: string; entries: { name: string; source: string }[]; workers?: readonly string[] }): Promise<unknown> }
 const build = async (root: string): Promise<void> => {
@@ -144,4 +145,67 @@ test("serve.memory still names a worker by the module that asked for it, not by 
     "    at spawnHeavyViews (file:///app/src/lib/read-model-worker.ts:1802:21)",
   ].join("\n");
   assert.equal(spawnSite(stack), "read-model-worker:spawnHeavyViews");
+});
+
+/**
+ * A tree whose worker spawns a lane thread from a function esbuild must rename: a sibling module holds a `spawn` too.
+ * Bundled, every frame names the bundle's file, and the first is the tracker's own onSpawn closure (the live
+ * `worker-lib-read-model-worker:onSpawn` holder); tsx-loaded, the frame named `fixture-worker:spawn`.
+ */
+function makeSpawningTree(t: { after: (fn: () => void) => void }): string {
+  const root = makeTree(t);
+  writeFileSync(join(root, "src", "lib", "fixture-sibling.ts"), "export function spawn(): string {\n  return \"sibling\";\n}\n");
+  writeFileSync(join(root, WORKER), [
+    'import { isMainThread, parentPort, workerData } from "node:worker_threads";',
+    `import { runsBundled, startWorker } from ${JSON.stringify(HELPER)};`,
+    `import { trackWorkerThreads } from ${JSON.stringify(HEAPS)};`,
+    'import { spawn as sibling } from "./fixture-sibling.js";',
+    "function spawn() {",
+    "  return startWorker(import.meta.url, { workerData: { lane: true } });",
+    "}",
+    "if (!isMainThread && workerData?.lane) parentPort!.postMessage({ lane: true });",
+    "else if (!isMainThread) {",
+    "  const book = trackWorkerThreads();",
+    "  const lane = spawn();",
+    "  parentPort!.postMessage({ bundled: runsBundled(), sibling: sibling(), kinds: book.live().map((w) => w.kind) });",
+    "  lane.once(\"message\", () => void lane.terminate());",
+    "}",
+  ].join("\n") + "\n");
+  return root;
+}
+
+test("a bundled worker names the threads it spawns by their source module and function, as tsx did", async (t) => {
+  const root = makeSpawningTree(t);
+  await build(root);
+  const bundle = join(root, "dist", "child-entries", "worker-lib-fixture-worker.mjs");
+  const text = readFileSync(bundle, "utf8").split("\n");
+  const lineOf = (pattern: RegExp): number => {
+    const at = text.findIndex((line) => pattern.test(line));
+    assert.ok(at >= 0, `the bundle holds ${pattern}`);
+    return at + 1;
+  };
+  assert.ok(lineOf(/^function spawn\d+\(/) > 0, "esbuild renamed the worker's spawn, so only keepNames restores it");
+
+  // In this thread: a stack as V8 prints it inside the bundle, every frame naming the bundle's own file.
+  const url = pathToFileURL(bundle).href;
+  const stack = [
+    "Error",
+    `    at onSpawn (${url}:${lineOf(/const onSpawn = /)}:5)`,
+    "    at new Worker (node:internal/worker:297:28)",
+    `    at construct (${url}:${lineOf(/^function startWorker\(/) + 1}:9)`,
+    `    at startWorker (${url}:${lineOf(/^function startWorker\(/) + 3}:22)`,
+    `    at spawn (${url}:${lineOf(/^function spawn\d+\(/) + 1}:10)`,
+  ].join("\n");
+  assert.equal(spawnSite(stack), "fixture-worker:spawn");
+  assert.equal(spawnSite(`Error\n    at file://${bundle}:1:1`), "worker-lib-fixture-worker:<module>", "the banner lies before any module");
+
+  // A real bundle-started worker, spawning its own lane through startWorker as read-model-worker does.
+  const answer = await new Promise<{ bundled: boolean; sibling: string; kinds: string[] }>((resolve, reject) => {
+    const worker = startWorker(selfUrl(root), { execArgv: ["--import", "tsx"] }, { storeRoot: false });
+    worker.once("message", (m) => { void worker.terminate(); resolve(m as { bundled: boolean; sibling: string; kinds: string[] }); });
+    worker.once("error", reject);
+  });
+  assert.equal(answer.bundled, true, "the worker runs its bundle, where every frame names the bundle");
+  assert.equal(answer.sibling, "sibling");
+  assert.deepEqual(answer.kinds, ["fixture-worker:spawn"]);
 });

@@ -1427,14 +1427,43 @@ fi
 # THE ASYMMETRY SETS THE DEFAULT: killing a live worker loses unrecorded spend, so anything this
 # cannot positively classify as hung is waited for and then REFUSED, exactly as before.
 worker_lines() {
-  # `procps` is installed in the image (deploy/Dockerfile), so this is real ps, not the busybox
-  # applet. Include the detached automated retro's node child: it has no dispatch lock, and
-  # stopping the container during its synthesis or preflight loses the entire pass. A failure
-  # here yields NO lines, which reads as "no lane-less worker" — deliberately the
-  # conservative direction for the *kill* decision, and harmless for the *wait* decision because the
-  # lock count below is independent of it.
-  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
-    | grep -E -- 'claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro([[:space:]]|$)' || true
+  # Keep the outermost matching ancestor, including across non-worker intermediaries. Its age
+  # covers the whole invocation; the codex native child is part of its node wrapper's worker.
+  # Only multiple matches need ancestry. Missing parent links leave workers independent and busy.
+  local wpid wage wargs cwd lane parents processes
+  processes="$(docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | grep -E -- 'claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro([[:space:]]|$)' || true)"
+  parents=""
+  case "${processes}" in
+    *$'\n'*) parents="$(docker exec "${CONTAINER_NAME}" ps -eo pid,ppid --no-headers 2>/dev/null || true)" ;;
+  esac
+  while read -r wpid wage wargs; do
+    [ -n "${wpid:-}" ] || continue
+    cwd="$(docker exec "${CONTAINER_NAME}" readlink "/proc/${wpid}/cwd" 2>/dev/null || true)"
+    lane="$(worker_lane "${cwd}")"
+    printf '%s %s %s %s\n' "${wpid}" "${wage}" "${lane:-lane-less}" "${wargs}"
+  done <<WORKER_ROOTS
+$(printf '%s\n%s\n%s\n' "${parents}" WORKER_ROWS "${processes}" | awk '
+    $0 == "WORKER_ROWS" { rows = 1; next }
+    !rows { parent[$1] = $2; next }
+    rows && NF {
+      worker[$1] = 1
+      pid = $1; age = $2; $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      row[pid] = pid " " age " " $0
+    }
+    END {
+      for (pid in worker) {
+        ancestor = parent[pid]; duplicate = 0
+        for (seen in visited) delete visited[seen]
+        while (ancestor != "" && !visited[ancestor]++) {
+          if (ancestor in worker) { duplicate = 1; break }
+          ancestor = parent[ancestor]
+        }
+        if (!duplicate) print row[pid]
+      }
+    }' || true)
+WORKER_ROOTS
 }
 
 # ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────
@@ -1645,6 +1674,29 @@ holder_worktrees() {
   printf '%s' "${found}"
 }
 
+# Attribute only by cwd in a counted lock's worktree, never by the lock's pid: it may be the
+# daemon, whose other children (reviews included) still need to block independently.
+worker_lane() {
+  local cwd="$1" f tree
+  [ -n "${cwd}" ] || return 0
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    [ -e "${f}" ] || continue
+    while IFS= read -r tree; do
+      tree="${tree#worktree: }"
+      case "${tree}" in "${STATE_DIR}/worktrees/"*) : ;; *) continue ;; esac
+      tree="${STATE_MOUNT_DEST}${tree#"${STATE_DIR}"}"
+      case "${cwd}" in
+        "${tree}"|"${tree}"/*) basename "${f}" .lock; return 0 ;;
+      esac
+    done <<HOLDER_TREES
+$(holder_worktrees "${f}")
+HOLDER_TREES
+  done <<COUNTED_LOCKS
+${counted_locks}
+COUNTED_LOCKS
+}
+
 reclaim_frozen_daemon_holdings() {
   local dpid dhost target_id cutoff activity f reclaimed_dir reclaimed_path cpid cppid
   dpid="$(lock_pid_field "${DRAIN_LOCK}")"
@@ -1733,7 +1785,7 @@ epoch_of_started_at() {
 }
 
 oldest_inflight_age_s() {
-  local max=0 f started_at started_epoch age now_epoch wpid wage wargs
+  local max=0 f started_at started_epoch age now_epoch wpid wage wlane wargs
   now_epoch="$(date -u +%s 2>/dev/null || true)"
   [ -n "${now_epoch}" ] || return 0
   if [ -d "${INFLIGHT_DIR}" ]; then
@@ -1747,11 +1799,11 @@ oldest_inflight_age_s() {
       if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
     done
   fi
-  while read -r wpid wage wargs; do
+  while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
     if [ "${wage}" -gt "${max}" ] 2>/dev/null; then max="${wage}"; fi
   done <<WORKERS
-$(worker_lines)
+${worker_snapshot}
 WORKERS
   printf '%s' "${max}"
 }
@@ -1806,28 +1858,41 @@ waited=0
 while :; do
   reclaim_dead_inflight_locks
   n=0
-  if [ -d "${INFLIGHT_DIR}" ]; then
-    n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
-  fi
+  counted_locks=""
+  for f in "${INFLIGHT_DIR}"/*.lock; do
+    [ -e "${f}" ] || [ -L "${f}" ] || continue
+    n=$((n + 1))
+    counted_locks="${counted_locks}${f}"$'\n'
+  done
 
   # Lane-less workers, split by age. `busy` blocks the recycle exactly like a lock does; `hung` does
   # not, because it never will.
   lane_less_busy=0
   lane_less_hung=""
-  while read -r wpid wage wargs; do
+  worker_snapshot="$(worker_lines)"
+  busy_worker_lines=""
+  while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
+    if [ "${wlane}" != "lane-less" ]; then
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane ${wlane}  ${wargs}"$'\n'
+      continue
+    fi
     case "${FROZEN_DAEMON_CHILDREN}" in *" ${wpid} "*) continue ;; esac
     case "${wargs}" in
       *sweep-fix-settings-*) : ;;
-      *) lane_less_busy=$((lane_less_busy + 1)); continue ;;
+      *)
+        lane_less_busy=$((lane_less_busy + 1))
+        busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+        continue ;;
     esac
     if [ "${wage}" -ge "${HUNG_WORKER_AGE_S}" ] 2>/dev/null; then
       lane_less_hung="${lane_less_hung}${wpid} ${wage}"$'\n'
     else
       lane_less_busy=$((lane_less_busy + 1))
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
     fi
   done <<WORKERS
-$(worker_lines)
+${worker_snapshot}
 WORKERS
 
   if [ "${n}" -eq 0 ] && [ "${lane_less_busy}" -eq 0 ]; then
@@ -1872,12 +1937,9 @@ WORKERS
         sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
       done
     fi
-    # A LANE-LESS WORKER UNDER THE AGE BOUND IS REPORTED AND STILL REFUSED. It holds no lock, so
-    # nothing above names it, and before this change it was not merely unreported — it was invisible,
-    # and the recycle removed the container out from under it.
-    if [ "${lane_less_busy}" -gt 0 ]; then
-      echo "  lane-less worker(s) under the ${HUNG_WORKER_AGE_S}s age bound — busy, not hung:" >&2
-      worker_lines | sed 's/^/    /' >&2 || true
+    if [ -n "${busy_worker_lines}" ]; then
+      echo "  in-flight worker trees — busy, not hung (lane workers are included in their lock count):" >&2
+      printf '%s' "${busy_worker_lines}" >&2
     fi
     echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
     echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2

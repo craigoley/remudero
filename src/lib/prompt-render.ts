@@ -625,6 +625,7 @@ export function renderFixPrompt(opts: {
     "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
     "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
     "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation. " +
+      "NEEDS_SCOPE is for a red this PR's diff causes: a red in a file the diff does not touch or reach, which passes at main, is FLAKE, and the harness reruns it as one either way. " +
       "Leave those out-of-scope edits saved (uncommitted) in the worktree when you report — never revert them: the scope amendment admits only paths this round actually changed.",
     "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
     ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),

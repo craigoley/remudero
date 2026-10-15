@@ -1,0 +1,51 @@
+- id: W1-T9577
+  title: "A LOOP FREEZE NAMES EVERY CALLER THAT HELD IT, NOT ONLY ITS THREE LONGEST CALLS — the read-plane sampler keeps the SYNC_SPAWN_TOP_N=3 longest single sync spawns per interval, so on core 15:14-21:14Z 2026-10-14 the named entries covered 449 s of 2,846 s of sync_spawn_ms (16%), and a caller made of many short calls (escalate.ts's gh issue gateway, ~40 call sites at 3 s or less each, 17.5 s) is never named"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — how a sync spawn is attributed; the sampler wraps every child_process sync call in the daemon
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14/15: 'go with all recommended follow ups' — the sync-spawn filing's unfiled attribution lead (#11818 report)"
+  plan_refs: [W1-T5718, W1-T7745, W1-T9554, W1-T9544, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T7744]
+  files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-freeze-names-every-caller-that-held-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; the 38 `daemon.alive` rows of
+    15:14-21:14Z across five daemon pids, streamed to ~/Remudero-notes/sync-spawn-filing/). `sync_spawn_ms` summed to
+    2,846 s. The `sync_spawn_top` entries on the same rows summed to 449 s, so 84% of the time the loop spent blocked
+    in a synchronous child process is attributed to no caller at all.
+    WHY, READ on origin/main (symbols, not lines): `createReadPlaneSampler` in src/lib/read-plane.ts wraps
+    execFileSync / execSync / spawnSync. `record` runs only for a call at or above SYNC_SPAWN_RECORD_MIN_MS (2,000 ms),
+    and `keep` retains the SYNC_SPAWN_TOP_N (3) longest single calls per window. So:
+      - a caller that blocks through many sub-2 s calls contributes to `sync_spawn_ms` but never to an entry;
+      - a fourth long caller in a busy interval is dropped even when its total exceeds the top three's;
+      - `caller` is the first frame outside the shared leaves (W1-T7745). For escalate.ts's `ghIssueGateway` that
+        frame is an anonymous closure, so even a recorded entry cannot say which of its ~40 call sites ran.
+    This is why the sync-spawn filing (#11818, W1-T9544..W1-T9556) could name only part of each freeze, and why the
+    17.5 s escalate.ts share was left unfiled: its callers cannot be named from the ledger.
+    THE CHANGE, mechanism not threshold:
+      1. Per window, accumulate EVERY sync spawn's duration by caller (and leaf), whatever its length, in a map bounded
+         by distinct callers. Emit `sync_spawn_by_caller`: the callers covering the window's time, longest total first,
+         until the named share reaches what the window holds, with a `sync_spawn_unnamed_ms` remainder. No new fixed
+         count or minimum: the cut is the window's own total.
+      2. Record a short caller CHAIN (the first frames outside the leaves, deduplicated) beside `caller`, so an
+         anonymous closure is named by the function that called it.
+      3. Keep `sync_spawn_top` as is (existing readers and W1-T9554 use it).
+    The `daemon.alive` and `daemon.loop_lag` rows carry the new fields; nothing else reads them yet.
+  acceptance:
+    - claim: "many short sync spawns from one caller are named by their total, though none reaches the single-call minimum"
+      proof: 'grep: test("W1-T9577: many short spawns from one caller are named by their total" in test/a-loop-freeze-names-every-caller-that-held-it.test.ts'
+    - claim: "a fourth long caller is named when its total outweighs a longer single call"
+      proof: 'grep: test("W1-T9577: a fourth caller is named by its total, not dropped by the top three" in test/a-loop-freeze-names-every-caller-that-held-it.test.ts'
+    - claim: "an anonymous closure caller is named by the chain that reached it"
+      proof: 'grep: test("W1-T9577: an anonymous caller is named by its chain" in test/a-loop-freeze-names-every-caller-that-held-it.test.ts'
+    - claim: "the per-caller totals and the unnamed remainder add up to the window's sync_spawn_ms"
+      proof: 'grep: test("W1-T9577: caller totals and the unnamed remainder sum to the window" in test/a-loop-freeze-names-every-caller-that-held-it.test.ts'
+  falsifier: |
+    Keep `record`'s SYNC_SPAWN_RECORD_MIN_MS gate and the top-3 `keep` as the only attribution: the first test's
+    twenty 500 ms calls from one caller produce no entry, and the second test's fourth caller is dropped.

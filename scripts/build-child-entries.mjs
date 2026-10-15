@@ -43,8 +43,11 @@ export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "
 /** Output directory, relative to the tree root. It lies under the gitignored `dist/`. */
 export const OUT_DIR = "dist/child-entries";
 export const MANIFEST_NAME = "manifest.json";
-/** Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. 3: the bundled flag and worker bundles. */
-export const RECIPE_VERSION = 3;
+/**
+ * Bump this when the bundling recipe changes: a bundle from an older recipe must stop matching. 3: the bundled flag and
+ * worker bundles. 4: keepNames, so a bundled function's stack frame carries its source name, not esbuild's renaming.
+ */
+export const RECIPE_VERSION = 4;
 /** The manifest layout this file writes and the only one {@link childEntryIsCurrent} accepts (2: per-entry `sha256`). W1-T8777's
  *  `workers` list is additive: a manifest without one holds no worker bundle, and recipe 3 already retires older builds. */
 export const MANIFEST_SCHEMA = 2;
@@ -218,6 +221,9 @@ export async function buildChildEntries({ root = SELF_ROOT, entries = CHILD_ENTR
       logLevel: "silent",
       banner: { js: bundleBanner(layout, entryPath, { worker }) },
       define: { "import.meta.url": "__rmd_module_url" },
+      // esbuild renames a symbol that collides across the merged modules (`spawn` -> `spawn4`); keepNames restores each
+      // function's own name, which V8 prints in a stack frame, so serve.memory names a bundled spawn site as tsx does.
+      keepNames: true,
       plugins: [moduleUrlPlugin(layout)],
     });
     const output = result.outputFiles?.find((f) => f.path === join(layout, bundle));
