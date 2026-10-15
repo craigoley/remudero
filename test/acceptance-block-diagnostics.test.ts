@@ -584,7 +584,7 @@ test("W1-T952: a well-formed body is accepted in the same run", async () => {
 
 test("W1-T952: removing the diagnostics call fails the refusal test", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const runTaskTsPath = join(repoRoot, "src", "run-task.ts");
+  const runTaskTsPath = join(repoRoot, "src", "lib", "alert-fix-body.ts");
   const targetTestFile = "test/acceptance-block-diagnostics.test.ts";
   const positiveTestName = "W1-T952: a body with no acceptance header is refused at author time";
 
@@ -593,16 +593,16 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
   const original = readFileSync(runTaskTsPath, "utf8");
   const originalSha = sha256(original);
 
-  const needle = '        const check = await deps.checkAcceptance(report.prUrl, body && "read" in body ? body.read : undefined);\n';
+  const needle = '    const check = await deps.checkAcceptance(prUrl, body && "read" in body ? body.read : undefined);\n';
   const occurrences = original.split(needle).length - 1;
   assert.equal(
     occurrences,
     1,
-    "sanity: the diagnostics call must appear EXACTLY once in run-task.ts, or this mutation is not targeting the real rung",
+    "sanity: the diagnostics call must appear EXACTLY once in lib/alert-fix-body.ts (W1-T9698), or this mutation is not targeting the real rung",
   );
   const mutated = original.replace(
     needle,
-    '        const check: AcceptanceAuthorTimeResult = { ok: true, message: "W1-T952 MUTATION: diagnostics call removed" };\n',
+    '    const check: AcceptanceAuthorTimeResult = { ok: true, message: "W1-T952 MUTATION: diagnostics call removed" };\n',
   );
   assert.notEqual(sha256(mutated), originalSha, "the mutation must actually change the bytes it is applied to");
 
@@ -624,7 +624,7 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
     }
     symlinkSync(join(repoRoot, "node_modules"), join(shadowRoot, "node_modules"), "dir");
     // The ONE file this check mutates -- written into the shadow copy, never the real checkout.
-    writeFileSync(join(shadowRoot, "src", "run-task.ts"), mutated);
+    writeFileSync(join(shadowRoot, "src", "lib", "alert-fix-body.ts"), mutated);
 
     // NODE_TEST_CONTEXT (set by node's OWN test runner on the process running THIS test) is
     // inherited by a plain spawnSync env by default, and node's test runner treats its presence
@@ -645,7 +645,7 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
   assert.equal(
     sha256(readFileSync(runTaskTsPath, "utf8")),
     originalSha,
-    "run-task.ts must never be modified by this check",
+    "lib/alert-fix-body.ts must never be modified by this check",
   );
 
   assert.ok(childResult, "sanity: the child process must actually have been spawned");
