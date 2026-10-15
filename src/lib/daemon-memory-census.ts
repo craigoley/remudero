@@ -75,21 +75,21 @@ export interface CensusCalibration {
 // census-calibration:begin
 export const DAEMON_MEMORY_CALIBRATION: Readonly<Record<string, CensusCalibration>> = {
   "source-maps.module": {
-    per_entry_bytes: 240547,
+    per_entry_bytes: 240549,
     entries: 587,
-    census_sha: "5d7c583ad975",
+    census_sha: "27d1f36d8d59",
     census_date: "2026-10-15"
   },
   "plan.task": {
     per_entry_bytes: 9915,
     entries: 4112,
-    census_sha: "5d7c583ad975",
+    census_sha: "27d1f36d8d59",
     census_date: "2026-10-15"
   },
   "board.closed-pr": {
-    per_entry_bytes: 3181,
+    per_entry_bytes: 3201,
     entries: 12000,
-    census_sha: "5d7c583ad975",
+    census_sha: "27d1f36d8d59",
     census_date: "2026-10-15"
   }
 };
