@@ -390,7 +390,7 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
   isStale: (holder: TestSlotHolder) => boolean, onReclaim: () => void, unpublishedCreation = false) {
   const same = (st: Stats): boolean => st.isFile() && st.dev === expected.dev &&
     st.ino === expected.ino && st.uid === expected.uid && st.uid === process.getuid?.() && (st.mode & 0o077) === 0;
-  const boundedRead = ((fd: number): string => {
+  const boundedRead = (fd: number): string => {
     const before = fstatSync(fd);
     if (!same(before) || (before.size < 1 && !unpublishedCreation) || before.size > 1024 * 1024) throw new Error("private reservation identity or bound changed");
     const bytes = Buffer.alloc(before.size); let offset = 0;
@@ -402,8 +402,7 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
     const after = fstatSync(fd);
     if (!same(after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("private reservation changed during recovery");
     return bytes.toString("utf8");
-  // The shared reclaimer calls this seam only as readFileSync(fd, "utf8"); it never requests a Buffer.
-  }) as unknown as typeof readFileSync;
+  };
   const safeOpen = (name: Parameters<typeof openSync>[0]): number => {
     if (!Number.isInteger(constants.O_NOFOLLOW) || !Number.isInteger(constants.O_NONBLOCK)) throw new Error("safe private recovery flags unavailable");
     const fd = openSync(name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -423,12 +422,13 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
     onReclaim, onLostReclaim: () => {},
   }, {
     openSync: safeOpen,
-    readFileSync: boundedRead, closeSync, fstatSync, statSync: lstatSync,
+    // The shared reclaimer calls this seam only as readFileSync(fd, "utf8"); it never requests a Buffer.
+    readFileSync: boundedRead as unknown as typeof readFileSync, closeSync, fstatSync, statSync: lstatSync,
     unlinkSync: name => {
       // The generic audit callback ran BEFORE this final check. The mutation guard
       // serializes cooperating writers; POSIX still supplies no arbitrary-actor inode CAS.
       const fd = safeOpen(name);
-      try { if (boundedRead(fd, "utf8") !== authorizedBytes) throw new Error("private reservation bytes replaced before unlink"); }
+      try { if (boundedRead(fd) !== authorizedBytes) throw new Error("private reservation bytes replaced before unlink"); }
       finally { closeSync(fd); }
       if (!same(lstatSync(name))) throw new Error("private reservation replaced before unlink");
       unlinkSync(name);
