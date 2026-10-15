@@ -318,8 +318,10 @@ const begin = async (beat, now) => {
   stall.unprofiledMs = performance.now() - stall.startedAt;
 };
 const rotate = async () => {
-  const { profile } = await post("Profiler.stop");
-  await post("Profiler.start");
+  // Both commands are sent BEFORE either reply is awaited: the main thread drains its inspector queue in order, so a
+  // synchronous child that begins between a stop and a separate start cannot hold the restart (an inspector command
+  // waits while the main thread is inside a native call) and leave the whole child wait unprofiled.
+  const [{ profile }] = await Promise.all([post("Profiler.stop"), post("Profiler.start")]);
   stall.chunkAt = performance.now();
   stall.fold = foldStallChunk(stall.fold, profile, forwarding);
 };
