@@ -1,0 +1,60 @@
+- id: W1-T9644
+  title: "EVERY WORKER DECISION IS AUTO-CHOSEN AS THE WORKER RECOMMENDED, AND NO SECOND READER SEES IT — three recorded decisions chose to relax a criterion, override a procedure, or have the operator widen scope; give each recorded DECISION_REQUEST one blind typed judgment that never sees the recommendation, and record whether it agrees"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19 span: the auto-choose site and the decision record writer. One concern — a blind second reading of recorded decisions, measurement only
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T32, W1-T191, W1-T4672]
+  files: [src/run-task.ts, src/lib/feedback-landing.ts, test/a-recorded-decision-gets-a-blind-second-judgment.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    HOW A DECISION IS MADE TODAY:
+      - src/run-task.ts:20744 parses a worker's DECISION_REQUEST and auto-chooses its RECOMMENDED option, then resumes.
+      - `shouldRecordDecision` (src/lib/risk-score.ts:446) promotes medium-risk and higher decisions to a record in
+        plan/decisions.d via `recordDecision` (src/lib/feedback-landing.ts:1572).
+      - Nothing reads a decision before the PR's review. Rule 15 protects the criteria text, not how a run reads it.
+    WHAT THE RECORDS SHOW: plan/decisions.d holds 50 records, 48 with a "Chosen (RECOMMENDED, auto)" line. Three chose
+    to lower a declared bar:
+      - W1-T2732: "Relax criterion 5 enough to edit test/coverage-session-blanking.test.ts harness blanking …"
+      - W1-T926: "… overriding proof-preflight’s “Do not generate a script” restriction."
+      - W1-T8503: "Have the operator amend the declared scope …", chosen automatically although it names an operator act.
+    Found while reading addyosmani/agent-skills (doubt-driven-development): a non-trivial decision gets an adversarial
+    check in a fresh context that sees the artifact and the contract, never the author's recommendation.
+    WHY MEASURE FIRST: nothing yet shows how often a blind reader disagrees, or whether its disagreements are right.
+    What a disagreement should do (hold the run, escalate) is decided from the rows, not now.
+  design: |
+    1. For a decision `shouldRecordDecision` records, before resuming, run one `runTypedJudgment`
+       (src/lib/typed-judgment.ts:182: tool-less, one turn, a probability distribution over fixed options).
+       - Its input is the task's acceptance criteria plus the options in an order seeded by the run id.
+       - The RECOMMENDED marker and the worker's reasoning are removed from the input.
+    2. Write a `decision.blind_check` ledger row: `{ task_id, run_id, agreed, chosen_index, blind_index, distribution }`.
+       Add a "Blind check:" line to the decision record through `recordDecision`.
+    3. Auto-choose is unchanged.
+    4. A failed or rejected judgment records `decision.blind_check` with `{ unavailable: <reason> }`, never agreement.
+    5. A ledger-only decision (not recorded) gets no judgment, so trivial picks cost nothing.
+    New tests go in test/a-recorded-decision-gets-a-blind-second-judgment.test.ts with an injected judgment seam, and
+    `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-recorded-decision-gets-a-blind-second-judgment.test.ts"
+    - claim: "a recorded DECISION_REQUEST is judged blind before auto-choose, and the row says whether it agreed"
+      proof: 'grep: test("W1-T9644: a recorded DECISION_REQUEST is judged blind before auto-choose" in test/a-recorded-decision-gets-a-blind-second-judgment.test.ts'
+    - claim: "the blind judgment never sees the RECOMMENDED marker or the reasoning of the worker"
+      proof: 'grep: test("W1-T9644: the blind judgment never sees the RECOMMENDED marker or the reasoning of the worker" in test/a-recorded-decision-gets-a-blind-second-judgment.test.ts'
+    - claim: "a ledger-only decision gets no blind judgment"
+      proof: 'grep: test("W1-T9644: a ledger-only decision gets no blind judgment" in test/a-recorded-decision-gets-a-blind-second-judgment.test.ts'
+    - claim: "a failed blind judgment is recorded unavailable, never as agreement"
+      proof: 'grep: test("W1-T9644: a failed blind judgment is recorded unavailable, never as agreement" in test/a-recorded-decision-gets-a-blind-second-judgment.test.ts'
+  falsifier: |
+    Pass the raw DECISION_REQUEST text to the judgment. The second test then finds the RECOMMENDED marker in its input.
+  note: |
+    READ-OUT: after 20 `decision.blind_check` rows, `rmd ledger-grep decision.blind_check` gives the agreement rate and
+    the disagreeing records, which are the evidence for whatever a disagreement should do.
