@@ -117,7 +117,8 @@ export function calibrationReport(state: CalibrationState, now: number, quantile
   if (now - state.coveredSince < CALIBRATION_DAY_MS || now - state.startedAt < CALIBRATION_DAY_MS) reasons.push("less than24h continuous coverage");
   if (now < state.lastAt || now - state.lastAt > OBSERVATION_MAX_GAP_MS) reasons.push("stale observation store");
   if (!closed.length) reasons.push("no closed forecast positive control");
-  if (!state.observations.length || state.observations.at(-1)?.mib === null) reasons.push("no readable observation positive control");
+  const latest = state.observations.at(-1);
+  if (!latest || latest.mib === null || latest.at !== state.lastAt || latest.generation !== state.generation) reasons.push("no current readable observation positive control");
   if (!(quantile >= 0.5 && quantile < 1 && maxMissRate >= 0 && maxMissRate <= 1)) reasons.push("invalid qualification policy");
   for (const [scenario, s] of Object.entries(scenarios)) {
     if (s.unknown || s.complete < Math.ceil(1 / (1 - quantile) - 1e-8) || s.missRate === null || s.missRate > maxMissRate) reasons.push(`unqualified scenario: ${scenario}`);
@@ -146,6 +147,8 @@ export const calibrationStatePath = (stateDir: string): string => join(stateDir,
 const pendingDir = (stateDir: string): string => join(stateDir, CALIBRATION_DIR, "pending");
 const publishErrorPath = (stateDir: string): string => join(stateDir, CALIBRATION_DIR, "publish-error.json");
 const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+const forecastIdentity = (o: MemoryForecast): string => JSON.stringify([o.generation, o.id, o.at]);
+const forecastKey = (o: MemoryForecast): string => createHash("sha256").update(forecastIdentity(o)).digest("hex");
 const validForecast = (o: MemoryForecast): boolean => o !== null && typeof o === "object" &&
   [o.at, o.projectedMib, o.initialMib].every(finite) && o.quantile >= 0.5 && o.quantile < 1 &&
   typeof o.id === "string" && o.id.length > 0 && typeof o.generation === "string" && o.generation.length > 0 &&
@@ -157,11 +160,13 @@ export function readCalibrationState(stateDir: string, io: Pick<CalibrationIo, "
   if (raw?.version !== 1 || ![raw.startedAt, raw.coveredSince, raw.lastAt].every(finite) || typeof raw.generation !== "string" ||
       !Array.isArray(raw.observations) || !Array.isArray(raw.outcomes) || !Array.isArray(raw.issues)) throw new Error("invalid calibration state");
   if (raw.outcomes.length > OUTCOMES_MAX) throw new Error("calibration outcome backstop exceeded");
+  if (raw.startedAt > raw.lastAt || raw.coveredSince > raw.lastAt) throw new Error("invalid calibration coverage clock");
   if (raw.observations.some(o => !o || !finite(o.at) || !(o.mib === null || finite(o.mib)) || !(o.peakMib == null || finite(o.peakMib)) || typeof o.generation !== "string") ||
-      raw.outcomes.some(o => !validForecast(o) || !finite(o.closedAt) || o.closedAt < o.at + BACKTEST_WINDOW_MS ||
+      raw.outcomes.some(o => !validForecast(o) || !finite(o.closedAt) || o.closedAt < o.at + BACKTEST_WINDOW_MS || o.closedAt > raw.lastAt ||
         !(o.observedMaxMib === null || finite(o.observedMaxMib)) || typeof o.complete !== "boolean" ||
         !(o.miss === null || typeof o.miss === "boolean") || o.miss !== (o.observedMaxMib === null ? null : o.observedMaxMib > o.projectedMib)) ||
-      raw.issues.some(i => !finite(i.at) || typeof i.reason !== "string")) throw new Error("invalid calibration population");
+      raw.issues.some(i => !i || !finite(i.at) || typeof i.reason !== "string")) throw new Error("invalid calibration population");
+  if (new Set(raw.outcomes.map(forecastIdentity)).size !== raw.outcomes.length) throw new Error("duplicate calibration outcomes");
   try {
     const fault = JSON.parse(io.read(publishErrorPath(stateDir)));
     if (!finite(fault.at)) throw new Error("invalid calibration publication failure");
@@ -175,7 +180,7 @@ function publishForecast(stateDir: string, forecast: MemoryForecast, io: Calibra
   let names: string[] = [];
   try { names = io.list(pendingDir(stateDir)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (names.length >= PENDING_MAX) throw new Error("calibration prediction backlog full");
-  const key = createHash("sha256").update(JSON.stringify([forecast.generation, forecast.id, forecast.at])).digest("hex");
+  const key = forecastKey(forecast);
   try { io.publish(join(pendingDir(stateDir), key + ".json"), JSON.stringify(forecast)); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -207,7 +212,7 @@ export function collectMemoryCalibration(stateDir: string, observation: MemoryOb
   state.generation = observation.generation; state.lastAt = now;
   state.observations = [...state.observations.filter(o => o.at >= now - BACKTEST_WINDOW_MS - 2 * OBSERVATION_MAX_GAP_MS), observation];
   state.outcomes = state.outcomes.filter(o => o.at >= now - CALIBRATION_DAY_MS);
-  const consumed: string[] = [], known = new Set(state.outcomes.map(o => o.id + ":" + o.at));
+  const consumed: string[] = [], known = new Set(state.outcomes.map(forecastIdentity));
   const issue = (reason: string) => { state.issues = [...state.issues.filter(i => i.reason !== reason && i.at >= now - CALIBRATION_DAY_MS), { at: now, reason }]; };
   let names: string[] = [];
   try { names = io.list(pendingDir(stateDir)); } catch (error) {
@@ -220,9 +225,13 @@ export function collectMemoryCalibration(stateDir: string, observation: MemoryOb
     const path = join(pendingDir(stateDir), name);
     try {
       const forecast = JSON.parse(io.read(path)) as MemoryForecast;
-      if (!validForecast(forecast) || forecast.at > now) throw new Error("invalid forecast");
+      if (!validForecast(forecast) || forecast.at > now || name !== forecastKey(forecast) + ".json") throw new Error("invalid forecast");
       const result = gradeMemoryForecast(forecast, state.observations, now);
-      if (result) { if (!known.has(forecast.id + ":" + forecast.at)) state.outcomes.push(result); consumed.push(path); }
+      if (result) {
+        const identity = forecastIdentity(forecast);
+        if (!known.has(identity)) { state.outcomes.push(result); known.add(identity); }
+        consumed.push(path);
+      }
     } catch {
       // Keep the unreadable receipt and mark the whole qualification unknown, not an omitted successful start.
       issue("pending forecast unreadable");
