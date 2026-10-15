@@ -107,7 +107,7 @@ export function createSelectedModeQualification(
     if (bound.kind === "unknown") return bound.evidence;
     try {
       const recheck = await bound.binding.recheck(signal);
-      if (recheck.kind !== "unchanged") return unavailable(recheck.kind === "unknown" ? recheck.reason : "revision_changed", bound.binding.digest);
+      if (recheck.kind !== "unchanged") return unavailable("reason" in recheck ? recheck.reason : "revision_changed", bound.binding.digest);
       return { selected_outcome: bound.mode === "shadow" ? "would-shadow" : "would-live", binding_digest: bound.binding.digest };
     } catch {
       // A rejected transport is still unknown, never a cached ready mode or a legacy fallback.
