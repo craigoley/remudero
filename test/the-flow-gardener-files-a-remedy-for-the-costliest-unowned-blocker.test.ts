@@ -190,7 +190,7 @@ test("flow measures equal PR-hour windows, distinguishes pending and credit, and
   let escalations = 0;
   const f = fixture(root, [...before, row(2, -24), row(2, 0)], {
     planState: () => ({ tasks: [{ ...remedy, origin: `${remedy.origin}#r2` }] }),
-    escalate: e => { escalations++; assert.match(e.detail, /debit: share of PR-hours/); return "https://github.com/acme/remudero/issues/1"; },
+    escalate: e => { escalations++; assert.match(e.detail, /did not fall: share of PR-hours/); return "https://github.com/acme/remudero/issues/1"; },
     mintTaskId: () => { throw new Error("escalation must not mint"); },
   });
   const inv = f.spec.inventory();
@@ -327,7 +327,12 @@ test("flow production sources read all archive forms, main trailers and merge ac
   assert.equal(inv.charges.length, 4);
   assert.deepEqual([...new Set(inv.charges.map(c => c.pr))].sort(), [1, 2, 3]);
   assert.equal(inv.episodes.find(e => e.pr === 2)!.outcome, "failed");
-  assert.equal(inv.ladder.find(l => l.cause === "escalated:metadata-only body red")!.state, "resolved", "a build trailer, not queued status, supplies the merge time");
+  const trailerRung = inv.ladder.find(l => l.cause === "escalated:metadata-only body red")!;
+  // The build trailer supplies the merge time (the remedy is past `in_progress`); no charge precedes that merge, so the shared
+  // measurement is unmeasurable and W1-T9060 keeps it measuring instead of calling it resolved.
+  assert.equal(trailerRung.state, "measuring", "a build trailer, not queued status, supplies the merge time; unmeasurable is never resolved");
+  assert.equal(trailerRung.effect!.verdict, "unmeasurable");
+  assert.match(trailerRung.effect!.reason, /^no-before-evidence:/);
   assert.equal(shim.calls().length, 1);
   const landing = spec.apply(workspace(repo.dir), { actions: spec.candidates(inv, () => 0), acting: ["draft"] }, {})!;
   assert.equal(ciFrictionRecordVerdict(readFileSync(join(repo.dir, landing.paths[0]!), "utf8"), "default owner search").ok, true);

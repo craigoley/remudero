@@ -127,6 +127,9 @@ export interface EffectReading {
   verdict?: "credit" | "debit";
   /** Why, for the ledger row. */
   reason?: string;
+  /** W1-T9060: the remedy task the reading judges. A reading that names one is recorded once per REMEDY (`effect:v3:<taskId>`),
+   *  not once per filing PR, so a re-filed or re-merged remedy cannot be credited twice. */
+  taskId?: string;
 }
 
 export interface TrackedGardenerPr {
@@ -761,14 +764,17 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   for (const pr of merged) {
     // ci-friction's effect is judged by the remedy's share of fix rounds (ci-friction-remedy.ts) from
     // 2026-10-02; the old decayed-minutes verdicts stand under their own id and these are new ones.
-    const id = pr.gardener === "ci-friction" ? `effect:v2:${pr.url}` : `effect:${pr.url}`;
-    if (hasVerdict(id)) continue;
+    const legacyId = pr.gardener === "ci-friction" ? `effect:v2:${pr.url}` : `effect:${pr.url}`;
+    if (hasVerdict(legacyId)) continue;
     const reading = deps.effectReading?.({ ...pr, mergedAt: pr.info.mergedAt }, rows);
     if (!reading) continue;
+    // W1-T9060: a reading that names its remedy task is keyed by it; the PR-keyed id stays for gardeners with no task.
+    const id = reading.taskId ? `effect:v3:${reading.taskId}` : legacyId;
+    if (hasVerdict(id)) continue;
     const verdict = reading.verdict ?? (reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined);
     if (!verdict) continue;
     issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict, kind: "effect" });
-    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}), ...(reading.opportunityMeasurement ? { opportunity_measurement: reading.opportunityMeasurement } : {}) });
+    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, ...(reading.taskId ? { task_id: reading.taskId } : {}), verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}), ...(reading.opportunityMeasurement ? { opportunity_measurement: reading.opportunityMeasurement } : {}) });
   }
 
   // CHURN — near-identical merges from one gardener and class, landing faster than its metric could move.
@@ -878,12 +884,12 @@ export function ciFrictionEffectReading(
   const mergedAtMs = Date.parse(remedy?.mergedAt ?? "");
   if (!remedy || !Number.isFinite(mergedAtMs)) return undefined;
   if (isDocOnlyRemedy(remedy)) {
-    return { before: 0, after: 0, se: 0, verdict: "debit", reason: `${remedy.id} was built as a docs-only record, which changes no code path` };
+    return { before: 0, after: 0, se: 0, verdict: "debit", taskId: remedy.id, reason: `${remedy.id} was built as a docs-only record, which changes no code path` };
   }
   const effect = ciFrictionRemedyEffect(rounds(), parsed.key, mergedAtMs, nowMs);
   if (effect.verdict !== "credit" && effect.verdict !== "debit") return undefined;
   const share = (w: { k: number; n: number }) => (w.n > 0 ? w.k / w.n : 0);
-  return { before: share(effect.before), after: share(effect.after), se: 0, verdict: effect.verdict, reason: `${remedy.id}: ${effect.reason}` };
+  return { before: share(effect.before), after: share(effect.after), se: 0, verdict: effect.verdict, taskId: remedy.id, reason: `${remedy.id}: ${effect.reason}` };
 }
 
 /** The production wiring: the ledger union, GitHub REST for PRs, and the ci-friction remedies file. */
