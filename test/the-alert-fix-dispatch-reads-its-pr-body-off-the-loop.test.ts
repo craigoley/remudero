@@ -43,7 +43,8 @@ test("W1-T9698: the alert-fix acceptance check awaits an async body read", async
 
 async function judgedRows(read: (args: string[]) => unknown): Promise<Array<Record<string, unknown>>> {
   const rows: Array<Record<string, unknown>> = [];
-  await judgeOpenedAlertFixBody(PR_URL, alertFixBodyDeps(read), (step, extra = {}) => rows.push({ step, ...extra }));
+  const seams = alertFixBodyDeps(read);
+  await judgeOpenedAlertFixBody(PR_URL, seams.checkAcceptance, seams.readPrBody, (step, extra = {}) => rows.push({ step, ...extra }));
   return rows;
 }
 
@@ -76,6 +77,6 @@ test("W1-T9698: one open reads the pr body once", async () => {
 
   // Without a body reader (the fakes that predate W1-T8625), only the check runs.
   const checkOnly: Array<Record<string, unknown>> = [];
-  await judgeOpenedAlertFixBody(PR_URL, { checkAcceptance: () => acceptanceAuthorTimeCheck("no header") }, (step, extra = {}) => checkOnly.push({ step, ...extra }));
+  await judgeOpenedAlertFixBody(PR_URL, () => acceptanceAuthorTimeCheck("no header"), undefined, (step, extra = {}) => checkOnly.push({ step, ...extra }));
   assert.deepEqual(checkOnly.map((r) => r.defect), ["no-header"]);
 });

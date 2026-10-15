@@ -7,11 +7,10 @@ import { ghJsonAsync } from "./github-transport.js";
 import { inertAcceptanceProofs } from "./proof-grammar.js";
 import { acceptanceAuthorTimeCheck, type AcceptanceAuthorTimeResult } from "./review.js";
 
-/** The dispatch's two body seams. `checkAcceptance` judges the body handed to it, or reads its own when handed none. */
-export interface AlertFixBodySeams {
-  checkAcceptance: (prUrl: string, body?: string) => AcceptanceAuthorTimeResult | Promise<AcceptanceAuthorTimeResult>;
-  readPrBody?: (prUrl: string) => string | Promise<string>;
-}
+/** The dispatch's acceptance check: it judges the body handed to it, or reads its own when handed none. */
+export type AlertFixAcceptanceCheck = (prUrl: string, body?: string) => AcceptanceAuthorTimeResult | Promise<AcceptanceAuthorTimeResult>;
+/** The dispatch's read of the opened PR's body. */
+export type AlertFixBodyRead = (prUrl: string) => string | Promise<string>;
 
 /** W1-T8625: the opened PR's body over `gh`. `read` defaults to the awaited {@link ghJsonAsync}; an absent `body`
  *  field reads as `""`. */
@@ -26,8 +25,8 @@ export async function checkAlertFixAcceptance(prUrl: string, read: (args: string
   return acceptanceAuthorTimeCheck(await readAlertFixPrBody(prUrl, read));
 }
 
-/** The real body seams over one reader. */
-export function alertFixBodyDeps(read: (args: string[]) => unknown = ghJsonAsync): Required<AlertFixBodySeams> {
+/** The real `checkAcceptance` and `readPrBody` of the dispatch's deps, over one reader. */
+export function alertFixBodyDeps(read: (args: string[]) => unknown = ghJsonAsync): { checkAcceptance: AlertFixAcceptanceCheck; readPrBody: AlertFixBodyRead } {
   return {
     checkAcceptance: (prUrl, body) => (body === undefined ? checkAlertFixAcceptance(prUrl, read) : acceptanceAuthorTimeCheck(body)),
     readPrBody: (prUrl) => readAlertFixPrBody(prUrl, read),
@@ -41,20 +40,21 @@ export function alertFixBodyDeps(read: (args: string[]) => unknown = ghJsonAsync
  */
 export async function judgeOpenedAlertFixBody(
   prUrl: string,
-  deps: AlertFixBodySeams,
+  checkAcceptance: AlertFixAcceptanceCheck,
+  readPrBody: AlertFixBodyRead | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<void> {
   let body: { read: string } | { error: unknown } | undefined;
-  if (deps.readPrBody) {
+  if (readPrBody) {
     try {
-      body = { read: await deps.readPrBody(prUrl) };
+      body = { read: await readPrBody(prUrl) };
     } catch (error) {
       // Carried in `body`: the inert-proof count below ledgers it as its named check error.
       body = { error };
     }
   }
   try {
-    const check = await deps.checkAcceptance(prUrl, body && "read" in body ? body.read : undefined);
+    const check = await checkAcceptance(prUrl, body && "read" in body ? body.read : undefined);
     if (!check.ok) {
       log("alert-fix.acceptance_defect", { pr_url: prUrl, defect: check.defect, message: check.message });
     }

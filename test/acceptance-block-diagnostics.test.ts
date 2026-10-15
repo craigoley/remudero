@@ -593,7 +593,7 @@ test("W1-T952: removing the diagnostics call fails the refusal test", () => {
   const original = readFileSync(runTaskTsPath, "utf8");
   const originalSha = sha256(original);
 
-  const needle = '    const check = await deps.checkAcceptance(prUrl, body && "read" in body ? body.read : undefined);\n';
+  const needle = '    const check = await checkAcceptance(prUrl, body && "read" in body ? body.read : undefined);\n';
   const occurrences = original.split(needle).length - 1;
   assert.equal(
     occurrences,

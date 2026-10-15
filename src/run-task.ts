@@ -1597,7 +1597,7 @@ import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefect
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
-import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixBodySeams } from "./lib/alert-fix-body.js";
+import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
@@ -54392,13 +54392,13 @@ export interface AlertFixDispatchDeps {
    *  drive both the refusal and the positive-control branch without a real `gh` call — see the
    *  real binding ({@link checkAlertFixAcceptance}) and `PR_AUTHORING_PATHS`'s "alert-fix" row
    *  (lib/review.ts) for why THIS lane, specifically, cannot fall back to a plan-side lookup. */
-  checkAcceptance: AlertFixBodySeams["checkAcceptance"];
+  checkAcceptance: AlertFixAcceptanceCheck;
   /** W1-T8625: the opened PR's body, which the dispatcher parses ITSELF for inert proofs — `checkAcceptance`'s trailer
    *  arm returns `ok` before it reads the block, and every alert-fix body carries a trailer. Optional so the dispatch
    *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
    *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. W1-T9698: the dispatch reads it
    *  ONCE, awaited, and hands that body to `checkAcceptance`. */
-  readPrBody?: AlertFixBodySeams["readPrBody"];
+  readPrBody?: AlertFixBodyRead;
   /** W1-T8572: the main-repair fix dispatch's no-test-file open (that lane reuses this seam rather than declaring
    *  another): the REST PR create, the pushed branch's diff against origin/main and its head subject. Optional, so a
    *  fake that omits them gets the real reads; the alert-fix lane never calls them. */
@@ -54494,7 +54494,7 @@ export async function dispatchAlertFixRun(
       // diagnostic read, so only the check itself is guarded, not `ensureTaskTrailer`/`pr_opened`
       // above. W1-T9698: one awaited body read serves the check and the inert-proof count (W1-T8625);
       // the mutation check (test/acceptance-block-diagnostics.test.ts) targets its call in lib/alert-fix-body.ts.
-      await judgeOpenedAlertFixBody(report.prUrl, deps, log);
+      await judgeOpenedAlertFixBody(report.prUrl, deps.checkAcceptance, deps.readPrBody, log);
     } else {
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
