@@ -20,3 +20,11 @@
     The ledger step machine_judge.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 17 in the older half, 560 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "high-risk verdict at confidence 0.60 — on the change's description/files alone, no diff was read — The step name machine_judge.refused points at the machine judge, which is part of the review/dispatch policy machinery. A fix to its cause could change review or merge policy, and the description doesn't rule that out.; on the change's description/files alone, no diff was read — The rationale says the rows name no file, so the code that writes this step has not been located. The only declared file is a test that doesn't exist at base, so the real change surface is unknown and the finding can't be verified from what is shown.; on the change's description/files alone, no diff was read — The acceptance criterion is a grep for a test title in a file that doesn't yet exist. That checks that a test was named, not that the recurrence stopped, so it is weak verification of the actual fix.; on the change's description/files alone, no diff was read — The scout family has a weak track record (0 merged, 1 declined, Beta mean 0.33), and the evidence cites 0 PR references. Both call for stricter judgment.; on the change's description/files alone, no diff was read — The spike from 17 to 560 rows may be a symptom of a refusal gate working as designed. \"Fix the cause\" could then mean loosening a judge's refusals, which is a policy decision for the operator."
+    judged_at: "2026-10-15T00:53:31.843Z"
+    pin: "cbb99bc6deb1b869ce3ce442552843f103961161de511c4894c10c51f209978d"

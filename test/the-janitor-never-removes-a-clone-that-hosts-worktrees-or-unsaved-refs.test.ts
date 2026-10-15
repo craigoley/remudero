@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { age, fixture, git, repos, run, type Fixture } from "./helpers/host-cleanup-fixture.js";
@@ -65,28 +65,26 @@ test("W1-T8861: the janitor never removes a clone that hosts worktrees or unsave
 
   // a clone that hosts a live linked worktree is kept, and the worktree still works
   assert.equal(existsSync(hosting), true, r.stdout);
-  assert.match(r.stdout, new RegExp(`KEEP ${hosting}: hosts linked worktree ${linked}`));
+  assert.match(r.stdout, new RegExp(`KEEP ${hosting}: hosts linked worktree ${realpathSync(linked)}`));
   assert.equal(git(linked, "rev-parse", "--is-inside-work-tree").trim(), "true");
 
   // a linked worktree whose directory is gone no longer holds the clone
-  assert.equal(existsSync(stale), false, r.stdout);
+  assert.equal(existsSync(stale), true, "missing linked directories still own potentially unpublished metadata");
 
-  // an unpushed branch and an unpushed tag are bundled before the clone goes
-  assert.equal(existsSync(sideBranch), false, r.stdout);
-  assert.equal(existsSync(tagged), false, r.stdout);
-  const names = bundles(fx);
-  assert.equal(names.length, 2, r.stdout);
-  const heads = names.map(n => git(fx.root, "bundle", "list-heads", join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, n))).join("\n");
-  assert.ok(heads.includes(`${unpushed} refs/heads/keep/local-only`), heads);
-  assert.ok(heads.includes(`${taggedTip} refs/tags/local-tag`), heads);
+  // Unpublished refs stay in their original workspaces even when an archive is available.
+  assert.equal(existsSync(sideBranch), true, r.stdout);
+  assert.equal(existsSync(tagged), true, r.stdout);
+  assert.equal(git(sideBranch, "rev-parse", "keep/local-only").trim(), unpushed);
+  assert.equal(git(tagged, "rev-parse", "local-tag").trim(), taggedTip);
+  assert.deepEqual(bundles(fx), []);
 
   // every removal is on the durable audit log, whatever stdout did
   const audit = readFileSync(auditLog(fx), "utf8");
-  for (const p of [plain, stale, sideBranch, tagged]) {
+  for (const p of [plain]) {
     assert.match(audit, new RegExp(`^\\S+Z uid=\\d+ dry_run=0 pid=\\d+ REMOVE ${p} \\(standalone clone\\)$`, "m"), audit);
   }
   assert.doesNotMatch(audit, new RegExp(`REMOVE ${hosting}`));
-  assert.match(audit, /ARCHIVE-WORKTREE .*side-branch/);
+  assert.doesNotMatch(audit, /ARCHIVE-WORKTREE/);
 });
 
 test("W1-T8861: a clone with an unpushed ref that cannot be bundled off its filesystem is kept", () => {
@@ -104,7 +102,7 @@ test("W1-T8861: a clone with an unpushed ref that cannot be bundled off its file
   const r = run(fx, { RMD_CLEANUP_WORKTREE_ROOTS: clones, FAKE_ARCHIVE_FSID: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(risky), true, r.stdout);
-  assert.match(r.stdout, new RegExp(`KEEP ${risky}: unsaved refs \\(refs/heads/keep/local-only HEAD\\) could not be archived safely`));
+  assert.match(r.stdout, new RegExp(`KEEP ${risky}: not-proven-published refs \\(refs/heads/keep/local-only\\)`));
   assert.deepEqual(bundles(fx), []);
   assert.equal(existsSync(auditLog(fx)) ? readFileSync(auditLog(fx), "utf8").includes(`REMOVE ${risky}`) : false, false);
 });

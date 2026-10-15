@@ -8,7 +8,7 @@
   band_meaning: blast-radius
   priority: 2.5
   budget_usd: 6.00
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "console-follow-up:gardener-sdk-origin-carrier-2026-10-14"

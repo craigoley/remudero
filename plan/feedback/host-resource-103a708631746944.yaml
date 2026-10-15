@@ -1,0 +1,22 @@
+id: host-resource-103a708631746944
+ts: 2026-10-15T00:41:00.106Z
+raw: >-
+  host-resource:azure:inodes
+
+
+  Host azure, device inodes: 3355220 inodes free, falling 463 inodes/h
+  (Theil-Sen over 54 samples across 6.0 h); projected full in 302.2 days.
+
+  That host's janitor runs about every 1.0 h; the latest pass reclaimed 14 MB —
+  effectively nothing while the series kept falling.
+
+  The host's heartbeat has gone silent while its samples were falling.
+attachments: []
+origin: incident#103a7086317469442f73a747dafdb83ccc83d66f1ff144493e6301cb3b2a6ec6
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
