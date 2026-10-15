@@ -391,6 +391,7 @@ export interface TrackHooks {
 }
 
 interface Tracked {
+  rssIncomplete?: boolean;
   legacyPeakMib?: number;
   roots: Array<{ pid: number; start: string }>;
   peakMib: number;
@@ -506,6 +507,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") complete = false;
       }
     }
+    if (!complete) entry.rssIncomplete = true;
     if (complete && legacyComplete && legacyKb > 0) entry.legacyPeakMib = Math.max(entry.legacyPeakMib ?? 0, legacyKb / 1024);
     return complete ? kb / 1024 : undefined;
   };
@@ -574,9 +576,10 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       let listing: ProcessListing;
       try {
         listing = ports.listProcesses();
-        if (!listing.complete) return;
+        if (!listing.complete) { for (const entry of tracked.values()) entry.rssIncomplete = true; return; }
       } catch (error) {
-        void error; // An unreadable /proc this pass: the next pass tries again; no sample is invented.
+        for (const entry of tracked.values()) entry.rssIncomplete = true;
+        void error; // A later good sample cannot certify the tree's missing interval.
         return;
       }
       const startOf = new Map(listing.rows.map((row) => [row.pid, row.start]));
@@ -600,7 +603,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         // (3) A nested run ends once its runner's whole tree has exited.
         if (entry.nested && own.length === 0) {
           tracked.delete(id);
-          ended.push({ run: entry.nested, peakMib: entry.observed ? entry.peakMib : undefined, legacyPeakMib: entry.legacyPeakMib });
+          ended.push({ run: entry.nested, peakMib: entry.observed && !entry.rssIncomplete ? entry.peakMib : undefined, legacyPeakMib: entry.legacyPeakMib });
         }
       }
     } finally {
@@ -622,7 +625,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     tracked.delete(id);
     if (entry) flushFiles(entry, new Set());
     stopIfIdle();
-    return entry?.observed ? { peakMib: entry.peakMib, legacyPeakMib: entry.legacyPeakMib } : {};
+    return entry?.observed ? { ...(!entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib: entry.legacyPeakMib } : {};
   };
   return {
     track(id, pid, hooks) {
@@ -691,6 +694,7 @@ function openNestedTestRun(
   return {
     finish(peakMib, legacyPeakMib) {
       if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss", legacyPeakMib });
+      else if (legacyPeakMib !== undefined) recordPeak("test", legacyPeakMib, { ...context.store, measurementBasis: "legacy-hwm" });
       handle.releaseOccupancy();
     },
   };
@@ -764,6 +768,7 @@ function learnedHandle(
           const peak = measured ? measured.peakMib : sampler.finish(key);
           if (peak !== undefined) recordPeak(workerClass, peak, { ...store,
             measurementBasis: measured ? "concurrent-rss" : "legacy-hwm", legacyPeakMib: measured?.legacyPeakMib });
+          else if (measured?.legacyPeakMib !== undefined) recordPeak(workerClass, measured.legacyPeakMib, { ...store, measurementBasis: "legacy-hwm" });
         } catch (error) {
           recordError(store, "finish", error);
         }

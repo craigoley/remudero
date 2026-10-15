@@ -233,6 +233,22 @@ test("W1-T8879: incomplete or denied tree readings are not recorded as smaller m
   }
 });
 
+test("W1-T8879: a later unreadable interval invalidates concurrent training without losing the legacy measurement", () => {
+  let readable = true;
+  const sampler = createTreePeakSampler({
+    listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
+    readFile: path => {
+      if (path.endsWith("/stat")) return `10 (node) S 1 ${"0 ".repeat(17)}5 0 0`;
+      if (!readable) throw Object.assign(new Error("denied"), { code: "EACCES" });
+      return "VmRSS: 409600 kB\nVmHWM: 819200 kB\n";
+    }, setTimer: () => undefined, clearTimer: () => undefined,
+  });
+  sampler.track("partial", 10); readable = false; sampler.sampleNow(); readable = true;
+  const measured = sampler.finishMeasurement!("partial");
+  assert.equal(measured.peakMib, undefined, "a later small reading does not erase missing training coverage");
+  assert.equal(measured.legacyPeakMib, 800, "the existing HWM-based admission cohort remains separate");
+});
+
 test("W1-T8879: binding a root twice does not count its concurrent RSS twice", () => {
   const sampler = createTreePeakSampler({
     listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
