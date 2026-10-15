@@ -10,6 +10,7 @@ import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
+import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
   CHECK_REQUEUE_STEP,
@@ -243,6 +244,8 @@ export interface MainHealthRungDeps {
   mergeReader?: MainHealthMergeReader;
   /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T9665: the affected-suites input for a merge's changed files. Absent, a merge's reach is unknown. */
+  readAffectedInput?: (changed: readonly string[]) => Awaitable<AffectedSuitesInput>;
   /** W1-T6403: the PR openers of the red-main repair lane. Absent, a red main only escalates. */
   repair?: MainRepairLane;
   /** One failing check's job log, reduced by {@link mainCeilingLogReducer}; undefined when unread. */
@@ -275,6 +278,99 @@ export interface MainRepairFixRequest {
   readonly testFiles: readonly string[];
   readonly logExcerpt: string;
   readonly reason: string;
+  /** W1-T9665: every first-parent merge since the last green main, so a two-PR collision is visible. */
+  readonly mergesSinceGreen?: MainRepairMergesSinceGreen;
+}
+
+/** W1-T9665 — one merge since the last green main. `reachesFailingTests` is undefined when unknown. */
+export interface MainRepairMerge {
+  readonly sha: string;
+  readonly pr?: number;
+  readonly subject: string;
+  readonly files: readonly string[];
+  readonly diffStat: string;
+  readonly reachesFailingTests?: boolean;
+  readonly reached?: readonly string[];
+  readonly reachUnknown?: string;
+  /** A reaching merge's unified diff. */
+  readonly diff?: string;
+}
+
+export interface MainRepairMergesSinceGreen {
+  readonly afterGreenSha?: string;
+  /** Oldest first. */
+  readonly merges: readonly MainRepairMerge[];
+  readonly unreadable?: string;
+}
+
+const short = (sha: string): string => sha.slice(0, 12);
+
+const mainRepairMergeName = (merge: MainRepairMerge): string => `\`${short(merge.sha)}\`${merge.pr !== undefined ? ` (#${merge.pr})` : ""}`;
+
+/** W1-T9665 — the fix brief's merges-since-green lines and its "Fix EXACTLY ONE thing" line: the merges
+ *  reaching the failing tests are the ones to repair, and two of them are a collision. */
+export function mainRepairMergesBrief(request: Pick<MainRepairFixRequest, "offendingSha" | "mergesSinceGreen">): { lines: string[]; fixLine: string } {
+  const reaching = (request.mergesSinceGreen?.merges ?? []).filter((merge) => merge.reachesFailingTests === true);
+  const names = reaching.map(mainRepairMergeName).join(", ");
+  const locatedMisses = request.mergesSinceGreen?.merges.find((merge) => merge.sha === request.offendingSha)?.reachesFailingTests === false;
+  return {
+    lines: [
+      renderMainRepairMergesSinceGreen(request.mergesSinceGreen),
+      ...(reaching.length >= 2 ? [`The red may be a COLLISION of ${names}: each was green on its own base, and they fail only together. Repair their INTERACTION.`] : []),
+    ],
+    fixLine:
+      locatedMisses && reaching.length > 0
+        ? `Fix EXACTLY ONE thing: make main green again by REPAIRING the defect that ${names} introduced: they reach the failing tests, and the located merge reaches none of them.`
+        : "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+  };
+}
+
+/** Lines of `text` from its head that fit `chars`, then how many were cut. */
+function headWithOmission(text: string, chars: number): string {
+  if (text.length <= chars) return text;
+  const lines = text.split("\n");
+  const shown: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > chars) break;
+    shown.push(line);
+    used += line.length + 1;
+  }
+  return [...shown, `(${lines.length - shown.length} more diff lines omitted)`].join("\n");
+}
+
+/** W1-T9665 — the brief's "Merges since the last green main" section: reaching merges first with their
+ *  diffs, the rest with their diff stat. Past `budget`, whole non-reaching merges are cut first (newest
+ *  last-ranked first), then each reaching diff keeps its head; every cut is counted. */
+export function renderMainRepairMergesSinceGreen(since: MainRepairMergesSinceGreen | undefined, budget = MAIN_REPAIR_LOG_EXCERPT_CHARS): string {
+  if (!since) return "Merges since the last green main: not read for this brief.";
+  const title = `Merges since the last green main${since.afterGreenSha ? ` \`${short(since.afterGreenSha)}\`` : ""}:`;
+  if (since.unreadable !== undefined) return `${title} unread (${since.unreadable}). Nothing here says the merge above is the only candidate.`;
+  const rank = (merge: MainRepairMerge) => (merge.reachesFailingTests === true ? 0 : merge.reachesFailingTests === undefined ? 1 : 2);
+  const ordered = [...since.merges].sort((a, b) => rank(a) - rank(b));
+  const head = (merge: MainRepairMerge): string => {
+    const reach =
+      merge.reachesFailingTests === true
+        ? `REACHES the failing test(s) ${(merge.reached ?? []).join(", ")}`
+        : merge.reachesFailingTests === false
+          ? "reaches none of the failing tests"
+          : `reach UNKNOWN: ${merge.reachUnknown ?? "not read"}`;
+    return `- ${mainRepairMergeName(merge)} ${merge.subject} — ${reach}\n  files: ${merge.files.join(", ") || "(none listed)"}`;
+  };
+  const sum = (texts: readonly string[]) => texts.reduce((total, text) => total + text.length + 1, 0);
+  const reaching = ordered.filter((merge) => merge.reachesFailingTests === true);
+  const rest = ordered.filter((merge) => merge.reachesFailingTests !== true).map((merge) => ({ sha: merge.sha, text: `${head(merge)}\n${merge.diffStat}` }));
+  const fixed = title.length + 1 + sum(reaching.map(head));
+  const diffs = sum(reaching.map((merge) => merge.diff ?? merge.diffStat));
+  const omitted: string[] = [];
+  while (rest.length > 0 && fixed + diffs + sum(rest.map((entry) => entry.text)) > budget) omitted.push(short(rest.pop()!.sha));
+  const perDiff = Math.floor(Math.max(0, budget - fixed - sum(rest.map((entry) => entry.text))) / Math.max(1, reaching.length));
+  return [
+    title,
+    ...reaching.map((merge) => `${head(merge)}\n${headWithOmission(merge.diff ?? merge.diffStat, perDiff)}`),
+    ...rest.map((entry) => entry.text),
+    ...(omitted.length > 0 ? [`(${omitted.length} more merge(s) omitted to fit the brief, none reaching a failing test: ${omitted.join(", ")})`] : []),
+  ].join("\n");
 }
 
 /** W1-T6403 — the one revert PR of the offending merge, opened once its fix PR was not enough. */
@@ -847,6 +943,14 @@ interface RestCommit {
   parents?: ReadonlyArray<{ sha?: unknown }>;
 }
 
+type RestCommitFile = { filename?: unknown; additions?: unknown; deletions?: unknown; patch?: unknown };
+type RestCommitRead = RestCommit & { files?: ReadonlyArray<RestCommitFile> };
+
+function diffStatLines(files: ReadonlyArray<RestCommitFile>): string {
+  const lines = files.map((f) => ` ${String(f.filename)} | +${Number(f.additions ?? 0)} -${Number(f.deletions ?? 0)}`);
+  return lines.length > 0 ? lines.join("\n") : "(GitHub's commit read listed no files)";
+}
+
 /** The production {@link MainHealthMergeReader}: GitHub's commit, PR and compare reads over the same
  *  awaited `fetch` the rung already uses. Main squash-merges, so a `(#N)` subject names the PR. */
 function restMergeReader(owner: string, repo: string, fetch: GhApiFetcher): MainHealthMergeReader {
@@ -1237,14 +1341,65 @@ export function buildMainHealthRung(
   };
   const diffStatOf = async (sha: string): Promise<string> => {
     try {
-      const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as {
-        files?: ReadonlyArray<{ filename?: unknown; additions?: unknown; deletions?: unknown }>;
-      };
-      const lines = (commit?.files ?? []).map((f) => ` ${String(f.filename)} | +${Number(f.additions ?? 0)} -${Number(f.deletions ?? 0)}`);
-      return lines.length > 0 ? lines.join("\n") : "(GitHub's commit read listed no files)";
+      return diffStatLines(((await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as RestCommitRead)?.files ?? []);
     } catch (error) {
       return `(diff stat unreadable: ${String((error as Error)?.message ?? error)})`;
     }
+  };
+  /** W1-T9665 — whether `files` select a failing test file through the affected-suites import graph. */
+  const reachOf = async (files: readonly string[], testFiles: readonly string[]): Promise<Pick<MainRepairMerge, "reachesFailingTests" | "reached" | "reachUnknown">> => {
+    if (testFiles.length === 0) return { reachUnknown: "no failing test file was parsed from the log" };
+    const direct = testFiles.filter((path) => files.includes(path));
+    const unless = (why: string) => (direct.length > 0 ? { reachesFailingTests: true, reached: direct } : { reachUnknown: why });
+    if (!deps.readAffectedInput) return unless("no affected-suites input is wired");
+    let input: AffectedSuitesInput;
+    try {
+      input = await deps.readAffectedInput(files);
+    } catch (error) {
+      return unless(`the affected-suites input is unreadable: ${String((error as Error)?.message ?? error)}`);
+    }
+    const selection = selectAffectedSuites(files, input);
+    if (selection.fullRun) return unless(selection.reasons[0] ?? "the selector does not model this merge");
+    const reached = testFiles.filter((path) => direct.includes(path) || selection.suites.includes(path));
+    if (reached.length > 0) return { reachesFailingTests: true, reached };
+    const absent = testFiles.filter((path) => !input.files.has(path));
+    if (absent.length > 0) return { reachUnknown: `the import graph was read from a tree without ${absent.join(", ")}` };
+    return { reachesFailingTests: false };
+  };
+  /** W1-T9665 — every first-parent merge after the last green main up to `headSha`, oldest first. */
+  const mergesSinceGreenOf = async (first: MainHealthFirstRedCommit | undefined, headSha: string, testFiles: readonly string[]): Promise<MainRepairMergesSinceGreen> => {
+    if (!first) return { merges: [], unreadable: "this observation read no last green main" };
+    const read: Array<{ sha: string; commit: RestCommitRead }> = [];
+    try {
+      for (let at = headSha; at !== first.afterGreenSha; ) {
+        if (read.some((entry) => entry.sha === at)) throw new Error(`the first-parent chain from ${headSha} loops at ${at}`);
+        const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${at}`])) as RestCommitRead;
+        read.unshift({ sha: at, commit });
+        const parent = commit?.parents?.[0]?.sha;
+        if (typeof parent !== "string") throw new Error(`the first-parent chain from ${headSha} ends at ${at}, short of ${first.afterGreenSha}`);
+        at = parent;
+      }
+    } catch (error) {
+      return { afterGreenSha: first.afterGreenSha, merges: [], unreadable: String((error as Error)?.message ?? error) };
+    }
+    const merges: MainRepairMerge[] = [];
+    for (const { sha, commit } of read) {
+      const files = (commit.files ?? []).filter((file) => typeof file.filename === "string");
+      const paths = files.map((file) => String(file.filename));
+      const reach = await reachOf(paths, testFiles);
+      const pr = squashPrNumber(commit.commit?.message);
+      const diff = files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${typeof file.patch === "string" ? file.patch : "(no patch: binary or too large)"}`);
+      merges.push({
+        sha,
+        ...(pr !== undefined ? { pr } : {}),
+        subject: String(commit.commit?.message ?? "").split("\n")[0] ?? "",
+        files: paths,
+        diffStat: diffStatLines(files),
+        ...reach,
+        ...(reach.reachesFailingTests ? { diff: headWithOmission(diff.join("\n"), MAIN_REPAIR_LOG_EXCERPT_CHARS) } : {}),
+      });
+    }
+    return { afterGreenSha: first.afterGreenSha, merges };
   };
   /** The fix worker runs for minutes, so it is never awaited here: its outcome lands as a ledger row. */
   const dispatchFix = (lane: MainRepairLane, request: MainRepairFixRequest, red?: MainRedSignature): void => {
@@ -1277,18 +1432,22 @@ export function buildMainHealthRung(
     offendingPr: number | undefined,
     failures: readonly CiFailure[],
     reason: string,
-  ): Promise<MainRepairFixRequest> => ({
-    branch,
-    headSha: sha,
-    offendingSha,
-    ...(offendingPr !== undefined ? { offendingPr } : {}),
-    diffStat: await diffStatOf(offendingSha),
-    failingChecks: [...observation.failingChecks],
-    failingTestTitles: [...(observation.failingTestTitles ?? [])],
-    testFiles: baseReproductionFiles(failures),
-    logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
-    reason,
-  });
+  ): Promise<MainRepairFixRequest> => {
+    const testFiles = baseReproductionFiles(failures);
+    return {
+      branch,
+      headSha: sha,
+      offendingSha,
+      ...(offendingPr !== undefined ? { offendingPr } : {}),
+      diffStat: await diffStatOf(offendingSha),
+      failingChecks: [...observation.failingChecks],
+      failingTestTitles: [...(observation.failingTestTitles ?? [])],
+      testFiles,
+      logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
+      reason,
+      mergesSinceGreen: await mergesSinceGreenOf(observation.firstRedCommit, sha, testFiles),
+    };
+  };
   /** W1-T8042 — the fix request for a red the sweep handed over, built from the PR evidence it carried. */
   const inheritedFixRequest = async (
     record: MainRepairRecord,
@@ -1296,6 +1455,7 @@ export function buildMainHealthRung(
     sha: string,
     branch: string,
     why: string,
+    first: MainHealthFirstRedCommit | undefined,
   ): Promise<MainRepairFixRequest> => ({
     branch,
     headSha: sha,
@@ -1308,13 +1468,14 @@ export function buildMainHealthRung(
     reason:
       `${why}; the same red is on open PRs ${inherited.prs.map((n) => `#${n}`).join(", ")}, whose own diffs touch none of ` +
       `the files it names, and ${record.offendingSha.slice(0, 12)} is in every one's merge base and no green PR's (W1-T8042)`,
+    mergesSinceGreen: await mergesSinceGreenOf(first, sha, inherited.testFiles),
   });
   /** W1-T8042 — main's own runs concluded nothing, so a red the sweep handed over is this lane's only
    *  evidence: dispatch its first fix. Once dispatched, the record advances like any other. */
   const repairInheritedReds = async (lane: MainRepairLane, observation: MainHealthObservation, sha: string, branch: string): Promise<void> => {
     for (const record of mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()) {
       if (record.resolved || !record.inherited || record.fixDispatched || fixInFlight.has(record.offendingSha)) continue;
-      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, observation.reason), record.red);
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, observation.reason, observation.firstRedCommit), record.red);
     }
   };
   /** A stall reason once the same fix-PR marker has held for the tick and time windows, else undefined. */
@@ -1467,7 +1628,7 @@ export function buildMainHealthRung(
     if (record.revertPrUrl) return (await readRepairPr(record.revertPrUrl))?.state !== "closed";
     if (fixInFlight.has(record.offendingSha)) return true;
     if (record.inherited && !record.fixDispatched) {
-      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, ctx.observation.reason), record.red ?? ctx.red);
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, ctx.observation.reason, ctx.observation.firstRedCommit), record.red ?? ctx.red);
       return true;
     }
     let stalled: string | undefined;

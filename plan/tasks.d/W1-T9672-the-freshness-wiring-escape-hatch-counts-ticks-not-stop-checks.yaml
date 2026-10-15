@@ -1,0 +1,48 @@
+- id: W1-T9672
+  title: "THE IDLE-GATE FRESHNESS TEST FAILS ON EVERY RUN SINCE W1-T9069, AND IT IS NOT A TIME BOMB — its escape hatch counts checkStop CALLS as ticks, and #11994 (af107edd0) added checkStop reads to the latch's park and wake paths, so one stale cycle now consults checkStop 24 times and the hatch stops the daemon as `stopped` before the freshness restart it asserts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.50
+  risk: high  # Rule 19: one concern — what the freshness wiring tests count as a tick; no src/ change
+  band_meaning: span
+  origin: "operator session 2026-10-15: 'IDLE GATE: origin advancing DURING a dispatch never interrupts it' fails locally on origin/main"
+  plan_refs: [W1-T9069, W1-T2965]
+  files: [test/daemon-freshness-wiring.test.ts]
+  status: queued
+  priority: 2  # CI has not been seen red on it; every local preflight that selects the file goes red
+  attempts: 0
+  rationale: |
+    REPRODUCED on the Mac at origin/main cd482d436 with the setup preload, a private TMPDIR, GIT_CONFIG_GLOBAL and
+    GIT_CONFIG_SYSTEM set to /dev/null, and HOME and RMD_ROOT pointed at empty directories:
+    - `IDLE GATE: origin advancing DURING a dispatch never interrupts it — the worker reaches its verdict first`
+      fails every run with "the advance IS acted on — just not immediately", 'stopped' !== 'stale'. The file's
+      other 10 tests pass.
+    - Bisected: it passes at af107edd0^ and fails at af107edd0 (#11994, W1-T9069, "a latched restart refills a freed
+      lane with work that ends before it", merged 12:52Z).
+    - CAUSE: the test's escape hatch is `checkStop: () => (++ticks >= 4 ? requestStop(...) : undefined)`. It counts
+      every checkStop CALL as a tick. #11994 added checkStop reads in src/lib/daemon.ts: the latch's refill gate
+      (`!deps.checkStop?.() && !deps.checkPause?.()`) and `wakeParkedLanes(Boolean(deps.checkStop?.() || ...))`.
+      With a probe that counted `daemon.tick` log rows instead, the same test passes, and records 24 checkStop
+      calls against 1 tick.
+    - Nothing here reads a date or a clock boundary, so it is not a time bomb.
+    CI: main read green at cd482d436 (main.health.observed 15:33:58Z). That is not evidence for this test: main's
+    push coverage shards narrow to the HEAD^1...HEAD diff (ci.yml coverage-shard, affected selection), and
+    cd482d436 changed one test fixture. No ledger row shows the file red in CI.
+  design: |
+    1. The freshness wiring tests' escape hatches count completed loop cycles (the `daemon.tick` log rows the test
+       already records), not checkStop consultations. Apply it to every hatch in the file that counts in checkStop,
+       so a later checkStop read cannot fire one early.
+    2. A new test, "an escape hatch counts loop ticks, not checkStop reads", drives a checkStop consulted many
+       times per tick and shows the hatch still waits for its tick count.
+    3. Each hatch keeps its bound and its purpose: a regression that never returns `stale` still FAILS and never
+       hangs. Prove that by planting one: a checkFreshness that never reports stale still ends as `stopped`, with
+       the test's failure message.
+  acceptance:
+    - claim: "a hatch counts daemon.tick rows, so extra checkStop reads cannot stop the loop early"
+      proof: 'grep: test("W1-T9672: an escape hatch counts loop ticks, not checkStop reads" in test/daemon-freshness-wiring.test.ts'
+  falsifier: |
+    At origin/main the IDLE GATE test fails with 'stopped' !== 'stale'. With the hatch counting ticks and a
+    checkFreshness that never reports stale, the test still fails, by its own assertion, within the bound.

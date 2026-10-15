@@ -1375,7 +1375,16 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
     echo "  'git gc' can prune objects a live lane still needs, which the docker image/build prune" >&2
     echo "  above cannot do even while up. No checkout below was touched." >&2
   else
-    IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${STATE_DIR}/remudero:${RMD_OP_DIR}}"
+    # W1-T9617: the daemon's checkout is the one its next launch binds — on scratch when the hot
+    # checkouts moved it (deploy/scratch-mounts.sh), never the stale copy left on the state disk.
+    RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+    RECLAIM_SCRATCH_LIB="$(dirname "$0")/scratch-mounts.sh"
+    [ -r "${RECLAIM_SCRATCH_LIB}" ] || RECLAIM_SCRATCH_LIB="/usr/local/bin/rmd-scratch-mounts"
+    if [ -r "${RECLAIM_SCRATCH_LIB}" ]; then
+      RECLAIM_DAEMON_CHECKOUT="$(. "${RECLAIM_SCRATCH_LIB}" && scratch_daemon_checkout "${STATE_DIR}" remudero-daemon)" ||
+        RECLAIM_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+    fi
+    IFS=':' read -r -a GIT_RECLAIM_DIRS <<<"${RMD_GIT_RECLAIM_DIRS:-${RECLAIM_DAEMON_CHECKOUT}:${RMD_OP_DIR}}"
     git_reclaim_reached=0
     for gdir in "${GIT_RECLAIM_DIRS[@]}"; do
       [ -n "${gdir}" ] || continue
