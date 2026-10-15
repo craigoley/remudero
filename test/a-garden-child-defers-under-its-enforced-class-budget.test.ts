@@ -212,7 +212,8 @@ test("a garden child that would not fit is deferred to its next pass with one le
     });
 
     const deferred = await spawnGarden("flow" as never, [], { stopped: false });
-    assert.equal(deferred, null, "the deferred pass resolves without a child");
+    assert.deepEqual(deferred, { kind: "deferred", reason: "memory-budget-shortfall" },
+      "the deferred pass retains its admission disposition without a child");
     assert.equal(reserved, 0, "a deferred child holds no reservation");
     assert.throws(() => readFileSync(started), /ENOENT/, "no garden child started");
     const defers = w.rows.filter((row) => row.step === ENFORCE_DEFER_STEP);
