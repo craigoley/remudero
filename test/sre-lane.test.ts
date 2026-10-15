@@ -179,26 +179,24 @@ test("a ledger row missing a field, or carrying an unparseable ts, is skipped ra
   assert.equal(incidentEventFromLedgerRow({ ...row, ts: "not a date" }, "core"), undefined);
 });
 
-test("mergedPrsSince names each PR merged since the deploy sha, and nothing when git cannot answer", () => {
+test("mergedPrsSince names each PR merged since the deploy sha, and nothing when git cannot answer", async () => {
   const calls: string[][] = [];
-  const run = (args: string[]): string => {
+  const run = async (args: string[]): Promise<string> => {
     calls.push(args);
-    if (args[2] === "log") return "sha1\u0001feat: one (#101)\nsha2\u0001a torn subject with no number\n\n";
-    return "src/a.ts\nsrc/b.ts\n";
+    return "\0sha1\u0001feat: one (#101)\n\nsrc/a.ts\nsrc/b.ts\n\0sha2\u0001a torn subject with no number\n\nsrc/c.ts\n";
   };
-  assert.deepEqual(mergedPrsSince("/repo", "o", "r", "dep1", run), [
+  assert.deepEqual(await mergedPrsSince("/repo", "o", "r", "dep1", run), [
     { url: "https://github.com/o/r/pull/101", files: ["src/a.ts", "src/b.ts"] },
   ]);
   assert.equal(calls[0][3], "dep1..origin/main");
-  assert.deepEqual(calls[1], ["-C", "/repo", "show", "--name-only", "--format=", "sha1"]);
-  assert.equal(calls.length, 2, "a subject with no PR number is never shown, never guessed from");
+  assert.equal(calls.length, 1, "a subject with no PR number names no suspect, never a guessed one");
 
   calls.length = 0;
-  mergedPrsSince("/repo", "o", "r", undefined, run);
+  await mergedPrsSince("/repo", "o", "r", undefined, run);
   assert.ok(calls[0].includes("--since=24 hours ago"), "no deploy sha reads the last 24 hours");
 
   // The real git, in a directory that is no repository: the read fails and names no suspects.
-  assert.deepEqual(mergedPrsSince(tmpRoot(), "o", "r", "dep1"), []);
+  assert.deepEqual(await mergedPrsSince(tmpRoot(), "o", "r", "dep1"), []);
 });
 
 test("an unreadable SRE lane store restarts empty", () => {
