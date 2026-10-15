@@ -1,0 +1,29 @@
+id: incident-b66f45f8c3229b73
+ts: 2026-10-15T04:19:20.950Z
+raw: >-
+  Incident b66f45f8c322: flow idle-capacity:freshness_drain
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T04:08:29.999Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=freshness_drain:unnamed setter=unrecorded since=2026-10-15T03:33:35.354Z since=2026-10-15T03:33:35.354Z slot_minutes=60.27 dispatchable=3 cause=freshness_drain reason="freshness_drain:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+    - instance=core hold=freshness_drain:unnamed setter=unrecorded since=2026-10-15T03:33:35.354Z since=2026-10-15T03:33:35.354Z slot_minutes=104.73 dispatchable=3 cause=freshness_drain reason="freshness_drain:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b66f45f8c3229b73e846c02a3fc96760881b27deea668349562cad9b4ef32a2f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
