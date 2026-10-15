@@ -52,11 +52,8 @@ export interface ServedRecommendation extends InboxRecommendation {
 export type RecommendationStore = Record<string, StoredRecommendation>;
 
 const SEED_NAME = "inbox-recommendations-2026-10-13";
-
-/** The committed operator-session seed, under the plan directory. */
-export function recommendationSeedPath(planDir: string): string {
-  return `${planDir}/seeds/${SEED_NAME}.json`;
-}
+/** The committed operator-session seed, repo-relative. */
+export const RECOMMENDATION_SEED_PATH = "plan/seeds/inbox-recommendations-2026-10-13.json";
 
 export function recommendationStorePath(stateDir: string): string {
   return `${stateDir}/inbox-recommendations.json`;

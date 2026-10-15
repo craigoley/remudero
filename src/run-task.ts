@@ -234,7 +234,7 @@ import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
-import { gitRecommendationEvidence, realRecommendationWriter, recommendationSeedPath } from "./lib/inbox-recommendation.js";
+import { gitRecommendationEvidence, realRecommendationWriter, RECOMMENDATION_SEED_PATH } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
@@ -40232,7 +40232,7 @@ export async function daemonCommand(
             planMonolith: relative(repoRoot, resolveRepoLayout(repoRoot).planMonolith),
           }),
           summarize: inboxRecommendationWriter(config, log),
-          readSeed: () => readFileIfExists(recommendationSeedPath(resolveRepoLayout(repoRoot).planDir)),
+          readSeed: () => readFileIfExists(join(repoRoot, RECOMMENDATION_SEED_PATH)),
         },
         fleetLane: {
           stateDir: join(config.root, "state"),
