@@ -25,7 +25,7 @@ import { isMainModule } from "./lib/argv.mjs";
 /** The status a deadline kill exits with — the same one coreutils `timeout` uses, so both enforcers read alike. */
 const DEADLINE_EXIT_CODE = 124;
 /** The stderr line the parent reads to name the enforcer: `<marker> enforced_by=<runner|timeout>`. */
-const DEADLINE_MARKER = "RMD_DEADLINE_EXCEEDED";
+const DEADLINE_MARKER = "rmd-deadline-exceeded";
 
 /** The argv to spawn for `command` under the optional coreutils `timeout`, armed for `remainingMs` from now. */
 function deadlineArgv(command, remainingMs, killGraceMs, timeoutBin) {

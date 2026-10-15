@@ -105,7 +105,7 @@ export function preopenGateLaunch(
 export const DEADLINE_RUNNER = fileURLToPath(new URL("../../scripts/run-with-deadline.mjs", import.meta.url));
 /** Mirrors scripts/run-with-deadline.mjs: a deadline kill's exit status (coreutils `timeout`'s too) and its stderr line. */
 export const GATE_DEADLINE_EXIT_CODE = 124;
-export const GATE_DEADLINE_MARKER = "RMD_DEADLINE_EXCEEDED";
+export const GATE_DEADLINE_MARKER = "rmd-deadline-exceeded";
 /** How long a group signalled SIGTERM at the deadline has to leave before it is SIGKILLed. A teardown grace, not a bound on the gate. */
 export const GATE_KILL_GRACE_MS = 5_000;
 
@@ -158,6 +158,8 @@ export interface RunGateDeadline {
   backstopMs?: number;
   /** coreutils `timeout`, or `null` for none; default {@link gateTimeoutBin}. */
   timeoutBin?: string | null;
+  /** Where the absolute deadline is read from; default the system clock. */
+  clock?: Clock;
 }
 
 /**
@@ -170,7 +172,7 @@ export interface RunGateDeadline {
 export function defaultRunGate(cwd: string, harnessRmd?: string, log?: GateLog, deadline: RunGateDeadline = {}): Promise<GateRun> {
   const backstopMs = deadline.backstopMs ?? PREOPEN_GATE_BACKSTOP_MS;
   const timeoutBin = deadline.timeoutBin === undefined ? gateTimeoutBin() : deadline.timeoutBin;
-  const deadlineAt = Date.now() + backstopMs;
+  const deadlineAt = (deadline.clock ?? systemClock).now() + backstopMs;
   const { file, args } = harnessRmd === undefined
     ? preopenGateLaunch(cwd, log, HARNESS_RMD, HARNESS_ROOT, { deadline_enforced_by: armedEnforcers(timeoutBin) })
     : preopenGateCommand(cwd, harnessRmd);
