@@ -892,13 +892,27 @@ sweep:
   # itself, never by validatePolicy. `classModes` overrides mode for named worker classes: garden
   # (gardener/cleanup-bot children) enforces on operator 2026-10-14, after the 10-14 loop stalls in which
   # the shadow verdict would have refused the 3 running garden children. A garden child that would not
-  # fit is deferred to its next pass (memory_budget.enforce_defer), never dropped. Builds, fixes and
-  # reviews stay in shadow until W1-T8472 lands.
+  # fit is deferred to its next pass (memory_budget.enforce_defer), never dropped. Operator 2026-10-15
+  # approved guarded enforcement for implement (build), fix, review and advisory after W1-T8472 merged
+  # in #11725. Existing workers are not stopped; test/proof and unnamed classes stay shadow. No numeric
+  # threshold, resource limit, provider, credential or spending setting changes with this ruling.
   hostMemoryBudget:
     mode:
       value: "shadow"
       origin: "proposal"
     classModes:
+      implement:
+        value: "enforce"
+        origin: "proposal"
+      fix:
+        value: "enforce"
+        origin: "proposal"
+      review:
+        value: "enforce"
+        origin: "proposal"
+      advisory:
+        value: "enforce"
+        origin: "proposal"
       garden:
         value: "enforce"
         origin: "proposal"
