@@ -1872,7 +1872,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -48399,28 +48399,41 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = await tickReadFor?.();
+    const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
-    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
-    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
-    try {
-      await mainHealthRung?.();
-    } catch (e) {
-      log("main.health.error", { error: String((e as Error)?.message ?? e) });
-    }
-    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
-    // so a reply steers this same tick. Contained like `mainHealthRung` above.
-    if (escalationAnswerGateway) {
-      try {
-        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
-          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
-        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
-      } catch (e) {
-        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
-      }
-    }
+    const [tickRead] = await Promise.all([
+      prelude.time("tick_read", () => tickReadFor?.()),
+      // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+      prelude.time("triage_evidence", async () => {
+        if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
+      }),
+      prelude.time("main_health", async () => {
+        try {
+          await mainHealthRung?.();
+        } catch (e) {
+          log("main.health.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+      // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
+      // so a reply steers this same tick. Contained like `mainHealthRung` above.
+      prelude.time("escalation_answers", async () => {
+        if (!escalationAnswerGateway) return;
+        try {
+          const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+            { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
+          if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+        } catch (e) {
+          log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+    ]);
+    prelude.note({
+      tick_read_source: tickRead === undefined ? "none"
+        : (tickRead.servedPublishedAtMs ?? prelude.startedAtMs) < prelude.startedAtMs ? "served" : "own_read",
+      ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshot_published_at_ms: tickRead.servedPublishedAtMs } : {}),
+    });
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
@@ -48430,20 +48443,21 @@ export function buildSweepHook(
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
-      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-        pacer,
-        planFilingFileCache,
-        onPlanFilingClassification: reportPlanFilingClassification,
-        isMerged,
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
+        buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          pacer,
+          planFilingFileCache,
+          onPlanFilingClassification: reportPlanFilingClassification,
+          isMerged,
           readMainPlan: resolvedReadMainPlan,
-      });
+        }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log,
-        tickRead ? tickReadReverificationDeps(tickRead) : {});
+      const reverifySummary = await prelude.time("post_fix_reverification", () => sweepPostFixReverification(owner, repo,
+        openPrs, ledgerPath, runId, log, tickRead ? tickReadReverificationDeps(tickRead) : {}));
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
@@ -48470,20 +48484,23 @@ export function buildSweepHook(
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
-      const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
-      const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      const staleGateWorkflowsByPr = await prelude.time("stale_gate_workflows", () =>
+        tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung));
+      const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
-      const behindMainByPr = tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
+      const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
-      await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
+      await prelude.time("merge_probes", () =>
+        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr }));
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = await prelude.time("credit_candidates", () =>
+        tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub));
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -48496,6 +48513,7 @@ export function buildSweepHook(
               readMainPlan: resolvedReadMainPlan },
           }),
           ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
+          markPrelude: prelude.mark,
           ledgerPath,
           runId,
           log,
@@ -48572,6 +48590,7 @@ export function buildSweepHook(
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
+    prelude.write(false);
     // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
