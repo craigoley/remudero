@@ -177,8 +177,13 @@ export function gitRecommendationEvidence(git: GitRunner): RecommendationEvidenc
       const value = entry.trim();
       const pr = /^#(\d+)$/.exec(value)?.[1];
       if (pr !== undefined) {
-        const hit = await git(["log", "origin/main", "-n", "1", "--format=%H", "--fixed-strings", `--grep=(#${pr})`]).catch(() => "");
-        return hit.trim() !== "" ? "pr" : undefined;
+        try {
+          const hit = await git(["log", "origin/main", "-n", "1", "--format=%H", "--fixed-strings", `--grep=(#${pr})`]);
+          return hit.trim() !== "" ? "pr" : undefined;
+        } catch {
+          // deliberate: a log that cannot be read proves nothing, so the entry does not resolve.
+          return undefined;
+        }
       }
       if (/^[0-9a-f]{7,40}$/.test(value)) return (await succeeds(git(["merge-base", "--is-ancestor", value, "origin/main"]))) ? "sha" : undefined;
       if (/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(value)) {
