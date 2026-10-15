@@ -7,6 +7,8 @@
 // credential probe first: alive parks only that lane, and refused or unreadable stops as before, naming the probe.
 
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { test } from "node:test";
 
@@ -19,11 +21,9 @@ import type { RunResult } from "../src/lib/run-result.js";
 
 // Read off the namespaces so the file still loads at the merge base, where these do not exist.
 type Probe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
+type TokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
 const { receivePackCredentialProbe } = daemonModule as unknown as {
-  receivePackCredentialProbe: (opts: {
-    owner: string; repo: string; token: () => string | undefined; timeoutMs?: number;
-    fetchFn?: (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<{ status: number }>;
-  }) => () => Promise<Probe>;
+  receivePackCredentialProbe: (opts: { originUrl: string; token: TokenSource; timeoutMs?: number }) => () => Promise<Probe>;
 };
 const { laneCredentialRefusal } = drainModule as unknown as {
   laneCredentialRefusal: (err: unknown) => { firstLine: string; stderr: string } | undefined;
@@ -76,17 +76,61 @@ async function settleOnce(throwFor: (id: string) => unknown, probe: (() => Promi
       },
       sleep: async () => {},
       log: (step, extra = {}) => rows.push({ step, extra }),
-      ...(probe ? { probeFleetCredential: () => { probes++; return probe(); } } : {}),
+      ...(probe ? { probeFleetPushCredential: () => { probes++; return probe(); } } : {}),
     } as DaemonDeps,
     { laneCount: 2, max: 2, pollIntervalMs: 1 },
   );
   return { s, rows, probes: () => probes, failed: rows.filter((r) => r.step === "daemon.lane_failed") };
 }
 
+/**
+ * The 05:37 shape on the real runDaemon at two lanes: W9-T2 is held open, W1-T9047's push is refused, and W9-T3 waits
+ * for a freed lane. Records what had started before W9-T2 was released, so a red never leaves the daemon running.
+ */
+async function refillRun(failure: () => unknown, probe: (() => Promise<Probe>) | undefined) {
+  const rows: Row[] = [];
+  const started: string[] = [];
+  const held = deferred<RunResult>();
+  const failing = deferred<RunResult>();
+  const bothStarted = deferred<void>();
+  let probes = 0;
+  const run = runDaemon(
+    planOf(["W9-T2", "W1-T9047", "W9-T3"]),
+    {
+      refreshMerged: () => () => false,
+      log: (step: string, extra: Record<string, unknown> = {}) => rows.push({ step, extra }),
+      runOne: (id: string) => {
+        started.push(id);
+        if (started.includes("W9-T2") && started.includes("W1-T9047")) bothStarted.resolve();
+        if (id === "W9-T2") return held.promise;
+        if (id === "W1-T9047") return failing.promise;
+        return Promise.resolve(okResult(id));
+      },
+      sleep: async () => {},
+      checkFreshness: () => ({ stale: false }),
+      ...(probe ? { probeFleetPushCredential: () => { probes++; return probe(); } } : {}),
+    } as unknown as DaemonDeps,
+    { max: 3, laneCount: 2 },
+  );
+  await bothStarted.promise;
+  failing.reject(failure());
+  for (let i = 0; i < 4; i++) await drainMicrotasks();
+  const startedWhileHeld = [...started].sort();
+  held.resolve(okResult("W9-T2"));
+  const s = await run;
+  return {
+    s, startedWhileHeld, probes: () => probes,
+    failed: rows.filter((r) => r.step === "daemon.lane_failed"),
+    refillHeld: rows.filter((r) => r.step === "dispatch.lane_refill_held" && r.extra.reason === "a lane rejected").length,
+  };
+}
+
 test("W1-T9680: a could-not-read-username push parks its lane while the fleet credential probe reads alive", async () => {
-  const { s, failed, probes } = await settleOnce((id) => (id === "W1-T9047" ? usernamePush() : undefined), async () => ({ state: "alive" }));
+  const { s, failed, probes, startedWhileHeld, refillHeld } = await refillRun(usernamePush, async () => ({ state: "alive" }));
   assert.notEqual(s.stopReason, "error", `one lane's push stopped the daemon: ${s.stopDetail}`);
-  assert.deepEqual(s.merged, ["W9-T2"], "the sibling lane ran to its merge");
+  assert.deepEqual(startedWhileHeld, ["W1-T9047", "W9-T2", "W9-T3"], "W9-T3 started on the freed lane while W9-T2 still ran");
+  assert.equal(refillHeld, 0, "no 'a lane rejected' refill hold");
+  assert.deepEqual([...s.merged].sort(), ["W9-T2", "W9-T3"]);
   assert.equal(failed.length, 1);
   assert.equal(failed[0]!.extra.task, "W1-T9047");
   assert.equal(failed[0]!.extra.class, "push_credential_missing");
@@ -98,12 +142,18 @@ test("W1-T9680: a could-not-read-username push parks its lane while the fleet cr
 });
 
 test("W1-T9680: a refused fleet credential probe still stops the daemon and names the probe", async () => {
-  const { s, failed } = await settleOnce((id) => (id === "W1-T9047" ? usernamePush() : undefined),
-    async () => ({ state: "refused", detail: "receive-pack discovery answered HTTP 401" }));
-  assert.equal(s.stopReason, "error");
-  assert.match(s.stopDetail ?? "", /^W1-T9047: Command failed: git -C \S+ push origin HEAD/, "the lane's failure leads the detail");
-  assert.match(s.stopDetail ?? "", /fleet credential probe: refused \(receive-pack discovery answered HTTP 401\)/);
-  assert.equal(failed.length, 0, "a fleet outage is not parked as one task's failure");
+  for (const [probe, named] of [
+    [async (): Promise<Probe> => ({ state: "refused", detail: "receive-pack discovery answered HTTP 401" }), "refused (receive-pack discovery answered HTTP 401)"],
+    [undefined, "unreadable (no fleet credential probe is wired)"],
+  ] as const) {
+    const { s, failed, startedWhileHeld, refillHeld } = await refillRun(usernamePush, probe);
+    assert.equal(s.stopReason, "error");
+    assert.match(s.stopDetail ?? "", /^W1-T9047: Command failed: git -C \S+ push origin HEAD\nfatal: could not read Username/, "the lane's failure and stderr lead the detail");
+    assert.ok((s.stopDetail ?? "").endsWith(`fleet credential probe: ${named}`), `the detail names the probe: ${s.stopDetail}`);
+    assert.equal(failed.length, 0, "a fleet outage is not parked as one task's failure");
+    assert.deepEqual(startedWhileHeld, ["W1-T9047", "W9-T2"], "nothing new is admitted onto the freed lane");
+    assert.equal(refillHeld, 1);
+  }
 });
 
 test("W1-T9680: an unreadable or absent probe keeps the credential refusal fatal", async () => {
@@ -127,50 +177,6 @@ test("W1-T9680: a server-refused credential in one lane is probed too, and a sec
   assert.equal(probes(), 2, "each refusal asks the probe");
 });
 
-test("W1-T9680: a credential refusal leaves its freed lane open to refill only while the probe reads alive", async () => {
-  for (const [probe, expectRefill] of [[{ state: "alive" }, true], [{ state: "refused", detail: "HTTP 401" }, false]] as const) {
-    const rows: Row[] = [];
-    const started: string[] = [];
-    const holdA = deferred<RunResult>();
-    const holdB = deferred<RunResult>();
-    const bothStarted = deferred<void>();
-    const run = runDaemon(
-      planOf(["A", "B", "C"]),
-      {
-        refreshMerged: () => () => false,
-        log: (step: string, extra: Record<string, unknown> = {}) => rows.push({ step, extra }),
-        runOne: (id: string) => {
-          started.push(id);
-          if (started.includes("A") && started.includes("B")) bothStarted.resolve();
-          if (id === "A") return holdA.promise;
-          if (id === "B") return holdB.promise;
-          return Promise.resolve(okResult(id));
-        },
-        sleep: async () => {},
-        checkFreshness: () => ({ stale: false }),
-        probeFleetCredential: async () => probe,
-      } as unknown as DaemonDeps,
-      { max: 3, laneCount: 2 },
-    );
-    await bothStarted.promise;
-    holdB.reject(usernamePush());
-    for (let i = 0; i < 4; i++) await drainMicrotasks();
-    const startedWhileARan = [...started];
-    holdA.resolve(okResult("A")); // released before asserting, so a red never leaves the daemon running
-    const s = await run;
-    const held = rows.filter((r) => r.step === "dispatch.lane_refill_held" && r.extra.reason === "a lane rejected").length;
-    if (expectRefill) {
-      assert.deepEqual(startedWhileARan, ["A", "B", "C"], "C started on B's freed lane while A still ran");
-      assert.equal(held, 0);
-      assert.notEqual(s.stopReason, "error", `stopDetail: ${s.stopDetail}`);
-    } else {
-      assert.deepEqual(startedWhileARan, ["A", "B"], "a refused fleet credential admits nothing new");
-      assert.equal(held, 1);
-      assert.equal(s.stopReason, "error");
-    }
-  }
-});
-
 test("W1-T9680: the lane classifier names a credential refusal from a spawned command and nothing else", () => {
   assert.deepEqual(laneCredentialRefusal(usernamePush()), { firstLine: `Command failed: git -C ${WT} push origin HEAD`, stderr: USERNAME.trim() });
   assert.match(laneCredentialRefusal(badCredentials())?.stderr ?? "", /^fatal: Authentication failed/);
@@ -183,30 +189,63 @@ test("W1-T9680: the lane classifier names a credential refusal from a spawned co
     "the ledgered stderr is bounded");
 });
 
-test("W1-T9680: the receive-pack probe sends the push token and reads 200 alive, 401/403 refused, anything else unreadable", async () => {
-  const seen: Array<{ url: string; auth: string }> = [];
-  const probeAnswering = (status: number) => receivePackCredentialProbe({
-    owner: "craigoley", repo: "remudero", token: () => "tok",
-    fetchFn: async (url, init) => { seen.push({ url, auth: init.headers.Authorization! }); return { status }; },
+/** A local stand-in for GitHub's smart-HTTP endpoint: receive-pack discovery needs the right token, as GitHub's does. */
+async function receivePackStub(answer: (path: string, auth: string | undefined) => number | "hang") {
+  const seen: Array<{ path: string; auth: string | undefined }> = [];
+  const server = createServer((req, res) => {
+    seen.push({ path: req.url ?? "", auth: req.headers.authorization });
+    const status = answer(req.url ?? "", req.headers.authorization);
+    if (status === "hang") return;
+    res.writeHead(status).end();
   });
-  assert.deepEqual(await probeAnswering(200)(), { state: "alive" });
-  assert.equal(seen[0]!.url, "https://github.com/craigoley/remudero.git/info/refs?service=git-receive-pack");
-  assert.equal(seen[0]!.auth, `Basic ${Buffer.from("x-access-token:tok").toString("base64")}`);
-  assert.deepEqual(await probeAnswering(401)(), { state: "refused", detail: "receive-pack discovery answered HTTP 401" });
-  assert.deepEqual(await probeAnswering(403)(), { state: "refused", detail: "receive-pack discovery answered HTTP 403" });
-  assert.deepEqual(await probeAnswering(502)(), { state: "unreadable", detail: "receive-pack discovery answered HTTP 502" });
-  const thrown = receivePackCredentialProbe({ owner: "o", repo: "r", token: () => "tok", fetchFn: async () => { throw new Error("getaddrinfo ENOTFOUND"); } });
-  assert.deepEqual(await thrown(), { state: "unreadable", detail: "receive-pack discovery failed: getaddrinfo ENOTFOUND" });
-  let fetched = false;
-  const tokenless = receivePackCredentialProbe({ owner: "o", repo: "r", token: () => undefined, fetchFn: async () => { fetched = true; return { status: 200 }; } });
-  assert.deepEqual(await tokenless(), { state: "refused", detail: "no push token is set" });
-  assert.equal(fetched, false, "no token is never sent as an anonymous read");
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${port}/craigoley/remudero.git`,
+    seen,
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+  };
+}
+
+const basic = (token: string) => `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+const tokenOf = (token: string): TokenSource => async () => ({ ok: true, token });
+
+test("W1-T9680: the receive-pack probe reads a dead credential as refused", async () => {
+  const stub = await receivePackStub((path, auth) =>
+    path !== "/craigoley/remudero.git/info/refs?service=git-receive-pack" ? 404 : auth === basic("live") ? 200 : 401);
+  try {
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: stub.origin, token: tokenOf("live") })(), { state: "alive" });
+    assert.equal(stub.seen[0]!.path, "/craigoley/remudero.git/info/refs?service=git-receive-pack", "receive-pack, never upload-pack");
+    assert.equal(stub.seen[0]!.auth, basic("live"), "authenticated as x-access-token with the push token");
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: stub.origin, token: tokenOf("expired") })(),
+      { state: "refused", detail: "receive-pack discovery answered HTTP 401" });
+    const asked = stub.seen.length;
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: stub.origin, token: async () => ({ ok: false, reason: "mint returned no token" }) })(),
+      { state: "refused", detail: "no push token: mint returned no token" });
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: stub.origin, token: async () => { throw new Error("key unreadable"); } })(),
+      { state: "refused", detail: "no push token: key unreadable" });
+    assert.equal(stub.seen.length, asked, "no token is never sent as an anonymous read");
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: `${stub.origin}/`, token: tokenOf("live") })(), { state: "alive" }, "a trailing slash is the same origin");
+  } finally {
+    await stub.close();
+  }
 });
 
-test("W1-T9680: a receive-pack probe that never answers is aborted and reads unreadable", async () => {
-  const hung = receivePackCredentialProbe({
-    owner: "o", repo: "r", token: () => "tok", timeoutMs: 20,
-    fetchFn: (_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
-  });
-  assert.deepEqual(await hung(), { state: "unreadable", detail: "receive-pack discovery failed: aborted" });
+test("W1-T9680: the receive-pack probe reads 403 as refused and any other answer, a dead host or no answer as unreadable", async () => {
+  const forbidden = await receivePackStub(() => 403);
+  const broken = await receivePackStub(() => 502);
+  const hung = await receivePackStub(() => "hang");
+  try {
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: forbidden.origin, token: tokenOf("t") })(),
+      { state: "refused", detail: "receive-pack discovery answered HTTP 403" });
+    assert.deepEqual(await receivePackCredentialProbe({ originUrl: broken.origin, token: tokenOf("t") })(),
+      { state: "unreadable", detail: "receive-pack discovery answered HTTP 502" });
+    const timedOut = await receivePackCredentialProbe({ originUrl: hung.origin, token: tokenOf("t"), timeoutMs: 50 })();
+    assert.equal(timedOut.state, "unreadable");
+    assert.match(timedOut.state === "unreadable" ? timedOut.detail : "", /^receive-pack discovery failed: /);
+  } finally {
+    await Promise.all([forbidden.close(), broken.close(), hung.close()]);
+  }
+  const gone = await receivePackCredentialProbe({ originUrl: forbidden.origin, token: tokenOf("t") })();
+  assert.equal(gone.state, "unreadable", "a closed port is not a refused credential");
 });

@@ -1299,7 +1299,7 @@ export interface DaemonDeps {
   readPushedRunBranches?: () => string | Promise<string>;
   /** W1-T9680: is the fleet's push credential alive? Asked before one lane's credential refusal can stop the
    *  daemon. Absent reads `unreadable`, so the refusal stays fatal as before W1-T9680. */
-  probeFleetCredential?: () => Promise<FleetCredentialProbe>;
+  probeFleetPushCredential?: () => Promise<FleetCredentialProbe>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1816,31 +1816,33 @@ function runBranchDispatchOpts(
 /** W1-T9680: the fleet credential probe's answer. Only `alive` makes a lane's credential refusal lane-local. */
 export type FleetCredentialProbe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
 
+/** W1-T9680: where the probe's push token comes from — a mint like the credential socket's, or a fixed token. */
+export type PushTokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
+
 /**
- * W1-T9680 — the fleet credential probe: receive-pack discovery with the token a push would send. The repo is
- * public, so an upload-pack read (`git ls-remote`) answers 200 with no credential at all; receive-pack answers
- * 401 to a missing or bad token and pushes nothing. Bounded by loop-available time.
+ * W1-T9680 — the fleet push credential probe: receive-pack discovery at `originUrl` with the token a worker push
+ * sends. The repo is public, so an upload-pack read (`git ls-remote`) answers 200 with no credential at all;
+ * receive-pack answers 401 to a missing or wrong token and pushes nothing. Bounded by loop-available time.
  */
 export function receivePackCredentialProbe(opts: {
-  owner: string;
-  repo: string;
-  token: () => string | undefined;
-  fetchFn?: (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<{ status: number }>;
+  originUrl: string;
+  token: PushTokenSource;
   timeoutMs?: number;
   clock?: Clock;
 }): () => Promise<FleetCredentialProbe> {
-  const fetchFn = opts.fetchFn ?? ((url, init) => fetch(url, init));
   return async () => {
-    const token = opts.token();
-    if (!token) return { state: "refused", detail: "no push token is set" };
+    const minted = await opts.token().catch((error: unknown) => ({ ok: false as const, reason: String((error as Error)?.message ?? error) }));
+    if (!minted.ok) return { state: "refused", detail: `no push token: ${minted.reason}` };
     const controller = new AbortController();
     const cancel = loopAvailableDeadline(opts.clock ?? systemClock, opts.timeoutMs ?? 15_000, () => controller.abort());
     try {
-      const url = `https://github.com/${opts.owner}/${opts.repo}.git/info/refs?service=git-receive-pack`;
-      const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
-      const { status } = await fetchFn(url, { headers: { Authorization: `Basic ${auth}` }, signal: controller.signal });
-      if (status === 200) return { state: "alive" };
-      return { state: status === 401 || status === 403 ? "refused" : "unreadable", detail: `receive-pack discovery answered HTTP ${status}` };
+      const auth = Buffer.from(`x-access-token:${minted.token}`).toString("base64");
+      const url = `${opts.originUrl.replace(/\/+$/, "")}/info/refs?service=git-receive-pack`;
+      const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` }, signal: controller.signal });
+      await response.body?.cancel();
+      if (response.status === 200) return { state: "alive" };
+      const state = response.status === 401 || response.status === 403 ? "refused" : "unreadable";
+      return { state, detail: `receive-pack discovery answered HTTP ${response.status}` };
     } catch (error) {
       return { state: "unreadable", detail: `receive-pack discovery failed: ${String((error as Error)?.message ?? error)}` };
     } finally {
@@ -3692,7 +3694,7 @@ export async function runDaemon(
   const fleetCredentialFor = (err: object): Promise<FleetCredentialProbe> => {
     let probe = credentialProbes.get(err);
     if (probe === undefined) {
-      const ask = deps.probeFleetCredential ?? (async (): Promise<FleetCredentialProbe> => ({ state: "unreadable", detail: "no fleet credential probe is wired" }));
+      const ask = deps.probeFleetPushCredential ?? (async (): Promise<FleetCredentialProbe> => ({ state: "unreadable", detail: "no fleet credential probe is wired" }));
       probe = ask().catch((error: unknown): FleetCredentialProbe => ({ state: "unreadable", detail: String((error as Error)?.message ?? error) }));
       credentialProbes.set(err, probe);
     }

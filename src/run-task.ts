@@ -3266,7 +3266,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
+import { LEDGER_REQUEST_STEP, realScopedMint, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -40111,8 +40111,15 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
-        // W1-T9680: the token the daemon's own pushes send (GH_TOKEN, re-minted in process by the App refresh).
-        probeFleetCredential: receivePackCredentialProbe({ owner: target.owner, repo: target.repo, token: () => process.env.GH_TOKEN }),
+        // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
+        probeFleetPushCredential: receivePackCredentialProbe({
+          originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
+          token: async () => {
+            if (gitCredentialSocket) return (deps.gitCredentialMint ?? realScopedMint(log))(`${target.owner}/${target.repo}`);
+            const token = process.env.GH_TOKEN;
+            return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
+          },
+        }),
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
