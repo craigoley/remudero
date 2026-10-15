@@ -5,7 +5,7 @@
  * daemon-level tests scale minutes to milliseconds as W1-T9563's suite does (a 20 ms policy value for 559 s).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,10 +14,9 @@ import { gzipSync } from "node:zlib";
 import * as daemon from "../src/lib/daemon.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { readLedgerRawLines, readRestartHistoryLines } from "../src/run-task.js";
 
 // A namespace import, so the file still loads at base and each test reddens on its own.
-const { learnedSweepBound, recordSettledSweep, settledSweepDurations } = daemon;
+const { learnedSweepBound, readRestartHistoryLines, recordSettledSweep, settledSweepDurations } = daemon;
 
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MIN = 60_000;
@@ -91,7 +90,7 @@ test("W1-T9632: a boot whose settled passes were rotated into archives keeps its
     writeFileSync(join(dir, "ledger.ndjson"), [...live.map((ms, i) => settledRow(ms, 30 - i * 10)), JSON.stringify({ ts: new Date().toISOString(), step: "daemon.start" })].join("\n") + "\n");
     const lines: Line[] = [];
     const summary = await runDaemon(fixturePlan(dir), staleOnceDeps(lines, {
-      readLedgerLines: () => readLedgerRawLines(join(dir, "ledger.ndjson")),
+      readLedgerLines: () => readFileSync(join(dir, "ledger.ndjson"), "utf8").split("\n").filter(Boolean),
       readRestartHistory: () => readRestartHistoryLines(dir),
     }), { pollIntervalMs: 30, sweepWallClockBoundMs: 20 });
     assert.equal(summary.stopReason, "stale");

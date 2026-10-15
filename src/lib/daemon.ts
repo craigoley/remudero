@@ -130,7 +130,8 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, systemClock, type Clock } from "../lib/clock.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
@@ -325,6 +326,18 @@ export type RestartWorkHistory = { yieldCost: RestartEstimate; remaining: Readon
 export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 /** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
+/** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail;
+ *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
+    rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
+    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
+  });
+  if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
+  return read.rows.map((row) => JSON.stringify(row));
+}
+
 export function restartWorkHistory(rawLines: readonly string[], nowMs: number): RestartWorkHistory {
   const since = nowMs - RESTART_HISTORY_WINDOW_MS;
   const rows: Array<{ row: Record<string, unknown>; at: number }> = [];
