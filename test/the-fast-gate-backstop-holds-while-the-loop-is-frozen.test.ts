@@ -147,7 +147,15 @@ test("W1-T9556: coreutils timeout is found by a spawn-free PATH walk, and the ro
   chmodSync(join(bin, "timeout"), 0o755);
   assert.equal(findOnPath("timeout", ["", notExec, asDir, bin].join(":")), join(bin, "timeout"));
   assert.equal(findOnPath("timeout", [notExec, asDir].join(":")), null);
-  assert.equal(findOnPath("timeout", undefined), null);
+  // An UNSET PATH, not an `undefined` argument: that takes the process.env.PATH default, which on a Linux runner
+  // holds /usr/bin/timeout.
+  const savedPath = process.env.PATH;
+  delete process.env.PATH;
+  try {
+    assert.equal(findOnPath("timeout"), null);
+  } finally {
+    process.env.PATH = savedPath;
+  }
   assert.equal(gateTimeoutBin(), gateTimeoutBin(), "resolved once");
   assert.deepEqual(armedEnforcers("/usr/bin/timeout"), ["timeout", "runner", "parent"]);
   assert.deepEqual(armedEnforcers(null), ["runner", "parent"]);
