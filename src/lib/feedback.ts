@@ -511,6 +511,21 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
+/** W1-T9624: the entry origin/main already holds for `id`, or `null` (absent, unreadable, or not an entry).
+ *  A daemon checkout runs a pinned boot sha, so a landed entry can be in neither its working tree nor its
+ *  HEAD; a deterministic-id capture that misses this re-writes the path with new bytes (2026-10-15: 45
+ *  such files refused every boot checkout, W1-T9623). Any git failure reads as absent, never as present. */
+export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(git(["show", `origin/main:${feedbackEntryRelPath(root, id)}`]));
+  } catch {
+    return null; // no origin/main, no such path, or unparseable: today's behaviour, never "exists"
+  }
+  const entry = parsed as Partial<FeedbackEntry> | null;
+  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string" ? (entry as FeedbackEntry) : null;
+}
+
 /** ROOT-FREE repo-relative path of a feedback entry — `plan/feedback/<id>.yaml` — for callers
  * without a checkout root (`lib/triage.ts`'s Acceptance proof). Derived from
  * {@link feedbackEntryPath} rather than re-typed, so a path move cannot leave it stale. */
@@ -866,6 +881,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     if (existing) return existing;
   }
   if (opts.id !== undefined && existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
+  if (opts.id !== undefined) {
+    const landed = readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
+    if (landed) return landed;
+  }
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";
