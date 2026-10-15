@@ -1,0 +1,73 @@
+- id: W1-T9584
+  title: "A HELD DEPENDABOT PR IS REFRESHED BY A FLEET MERGE COMMIT, NEVER BY DEPENDABOT: the dep-review row outranks every base-red row, so a stale or base-red bump only ever holds, while the distance update-branch rung pushes remudero-fleet merges onto Dependabot heads (#11793, #11791 on 2026-10-14), after which Dependabot stops managing them; a held Dependabot head is refreshed by asking Dependabot to rebase, once per head, and only when its red is main's"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how a held Dependabot head gets onto current main
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: 'get them green, resolve the root causes that prevented automated flow… We need the pr queue to be automated.' (dependabot #11788/#11791/#11793)"
+  plan_refs: [W1-T54, W1-T100, W1-T4351, W1-T5022, W1-T3244, W1-T6258]
+  files: [src/lib/sweep.ts, src/lib/dep-review.ts, src/run-task.ts, test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14/15 (core ledger, 4 archives 20:59Z-00:00Z plus live ledger.ndjson, 2,143 rows naming
+    PRs 11780-11799, dependabot or dep-review; newest row 00:42:31Z):
+    - #11788, #11791, #11793: every sweep.disposed row is disposition dep-review, blocker awaiting-review,
+      blocker_owner review-lane. #11788's repeat_streak reached 16 by 00:42Z; blocker_since 20:37:48Z.
+    - dep-review.decided is `hold` on every pass from 22:54Z to 00:42Z for all three. No row in the window
+      asks Dependabot for anything. `git grep '@dependabot'` over src/ finds only DEPENDABOT_IGNORE_MAJOR_COMMAND
+      (the major-migration path); nothing posts `@dependabot rebase` or `@dependabot recreate`.
+    - The only refresh that happened was the fleet's own: sweep.update_branch.attempted/updated #11793
+      23:45:35Z (update_reason distance-unknown, behind_by 22) wrote remudero-fleet merge 2d5030059; the same
+      rung merged main into #11791 at 00:44:19Z (cee010e35). Both heads now carry a non-Dependabot commit.
+    - An operator-posted `@dependabot rebase` on #11788 at 22:07:35Z produced Dependabot's rebased head
+      b00fda7b at 22:09:19Z: two minutes, branch still Dependabot-managed.
+    READ at origin/main 7cfdd7775:
+    - sweep.ts DISPOSITION_RULES: the `dep-review` row (`when: pr.isDependabot === true`) sits above every
+      conflict, review-failed, ci-red and base-red row, so decideBaseRed and the fixed-on-main refresh never
+      see a Dependabot PR.
+    - dep-review.ts decideDepReview returns `hold` on any red check; reconcileDepReviewHold only escalates
+      after DEP_REVIEW_HOLD_AGE_MS (24 h). A hold has no remedy of its own.
+    - selectUpdateBranchDecision filters drafts, ready-unknown and in-flight run branches, never
+      isDependabot, so openPrsBehindMain/armedButStalled/redPrWithStaleGate can each pick a Dependabot head.
+      sweep.ts's own isDependabot doc says such a branch must NEVER get fleet commits.
+    OVERLAP: shares src/lib/sweep.ts and src/run-task.ts with W1-T100 (route blocked_ci to the ci-log fix
+    path). W1-T100 routes fleet PRs to a fix worker; this task never fixes, and touches only Dependabot heads,
+    which the dep-review row keeps out of W1-T100's rows by design.
+  design: |
+    1. selectUpdateBranchDecision drops a candidate whose view has isDependabot === true, and the pass ledgers
+       the stand-down by name (`sweep.update_branch.dependabot_deferred`, pr, head, update_reason), so the
+       refresh it would have made goes to step 2 instead of disappearing.
+    2. On a dep-review `hold` with red checks, classify the red with the SAME evidence the base-red rows use
+       (decideBaseRed's main-health census and once-per-head history; W1-T4351/W1-T6024), not a new rule:
+       - main's red (a failing check main's newest genuine run also fails): wait, as decideBaseRed does.
+       - stale base (decideBaseRed would refresh, or the head is behind main and the fixed-on-main probe
+         says its failing test files pass at main's tip): post ONE `@dependabot rebase` for this head, or
+         `@dependabot recreate` when the head carries a non-Dependabot commit (Dependabot refuses to rebase
+         an edited branch). Ledger `dep-review.refresh_requested` {pr_url, head_sha, command, cause}. The
+         durable dep-review-holds state records the head it was asked for, so a restart or rotation never asks
+         twice; a NEW head re-earns judgement.
+       - own red (a check main passes, or a red that survived one requested refresh): no command; the hold
+         stands and the existing escalation backstop applies. (Routing an own red to a fleet build is a
+         separate concern.)
+    3. A requested refresh that Dependabot never answers is visible, not silent: the next pass on the same
+       head ledgers `dep-review.refresh_unanswered` with the age since the request, and the hold escalation's
+       body names the request. No fixed timeout is added; the existing hold backstop is unchanged.
+    Positive control for the build: prove in the fixture that an App-authored comment is the write used
+    (DepReviewPrMutations.comment), and name in the PR body whether a live Dependabot answered a fleet-App
+    comment in the ledger after merge.
+  acceptance:
+    - claim: "no update-branch rung selects a Dependabot head, and the deferral is ledgered by name"
+      proof: 'grep: test("W1-T9584: no update-branch rung selects a Dependabot head" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+    - claim: "a held Dependabot head red for a stale base gets exactly one rebase request per head, and recreate when the head was edited"
+      proof: 'grep: test("W1-T9584: a stale held Dependabot head asks Dependabot to rebase once per head" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+    - claim: "a held Dependabot head red for its own reason gets no command"
+      proof: 'grep: test("W1-T9584: an own red on a Dependabot head posts no command" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+  falsifier: |
+    Remove the isDependabot filter: the fixture's Dependabot PR behind main by 22 is selected for update-branch.
+    Remove the refresh request: the stale held fixture records no dep-review.refresh_requested and no comment.
