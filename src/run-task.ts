@@ -1899,8 +1899,11 @@ import {
   detectReviewFalseBlock,
   detectCiLogVerdictUnchanged,
   classifyNoPrShape,
+  shouldRecheckAfterNothingChanged,
+  shouldSelfHealNothingChanged,
 } from "./lib/fix-rung-classify.js";
-export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape };
+export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape,
+  shouldRecheckAfterNothingChanged, shouldSelfHealNothingChanged };
 
 /**
  * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
@@ -58079,14 +58082,3 @@ export {
   type BranchCitationHit,
   type ReverseBranchDrift,
 } from "./lib/branch-reaper.js";
-
-/** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
-export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
-  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
-}
-
-/** W1-T5334: first "changed nothing" refusal at a head: FIXED, FLAKE or unstated re-reads once; BASE_RED and repeats stand down. */
-export function shouldSelfHealNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
-  if (shouldRecheckAfterNothingChanged(fixKind, reason, refusedAtHead)) return true;
-  return reason === "the worker changed nothing" && refusedAtHead <= 1 && (fixKind === undefined || fixKind === "FLAKE");
-}
