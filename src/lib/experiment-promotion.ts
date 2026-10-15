@@ -28,6 +28,7 @@ import {
   paretoFront,
   proposePromptCandidates,
   scoreCandidatesOnHeldOut,
+  validateFixTranscript,
   type FixRungOutcome,
   type FixTranscript,
   type HeldOutScoreResult,
@@ -76,6 +77,8 @@ export interface PromotionScope {
   policyScope: string;
   taskType?: string;
   lane?: string;
+  /** The worker model a learned prompt applies to (W1-T9640). Not part of the serialization key. */
+  model?: string;
 }
 
 export interface PromotionRollback {
@@ -143,7 +146,7 @@ function finiteNumber(value: unknown): value is number {
 function validateScope(value: unknown): PromotionScope | null {
   if (!isRecord(value) || !safeText(value.repo, MAX_TEXT) || !safeText(value.policyScope, MAX_TEXT)) return null;
   const scope: PromotionScope = { repo: value.repo.trim(), policyScope: value.policyScope.trim() };
-  for (const field of ["taskType", "lane"] as const) {
+  for (const field of ["taskType", "lane", "model"] as const) {
     if (value[field] !== undefined) {
       if (!safeText(value[field], MAX_TEXT)) return null;
       scope[field] = value[field].trim();
@@ -240,6 +243,9 @@ export interface PromptEvolutionPromotionInput {
   expiresAt: string;
   createdAt: string;
   rollback: PromotionRollback;
+  /** The worker model whose recorded rounds may teach and score this promotion (W1-T9640). Every other model's
+   *  transcripts are left out, and the promotion is scoped to this model. */
+  model: string;
   /** Re-runs the fix rung for one candidate against one held-out failure (W1-T9639). Absent means
    *  nothing was scored, so nothing may be proposed. */
   runFixRung?: (candidate: PromptCandidate, transcript: FixTranscript) => FixRungOutcome;
@@ -272,12 +278,16 @@ export interface PromptEvolutionPromotionOutcome {
  * validation, rather than a partial or unguarded promotion.
  */
 export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionInput): PromptEvolutionPromotionOutcome {
-  const candidates = proposePromptCandidates(input.basePrompt, input.transcripts, input.seed);
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  if (!model) return { candidates: [], winner: undefined, promotion: null, scores: [], reason: "no-model" };
+  // W1-T9640: one model's rounds teach and score its own candidates; another arm's refusals never reach them.
+  const transcripts = input.transcripts.filter((value) => validateFixTranscript(value)?.model === model);
+  const candidates = proposePromptCandidates(input.basePrompt, transcripts, input.seed);
   const runFixRung = input.runFixRung;
   if (!runFixRung) return { candidates, winner: undefined, promotion: null, scores: [], reason: "unscored" };
   const base = candidates[0];
   if (!base) return { candidates, winner: undefined, promotion: null, scores: [], reason: "no-candidates" };
-  const scores = scoreCandidatesOnHeldOut(candidates, input.transcripts, input.seed, runFixRung);
+  const scores = scoreCandidatesOnHeldOut(candidates, transcripts, input.seed, runFixRung);
   const baseScore = scores.find((score) => score.candidateId === base.id);
   if (!baseScore || baseScore.overall.scored === 0) {
     return { candidates, winner: undefined, promotion: null, scores, reason: "no-held-out-cases" };
@@ -292,7 +302,7 @@ export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionI
     promotionId: `prompt-evolution:${input.seed}:${winner.id}`,
     candidate: winner.id,
     baseline: input.baseline,
-    scope: input.scope,
+    scope: { ...input.scope, model },
     comparisonPopulation: input.comparisonPopulation,
     denominatorFloor: input.denominatorFloor,
     observationWindow: input.observationWindow,
