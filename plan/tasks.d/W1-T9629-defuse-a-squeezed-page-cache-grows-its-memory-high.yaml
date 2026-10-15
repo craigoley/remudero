@@ -1,0 +1,23 @@
+- id: W1-T9629
+  title: "Defuse the expiring fixture in test/a-squeezed-page-cache-grows-its-memory-high.test.ts before 2026-10-23T22:00:00.000Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "expiring-fixture:test/a-squeezed-page-cache-grows-its-memory-high.test.ts"
+  files:
+    - test/a-squeezed-page-cache-grows-its-memory-high.test.ts
+  acceptance:
+    - claim: "The census reports no crossing for test/a-squeezed-page-cache-grows-its-memory-high.test.ts with now past 2026-10-23T22:00:00.000Z, and the test remains green across the crossing."
+      proof: "grep: test(\"W1-T9629: test/a-squeezed-page-cache-grows-its-memory-high\\.test\\.ts stays defused across 2026-10-23T22:00:00\\.000Z\" in test/a-squeezed-page-cache-grows-its-memory-high.test.ts"
+  rationale: |
+    test/a-squeezed-page-cache-grows-its-memory-high.test.ts:216: updated_at is stamped 2026-10-09T22:00:00Z; sweep.staleDays (REST updated_at -> updatedAt -> lastActivityAt) crosses on 2026-10-23T22:00:00.000Z.
+    Found 8.439758935185186 days before crossing using a 21-day lead horizon.
+    Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.
+    Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.
+    Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.
