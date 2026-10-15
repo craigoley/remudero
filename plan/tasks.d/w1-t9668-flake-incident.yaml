@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
   status: blocked
   retirement: retired  # not a flake: a deterministic main red, superseded by W1-T9551 (the gardener routes a no-recovery red to main-health). #11987 (W1-T9503) and #11997 collided; main was red on this test from 037a58d8f until #12034 (cd482d436); its own evidence reads "0 recovered on retry, 9 also failed"; operator 2026-10-15 via the filing session
