@@ -108,6 +108,44 @@ test("gardener lifecycle measures admission separately from execution and preser
   assert.ok(observed.some((r) => r.name === "gate" && r.phase === "running"));
 });
 
+test("gardener memory deferral is not a cancelled or completed process", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferred-runtime-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  let now = Date.now();
+  const clock = clockFromMillisFn(() => now);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "deferred-fixture", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  const earlier = clock.iso();
+  const prior = { name: "plan", observedAt: earlier, passId: "previous", nextDueAt: null, queueMs: 0, executionMs: 57, exit: 0 };
+  writer.record({ ...prior, phase: "queued", reason: null });
+  writer.record({ ...prior, phase: "completed", reason: "process-completed" });
+  await writer.flush();
+  now += 1000;
+  const run = startGardenOffLoop("plan", 60_000, { clock, log: (step, extra) => logs.push({ step, extra }),
+    observe: event => writer.record(event),
+    spawnPass: boundedGardenPassSpawn(async () => ({ kind: "deferred", reason: "memory-budget-shortfall" }) as never, 1) });
+  t.after(() => run.stop());
+  await wait(0); await writer.flush();
+  const entry = (await readGardenerRuntime(stateDir)).gardens[0]!;
+  assert.equal(entry.phase, "idle");
+  assert.equal(entry.reason, "memory-budget-shortfall");
+  assert.equal(entry.attempts, 2);
+  assert.equal(entry.completions, 1);
+  assert.equal(entry.failures, 0);
+  assert.equal(entry.executionMs, null, "a deferred start cannot borrow the preceding child's execution time");
+  assert.equal(entry.exit, null);
+  assert.equal(entry.lastCompletedAt, earlier);
+  assert.equal(entry.lastSuccessAt, earlier);
+  assert.notEqual(entry.passId, "previous");
+  assert.ok(entry.nextDueAt);
+  const row = logs.find(row => row.step === GARDEN_PASS_STEP)!;
+  assert.equal(row.extra?.passId, entry.passId);
+  assert.equal(row.extra?.reason, "memory-budget-shortfall");
+  assert.equal(row.extra?.executionMs, null);
+});
+
 test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
   const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-correlation-`));
