@@ -14,6 +14,12 @@
  * PRIORITY: waiting starts in one process are evaluated one at a time, highest class weight times aged wait first
  *   (host-memory-priority.ts `rankDemand`), so an older build eventually outranks a newer review and nothing starves.
  * FAIL-OPEN AND NAMED: an error admits the start and writes memory_budget.enforce_error; it never holds work hostage.
+ *
+ * PER CLASS (operator 2026-10-14): `sweep.hostMemoryBudget.classModes` overrides `mode` for one worker class, so garden
+ * children enforce while builds, fixes and reviews stay in shadow until W1-T8472 lands. A caller that runs again on its
+ * own schedule (a garden pass) asks `onShortfall: "defer"`: where an enforced start would wait out a shortfall, it is
+ * instead DEFERRED, named in one memory_budget.enforce_defer row, and the caller's next pass asks again. Nothing is
+ * dropped: the deferred pass records no pacing, so it stays due.
  */
 
 import { join } from "node:path";
@@ -25,6 +31,7 @@ import {
   defaultShadowMemoryPorts,
   evaluateShadowMemory,
   gatherShadowInputs,
+  hostMemoryBudgetModeFor,
   type ShadowInputs,
   type ShadowMemoryPorts,
   type ShadowVerdict,
@@ -34,6 +41,8 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 export const ENFORCE_WAIT_STEP = "memory_budget.enforce_wait";
 export const ENFORCE_ADMIT_STEP = "memory_budget.enforce_admit";
 export const ENFORCE_ERROR_STEP = "memory_budget.enforce_error";
+/** A start that asked to be deferred rather than wait was deferred to its caller's next pass. */
+export const ENFORCE_DEFER_STEP = "memory_budget.enforce_defer";
 
 /** PROPOSALS for the back-off schedule: the first re-read after 5 s, doubling to one re-read a minute. */
 export const ADMISSION_BACKOFF = { baseMs: 5_000, maxMs: 60_000, jitter: 0.2 } as const;
@@ -65,10 +74,14 @@ export interface AdmissionRequest {
   taskId?: string;
   /** A caller with an existing reservation seam supplies it here; the same handle goes to its spawn. */
   reserve?: () => LearnedReservation | undefined;
+  /** What an enforced start does about a shortfall it could wait out: "wait" (default) backs off in place; "defer"
+   *  returns `deferred` at once, for a caller whose next scheduled pass asks again. */
+  onShortfall?: "wait" | "defer";
 }
 
 export type AdmissionOutcome =
   | { kind: "not-enforced"; why: string }
+  | { kind: "deferred"; reasons: ShadowVerdict["reasons"] }
   | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for"; waitedMs: number; attempts: number; reservation?: LearnedReservation }
   | { kind: "error"; reason: string; reservation?: LearnedReservation; reservationAttempted?: true };
 
@@ -137,7 +150,8 @@ export async function awaitMemoryAdmission(
   let reservationAttempted = false;
   try {
     const policy = ports.policy();
-    if (policy.mode !== "enforce") return { kind: "not-enforced", why: `mode ${policy.mode}` };
+    const mode = hostMemoryBudgetModeFor(policy, request.workerClass);
+    if (mode !== "enforce") return { kind: "not-enforced", why: `mode ${mode}` };
     if (!ports.enforceHere()) return { kind: "not-enforced", why: "not a daemon-owned process" };
     const root = typeof request.root === "string" ? request.root : request.root();
     ledgerPath = join(root, "state", LEDGER_FILENAME);
@@ -180,6 +194,12 @@ export async function awaitMemoryAdmission(
                 attempts: attempt, reasons: verdict.reasons, numbers: verdict.numbers });
             }
             return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}) };
+          }
+          if (tier === "shortfall" && request.onShortfall === "defer") {
+            write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
+              uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
+              waited_ms: now - startedAt });
+            return { kind: "deferred", reasons: verdict.reasons };
           }
           if (!noted) {
             noted = true;

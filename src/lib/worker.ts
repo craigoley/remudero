@@ -1,6 +1,7 @@
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
-import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence,
-  type WorkerMcpIsolation, type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
+import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
+  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
+  type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -95,6 +96,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
 import { hashInstallInputs } from "./install-hash.js";
+import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
@@ -249,6 +251,12 @@ export function workerExitOfError(e: unknown): WorkerExit {
 export interface WorkerResult {
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
   mcpIsolation?: WorkerMcpIsolationEvidence;
+  /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
+   * ones without a date cutoff. Absent on Codex/cash calls and on hand-built fixtures. */
+  mcpBoundary?: typeof WORKER_MCP_STRICT;
+  /** W1-T9489: present when the init inventory showed a capability outside the boundary (`exposed`, the run then earns no
+   * success credit) or gave no complete inventory to judge (`unknown`). Absent means observed and clean. */
+  mcpExposure?: WorkerMcpExposure;
   /** Bounded observational SDK init names; raw auth/configuration envelopes are never retained. */
   initSummary?: WorkerInitSummary;
   /** Backend that executed this call. Optional only for pre-connector test fixtures. */
@@ -580,6 +588,8 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
   mcp_isolation?: WorkerMcpIsolationEvidence;
+  mcp_boundary?: typeof WORKER_MCP_STRICT;
+  mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
@@ -635,6 +645,8 @@ export function workerLedgerFields(r: WorkerResult): {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
+    ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
+    ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
@@ -1105,7 +1117,7 @@ export interface SpawnWorkerArgs {
   /** Tool names this spawn is never offered, threaded to the SDK's `Options.disallowedTools`. Deliberately NOT the settings
    * `deny` list: that floor is hook-enforced, and {@link DenyFloorVerdict} exists because the block can LEAK under
    * `bypassPermissions` (claude-code#20946), whereas a disallowed tool is never presented to the model at all. Default
-   * UNRESTRICTED (W1-T2591). */
+   * UNRESTRICTED for the caller (W1-T2591); the claude.ai account-connector denies are merged in on every spawn (W1-T9489). */
   disallowedTools?: readonly string[];
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
@@ -3082,8 +3094,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         args.onSpawnError,
       ),
     };
-    // Omitted entirely when unset, so an unrestricted spawn's option object is byte-identical to what it was — never
-    // `disallowedTools: undefined`, a different object for the SDK (W1-T2591).
+    // The caller's own list. Every spawn's final list also carries the account-connector denies, merged in by
+    // applyWorkerMcpBoundary below, so no spawn's `disallowedTools` is absent any more (W1-T9489 retires W1-T2591's
+    // "unrestricted spawn is byte-identical" note).
     if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
     // Never unnamed: the CLI's own default is Opus with a 1M context (measured 2026-09-22), not the worker tier.
@@ -3201,6 +3214,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
       // so a provider refusal cannot leave the watchdog running after the caller catches it.
       if (args.mcpIsolation) applyWorkerMcpIsolation(options);
+      // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
+      // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
+      const boundaryServers = applyWorkerMcpBoundary(options);
       const liveQuery = runQuery({ prompt: args.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3243,6 +3259,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
         if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;
       }
+      // W1-T9489: the tripwire at the producer. A worker offered anything outside its own server map is ledgered as exposed
+      // and earns no success credit: the subtype changes too, because callers grade `{isError, subtype: "success"}` as clean.
+      result.mcpBoundary = WORKER_MCP_STRICT;
+      const exposure = workerMcpExposure(result.initSummary, boundaryServers);
+      if (exposure?.state === "exposed") {
+        exposure.original_subtype = result.subtype;
+        result.isError = true;
+        result.subtype = "error_mcp_exposure";
+      }
+      if (exposure) result.mcpExposure = exposure;
       if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;
       result.selectionAssignmentId = selectionAssignmentId;
@@ -3303,7 +3329,7 @@ export interface UsageProbeSession {
  * SpawnWorkerArgs.queryFn}. */
 export type UsageProbeQueryFn = (params: {
   prompt: AsyncIterable<never>;
-  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable">;
+  options: Pick<Options, "env" | "settingSources" | "pathToClaudeCodeExecutable"> & ReturnType<typeof workerMcpProbeBoundary>;
 }) => UsageProbeSession;
 
 /** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to
@@ -3381,7 +3407,8 @@ export function openUsageProbeSession(
   // `runQuery` creates no connection and is not what this stops.
   if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
   const q = runQuery ?? ((p: Parameters<UsageProbeQueryFn>[0]) => query(p as never) as unknown as UsageProbeSession);
-  const options: Parameters<UsageProbeQueryFn>[0]["options"] = { settingSources: [] };
+  // W1-T9489: the probe opens on the same config dir as a worker, so it gets the same strict, empty server map.
+  const options: Parameters<UsageProbeQueryFn>[0]["options"] = { settingSources: [], ...workerMcpProbeBoundary() };
   // Hand the SDK the binary spawnWorker already resolved once per process. Unset, the SDK's query() picks its own binary and,
   // on Linux, runs a synchronous, uncached process.report.getReport() to choose musl or glibc on EVERY probe — 56 s of self
   // time in the 2026-10-14 loop-stall profile. A resolution failure is never a new failure: the probe opens as before and the
@@ -4647,6 +4674,30 @@ export function linkWorktreeNodeModules(
   return "linked";
 }
 
+/** Enabled accounts give new checkouts private workspaces and caches backed by a durable generation. */
+export async function provisionWorktreeNodeModules(
+  repoDir: string,
+  worktreePath: string,
+  deps: Parameters<typeof linkWorktreeNodeModules>[2] = {},
+): Promise<NodeModulesLinkOutcome> {
+  const root = configuredDependencySeedRoot();
+  if (!root) return linkWorktreeNodeModules(repoDir, worktreePath, deps);
+  const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  try {
+    // Seed identity, locking, copying and npm run in a bounded child, never on the daemon's event loop.
+    const args = ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)),
+      "prime", worktreePath, "--root", root, ...(source ? ["--source", dirname(source)] : [])];
+    const { stdout } = await execFilePromise(process.execPath, args, {
+      cwd: worktreePath, encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
+    });
+    const result = JSON.parse(stdout) as { status: string };
+    return result.status === "present" ? "already-present" : "linked";
+  } catch (error) {
+    (deps.warn ?? console.error)(`dependency seed provisioning refused: ${(error as Error).message}`);
+    return "failed";
+  }
+}
+
 /** W1-T4260: the untrappable bound on a satellite tree's `npm ci`, SIGKILL on expiry like review.ts `ensureDeps`. A BACKSTOP:
  * a healthy install ends on its own (a next/react/@clerk proxy measured ~10 s cold, 559 MiB), so this fires only on a wedged
  * one. The SAME 120 s as `ensureDeps`: runTask runs in the daemon's process, so this install blocks every lane while it runs. */
@@ -5540,6 +5591,8 @@ export function worktreeAdd(
   });
   logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
   execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
+  const satelliteSource = prepareWorktreeDependencies(repoDir, worktreePath, deps);
+  linkWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
   finishWorktreeAdd(repoDir, worktreePath, deps);
   recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
 }
@@ -5567,21 +5620,22 @@ function logAddedWorktree(
   });
 }
 
-function finishWorktreeAdd(
+function prepareWorktreeDependencies(
   repoDir: string,
   worktreePath: string,
   deps: WorktreeAddDepsArg,
   exclude: () => void = () => { excludeNodeModulesFromGit(worktreePath); },
-): void {
+): string | undefined {
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   exclude();
   if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
   // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
   // before, through the unchanged call below (W1-T4260).
-  const satelliteSource = satelliteNodeModulesSource(repoDir, worktreePath, deps);
-  if (satelliteSource) linkWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => satelliteSource });
-  else linkWorktreeNodeModules(repoDir, worktreePath);
+  return satelliteNodeModulesSource(repoDir, worktreePath, deps);
+}
+
+function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
   // The link above is ROOT-only and cannot reach a dependency npm installed beneath a declared workspace (e.g.
   // apps/dashboard/node_modules) -- link those too, through the SAME observability channel `worktree.add` already uses, so a
   // missing local tool is attributable to provisioning rather than misdiagnosed as the worker's own diff (W1-T4003).
@@ -5727,12 +5781,14 @@ export async function worktreeAddAsync(
   } catch {
     // Excluding node_modules is best-effort, as in the sync form.
   }
-  finishWorktreeAdd(repoDir, worktreePath, deps, () => {
+  const satelliteSource = prepareWorktreeDependencies(repoDir, worktreePath, deps, () => {
     excludeNodeModulesFromGit(worktreePath, { commonDir: () => {
       if (commonDir === undefined) throw new Error("git common dir unreadable");
       return commonDir;
     } });
   });
+  await provisionWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
+  finishWorktreeAdd(repoDir, worktreePath, deps);
   let drift: CanonicalCheckoutDriftResult;
   try {
     const raw = await worktreeGit(["-C", repoDir, "rev-list", "--count", `HEAD..origin/${ref}`]);

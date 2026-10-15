@@ -32,6 +32,35 @@ not-granted. A digest is integrity evidence, not a private-source release decisi
 
 ## Bounded compatibility window
 
+### Carried lifecycle fields
+
+W1-T9559 gives the selected reader and proposal writer one frozen field vocabulary
+in the public registry module. It includes every current installer/recycler case
+field, including `gh_app_private_key_host_path`, plus the existing selected `mode`
+safety field. Tests derive the lifecycle field census from both actual shell case
+blocks and exercise both consumers, rather than ratifying a guessed field count.
+Unsupported sibling fields and unknown roots remain refused; this is not an
+open-ended future-schema allowance. The supported versions/capabilities and
+legacy no-selection behavior are unchanged.
+
+The host key path is opaque carried metadata, not credential bytes or a container
+path. Recognition never opens the named key, mounts it, validates every installer
+value, selects an overlay or grants publication permission. Its bytes contribute
+to integrity evidence: changing it invalidates an existing read binding or the
+writer's final pre-effect comparison. Proposals preserve it and every other
+non-target byte. Public projections, serialized bindings, diagnostics and
+success/incomplete receipts expose none of those operational paths or values;
+publication permission remains `not-granted`.
+
+This source step does not upgrade shell `mode` handling or qualify all daemon,
+lifecycle and effect consumers. Old shell binaries still reject `mode`; do not
+give them new safety grammar or swap their authoritative file during active work.
+WORKERS CONTINUE for isolated source validation. Actual selection/replacement,
+credential mounts and incompatible shared state still need the separate human
+drain/stop approvals below. Admission remains opt-in SHADOW ONLY, with owner/admin
+override and the complete Apache public implementation preserved. No schedule,
+live policy/configuration, deployment or private-value move is included.
+
 ### Explicit proposal writer target
 
 W1-T9493 adds `onboardingGoLive.registryTarget: { repository, filePath }` to

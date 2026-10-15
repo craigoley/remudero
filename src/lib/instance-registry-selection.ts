@@ -9,7 +9,7 @@ import { lstat, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { RmdError } from "./errors.js";
-import { parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
+import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
 
 export interface RegistrySelectionInput {
   cliPath?: string;
@@ -83,13 +83,7 @@ export type SelectedRegistryRead = { kind: "legacy" } | Unknown | Refused
 
 const MAX_BYTES = 256 * 1024;
 const CAPABILITIES = Object.freeze(["identity", "mode", "primary"]);
-const FIELDS = new Set([
-  "repo", "github_repo", "project", "retired", "mode", "primary", "state_dir",
-  "container_name", "service_user", "image", "max_old_space_mb", "service_name",
-  "watchdog_service_name", "watchdog_timer_name", "launcher_path", "revival_log",
-  "gh_app_id", "gh_app_installation_id", "gh_app_private_key_path", "claude_dir",
-  "codex_dir", "container_config_dir",
-]);
+const FIELDS = new Set(SELECTED_INSTANCE_REGISTRY_FIELDS);
 class ReadRefusal extends RmdError {
   constructor(readonly reason: UnknownReason) { super("registry", 1, reason, { reason }); }
 }
