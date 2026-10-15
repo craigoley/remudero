@@ -1,0 +1,28 @@
+id: incident-e4c74a283ab02a7b
+ts: 2026-10-15T13:55:26.243Z
+raw: >-
+  Incident e4c74a283ab0: flow idle-capacity:capacity_headroom
+
+  First seen: 2026-10-15T13:54:55.128Z
+
+  Last seen: 2026-10-15T13:54:55.128Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=capacity_headroom:unnamed setter=unrecorded since=2026-10-15T13:27:44.615Z since=2026-10-15T13:27:44.615Z slot_minutes=27.18 dispatchable=2 cause=capacity_headroom reason="capacity_headroom:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e4c74a283ab02a7bd727b6a91243ec4438451d43017a68e5e375ccd325761a4e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
