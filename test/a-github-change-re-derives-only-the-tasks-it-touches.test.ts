@@ -3,12 +3,12 @@ import { createHash } from "node:crypto";
 import { appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { canonicalProjection, createBoardProjection, githubAnswerOf, githubDigest, githubViewOf, type BoardDirtRules, type BoardProjection } from "../src/lib/board-projection.js";
+import { canonicalProjection, createBoardProjection, githubAnswerOf, githubDigest, githubViewOf, TASK_TOKEN_RE, type BoardDirtRules, type BoardProjection } from "../src/lib/board-projection.js";
 import type { Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
-import { buildBatchedGithub, projectPlan, type BatchedIssue, type BatchedPr, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, projectPlan, TASK_ID_TRAILER_RE, type BatchedIssue, type BatchedPr, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-15T03:00:00.000Z");
@@ -252,4 +252,13 @@ test("test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts: an answ
     assert.notEqual(githubAnswerOf(value), first, "a replay of the same value never matches, so its task re-derives");
   }
   assert.equal(githubAnswerOf({ a: 1 }), githubAnswerOf({ a: 1 }), "a comparable answer still equals itself");
+});
+
+test("test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts: the open slice's token scan finds every trailer owner projectPlan groups by, and refuses what is no task id", () => {
+  for (const id of ["W1-T5", "W12-T3456", "W3-T77a"]) {
+    assert.ok(TASK_ID_TRAILER_RE.test(id), `${id} is an id projectPlan's trailer grouping accepts`);
+    assert.equal(TASK_TOKEN_RE.test(`Remudero-Task: ${id}`), true, `the scan accepts ${id}`);
+    assert.equal(TASK_TOKEN_RE.exec(`done\n\nRemudero-Task: ${id}`)?.[0], id, `the scan finds ${id} exactly`);
+  }
+  assert.equal(TASK_TOKEN_RE.test("Remudero-Task: SEC-12\nrun-main"), false, "no task-id-shaped token, no owner");
 });

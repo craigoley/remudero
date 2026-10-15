@@ -173,7 +173,7 @@ const GITHUB_UNREPLAYED: ReadonlySet<string> = new Set(["warm", "serveOffLoop", 
 const TRAILER_LOOKUP = "mergedTrailerLookup()";
 const UNDEFINED_ARG = "\u0000undefined";
 /** Every task-id-shaped token: the open slice's superset of `projectPlan`'s trailer grouping (TASK_ID_TRAILER_RE). */
-const TASK_TOKEN_RE = /W[0-9]+-T[0-9]+[A-Za-z]?/g;
+export const TASK_TOKEN_RE = /W[0-9]+-T[0-9]+[A-Za-z]?/;
 
 function readKey(method: string, args: readonly unknown[]): string {
   return `${method}\u0000${JSON.stringify(args, (_key, value: unknown) => (value === undefined ? UNDEFINED_ARG : value))}`;
@@ -263,7 +263,7 @@ export function githubViewOf(gateway: GitHub, generation: string): GithubView {
     else groups[half].set(owner, [pr]);
   };
   for (const pr of open ?? []) {
-    const owners = new Set([taskIdFromRunBranch(pr.headRefName), ...((pr.body ?? "").match(TASK_TOKEN_RE) ?? [])]);
+    const owners = new Set([taskIdFromRunBranch(pr.headRefName), ...((pr.body ?? "").match(new RegExp(TASK_TOKEN_RE.source, "g")) ?? [])]);
     for (const owner of owners) if (owner !== undefined) file("open", owner, pr);
   }
   for (const pr of merged ?? []) {
@@ -281,6 +281,7 @@ export function githubViewOf(gateway: GitHub, generation: string): GithubView {
     try {
       return githubAnswerOf(Reflect.apply(fn as (...a: unknown[]) => unknown, method === TRAILER_LOOKUP ? undefined : gateway, args));
     } catch (error) {
+      // Not erased: a throw is an answer of its own, distinct from every return, as the recording keeps it.
       return thrownAnswer(error);
     }
   };
@@ -306,9 +307,10 @@ export function githubViewOf(gateway: GitHub, generation: string): GithubView {
 /** The open-sibling observation `projectPlan` attaches to `projection`'s task, recomputed over `view`; "-" when it
  *  does not run for this projection. */
 function siblingAnswer(view: GithubView, task: Task | undefined, projection: StatusProjection): string {
-  if (!task?.files || task.files.length === 0 || projection.merged || projection.prState === "OPEN") return "-";
+  const files = task === undefined ? [] : task.files ?? [];
+  if (task === undefined || files.length === 0 || projection.merged || projection.prState === "OPEN") return "-";
   const gateway = view.gateway;
-  return githubAnswerOf(openSiblingBuild(task.id, task.files, view.openRows, gateway.changedFiles?.bind(gateway)) ?? null);
+  return githubAnswerOf(openSiblingBuild(task.id, files, view.openRows, gateway.changedFiles?.bind(gateway)) ?? null);
 }
 
 /** What `task`'s projection read from GitHub under `view`, as one digest: equal digests, equal GitHub inputs. */
