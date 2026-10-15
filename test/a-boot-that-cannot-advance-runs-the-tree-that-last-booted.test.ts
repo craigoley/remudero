@@ -92,7 +92,7 @@ test("W1-T9631: a boot that cannot advance runs the tree that last booted, names
   const first = boot(home, origin, "main", { ...process.env, GIT_CONFIG_GLOBAL: hostConfig, GIT_CONFIG_SYSTEM: hostConfig });
   assert.equal(first.status, 0, first.stderr);
   assert.equal(readFileSync(hostConfig, "utf8"), hostSentinel, "the inherited config sentinel is untouched");
-  assert.match(readFileSync(join(home, ".gitconfig"), "utf8"), /\[safe\]/, "the entrypoint writes safe.directory only to the fixture config");
+  assert.match(readFileSync(join(home, ".gitconfig"), "utf8"), /\[user\]/, "the entrypoint writes worker identity only to the fixture config");
   assert.equal(first.blocked, "<unset>", "a boot that reached its target tells the daemon nothing is blocked");
   const lastBooted = headOf(home);
   const target = advance(origin, "second.txt");
