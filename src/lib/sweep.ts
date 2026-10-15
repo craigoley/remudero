@@ -14639,13 +14639,13 @@ export function createSweepFixAdmissionController(input: {
       return;
     }
     // W1-T9679: a learned estimate above the whole headroom must not wedge an idle fleet. With no fix reserved here,
-    // one is admitted on its typical peak when no fix tree is live, else when no worker tree is live at all. It is
-    // then charged its whole estimate, so no second rides on it; the spawn guard stays the hard stop.
+    // one is admitted on its typical peak when no fix tree is live and what is left covers it; when even the typical
+    // exceeds the headroom, when no worker tree is live at all. It is then charged its whole estimate, so no second
+    // rides on it; the spawn guard stays the hard stop.
     const live = reservations === 0 ? liveTrees() : undefined;
     if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
-    else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 && charge.headroomMib > 0) {
-      charge.admissionRung = "nothing-live";
-    }
+    else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
+      charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
     if (charge.admissionRung !== "none") available = 1;
   };
   const reviewsFit = (count: number): boolean => !pressure

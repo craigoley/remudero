@@ -44,15 +44,21 @@ function controller(input: {
 }
 
 test("W1-T9679: an idle fleet whose learned fix peak exceeds the headroom still admits one fix", () => {
+  // Headroom 2,994, estimate 3,196, 0 active workers, nothing reserved: origin/main reads 0 available here.
   const rows: Record<string, unknown>[] = [];
-  const at1601 = controller({ availableMib: 6_066, reviews: 3, rows });
-  assert.equal(at1601.snapshot().fixAdmissionsAvailable, 1, "the 16:01Z row that read 0 now reads one admission");
-  assert.equal(rows.at(-1)?.admission_rung, "nothing-live", "3 unstarted reviews and no live tree: the nothing-live rung");
+  const at1601 = controller({ availableMib: 6_066, rows });
+  assert.equal(at1601.snapshot().fixAdmissionsAvailable, 1, "the shape that read 0 now reads one admission");
+  assert.equal(rows.at(-1)?.admission_rung, "typical", "admitted on a named rung");
   assert.equal(at1601.claim(pr).admitted, true, "one fix is admitted at 0 active workers");
   const second = at1601.claim(pr);
   assert.equal(second.admitted, false, "one, never a second");
   assert.equal(rows.at(-1)?.admission_rung, "none");
   if (!second.admitted) assert.match(second.reason, /a fix needs 3196 MiB \(measured; typical 478\)/);
+
+  // The 16:01Z row itself also charged 3 planned reviews (3,660 MiB) past the headroom. Reviews stay first (W1-T9498):
+  // the typical peak fits the headroom, so no rung overrides their charge, and the fix waits for them to settle.
+  const reviewsFirst = controller({ availableMib: 6_066, reviews: 3 });
+  assert.equal(reviewsFirst.claim(pr).admitted, false, "charged reviews still come before the fix");
 });
 
 test("W1-T9679: the typical rung admits one fix and charges it at its learned estimate", () => {
@@ -75,7 +81,7 @@ test("W1-T9679: the typical rung admits one fix and charges it at its learned es
 });
 
 test("W1-T9679: the nothing-live rung is judged on the residency reading, never the reservation count", () => {
-  // 300 MiB over the floor: under the 478 typical peak, so only the nothing-live rung can admit.
+  // 300 MiB over the floor: even the 478 typical peak exceeds it, so only the nothing-live rung can admit.
   const tight = FLOOR + 300;
   assert.equal(controller({ availableMib: tight, reviews: 1 }).claim(pr).admitted, true, "an unstarted review: nothing live");
   assert.equal(controller({ availableMib: tight, reviews: 1, activeWorkers: 1, residents: () => ({ review: [900], fix: [] }) })
