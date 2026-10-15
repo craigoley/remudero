@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: serve held on image drift from 16:03Z; no source handoff since 12:16Z"
   plan_refs: [W1-T8311, W1-T8873, W1-T6245, W1-T9487]
   files: [src/lib/serve-policy-convergence.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/a-memory-deferred-handoff-does-not-hold-the-serve-replace.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

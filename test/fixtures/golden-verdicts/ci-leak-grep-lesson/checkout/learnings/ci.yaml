@@ -1,0 +1,6 @@
+- id: leak-grep-refuses-plan-shard-token-text
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", ".github/scripts/leak-grep.sh", ".github/workflows/ci.yml"]
+  fact: Run `bash .github/scripts/leak-grep.sh` on the committed tree before pushing a plan shard, and reword any matched text rather than allowlisting it.
+  src: "ci-learning:11383:leak-grep"

@@ -12,7 +12,7 @@
   origin: "operator instruction 2026-10-14: advance the governed public compatibility steps before private rmd-ops staging, without schedules, duplicate work or live changes"
   plan_refs: [W1-T9435, W1-T9493, W1-T4227, W1-T4198, W1-T7727]
   files: [src/lib/instance-registry.ts, src/lib/instance-registry-selection.ts, src/lib/onboarding-golive.ts, test/one-registry-for-the-fleet.test.ts, test/onboarding-golive.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ actual main 27a4ee4aaeea20ce5cf7fa736e82750689131384 after the normal
