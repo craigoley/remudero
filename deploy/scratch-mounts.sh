@@ -85,12 +85,14 @@ scratch_enabled() {
 }
 
 # W1-T9617: the hot checkouts' own switch. It only ever adds to a scratch plan that is already on.
+# Like the scratch root (W1-T5631), a test process never reads the host's real switch file.
 scratch_checkouts_enabled() {
   case "${RMD_SCRATCH_CHECKOUTS:-auto}" in
     on) return 0 ;;
     off) return 1 ;;
-    *) [ -e "${RMD_SCRATCH_CHECKOUTS_SWITCH:-/etc/remudero/scratch-checkouts.on}" ] ;;
   esac
+  [ -z "${NODE_TEST_CONTEXT:-}" ] || [ -n "${RMD_SCRATCH_CHECKOUTS_SWITCH:-}" ] || return 1
+  [ -e "${RMD_SCRATCH_CHECKOUTS_SWITCH:-/etc/remudero/scratch-checkouts.on}" ]
 }
 
 # Serve's code dir is its own checkout (serve-container.sh binds it); a build daemon's is the

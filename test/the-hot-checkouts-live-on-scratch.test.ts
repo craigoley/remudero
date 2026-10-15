@@ -207,6 +207,12 @@ test("W1-T9617: with the switch off the scratch plan is unchanged", (t) => {
     : execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, ...h.env } });
   assert.deepEqual(readMountPlanDrift(exec, REPO_ROOT, h.state, "remudero-daemon"), [], "a merge recycles nothing");
 
+  // A test process never reads the host's real switch file: only an explicit path turns it on.
+  const hostSwitch = { ...process.env, ...h.env, NODE_TEST_CONTEXT: "child-v8" } as NodeJS.ProcessEnv;
+  delete hostSwitch.RMD_SCRATCH_CHECKOUTS_SWITCH;
+  delete hostSwitch.RMD_SCRATCH_CHECKOUTS;
+  assert.equal(spawnSync("bash", ["-c", `. "${LIB}"; scratch_checkouts_enabled`], { env: hostSwitch }).status, 1);
+
   // The checkouts switch alone moves nothing: it only adds to a scratch plan that is already on.
   writeFileSync(join(h.root, "scratch-checkouts.on"), "");
   assert.deepEqual(plan(h, "remudero-daemon", { RMD_SCRATCH: "off" }).args, []);
