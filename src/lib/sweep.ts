@@ -11164,12 +11164,13 @@ export async function buildRefreshValueGate(
   const written = new Set(ledgerLines.filter((l) => l.step === REFRESH_DECIDED_STEP).map(rowKey));
   const queueDepth = openPrs.filter((pr) => pr.checksState === "pending").length;
   const benefitWeight = observedRefreshBenefitWeight(ledgerLines);
-  const valueOf = (c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
+  const ciMinutes = observedCiMinutes(ledgerLines);
+  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
     const facts = refreshOverlapOf(c, view, deps.baseChangedFilesByPr?.get(view.prNumber));
     const repairNeeded = facts.repairNeeded || path === "base-red" || path === "plan-repair";
     const ciInFlight = view.checksState === "pending";
     const value = decideRefresh({ path, overlap: facts.overlap, overlapFiles: facts.files, repairNeeded, strict, ciInFlight,
-      judge, queueDepth, benefitWeight });
+      judge, queueDepth, benefitWeight, ciMinutes });
     return { facts, ciInFlight, value };
   };
   return {
@@ -20832,8 +20833,8 @@ import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import {
-  askRefreshJudge, decideRefresh, dueRefreshOutcomes, forcedRefreshRow, judgedVerdicts, observedRefreshBenefitWeight,
-  productionRefreshJudge, refreshDecidedRow, selectPacedRefreshRequest, REFRESH_DECIDED_STEP, REFRESH_OUTCOME_STEP,
+  askRefreshJudge, decideRefresh, dueRefreshOutcomes, forcedRefreshRow, judgedVerdicts, observedCiMinutes,
+  observedRefreshBenefitWeight, productionRefreshJudge, refreshDecidedRow, selectPacedRefreshRequest, REFRESH_DECIDED_STEP, REFRESH_OUTCOME_STEP,
   type RefreshJudge, type RefreshJudgeVerdict, type RefreshOverlap, type RefreshPath,
 } from "./refresh-value.js";
 

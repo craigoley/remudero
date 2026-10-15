@@ -356,3 +356,22 @@ test("W1-T7735: the production sweep effects read main's protection strictness a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T7735: the predicted cost prices CI at the newest median run main-health observed", async () => {
+  const stale = pr(7041, { autoMergeArmed: true, mergeState: "behind" });
+  const facts = { behindMainByPr: one(7041, 12), baseChangedFilesByPr: one(7041, base(["src/other.ts"])),
+    readBranchProtectionStrict: () => false };
+  const costOf = async (ledger: Array<Record<string, unknown>>) => {
+    const h = harness(facts, ledger);
+    await runSweep([stale], h.deps, POLICY);
+    return decided(h.rows)[0]?.predicted_cost_ci_min;
+  };
+  // No observation yet: the measured 2026-10-10 median prices the run.
+  assert.equal(await costOf([]), DEFAULT_CI_MINUTES);
+  // The main-health rung's own median of main's completed runs; the newest one wins.
+  const bisecting = (medianRunMs: number | null) =>
+    ({ run_id: "SWEEP", task_id: "SWEEP", step: "main.repair.bisecting", median_run_ms: medianRunMs });
+  assert.equal(await costOf([bisecting(20 * 60_000), bisecting(31.5 * 60_000)]), 31.5);
+  // An unread median (null) is not an observation, so the newest real one still prices the run.
+  assert.equal(await costOf([bisecting(25 * 60_000), bisecting(null)]), 25);
+});

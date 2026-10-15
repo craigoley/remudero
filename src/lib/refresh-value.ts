@@ -176,6 +176,19 @@ export function observedRefreshBenefitWeight(lines: readonly LedgerRow[]): numbe
   return total === 0 ? 1 : Math.round((hits / total) * 1000) / 1000;
 }
 
+/** W1-T7735 — the observed CI duration, in minutes. It is the newest `median_run_ms` the main-health
+ *  rung recorded on a `main.repair.bisecting` row (the median of main's completed runs).
+ *  `undefined` until one is observed, and {@link decideRefresh} then prices at {@link DEFAULT_CI_MINUTES}. */
+export function observedCiMinutes(lines: readonly LedgerRow[]): number | undefined {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const l = lines[i]!;
+    if (l.step === "main.repair.bisecting" && typeof l.median_run_ms === "number" && l.median_run_ms > 0) {
+      return Math.round(l.median_run_ms / 6_000) / 10;
+    }
+  }
+  return undefined;
+}
+
 /** W1-T7735 — outcomes owed this pass. Each decision row without an outcome is joined with what the
  *  open set now shows: it left the open set (merged or closed), conflicts, or reds. A decision
  *  whose PR is still open and undecided stays owed. */
