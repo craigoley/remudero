@@ -1250,11 +1250,13 @@ function recordedTree(read: ShadowMemoryPorts["readFile"], entryPath: string): {
 /**
  * Each tree's rss+swap, a process counted ONCE: a tree rooted inside another (a test run inside a worker's tree) is
  * measured first and keeps its processes, so the enclosing tree's resident leaves them out. Pure over `read`.
+ * Calibration may additionally request concurrent RSS; the default result keeps the legacy reader contract.
  */
 export function residentsOf(
   read: ShadowMemoryPorts["readFile"],
   paths: readonly string[],
   budget: { left: number } = { left: MAX_TREE_PROCESSES },
+  options: { includeRss?: boolean } = {},
 ): ShadowEntryInput["resident"][] {
   const trees = paths.map((path) => recordedTree(read, path));
   const keys = trees.map((t) => new Set("unread" in t ? [] : t.tree.map(identityKey)));
@@ -1272,7 +1274,7 @@ export function residentsOf(
     }
     const own = t.tree.filter((p) => !counted.has(identityKey(p)));
     for (const p of own) counted.add(identityKey(p));
-    out[i] = treeResident(read, own, budget);
+    out[i] = treeResident(read, own, budget, options.includeRss === true);
   }
   return out;
 }
@@ -1282,6 +1284,7 @@ function treeResident(
   read: ShadowMemoryPorts["readFile"],
   tree: readonly ProcessIdentity[],
   budget: { left: number },
+  includeRss: boolean,
 ): ShadowEntryInput["resident"] {
   let kb = 0;
   let rssKb = 0;
@@ -1302,7 +1305,7 @@ function treeResident(
       void error; // Gone between the listing and the read: it holds nothing now.
     }
   }
-  return { mib: kb / 1024, complete: true, ...(rssComplete ? { rssMib: rssKb / 1024 } : {}) };
+  return { mib: kb / 1024, complete: true, ...(includeRss && rssComplete ? { rssMib: rssKb / 1024 } : {}) };
 }
 
 interface TailRow { step: string; at: number; bytes?: number; pid?: number }
@@ -1435,7 +1438,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   const now = ports.clock.now();
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
-  const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path));
+  const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path), undefined, { includeRss: true });
   // A measured estimate's class also has a learned median; an unmeasured one claims its whole estimate as typical.
   const typical = (workerClass: WorkerClass, estimateMib: number): { typicalMib?: number } => {
     const median = typicalOf(ports, workerClass);

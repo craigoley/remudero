@@ -12,13 +12,53 @@ import {
   type CalibrationIo, type CalibrationState, type MemoryForecast,
 } from "../src/lib/host-memory-calibration.js";
 import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
-import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
+import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, residentsOf, type HostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-15T00:00:00Z");
 const forecast = (at = NOW): MemoryForecast => ({ id: "fixture", at, generation: "g1", scenario: "serve-steady",
   model: JOINT_MODEL, quantile: 0.95, projectedMib: 4400, initialMib: 1000, basis: "cgroup-current-mib" });
 const observations = (at = NOW, peak = 3000) => Array.from({ length: 11 }, (_, i) => ({ at: at + i * 3 * 60_000, mib: peak, peakMib: peak, generation: "g1" }));
+
+test("W1-T8879: legacy residents keep their shape while the real calibration gather explicitly requests RSS", () => {
+  const policy = loadHostMemoryBudgetPolicy(new URL("../plan/policy.yaml", import.meta.url).pathname, fixedClock(NOW));
+  const files: Record<string, string> = {
+    "/ledger/outer.json": JSON.stringify({ roots: [{ pid: 10, start: "proc:100" }], tree: [{ pid: 12, start: "proc:120" }] }),
+    "/ledger/inner.json": JSON.stringify({ roots: [{ pid: 12, start: "proc:120" }], tree: [] }),
+    "/proc/10/stat": `10 (node) S 1 ${"0 ".repeat(17)}100 0 0`,
+    "/proc/12/stat": `12 (node) S 1 ${"0 ".repeat(17)}120 0 0`,
+    "/proc/10/status": "VmRSS: 102400 kB\nVmSwap: 51200 kB\n",
+    "/proc/12/status": "VmRSS: 204800 kB\nVmSwap: 102400 kB\n",
+  };
+  const readFile = (path: string): string => {
+    const text = files[path];
+    if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+    return text;
+  };
+  const paths = ["/ledger/outer.json", "/ledger/inner.json"];
+  assert.deepEqual(residentsOf(readFile, paths), [{ mib: 150, complete: true }, { mib: 300, complete: true }]);
+  const expected = [{ mib: 150, complete: true, rssMib: 100 }, { mib: 300, complete: true, rssMib: 200 }];
+  assert.deepEqual(residentsOf(readFile, paths, undefined, { includeRss: true }), expected,
+    "swap is not concurrent RSS and a nested process still belongs to exactly one tree");
+  const ports: ShadowMemoryPorts = {
+    clock: fixedClock(NOW), nowNs: () => 0n, readFile, readTail: () => "",
+    readLedger: () => ({ state: "present", scope: "host", dir: "/ledger", reservedMib: 1024,
+      entries: paths.map((path, i) => ({ id: String(i), owner: "fixture@c1", workerClass: "implement" as const,
+        estimateMib: 512, estimateSource: { kind: "default-unmeasured" as const }, status: "owned" as const,
+        ageMs: 0, sinceVerifiedMs: 0, walkComplete: true, path })),
+      counts: { live: 2, uncertain: 0, incompleteWalk: 0, localScope: 0, unreadable: 0 } }),
+    policy: () => policy, write: undefined, stderr: () => undefined, instance: () => "fixture",
+    daemonPid: () => undefined, listStateDir: () => [], estimate: () => 512, typical: () => 256,
+    writeFile: () => undefined, readReviewDemand: () => { throw new Error("not a gather input"); },
+    priorityPolicy: () => { throw new Error("not a gather input"); },
+  };
+  const start = { root: "/fixture/core", workerClass: "implement" as const, estimateMib: 512 };
+  assert.deepEqual(gatherShadowInputs(start, ports, policy).entries.map(e => e.resident), expected,
+    "the production gather opts in, not just the isolated reader test");
+  files["/proc/12/status"] = "VmSwap: 102400 kB\n";
+  assert.deepEqual(residentsOf(readFile, paths, undefined, { includeRss: true })[1], { mib: 100, complete: true },
+    "a missing RSS reading stays missing, never measured zero");
+});
 
 test("W1-T8879: the memory budget claims a calibrated joint quantile", () => {
   const samples = Array.from({ length: 100 }, (_, i) => ({ workerClass: "implement" as const,
