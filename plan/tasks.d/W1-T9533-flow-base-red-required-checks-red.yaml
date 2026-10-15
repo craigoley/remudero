@@ -5,8 +5,12 @@
   type: implement
   verify: auto
   risk: low
-  priority: 1.27
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-10-14: retire W1-T9533 — misattributed. Its files: name src/lib/fix-lane-gardener.ts, a once-a-day
+  # remedy filer that never touches a PR; the hold it measures is produced by src/lib/sweep.ts's one-per-pass
+  # `baseRedRefreshPr` slot and the light passes' `updateBranch: undefined` (src/run-task.ts). Replaced by W1-T9595
+  # (refresh by admission); the owner-search defect that picked the file is W1-T9597.
   attempts: 0
   author_class: machine
   origin: "flow-blocker:base-red:required checks red"
