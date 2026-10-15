@@ -148,8 +148,47 @@ resolve_target() {
 # equal the incoming blob (`git hash-object`, byte comparison — never a shell string, which mangles
 # binary data). An unreadable incoming blob (`git cat-file -e` fails) is treated as NOT safe, fail-
 # closed like the dirty guard itself. Every cleared path is logged by name before removal.
-# Falsifier: test/entrypoint-boot.test.ts's five "entrypoint:" cases for this predicate.
+# Falsifier: test/entrypoint-boot.test.ts's "entrypoint:" cases for this predicate, and its "W1-T9623:" cases.
 # Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
+
+# ── W1-T9623: a DIFFERING untracked file is MOVED ASIDE, never left to block every boot ──────────
+# MEASURED 2026-10-15: 45 untracked `plan/feedback/incident-*.yaml` files in the core checkout each
+# differed from the copy #11901/#11946 had landed (the SRE lane re-captured a recurring incident
+# after its landed copy was acknowledged away, with a new `ts` and Count). Leaving them made
+# `git checkout` refuse at 08:22:44 and on every one of the ~150 boots after it, each dying in
+# about a second, until a hand move at 10:28:42 — 2 h 6 m with no daemon. The bytes are kept
+# under `$RECOVERED_UNTRACKED_ROOT/<stamp>/<path>`, named in the log and the ledger, so nothing is
+# discarded and the boot proceeds onto the incoming commit. A failed move leaves the file in place
+# and the checkout below refuses exactly as before.
+RECOVERED_UNTRACKED_ROOT="$CONFIG_ROOT/state/recovered-untracked"
+MOVED_ASIDE_DIR=""
+
+# One JSON string body, for the ledger lines below: backslash, quote and newline escaped.
+json_escape() {
+  local s="${1//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "${s//$'\n'/\\n}"
+}
+
+move_untracked_aside() {
+  local path="$1" local_sha="$2" blob="$3" dest
+  if [ -z "$MOVED_ASIDE_DIR" ]; then
+    MOVED_ASIDE_DIR="$RECOVERED_UNTRACKED_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  fi
+  dest="$MOVED_ASIDE_DIR/$path"
+  if ! mkdir -p -- "$(dirname -- "$dest")" || ! mv -- "$TREE/$path" "$dest"; then
+    log "  leaving untracked '$path' in place: the incoming commit adds this path with DIFFERENT bytes, and moving it aside to $dest failed"
+    return 0
+  fi
+  log "  moved untracked '$path' aside to $dest: the incoming commit adds this path with DIFFERENT bytes, which would refuse every checkout; the local bytes are kept there"
+  # A missing state dir fails the redirection in the shell itself, so it is checked, not redirected into.
+  [ -d "$(dirname -- "$LEDGER_FILE")" ] || return 0
+  printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.untracked_moved_aside","lane":"daemon","path":"%s","moved_to":"%s","local_blob":"%s","incoming_blob":"%s","reason":"the incoming commit adds this untracked path with different bytes, so git checkout would refuse every boot"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(json_escape "$path")" "$(json_escape "$dest")" "$local_sha" "$blob" \
+    >> "$LEDGER_FILE" || log "  (the ledger line for '$path' could not be written; this log line stands)"
+  return 0
+}
+
 clear_redundant_untracked() {
   local target="$1" path blob local_sha
   while IFS= read -r -d '' path; do
@@ -163,7 +202,7 @@ clear_redundant_untracked() {
       log "  clearing untracked '$path': the incoming commit adds this exact path with identical bytes"
       rm -f -- "$TREE/$path"
     else
-      log "  leaving untracked '$path' in place: the incoming commit adds this path but with DIFFERENT bytes"
+      move_untracked_aside "$path" "$local_sha" "$blob"
     fi
   done < <(git -C "$TREE" ls-files --others --exclude-standard -z)
 }
