@@ -47,17 +47,20 @@ test("formatTail redacts the entire secret before cutting through a long final l
 
 test("formatTail redacts secrets, including one that straddles the cut", () => {
   const token = `ghp_${"A".repeat(36)}`;
+  // Built at runtime so no literal credential-shaped string sits in the source for leak-grep.
+  const awsKey = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
+  const skKey = ["sk", "-", "abcdefghijklmnop1234"].join("");
   const raw = [
     `fetch https://user:hunter2@example.com/x`,
     `Authorization: Bearer abcdef1234567890`,
     `GITHUB_TOKEN=${token}`,
     `password = "p@ss word"`,
-    `key AKIAABCDEFGHIJKLMNOP and sk-abcdefghijklmnop1234`,
+    `key ${awsKey} and ${skKey}`,
     `-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\n-----END RSA PRIVATE KEY-----`,
     `author: bob`,
   ].join("\n");
   const out = formatTail(raw);
-  for (const leaked of ["hunter2", "abcdef1234567890", token, "p@ss", "AKIAABCDEFGHIJKLMNOP", "sk-abcdefghijklmnop1234", "MIIBOgIBAAJB"]) {
+  for (const leaked of ["hunter2", "abcdef1234567890", token, "p@ss", awsKey, skKey, "MIIBOgIBAAJB"]) {
     assert.ok(!out.includes(leaked), `leaked ${leaked}`);
   }
   assert.match(out, /author: bob/);
