@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { acquireTestSlot, lowPriorityCommand, testRunArgv } from '../src/lib/test-slot.ts';
+import { acquireTestSlot, lowPriorityCommand, testRunArgv, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { listTestFiles } from './test-tier-manifest.mjs';
 import { authorEnvironment, completeTestResult } from './preflight-author.mjs';
 import { captureStepSync } from './lib/author-step-capture.mjs';
@@ -32,7 +32,7 @@ export function calibrateAuthorRuntime({ root = REPO_ROOT } = {}) {
     native: join(dir, 'sample.native-result.json'), durations: join(dir, 'durations.json') };
   const slot = acquireTestSlot('native-author-runtime:sample');
   try {
-    if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('calibration requires an admitted host-wide slot');
+    if (!testSlotExecutionAllowed(slot) || !['acquired', 'inherited'].includes(slot.outcome)) throw new Error('calibration requires an admitted host-wide slot');
     const concurrency = Math.min(4, slot.concurrency);
     const command = lowPriorityCommand(process.execPath, testRunArgv(['--test', '--test-reporter=tap',
       '--test-reporter-destination=stdout', `--test-reporter=${join(root, 'scripts/test-duration-reporter.mjs')}`,
