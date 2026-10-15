@@ -234,6 +234,7 @@ import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
+import { gitRecommendationEvidence, realRecommendationWriter, RECOMMENDATION_SEED_PATH } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
@@ -37777,6 +37778,27 @@ export function inboxThreadDecider(
   }
 }
 
+export function inboxRecommendationWriter(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): SummarizeDeps["summarize"] | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "inbox-recommendation-settings.json"),
+    });
+    return realRecommendationWriter({
+      mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
+      cwd: config.root,
+      settingsFile,
+    });
+  } catch (e) {
+    log("inbox.recommendation_writer_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 export function plainInboxWriter(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -40287,6 +40309,16 @@ export async function daemonCommand(
           stateDir: join(config.root, "state"),
           readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
           summarize: plainInboxWriter(config, log),
+        },
+        recommendationBackfill: {
+          stateDir: join(config.root, "state"),
+          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          evidence: gitRecommendationEvidence((args) => hostWorktreeGitAsync(repoRoot, args, { maxBuffer: 1 << 26 }), {
+            planDir: relative(repoRoot, resolveRepoLayout(repoRoot).planDir),
+            planMonolith: relative(repoRoot, resolveRepoLayout(repoRoot).planMonolith),
+          }),
+          summarize: inboxRecommendationWriter(config, log),
+          readSeed: () => readFileIfExists(join(repoRoot, RECOMMENDATION_SEED_PATH)),
         },
         fleetLane: {
           stateDir: join(config.root, "state"),
