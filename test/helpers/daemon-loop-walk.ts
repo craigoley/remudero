@@ -45,9 +45,64 @@ export function trackedSourceFiles(): string[] {
  *  sync preflight's in-tree spawn) is invisible to the function-only walk. */
 const OBJECT_DECL = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\{/;
 
+/** W1-T9701: the node that holds what a module evaluates at import. Not identifier-shaped, so no body names it and
+ *  no seeded walk reaches it. */
+export const MODULE_LOAD = "<module-load>";
+
+/** `key: callee(` or `key: new Callee(` at the start of a member: the initializer calls it while the module loads. */
+const CALL_VALUED_MEMBER = /^\s*(?:[\w$]+|"[^"]*"|'[^']*')\s*:\s*(?:new\s+)?(?!async\b|function\b)[A-Za-z_$][\w$.]*\s*\(/;
+
+/**
+ * W1-T9701: split an object-literal node at `open` (its literal's `{`) into what the const hands over and what runs at
+ * module load. Kept as reach: every member that is a function (an arrow, a method, a `function`), a handed-over
+ * value, and a call that is passed a function (a wrapper may run it later). Moved to module load: a call-valued member
+ * with no function in it, and the code after the literal closes (a column-0 statement in the same node). Both halves
+ * keep the body's length and newlines, so neither shifts what the other matches.
+ */
+export function splitObjectLiteral(body: string, open: number): { reach: string; load: string } {
+  const reach = body.split("");
+  const load = body.replace(/[^\n]/g, " ").split("");
+  const move = (from: number, to: number) => {
+    for (let k = from; k < to; k++) {
+      if (body[k] === "\n") continue;
+      load[k] = body[k]!;
+      reach[k] = " ";
+    }
+  };
+  const member = (from: number, to: number) => {
+    const text = body.slice(from, to);
+    if (CALL_VALUED_MEMBER.test(text) && !/=>|\bfunction\b/.test(text)) move(from, to);
+  };
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== c && (c === "`" || body[j] !== "\n")) j += body[j] === "\\" ? 2 : 1;
+      i = j;
+    } else if (c === "/" && body[i + 1] === "/") {
+      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
+    } else if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") {
+      depth--;
+      if (depth === 0) {
+        member(start, i);
+        move(i + 1, body.length);
+        break;
+      }
+    } else if (c === "," && depth === 1) {
+      member(start, i);
+      start = i + 1;
+    }
+  }
+  return { reach: reach.join(""), load: load.join("") };
+}
+
 /** Column-0 function declarations (generators included) and column-0 arrow consts; a body runs to the
  *  next column-0 declaration (a closing brace at column 0 is NOT a boundary: a multi-line parameter type
- *  closes with one). `objectLiterals` also walks {@link OBJECT_DECL} bodies. */
+ *  closes with one). `objectLiterals` also walks {@link OBJECT_DECL} bodies, split by {@link splitObjectLiteral}:
+ *  what one evaluates at import goes to the {@link MODULE_LOAD} node. */
 export function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[] {
   const fns: Fn[] = [];
   const decl =
@@ -56,11 +111,19 @@ export function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[]
   for (const file of trackedSourceFiles()) {
     const lines = stripComments(readFileSync(new URL(`../../${file}`, import.meta.url), "utf8")).split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const m = decl.exec(lines[i]!) ?? (opts.objectLiterals ? OBJECT_DECL.exec(lines[i]!) : null);
+      const fn = decl.exec(lines[i]!);
+      const m = fn ?? (opts.objectLiterals ? OBJECT_DECL.exec(lines[i]!) : null);
       if (!m) continue;
       let end = i + 1;
       while (end < lines.length && !NEXT_DECL.test(lines[end]!)) end++;
-      fns.push({ name: (m[1] ?? m[2])!, file, body: lines.slice(i, end).join("\n") });
+      const body = lines.slice(i, end).join("\n");
+      if (fn) {
+        fns.push({ name: (m[1] ?? m[2])!, file, body });
+        continue;
+      }
+      const { reach, load } = splitObjectLiteral(body, m.index + m[0].length - 1);
+      fns.push({ name: m[1]!, file, body: reach });
+      if (load.trim() !== "") fns.push({ name: MODULE_LOAD, file, body: load });
     }
   }
   return fns;
