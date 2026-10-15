@@ -5,7 +5,7 @@ import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { isGhRateLimitError, readLedgerLines } from "./status.js";
-import { captureFeedback, feedbackDir, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, feedbackCaptured, feedbackDir, setFeedbackStatus, stageFeedbackCapture, type FeedbackEntry } from "./feedback.js";
 import { isTestRunner } from "./live-write-guard.js";
 
 /**
@@ -536,6 +536,9 @@ export interface OpsPollDeps {
   /** Landing-bridge options for the reconciler's status flip — `{}` (the default) is the real
    *  bridge, exactly what `captureFeedback` already passes. Tests inject a recorder. */
   land?: LandFeedbackOpts;
+  /** W1-T9615: the daemon's state root. Set (the daemon's intake rung), a new alert entry is staged in its landing
+   *  queue for the per-poll async sweep and never landed on the loop; absent (the CLI), it lands inline as before. */
+  landingStateRoot?: string;
 }
 
 export interface OpsPollResult {
@@ -593,14 +596,11 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
     }
     for (const alert of open) {
       const id = alertFeedbackId(owner, repo, alert);
-      if (existsSync(feedbackEntryPath(deps.root, id))) continue;
-      feedbackCreated.push(
-        captureFeedback(deps.root, {
-          id,
-          raw: renderAlertRaw(owner, repo, alert),
-          origin: `alert#${alertOriginId(alert)}`,
-        }),
-      );
+      if (feedbackCaptured(deps.root, id, deps.landingStateRoot)) continue;
+      const capture = { id, raw: renderAlertRaw(owner, repo, alert), origin: `alert#${alertOriginId(alert)}` as const };
+      feedbackCreated.push(deps.landingStateRoot === undefined
+        ? captureFeedback(deps.root, capture)
+        : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
     }
     // RECONCILE the other direction (impl-EV): the capture loop above only ever ADDS. An entry
     // whose alert has since been dismissed or fixed was never closed by anything, so it aged into

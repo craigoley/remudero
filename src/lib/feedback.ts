@@ -11,7 +11,7 @@ export type { FeedbackAdmissionContext } from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
+import { landFeedback, landFeedbackStatusContent, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -872,15 +872,61 @@ export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot
  * (W1-T397). Local writes/attachments need no network; later publication can use the network.
  * Landing/upstream failures never discard the local entry. See docs/forensics/feedback.md. */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
+  const existing = existingCapture(root, opts, opts.land?.stateRoot);
+  if (existing) return existing;
+  const entry = writeCapture(root, opts);
+  const publication = capturePublication(opts);
+  try {
+    landFeedback(root, { ...opts.land, ...(publication === undefined ? {} : { publication }) });
+  } catch {
+    // landFeedback already swallows its own failures — a defensive second layer only.
+  }
+  return upstreamCapture(root, entry, opts, publication);
+}
+
+/** {@link stageFeedbackCapture}'s answer: the entry, and whether its record now waits in the landing queue. */
+export interface StagedFeedbackCapture {
+  entry: FeedbackEntry;
+  /** False for an entry that already existed (nothing was written), or a failed stage, whose copy stays in the checkout. */
+  queued: boolean;
+  error?: string;
+}
+
+/** W1-T9615: {@link captureFeedback} for a DAEMON-LOOP caller. The entry is written, upstreamed as before, then MOVED into
+ *  W1-T5460's landing queue under `stateRoot`, which the per-poll async sweep drains; nothing lands inline, so the sync
+ *  plan-PR preflight never runs on the loop. An id already queued is that entry, untouched. With no `stateRoot`, or
+ *  after a failed stage, the copy stays in the checkout, where the same sweep's dirty scan lands it. */
+export function stageFeedbackCapture(root: string, stateRoot: string | undefined, opts: Omit<CaptureFeedbackOptions, "land">): StagedFeedbackCapture {
+  const existing = existingCapture(root, opts, stateRoot, true);
+  if (existing) return { entry: existing, queued: false };
+  const entry = upstreamCapture(root, writeCapture(root, opts), opts, capturePublication(opts));
+  if (stateRoot === undefined) return { entry, queued: false };
+  const staged = queueFeedbackRecord(root, feedbackEntryRepoPath(entry.id), stateRoot);
+  return staged.queued ? { entry, queued: true } : { entry, queued: false, error: staged.error ?? "the record was not queued" };
+}
+
+/** W1-T9615: true when entry `id` is in the checkout or waits in `stateRoot`'s landing queue — a staging caller's dedup read. */
+export function feedbackCaptured(root: string, id: string, stateRoot?: string): boolean {
+  return existsSync(feedbackEntryPath(root, id)) || (stateRoot !== undefined && existsSync(join(queuedFeedbackDir(stateRoot), `${id}.yaml`)));
+}
+
+/** The entry a capture of `opts` already has: by submission key, then the checkout, the queue (`queuedIds`) and origin/main. */
+function existingCapture(root: string, opts: CaptureFeedbackOptions, stateRoot: string | undefined, queuedIds = false): FeedbackEntry | null {
   if (opts.submissionKey) {
-    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, opts.land?.stateRoot);
+    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, stateRoot);
     if (existing) return existing;
   }
-  if (opts.id !== undefined && existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
-  if (opts.id !== undefined) {
-    const landed = readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
-    if (landed) return landed;
+  if (opts.id === undefined) return null;
+  if (existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
+  if (queuedIds && stateRoot !== undefined) {
+    const queued = readQueuedFeedbackRecords(stateRoot).get(feedbackEntryRepoPath(opts.id));
+    if (queued) return queued as unknown as FeedbackEntry;
   }
+  return readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
+}
+
+/** Validate `opts` and write its new entry (and attachments) under `root`. */
+function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";
@@ -897,7 +943,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     ? inheritFeedbackLineage(opts.derivedFrom.entry, opts.derivedFrom.relayedBy)
     : opts.admission?.mode === "shadow" && opts.contribution !== undefined
       ? admitFeedbackContribution(opts.contribution, opts.admission) : null;
-  let entry: FeedbackEntry = {
+  const entry: FeedbackEntry = {
     id,
     ts: new Date().toISOString(),
     raw,
@@ -914,13 +960,17 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   observeFeedbackAdmission(entry, opts.admission, "capture");
-  const publication = opts.admission?.mode === "shadow" ? { mode: "shadow" as const,
-    record: opts.admission.record ?? (() => {}) } : undefined;
-  try {
-    landFeedback(root, { ...opts.land, ...(publication === undefined ? {} : { publication }) });
-  } catch {
-    // landFeedback already swallows its own failures — a defensive second layer only.
-  }
+  return entry;
+}
+
+function capturePublication(opts: CaptureFeedbackOptions): FeedbackPublicationContext | undefined {
+  return opts.admission?.mode === "shadow" ? { mode: "shadow" as const, record: opts.admission.record ?? (() => {}) } : undefined;
+}
+
+/** The W1-T397 upstream step: a configured home repo other than this one gets a PR, recorded on the entry. */
+function upstreamCapture(root: string, captured: FeedbackEntry, opts: CaptureFeedbackOptions, publication: FeedbackPublicationContext | undefined): FeedbackEntry {
+  let entry = captured;
+  const id = entry.id;
   try {
     const home = loadHomeRepoPointer(root);
     if (home) {
