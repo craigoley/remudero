@@ -2591,6 +2591,7 @@ async function runGatedSweep(
     };
     continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
     const startedAtMs = Date.now();
+    const elapsedSinceStart = (): number => Date.now() - startedAtMs;
     let abandoned = false;
     const sweepPromise: Promise<SweepCycleOutcome | void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
     // Cleared on settle, never on abandon. Attaching this to the pass promise itself, rather than to the
@@ -2602,7 +2603,7 @@ async function runGatedSweep(
         liveness.inFlight = false;
         liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
       }
-      const elapsedMs = Date.now() - startedAtMs;
+      const elapsedMs = elapsedSinceStart();
       recordSettledSweep(sweepBound, elapsedMs); // W1-T9563: a pass past its bound is still a healthy sample
       log("daemon.sweep.settled", { elapsed_ms: elapsedMs, abandoned, bound_ms: bound.boundMs, bound_basis: bound.basis });
     }, () => { if (liveness) liveness.inFlight = false; });
@@ -2614,7 +2615,7 @@ async function runGatedSweep(
       const winner = await Promise.race([sweepPromise, boundTimer]);
       if (winner === "abandoned") {
         abandoned = true;
-        const elapsedMs = Date.now() - startedAtMs;
+        const elapsedMs = elapsedSinceStart();
         log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
         // Never leave the real pass's eventual outcome unhandled — it may resolve or throw well after this
         // call has moved on, which the reconciler's shared mutex is what makes safe.

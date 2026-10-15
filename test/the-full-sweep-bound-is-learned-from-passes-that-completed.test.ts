@@ -12,16 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import {
-  SWEEP_BOUND_MIN_SAMPLES,
-  SWEEP_BOUND_WINDOW,
-  learnedSweepBound,
-  recordSettledSweep,
-  runDaemon,
-  settledSweepDurations,
-  type DaemonDeps,
-} from "../src/lib/daemon.js";
+import * as daemon from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
+
+// A namespace import, so the file still loads where the learner is absent and each test reddens on its own.
+const { SWEEP_BOUND_MIN_SAMPLES, SWEEP_BOUND_WINDOW, learnedSweepBound, recordSettledSweep, settledSweepDurations } = daemon;
 
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MIN = 60_000;
