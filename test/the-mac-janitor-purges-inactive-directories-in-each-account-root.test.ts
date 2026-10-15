@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { age as fixtureAge, fixture, git, repos, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
@@ -137,7 +137,10 @@ test("live paths, unreadable process probes and external symlinks remain in plac
       if (kind === "cwd") writeFileSync(fx.lsofList, path + "\n");
       if (kind === "ps-unavailable") env.FAIL_PS = "1";
       if (kind === "lsof-unavailable") env.FAIL_LSOF = "1";
-      if (kind === "symlink") { symlinkSync(fx.root, join(path, "outside")); age(path, 8); }
+      if (kind === "symlink") {
+        const before = statSync(path); symlinkSync(fx.root, join(path, "outside"));
+        utimesSync(path, before.atime, before.mtime); // Never recurse through the deliberate cycle.
+      }
       const r = sweep(fx, true, env); assert.equal(r.status, 0, r.stderr + r.stdout);
       assert.equal(existsSync(path), true, `${kind}: ${r.stdout}`);
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
@@ -212,5 +215,21 @@ exit 0
     assert.equal(existsSync(join(path, "new-content.bin")), true, r.stdout);
     assert.equal(existsSync(path), true, r.stdout);
     assert.match(r.stdout, /content or metadata touched within 6h/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+
+test("parent aliases resolve once while a symlink scan root stays excluded", () => {
+  const fx = setup();
+  try {
+    const parent = join(fx.root, "home-alias"); symlinkSync(fx.home, parent);
+    const root = join(parent, "rmd-work"); const old = data(roots(fx)[3]!, "alias-idle-data");
+    const excluded = join(fx.root, "excluded"); mkdirSync(excluded);
+    const keep = data(excluded, "symlink-root-data");
+    const link = join(fx.root, "root-link"); symlinkSync(excluded, link);
+    const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: [root, roots(fx)[3]!, link].join(":") });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(old), false, r.stdout); assert.equal(existsSync(keep), true, r.stdout);
+    assert.equal((r.stdout.match(/REMOVED-SCRATCH/g) ?? []).length, 1, r.stdout);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
