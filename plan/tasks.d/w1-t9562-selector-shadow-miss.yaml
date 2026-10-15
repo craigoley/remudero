@@ -1,0 +1,29 @@
+- id: W1-T9562
+  title: "REPAIR THE SELECTOR EDGE INTO test/ci-friction-remedies-file-admission.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/ci-friction-remedies-file-admission.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 38645541967 for PR #11820 at b2f0595277a6a40244d06bee8dc36e9bad01ea47: src/lib/prompt-render.ts, test/check-reviewer-unmet.test.ts -> test/ci-friction-remedies-file-admission.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/ci-friction-remedies-file-admission.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/ci-friction-remedies-file-admission.test.ts when this edge is exercised"
+      proof: "grep: test/ci-friction-remedies-file-admission\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/ci-friction-remedies-file-admission.test.ts for each recorded edge"
+      proof: "grep: test/ci-friction-remedies-file-admission\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan limits the remedy to a named selector edge and regression coverage in two existing files, with a specific PR, run, and commit cited as evidence."
+      - "The declared scope requests no sensitive access, deletion, irreversible action, operator decision, or merge, deployment, infrastructure, or review policy change."
+      - "The supplied family record reports 18 merged and 0 declined tasks; the filing-time gates report no additional concern."
+    judged_at: "2026-10-15T00:54:22.442Z"
+    pin: "491227a0cbb138861bab784d540297ba3e9f874120b9c394a0386091250846d6"

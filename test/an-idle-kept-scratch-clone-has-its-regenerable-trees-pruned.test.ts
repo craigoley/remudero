@@ -1,6 +1,6 @@
 /**
- * W1-T5547 — a scratch unit W1-T5513 must KEEP (dirty, unbundleable) still loses its regenerable
- * trees. Driven as the real deploy/rmd-host-cleanup.sh against a fixture scratch root: an idle kept
+ * W1-T5547 — a published scratch unit W1-T5513 must KEEP for dirty source can lose regenerable
+ * trees, but unpublished work keeps its caches too. Driven as the real deploy/rmd-host-cleanup.sh: an idle kept
  * clone has its top-level coverage/ and node_modules/ pruned, and nothing else; a fresh, held,
  * mounted or marked unit is never pruned; a symlinked node_modules is never followed.
  */
@@ -35,7 +35,7 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
   // kept for an ignored path beyond node_modules/coverage AND uncommitted changes
   const dirty = keptUnit(fx, main, "dirty-unit");
   writeFileSync(join(dirty.repo, "uncommitted.txt"), "not committed\n");
-  // kept because its local branch cannot be bundled: the archive shares the scratch filesystem
+  // Unpublished work stays in place regardless of whether an archive could be made.
   const unsaved = keptUnit(fx, main, "unsaved-unit");
   rmSync(join(unsaved.repo, "state"), { recursive: true, force: true });
   git(unsaved.repo, "checkout", "-q", "-b", "local-only");
@@ -64,7 +64,7 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
   const r = run(fx, { ...scratchOnly(fx), FAKE_ARCHIVE_FSID: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
 
-  for (const u of [dirty, unsaved]) {
+  for (const u of [dirty]) {
     assert.equal(existsSync(u.unit), true, `the unit itself is kept: ${r.stdout}`);
     assert.equal(existsSync(join(u.repo, "coverage")), false, `coverage/ is pruned: ${r.stdout}`);
     assert.equal(existsSync(join(u.repo, "node_modules")), false, `node_modules/ is pruned: ${r.stdout}`);
@@ -76,8 +76,12 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
   assert.ok(r.stdout.includes(`KEEP ${dirty.unit}: uncommitted changes (${dirty.repo})`), r.stdout);
   assert.equal(readFileSync(join(dirty.repo, "uncommitted.txt"), "utf8"), "not committed\n");
   assert.equal(readFileSync(join(dirty.repo, "state", "ledger.jsonl"), "utf8"), "{}\n", "unknown ignored data stays");
-  assert.ok(r.stdout.includes(`KEEP ${unsaved.unit}: local branches could not be archived safely`), r.stdout);
-  assert.match(r.stdout, /pruned 5 regenerable trees from kept scratch units \([1-9][0-9]* bytes\)/);
+  assert.ok(r.stdout.includes(`KEEP ${unsaved.unit}: not-proven-published`), r.stdout);
+  for (const name of ["coverage", "node_modules"]) {
+    assert.equal(existsSync(join(unsaved.repo, name)), true, "unpublished work keeps its caches too");
+    assert.ok(!r.stdout.includes(`PRUNE ${join(unsaved.repo, name)}`), r.stdout);
+  }
+  assert.match(r.stdout, /pruned 3 regenerable trees from kept scratch units \([1-9][0-9]* bytes\)/);
 
   assert.equal(lstatSync(linkedModules).isSymbolicLink(), true, "a symlinked node_modules is left alone");
   assert.equal(readFileSync(join(outside, "precious.js"), "utf8"), "keep\n", "its target is never followed");
@@ -118,6 +122,7 @@ test("a mounted, marked, locked, tracked or bundle-holding kept tree is never pr
   writeFileSync(join(tracked.repo, ".git", "info", "exclude"), "node_modules\nstate\n");
   git(tracked.repo, "add", "coverage");
   git(tracked.repo, "commit", "-q", "-m", "tracked coverage");
+  git(tracked.repo, "push", "origin", "HEAD:tracked-coverage");
   writeFileSync(join(tracked.repo, ".git", "info", "exclude"), "node_modules\ncoverage\nstate\n");
   // a loose bundle inside coverage/ is a rescue the bundle archiver reads; it is never pruned
   const bundled = keptUnit(fx, main, "bundle-unit");

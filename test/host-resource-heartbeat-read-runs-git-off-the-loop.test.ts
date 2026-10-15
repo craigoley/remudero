@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import {
   gitHeartbeatSource,
+  HOST_RESOURCE_MIN_INTERVAL_MS,
   readSamples,
   runHostResourcePass,
   runHostResourcePassAsync,
@@ -212,7 +213,7 @@ test("W1-T5002: the standalone timer keeps one asynchronous read in flight and r
   const handle = startHostResourceGardener(p, 1_000);
   try {
     assert.equal(reads, 1);
-    nowMs += 6 * 60_000;
+    nowMs += HOST_RESOURCE_MIN_INTERVAL_MS + 60_000;
     t.mock.timers.tick(1_000);
     assert.equal(reads, 1, "elapsed cadence cannot admit a second pending read");
     rejectRead(new Error("async transport failure"));

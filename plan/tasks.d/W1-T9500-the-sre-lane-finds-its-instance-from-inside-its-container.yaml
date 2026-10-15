@@ -17,8 +17,8 @@
     - test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts
     # W1-T8232's tests drive the state-root match; each changes only if red without the change
     - test/the-sre-lane-runs-on-the-primary-instance.test.ts
-  status: queued
-  priority: 2
+  status: merged
+  priority: 1  # operator approval 2026-10-14 (Craig): raised, being session-built; the SRE lane has never started on core (63 sre_lane.disabled, 0 sre_lane.started across the 10-10..10-14 rotations)
   attempts: 0
   rationale: |
     ASKED: a PAUSE-age signal that fires when a PAUSE outlives the observed recycle durations for its kind, with no

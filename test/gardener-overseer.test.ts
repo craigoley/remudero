@@ -772,7 +772,7 @@ test("a ci-friction effect is judged on the remedy's build, by its cause's share
   assert.equal(ciFrictionEffectReading(pr, [filing], () => undefined, () => rounds, now), undefined, "no remedy record yet");
   assert.equal(ciFrictionEffectReading(pr, [filing], () => task(["src/a.ts"]), () => rounds, now), undefined, "its build has not merged");
   assert.deepEqual(ciFrictionEffectReading(pr, [filing], () => task(["docs/ci-friction-remedies.md"], new Date(merged).toISOString()), () => rounds, now), {
-    before: 0, after: 0, se: 0, verdict: "debit", reason: "W1-T7100 was built as a docs-only record, which changes no code path",
+    before: 0, after: 0, se: 0, verdict: "debit", taskId: "W1-T7100", reason: "W1-T7100 was built as a docs-only record, which changes no code path",
   });
   const credit = ciFrictionEffectReading(pr, [filing], () => task(["src/a.ts"], new Date(merged).toISOString()), () => rounds, now);
   assert.equal(credit?.verdict, "credit");

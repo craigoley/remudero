@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: serve's image replace ran at 17:02:56Z only because the ledger rotated at 17:00:22Z"
   plan_refs: [W1-T9504, W1-T6245, W1-T8311, W1-T9508]
   files: [src/lib/serve-policy-convergence.ts, test/a-ledger-rotation-does-not-blind-the-serve-handoff-hold.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

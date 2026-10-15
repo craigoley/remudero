@@ -625,6 +625,7 @@ export function renderFixPrompt(opts: {
     "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
     "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
     "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation. " +
+      "NEEDS_SCOPE is for a red this PR's diff causes: a red in a file the diff does not touch or reach, which passes at main, is FLAKE, and the harness reruns it as one either way. " +
       "Leave those out-of-scope edits saved (uncommitted) in the worktree when you report — never revert them: the scope amendment admits only paths this round actually changed.",
     "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
     ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),
@@ -1292,4 +1293,18 @@ export function renderImplementPrompt(
     task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits,
     capabilityContextPart,
   ).prompt;
+}
+
+/**
+ * W1-T6166: whether a `reviewer-unmet` fix round is worth dispatching at all. A round whose evidence
+ * names no unmet criterion, no gate failure and an empty review summary hands a worker nothing to act
+ * on, so it is prevented rather than retried. PURE; any other mode is never judged here.
+ */
+export function reviewerUnmetPrevention(
+  evidence: FixEvidence,
+): { dispatch: true } | { dispatch: false; reason: string } {
+  if (deriveFixMode(evidence) !== "reviewer-unmet") return { dispatch: true };
+  if ((evidence.review?.unmetCriteria.length ?? 0) > 0) return { dispatch: true };
+  if ((evidence.review?.summary ?? "").trim().length > 0) return { dispatch: true };
+  return { dispatch: false, reason: "reviewer-unmet evidence is empty: no unmet criterion and no review summary" };
 }

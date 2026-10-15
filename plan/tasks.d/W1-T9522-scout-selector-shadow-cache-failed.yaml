@@ -1,0 +1,30 @@
+- id: W1-T9522
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — selector-shadow.cache_failed landed 9 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:selector-shadow.cache_failed"
+  files:
+    - test/scout-selector-shadow-cache-failed.test.ts
+  acceptance:
+    - claim: "selector-shadow.cache_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9522: selector-shadow.cache_failed no longer recurs\" in test/scout-selector-shadow-cache-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step selector-shadow.cache_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 6 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-selector-shadow-cache-failed.test.ts). Nothing in the description or files list touches secrets, auth, permissions, merge/deploy/infrastructure policy, or data deletion.; on the change's description/files alone, no diff was read — The task is a fix for a recurring ledger symptom (selector-shadow.cache_failed). The description states that the fix targets the cause and does not hide rows, and that the PR will still pass CI and review. This is an ordinary implement task and does not need an operator decision.; on the change's description/files alone, no diff was read — Weaknesses: the evidence shows 0 of 1 declared files exist at the base, and the rows name no file, so the code that writes this step must be found first. The scope may therefore grow beyond the declared test file. The scout family has 0 merged and 1 declined task (Beta mean 0.33). These points call for careful review but do not meet the escalation criteria."
+    judged_at: "2026-10-15T00:54:02.559Z"
+    pin: "dbf67088a1282f6fb8819331dc261c398a7d59bfbc98d87daad0071d1ff01c78"

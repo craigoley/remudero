@@ -172,6 +172,29 @@
   src: "ci-learning:9979:ci-shard (7/8)"
   cited: "2026-10-09"
 
+- id: proof-discrimination-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts]
+  error_signatures: ["proof-discrimination", executed_stale]
+  fact: >-
+    When proof-discrimination refuses a PR, inspect its gate output and make each proof fail at the
+    merge base while passing on the changed head; a test added by the PR may also be copied into the
+    base proof worktree, so prove the changed behavior with a test of the modified surface. For
+    dispatcher or task-authoring changes, update the prompt or criteria writer in the lane that
+    produced the inert or stale proof, then verify with the gate's base comparison before pushing.
+  evidence: >-
+    The proof-discrimination gate refused PR #11139 and the recorded repair changed its broad diff,
+    which does not establish one shared cause. PR #11201's W1-T8921 record documents two
+    executed_stale proofs: the base proof worktree copied the added test, making both proofs pass at
+    base; the repair repointed them at changed behavior that differed between head and base.
+    Separate main-repair and alert-fix records W1-T8572 and W1-T8625 trace inert prose proofs to
+    dispatcher prompts that omitted the required proof dialect. Use the refusal's observed failure
+    and repair the proof-producing lane; the PR list alone does not establish that all refusals had
+    the same cause.
+  src: "ci-learning:11139:proof-discrimination"
+  cited: "2026-10-14"
+
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active
@@ -614,6 +637,30 @@
   src: "ci-learning:10339:Scan"
   cited: "2026-10-11"
 
+- id: leak-grep-refuses-plan-shard-token-text
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - ".github/scripts/leak-grep.sh"
+    - ".github/workflows/ci.yml"
+  error_signatures:
+    - "leak-grep: possible secret matching"
+  fact: >-
+    The leak-grep gate scans every tracked file, plan task shards included, for fixed secret-token
+    formats. Before pushing a plan/tasks.d shard, run `bash .github/scripts/leak-grep.sh` on the
+    committed tree, and if it reports a match, reword the matched text so the pattern no longer
+    matches. Never add an allowlist entry to defeat the tripwire.
+  evidence: >-
+    The leak-grep gate went red on PR #11383 and the repair touched
+    plan/tasks.d/W1-T9181-the-revalidation-garden-never-closes-on-an-absence.yaml. Checked at
+    origin/main on 2026-10-14: that record matches none of the seven patterns in
+    .github/scripts/leak-grep.sh. So the token that tripped #11383 is NOT established, and the
+    #11383 CI log was not read. The gate's own refusal names the rule above, so this entry
+    names that remedy, not a verified per-PR cause.
+  src: "ci-learning:11383:leak-grep"
+  cited: "2026-10-14"
+
 # ── docs-index-check refusal (ci-learning:11388:docs-index-check, PRs #11388 and #11524) ──
 - id: docs-index-stale-after-doc-edit
   subsystem: ci
@@ -623,4 +670,16 @@
     Any edit under docs/**/*.md makes the committed docs/docs-index.json STALE, and the docs-index:check gate refuses the PR; before pushing a docs change run `npm run --silent docs-index`, commit the regenerated docs/docs-index.json, then confirm `npm run --silent docs-index:check` prints OK.
   evidence: "ci-learning:11388:docs-index-check: the docs-index-check gate refused #11388 and #11524 because docs/docs-index.json did not match a fresh regeneration from docs/**/*.md (scripts/generate-docs-index.mjs --check exits 1 with 'is STALE'). The ci-learning note records the #11388 repair as regenerating docs/docs-index.json, editing docs/README.md, and touching three tests (a-refused-green-merge-records-why-and-reruns-a-stale-check, daemon-worktrees-pushes-and-arms-never-block-the-loop, run-task); that repair was NOT re-read from the PRs in this run. Also run `npm run --silent docs-index:check-paths` when a mermaid block cites a path."
   src: "ci-learning:11388:docs-index-check"
+  cited: "2026-10-14"
+
+# ── task-id-existence refusal (ci-learning:10904:task-id-existence, PR #10904) ──
+- id: task-id-existence-cites-must-resolve
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]
+  error_signatures: ["task-id-existence"]
+  fact: >-
+    The task-id-existence gate refuses any W1-T<n> id cited under src/, deploy/ or plan/ that resolves to neither a refs/rmd-id/W1-T<n> reservation on origin nor a `- id:` record in plan/tasks.yaml or plan/tasks.d/*.yaml; before pushing, write a placeholder W1-T<n> in prose, or mint and declare the id in the same PR, and run `npm run --silent task-id-existence:check`.
+  evidence: "scripts/task-id-existence-check.mjs (header: resolves to a reservation ref or a declared plan record, existence not ownership) and src/lib/task-id-reservation.ts. The ci-learning note for PR #10904 records that the gate went red and was repaired by editing plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml; the exact id that failed to resolve in that run was NOT read from the CI log in this entry, so the trigger is not verified here."
+  src: "ci-learning:10904:task-id-existence"
   cited: "2026-10-14"

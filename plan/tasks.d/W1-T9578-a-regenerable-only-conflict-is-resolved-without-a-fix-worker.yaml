@@ -1,0 +1,93 @@
+- id: W1-T9578
+  title: "A CONFLICT ONLY A GENERATOR OR MAIN'S DELETION CAN RESOLVE WAITS FOR A FIX WORKER THE HOST NEVER ADMITS — when every path `git merge-tree` reports conflicting is a REGENERABLE_ARTIFACT_GENERATORS key, the sweep still routes the PR to the bounded merge-conflict worker, which waits behind the review charge; #11755 (W1-T9415) and #11785 (W1-T8446) sat conflicted over 2 h on 2026-10-14 on learnings/index.json alone, a file main had retired (W1-T7954), until main was merged into them by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the sweep resolves a conflict whose unmerged paths are all registry artifacts itself; high because it pushes a merge to a fleet run branch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: #11755 (W1-T9415) and #11785 (W1-T8446) conflicted from 22:43Z on 2026-10-14 to a hand merge of main at 01:00Z on 2026-10-15; every conflicted row said 'would dispatch the bounded merge-conflict fix worker' and none was admitted"
+  plan_refs: [W1-T2548, W1-T3602, W1-T4914, W1-T9454, W1-T7954, W1-T9498, W1-T6133, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main c386eab77. Symbols, not lines.
+    OBSERVED 2026-10-14/15 (core ledger streamed read-only from the Azure host, archives 20-59Z..00-00Z plus the
+    live file). W1-T7954 (#11759, merged 23:10Z) retired the committed learnings/index.json. Every open PR whose
+    branch had edited it now hits a modify/delete conflict on that one path. sweep.merge_probe for #11785 at head
+    79653b0 and for #11755 at head d11ca07, against main 7cfdd77, both read verdict conflict with conflict_paths
+    ["learnings/index.json"] and github_mergeable_state dirty (00:38:11Z). Locally `git merge-tree --write-tree
+    --name-only` reports the same single path. learnings/ci.yaml and test/golden-verdicts.test.ts auto-merge.
+    The sweep dispositioned both PRs `conflicted` on 14 passes from 22:43Z to 00:56Z. Every one read "NOT
+    DISPATCHED this pass", either "deferred to full sweep (light pass)" or "live host capacity exhausted for this
+    full pass (headroom 2406 MiB over the floor; charged 2651 MiB for 3 reviews at 1130 ... a fix needs 1283 MiB
+    (measured); 2 active, 0 fixes admitted)" (00:42:26Z). The passes between them read `wait` mergeability-unknown,
+    which W1-T9454 already owns. No fix.dispatch row names either PR. The resolution a worker would have made is
+    `git rm learnings/index.json`, which took one command by hand.
+    WHY THE REGENERABLE ARM DOES NOT FIRE, AND WOULD NOT HELP IF IT DID. The `conflicted` row's reason calls
+    isRegenerableArtifactConflict on pr.mergeConflict.files. That list is GitHub compare's "touched on both sides"
+    superset (open-prs-rest.ts, hydrateMergeConflictEvidenceSteps, "INTERSECTION ONLY"), here learnings/ci.yaml,
+    learnings/index.json and test/golden-verdicts.test.ts. So the arm reads false. Even when it reads true, it
+    only changes the worker's prompt ("dispatching the merge-conflict fix mode to RE-RUN the generator(s)"). The
+    resolution is a worker round charged a fix's memory, the same admission the review queue holds closed. And for a
+    path main deleted, the registered generator (learnings-index) writes a file main now gitignores. Re-running it
+    is not the resolution. Taking main's deletion is.
+    WHY THIS IS SAFE WHERE W1-T3602 WAS NOT. W1-T3602 refused mechanical resolution on evidence never compared
+    byte for byte. Here git's own three-way merge decides every path outside the unmerged set. A registry path is
+    correct by construction when its generator re-runs on the merged tree (W1-T2548's premise). A path absent from
+    main's tree is main's deletion, and the PR's edit to a generated file it no longer tracks carries no hand-written
+    intent. Any unmerged path outside the registry refuses the whole resolution.
+    THE SEAMS EXIST. rebaseDirtyFleetBranchViaGit and prHeadTreeGit (W1-T6133) already cut a tree at a PR's own
+    head, lease on its head and on main's sha, and push through the harness's pre-push leaf. probeOpenPrMerges runs in
+    the same pass and ledgers the exact (head, main) conflict paths, so the trigger needs no new GitHub read.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for isRegenerableArtifactConflict, REGENERABLE_ARTIFACT_GENERATORS,
+    merge_probe, modify/delete, "deleted in main" and "mechanical conflict". Hits: W1-T2548 and W1-T2540 (merged, the
+    prompt arm), W1-T3602 (merged, refused byte-unchecked mechanical resolution), W1-T4914 (merged, the probe,
+    observation only), W1-T9454 (queued, the probe as fallback EVIDENCE for the same worker), W1-T9289 (queued,
+    plan-PR conflict rounds) and W1-T5864 (merged). None resolves without a worker. Swept the plan/ diffs of the 171
+    origin heads with a commit in the last 3 days (6 touch plan/tasks.d). One hit, W1-T9520 (plan-PR
+    automerge mergeability), is a different concern.
+    lint-plan's duplicate-surface check pairs this with W1-T100 (tasks.yaml, queued, src/lib/sweep.ts and src/run-task.ts).
+    That task routes blocked_ci to the ci-log fix path, a different concern. This task touches only the conflicted path.
+  design: |
+    No new bound. A conflict git can name, and the registry can resolve, is resolved by the pass that sees it.
+    1. TRIGGER. For a PR the sweep would disposition `conflicted` on its own task's run branch (fixHeadAcceptable), the
+       pass reads its sweep.merge_probe row for the PR's exact head_sha and the pass's main_sha. When the verdict is
+       conflict and every conflict path is a REGENERABLE_ARTIFACT_GENERATORS key, the PR takes the regenerate route.
+       No probe row for that pair, or any other path, means today's `conflicted` row runs unchanged.
+    2. RESOLVE IN A TREE CUT AT THE PR HEAD, through the rebaseDirtyFleetBranchViaGit seams (lease on head and main).
+       Run `git merge --no-edit origin/main`, then read `git ls-files -u`. If that unmerged set is not a subset of the
+       registry, abort the merge, remove the tree and fall through to the worker row. For each unmerged path: if
+       main's tree has no such path, `git rm` it (main's deletion); otherwise run its registered package.json script
+       on the merged tree and `git add` the path. Commit with the PR's Remudero-Task trailer and push fast-forward.
+       A moved head or main refuses, as the stale-red rebase already does.
+    3. RECORD. One `sweep.conflict_regenerated` row per attempt: pr_number, head_sha, main_sha, new_head_sha, each
+       path with its action (deleted-on-main or the generator it ran), and the outcome (pushed, fell-through and
+       why, lease-mismatch, error). The new head gets a fresh review and CI like any other head.
+    4. COST. A git merge and at most the registered generator scripts. No worker spawns, so it takes no
+       fix-admission charge. One attempt per (head, main) pair, keyed on the row in 3.
+    5. src/run-task.ts is near its comment-load ceiling. Keep the wiring to a call there.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Drive the route against real
+    throwaway repos (gitRepo()): a main that deletes a registered file the head edited, and a head and main that both
+    edit one registered file and one hand-written file.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts"
+    - claim: "a conflict whose only unmerged path is a registry file main deleted resolves to main's deletion and pushes, with no worker dispatched"
+      proof: 'grep: test("W1-T9578: a conflict on a registry file main deleted resolves to the deletion without a worker" in test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts'
+    - claim: "a conflict whose unmerged set includes a hand-written path pushes nothing and reaches the existing conflicted worker row"
+      proof: 'grep: test("W1-T9578: an unmerged path outside the registry falls through to the conflict worker" in test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts'
+    - claim: "a registry path both sides edited is resolved to its generator's output on the merged tree"
+      proof: 'grep: test("W1-T9578: a registry path both sides edited resolves to the generator output on the merged tree" in test/a-regenerable-only-conflict-is-resolved-without-a-fix-worker.test.ts'
+  falsifier: |
+    Against main, the deletion fixture dispositions `conflicted`, reports "would dispatch the bounded merge-conflict fix
+    worker", and pushes nothing, so the first title test fails. Drop the subset check on `git ls-files -u` and the
+    hand-written fixture is pushed with conflict markers or one side discarded, so the second test fails. Resolve a
+    both-sides registry edit by taking either side's bytes and the third test's generator-output comparison fails.

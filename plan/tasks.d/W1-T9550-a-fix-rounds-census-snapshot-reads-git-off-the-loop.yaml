@@ -1,0 +1,62 @@
+- id: W1-T9550
+  title: "A FIX ROUND'S CENSUS SNAPSHOT READS ITS GIT OFF THE DAEMON LOOP — writeFixCensusSnapshot runs rev-parse, merge-base, ls-files, ls-tree and two `cat-file --batch` blob reads through the synchronous hostWorktreeGit before every harness-committed fix round: its `blobs` read alone held core's loop 57.7 s in 6 h on 2026-10-14, one block 12.3 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the transport of the fix round's census snapshot; it runs inside runFixRung, on the daemon loop
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T7744, W1-T8918, W1-T9114, W1-T9085, W1-T6121, W1-T9544, W1-T9545, W1-T9549, W1-T9552, W1-T9554, W1-T9556]
+  files: [src/run-task.ts, src/lib/worktree-git.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; `daemon.alive` rows streamed to
+    ~/Remudero-notes/sync-spawn-filing/). In the 38 rows of 15:14-21:14Z the `sync_spawn_top` entry
+    `blobs (src/run-task.ts:18746 | 18756)`, leaf `hostWorktreeGit`, appears 6 times: 57.7 s, worst 12.3 s (17:55Z) and
+    9.2 s in the 21:14:26Z row. Those are only the top-3 entries per row; the same function's five other git reads are
+    smaller and fall below the cut. The earlier 15:38-19:39Z census (~/Remudero-notes/loopblock-0450/) gave 48 s.
+    WHO REACHES IT, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `blobs` is the closure in `writeFixCensusSnapshot` (src/run-task.ts): `rev-parse HEAD`, `rev-parse origin/main`,
+        `merge-base`, `ls-files`, `ls-tree -r` twice, then `cat-file --batch` over every census path at the merge base
+        and every scripts baseline at main (128 MiB buffer), all through the sync `hostWorktreeGit`.
+      - `runFixRung` (async, src/run-task.ts) calls `deps.writeFixCensusSnapshot?.(opts.worktreePath, deps.log)`
+        synchronously when the harness owns the round's git; the sweep's fix dispatch wires
+        `{ ...opts.deps, writeFixCensusSnapshot }`. Fix dispatch runs in the daemon process as a detached sweep action.
+      - The build run's census-push loop (`census_push.refused`, in the run path) calls it too.
+      - The awaited pieces exist: `hostWorktreeGitAsync` (src/lib/worktree-git.ts), and `checkFixCensusSnapshot` already
+        has an awaited child runner (W1-T7744's `spawnCensusChild`).
+    TAKE THE CHEAP CANDIDATE BESIDE THE COSTLY ONE: W1-T9114 expects to move fix dispatch into run children and W1-T9085
+    moves build runs; both are behind the queued W1-T9083 -> W1-T9085 -> W1-T9086 chain and `sweep.runChild.mode`.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    writeFixCensusSnapshot. Control: main reads 1 shard (W1-T8918, merged, which scopes the census to core); no head
+    reads more than main.
+  design: |
+    No new bound; the same reads, the same snapshot bytes, the same `fix.census_snapshot` rows.
+    Scope qualification: `hostWorktreeGitAsync` currently refuses stdin, so the preserved `cat-file --batch` read
+    needs async stdin support in the same hardened Git leaf, retaining its pin/config vetting and output limits.
+    The existing fix-round snapshot suite verifies that a pending snapshot resolves before its worker starts.
+    1. `writeFixCensusSnapshotAsync(root, log, runGit = hostWorktreeGitAsync)` performs the same git reads awaited and
+       writes the same snapshot file; a failure is the same `outcome: "unavailable"` row and `undefined`.
+    2. `runFixRung` awaits it (its `writeFixCensusSnapshot` dep may return a promise), and so does the build run's
+       census-push loop. The sync form is kept only if a CLI caller still needs it.
+    Tests go in test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts, with `test(` titles verbatim as in
+    the proofs below, over a temp git repo with an origin/main and the `syncBuiltinESMExports` trap
+    `startReadPlaneTelemetry` uses.
+  acceptance:
+    - claim: "the census snapshot is written with sync spawns trapped, byte-identical to the sync form's"
+      proof: 'grep: test("W1-T9550: the census snapshot is written with sync spawns trapped and matches the sync bytes" in test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts'
+    - claim: "a slow git during the snapshot does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9550: a slow git during the census snapshot does not delay a concurrent timer" in test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts'
+    - claim: "a failed read is still an unavailable snapshot"
+      proof: 'grep: test("W1-T9550: a failed census snapshot read is unavailable" in test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts'
+    - claim: "the fix round awaits the snapshot"
+      proof: 'grep: await deps\.writeFixCensusSnapshot in src/run-task.ts'
+  falsifier: |
+    Keep the sync `hostWorktreeGit` reads: with execFileSync, spawnSync and execSync trapped to throw, the first test's
+    snapshot is `unavailable` naming the trap, and with a PATH-stubbed git that sleeps the second test's setInterval
+    records no tick until the snapshot returns.

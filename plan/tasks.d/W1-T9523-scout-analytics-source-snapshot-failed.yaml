@@ -1,0 +1,30 @@
+- id: W1-T9523
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — analytics.source_snapshot_failed landed 4 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:analytics.source_snapshot_failed"
+  files:
+    - test/scout-analytics-source-snapshot-failed.test.ts
+  acceptance:
+    - claim: "analytics.source_snapshot_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9523: analytics.source_snapshot_failed no longer recurs\" in test/scout-analytics-source-snapshot-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step analytics.source_snapshot_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is one new test file (test/scout-analytics-source-snapshot-failed.test.ts), with no declared touch of secrets, auth, permissions, deletion, merge/deploy/infra, or review policy.; on the change's description/files alone, no diff was read — The acceptance is a grep-verifiable test name, so the finding can be checked from what is shown, and the PR still passes CI and review.; on the change's description/files alone, no diff was read — Mild concerns: the filing says the writing code is not yet located, so the real fix may reach beyond the declared file. The scout family has a weak record (0 merged, 1 declined). Neither shows a danger category from the escalation rule, so I keep it low."
+    judged_at: "2026-10-15T00:54:08.930Z"
+    pin: "e279abee4aa403193e607bb0755a1b697a24a0651743a95da253bec1a8923496"

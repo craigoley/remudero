@@ -1,0 +1,113 @@
+- id: W1-T9571
+  title: Installer and recycler validate existing instance mode without changing authority
+  repo: remudero
+  depends_on: [W1-T9559]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-15: advance all recommended public compatibility and qualification work through normal ownership and gates; shadow-only, owner override, no schedules or live cutover"
+  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T4265, W1-T4198, W1-T9500, W1-T7727]
+  files: [deploy/install-host-units.sh, deploy/recycle-container.sh, test/host-units-install.test.ts, test/recycle-container.test.ts, test/recycle-container-bash3-portability.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ actual main f59f4a2a1406b64124d64759c797f4866b68bfa9 after the normal
+    W1-T9559 source merge11845. The selected TypeScript reader and proposal writer
+    now share the frozen full lifecycle vocabulary. BOTH actual shell case blocks
+    still omit mode and their unknown-field arms refuse a row carrying it. The
+    existing onboarding proposal writer emits mode: live; valid shadow/live
+    registry data cannot therefore travel through the named lifecycle scripts.
+    The field is existing public safety grammar, not a new capability or policy.
+    A controlled subject sweep reads main and ALL16 OPEN head trees, more than
+    3000 plan shards and500 source/script paths per head, actual source blobs,
+    W4227 title controls and real merge-base own diffs. The100 closed/merged-PR
+    window11702..11855 covers predecessor filing11826 and source11845; merged
+    exact canonical trailers UNION run branches credit9435/9493/9559 and9500.
+    W4198 app/heap forwarding and W9500 instance-name forwarding already exist.
+    W7727 owns pause scoping; retired W6095 is not reopened. The open installer
+    overlap11851 installs a workspace-retirement guard, not registry grammar.
+    Serve shedding, feedback reply, run-child and garden pacing overlaps likewise
+    do not implement mode parsing. Preserve them and refresh before build/push.
+    This task fixes ONLY existing mode recognition and validation. Independent
+    selected-path resolution, revisions, daemon/effect binding, heartbeat and
+    private staging remain separate work. No live installation or recycle runs.
+  design: |
+    1. Extend the TWO existing bounded case blocks, not a duplicate parser or a
+       new registry service. Accept exactly shadow and live for one optional
+       mode field in the selected row. Reject malformed or duplicate mode before
+       any host artifact write or container mutation. Preserve optional absence
+       byte-for-byte; do not invent a new live default, strip a safety field,
+       accept arbitrary siblings or globally tighten unrelated legacy fields.
+       Retain the existing Bash3 portability contract; no associative-array or
+       external-tool requirement that an existing supported host cannot satisfy.
+    2. Carry/validate mode as existing registry metadata, never as permission to
+       mount credentials, promote an instance, arm/merge a PR, clear PAUSE/STOP,
+       bypass owner control or publish private source. This task does not add a
+       new runtime env override, selection fallback, state/claim format or live
+       activation arm. Keep RMD_INSTANCE_NAME, app/heap/credential path forwarding,
+       target identity, owner-authored holds and all existing lifecycle guards.
+    3. Add red behavioral cases to the EXISTING installer/recycler suites using
+       their real scripts, temporary rendering roots and recording Docker/Azure
+       transports. Assert exact successful valid-mode outputs, not a source-text
+       marker or exit0 alone. Invalid and duplicate mode must trap the first
+       consequential effect; unrelated future fields still refuse. Include
+       shadow, live, absent-mode and unknown-field positive/negative controls.
+       Never run an actual host install, container recycle, closure or promotion.
+    4. Exercise legacy output equality and existing owner PAUSE/STOP preservation.
+       Remove each actual case/validation fix to make its behavioral test fail,
+       restore the exact committed source and observe complete green TAP. Do not
+       relax the prior tests, detector or baseline to obtain a result. The normal
+       W9559 lifecycle-field census should still see the same vocabulary: it
+       already included existing mode, so adding that shell member widens no
+       selected contract. Derive controls from actual opened case blocks.
+    5. Update the existing public contract doc and generated index only if it
+       changes. State the supported mode grammar, legacy absence and remaining
+       path/digest/consumer/private-overlay gaps. Source compatibility is not
+       deployment or private selection. All new admission remains opt-in SHADOW
+       ONLY; human owner/admin override and complete Apache core stay intact.
+    6. Before build AND publication refresh exact merged Task trailers OR run
+       branches, active remote branches/claims, actual main and ALL OPEN-head
+       subjects with corpus/window/positive controls, package runnableCandidates
+       and ordinary ownership. The filing ID reservation is not an implementation
+       claim. Commit before measurement; verify paths, explicit childtsx/tmp
+       hygiene and shipped host-slot admission. One native author per distinct
+       committed tree. Reproduce EVERY failed title on THAT actual unchanged
+       pinned base before attribution/repair; unknown causes stay unknown. Keep
+       every failed/incomplete/setup/skip receipt. Source-mapped coverage must
+       instrument every changed TypeScript source SF if any; none is expected
+       here. Never claim LCOV instruments Bash: real-script effect traps and
+       removal/restoration falsifiers qualify these shell branches. Required
+       hosted full CI/coverage/proof/normal review still gate normal merge.
+    7. Inspect current baked and automatic-update implications before publication.
+       WORKERS CONTINUE for isolated source and admitted disposable tests. Actual
+       live compatible replacement needs separately approved exact-instance drain;
+       incompatible shared state/locks/claims/credential/config mounts require
+       approved FULL AFFECTED WRITER STOP, ALL only if ALL are affected. Do not
+       run host tools, change settings/config/infra or recreate schedules here.
+       No force/admin merge, extra mandatory reviewer or new SHA to clear a gate.
+  acceptance:
+    - claim: The real installer accepts existing valid instance mode without activating it
+      proof: 'unit test: installer accepts existing shadow and live mode without activating it'
+    - claim: The real recycler accepts existing valid instance mode without activating it
+      proof: 'unit test: recycler accepts existing shadow and live mode without activating it'
+    - claim: Invalid or duplicate installer mode refuses before consequential effects
+      proof: 'unit test: installer refuses invalid or duplicate mode before effects'
+    - claim: Invalid or duplicate recycler mode refuses before consequential effects
+      proof: 'unit test: recycler refuses invalid or duplicate mode before effects'
+    - claim: The installer preserves legacy output and unknown-field refusal
+      proof: 'unit test: installer mode compatibility preserves legacy output and unknown field refusal'
+    - claim: The recycler preserves legacy effects and independent owner holds
+      proof: 'unit test: recycler mode compatibility preserves legacy effects and owner holds'
+    - claim: Removing either actual mode fix breaks real lifecycle behavioral tests
+      proof: 'unit test: lifecycle mode grammar falsifiers exercise the real script arms'
+  falsifier: |
+    On the unchanged filing base a named installer/recycler row containing
+    mode: shadow or mode: live reaches each script's unknown-field refusal.
+    New real-script valid-mode tests are red. Removing either new case returns
+    that refusal; removing its validation permits malformed/duplicate mode to
+    reach an effect trap. Exact restoration passes. No skip, baseline allowance,
+    fake production marker, renamed primitive or actual live effect is a remedy.

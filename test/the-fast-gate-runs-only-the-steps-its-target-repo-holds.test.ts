@@ -65,17 +65,18 @@ test("W1-T8920: the harness repo still fails a missing fast-gate script", () => 
   }
 });
 
-test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd", async () => {
+test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd with a portable UTC clock", async () => {
   const work = scratch("gate");
   const harness = scratch("harness");
   try {
     // A real child: the fake harness rmd records its argv and writes the summary the gate reads back.
     const fakeRmd = join(harness, "rmd");
     const argvFile = join(harness, "argv.txt");
+    // BSD date does not implement GNU %N; use the pinned native Node clock.
     writeFileSync(
       fakeRmd,
       `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argvFile}"\nmkdir -p "$PWD/coverage"\n` +
-        `printf '{"ok":false,"finishedAt":"%s","steps":[{"name":"jscpd","ok":false}]}' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > "$PWD/coverage/preflight-summary.json"\nexit 1\n`,
+        `printf '{"ok":false,"finishedAt":"%s","steps":[{"name":"jscpd","ok":false}]}' "$(${JSON.stringify(process.execPath)} -e 'process.stdout.write(new Date().toISOString())')" > "$PWD/coverage/preflight-summary.json"\nexit 1\n`,
     );
     chmodSync(fakeRmd, 0o755);
 
@@ -84,6 +85,8 @@ test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness
     const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, fakeRmd) });
     assert.equal(result.kind, "fail", `a consumer build must be measured, got ${JSON.stringify(result)}`);
     assert.deepEqual(result.kind === "fail" ? result.failedSteps : [], ["jscpd"]);
+    const summary = JSON.parse(readFileSync(join(work, "coverage", "preflight-summary.json"), "utf8")) as { finishedAt: string };
+    assert.match(summary.finishedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "the real child writes a millisecond UTC clock, not a date-tool extension");
     assert.deepEqual(readFileSync(argvFile, "utf8").trim().split("\n"), ["preflight", "--fast", "--repo-root", work]);
 
     // A worktree holding its own bin/rmd still spawns that one, unchanged.
