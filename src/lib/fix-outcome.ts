@@ -155,7 +155,12 @@ export interface RedAttributionReads {
 }
 
 const settle = async <T>(read: () => T | Promise<T>): Promise<T | undefined> => {
-  try { return await read(); } catch { return undefined; }
+  try {
+    return await read();
+  } catch {
+    // An unread fact is undefined, which redAttribution turns into `unknown`: today's scope amendment, never a reroute.
+    return undefined;
+  }
 };
 
 /** W1-T9561 — gather {@link redAttribution}'s facts for a fix round's NEEDS_SCOPE. */
