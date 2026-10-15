@@ -10,6 +10,7 @@ import { connect as connectTcp, createServer as createTcpServer, type Socket, ty
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
 import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -4725,7 +4726,7 @@ export async function provisionWorktreeNodeModules(
     // Seed identity, locking, copying and npm run in a bounded child, never on the daemon's event loop.
     const args = ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)),
       "prime", worktreePath, "--root", root, ...(source ? ["--source", dirname(source)] : [])];
-    const { stdout } = await execFilePromise(process.execPath, args, {
+    const { stdout } = await execFileLoopBounded(process.execPath, args, {
       cwd: worktreePath, encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
     });
     const result = JSON.parse(stdout) as { status: string };

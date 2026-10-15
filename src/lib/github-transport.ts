@@ -1,12 +1,12 @@
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { promisify } from "node:util";
 
-import { clockFromMillisFn, systemClock } from "./clock.js";
+import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { refreshInstallationToken } from "./github-app.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -184,11 +184,13 @@ export function ghJson(
   return parseGhJsonBody(args, body);
 }
 
-const execFileAsync = promisify(execFile) as (
+/** The real `gh` executor. W1-T9651: `timeout` is a LOOP-AVAILABLE budget, never execFile's own timer, which after a
+ *  held loop destroys the unread stdout of a read that already finished and RESOLVES it empty. */
+const execFileAsync = (
   file: string,
   args: readonly string[],
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number },
-) => Promise<{ stdout: string; stderr: string }>;
+): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, opts);
 
 export type GhAsyncExecutor = typeof execFileAsync;
 
@@ -213,14 +215,13 @@ export function withGhKillEscalation<T extends { stdout: string; stderr: string 
   if (child === undefined || !(timeoutMs > 0)) return execPromise;
   const graceMs = opts.graceMs ?? DEFAULT_GH_KILL_GRACE_MS;
   const warn = opts.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
-  const timer = setTimeout(() => {
+  // W1-T9651: loop-available time, so a held loop never escalates a child whose exit is already waiting.
+  const clearEscalation = loopAvailableDeadline(systemClock, timeoutMs + graceMs, () => {
     if (child.exitCode === null && child.signalCode === null) {
       logGhKillEscalated(args, warn);
       child.kill("SIGKILL");
     }
-  }, timeoutMs + graceMs);
-  if (typeof timer.unref === "function") timer.unref();
-  const clearEscalation = (): void => clearTimeout(timer);
+  });
   execPromise.then(clearEscalation, clearEscalation);
   return execPromise;
 }
@@ -385,7 +386,8 @@ export async function ghLinesAsync(
   await applyGhReadCadenceAsync(args);
   const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
-  const deadline = setTimeout(() => child.kill("SIGTERM"), timeout);
+  // W1-T9651: bounded by loop-available time, so a held loop never kills a log that already finished.
+  const bound = boundChildByLoopTime(child, timeout);
   let partial = "";
   let stderr = "";
   let refused: unknown;
@@ -407,11 +409,12 @@ export async function ghLinesAsync(
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => void (stderr = (stderr + chunk).slice(-4096)));
   const read = new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     child.on("error", (err) => {
-      clearTimeout(deadline);
+      bound.cancel();
       reject(err);
     });
     child.on("close", (code, signal) => {
-      clearTimeout(deadline);
+      bound.cancel();
+      if (bound.timedOut) return reject(bound.timeoutError(`gh ${args.slice(0, 2).join(" ")}`, { signal, exitCode: code, stderr }));
       if (code === 0) emit([partial]);
       if (refused !== undefined) return reject(refused);
       if (code === 0) return resolve({ stdout: "", stderr });
