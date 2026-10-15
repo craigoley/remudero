@@ -804,7 +804,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   // `quiet` is a leak-locating re-run whose output and durations nobody wants. A role other than
   // "rest" writes its durations beside the main file (shard-1.pool.json), because the reporter
   // rewrites its destination and two children would otherwise erase each other's evidence.
-  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false } = {}) => {
+  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false, deadlineMs } = {}) => {
     // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
@@ -825,7 +825,8 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     // file whose own child exits 0 part-way is reported `ok` — the rest, the slow tier and the
     // plan-reading candidates are judged the same way as the pool ladder.
     const prefix = role === "rest" ? "test-tier-manifest" : "pure-test-pool";
-    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix });
+    // W1-T9426: a leak-locate probe carries a deadline measured from the full pool run.
+    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix, deadlineMs });
   };
 
   if (argv.includes("--record-evidence")) {
@@ -1094,7 +1095,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
     if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
-      return runShardWithPool(files, { fast, root, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
+      return runShardWithPool(files, { fast, root, env, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
     }
     return spawnTestFiles(files, { bounded: runTier === "fast" });
   }
