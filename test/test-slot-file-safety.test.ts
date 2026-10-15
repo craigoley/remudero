@@ -1,0 +1,50 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireTestSlot } from "../src/lib/test-slot.js";
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), "rmd-slot-file-safety-")), logs: string[] = [];
+  const lease = acquireTestSlot("owned safety fixture", { dir: root, slots: 1, memoryHeadroom: () => undefined,
+    load: () => ({ cores: 8, load1: 0 }), log: (line: string) => logs.push(line) });
+  assert.equal(lease.outcome, "acquired");
+  return { root, logs, lease, path: join(root, "slot-1.json"), cleanup: () => { lease.release(); rmSync(root, { recursive: true, force: true }); } };
+}
+test("a host test slot lease is readable by peer accounts but never group or world writable", () => {
+  const fx = fixture(); try {
+    assert.equal(statSync(fx.path).mode & 0o022, 0);
+    assert.equal(statSync(fx.path).mode & 0o600, 0o600);
+    fx.lease.refresh(); assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).pid, process.pid);
+  } finally { fx.cleanup(); }
+});
+test("a refreshed test slot never follows a replacement symlink or overwrites its owned sentinel", () => {
+  const fx = fixture(); try {
+    const sentinel = join(fx.root, "sentinel.json"); writeFileSync(sentinel, '{"owned-sentinel":true}');
+    renameSync(fx.path, join(fx.root, "original-record")); symlinkSync(sentinel, fx.path);
+    fx.lease.refresh(); assert.equal(readFileSync(sentinel, "utf8"), '{"owned-sentinel":true}');
+    assert(fx.logs.some(x => JSON.parse(x).step === "test_slot.refresh_lost"));
+    fx.lease.release(); assert.equal(readFileSync(sentinel, "utf8"), '{"owned-sentinel":true}');
+  } finally { fx.cleanup(); }
+});
+test("a foreign replacement record survives old lease refresh and release", () => {
+  const fx = fixture(); try {
+    renameSync(fx.path, join(fx.root, "old-record")); const foreign = '{"foreign-lease":true}'; writeFileSync(fx.path, foreign);
+    fx.lease.refresh(); fx.lease.release(); assert.equal(readFileSync(fx.path, "utf8"), foreign);
+  } finally { fx.cleanup(); }
+});
+test("an in-place changed owner nonce cannot regain the old lease heartbeat", () => {
+  const fx = fixture(); try {
+    const changed = { ...JSON.parse(readFileSync(fx.path, "utf8")), ownerNonce: "replacement-owner" };
+    writeFileSync(fx.path, JSON.stringify(changed)); fx.lease.refresh(); fx.lease.release();
+    assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).ownerNonce, "replacement-owner");
+  } finally { fx.cleanup(); }
+});
+test("an unavailable or malformed own lease record is reported without following another file", () => {
+  const fx = fixture(); try {
+    writeFileSync(fx.path, "not-json"); fx.lease.refresh(); fx.lease.release();
+    assert.equal(readFileSync(fx.path, "utf8"), "not-json");
+    assert(fx.logs.some(x => JSON.parse(x).step === "test_slot.refresh_lost"));
+  } finally { fx.cleanup(); }
+});

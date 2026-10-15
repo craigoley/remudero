@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeSync } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -553,12 +553,29 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             if (!holders.includes(short)) holders.push(short);
             break;
           }
+          let openedFd: number | undefined;
           try {
             concurrency = perFile === undefined ? testRunConcurrency(load(), slots) : sized(namedPeaks(othersThan(i)));
-            writeFileSync(path, JSON.stringify(record()), { flag: "wx", mode: 0o666 });
+            // Readers in other accounts retain access; only the creating account may rewrite the lease.
+            // The exclusive descriptor remains the heartbeat target, never a later path replacement.
+            const fd = openSync(path, "wx+", 0o644); openedFd = fd;
+            const writeRecord = (body: string): void => {
+              writeSync(fd, body, 0, "utf8"); ftruncateSync(fd, Buffer.byteLength(body));
+            };
+            writeRecord(JSON.stringify(record()));
             const waitedMs = clock.now() - startedAt;
             if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
             let held = true;
+            let closed = false;
+            const close = (): void => { if (!closed) { closed = true; closeSync(fd); } };
+            const stillOwnsRecord = (): boolean => {
+              const open = fstatSync(fd), current = lstatSync(path);
+              if (!current.isFile() || current.isSymbolicLink() || current.dev !== open.dev || current.ino !== open.ino || open.size < 1 || open.size > 1024 * 1024) return false;
+              const bytes = Buffer.alloc(open.size);
+              if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
+              const holder = parseTestSlotHolder(bytes.toString("utf8"));
+              return holder?.ownerNonce === ownerNonce && holder.pid === (opts.pid ?? process.pid) && holder.host === host();
+            };
             return {
               outcome: "acquired", concurrency, waitedMs,
               ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
@@ -568,7 +585,13 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
                 `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}`,
               refresh: () => {
-                if (held) writeFileSync(path, JSON.stringify({ ...record(), heartbeatAt: clock.iso() }));
+                if (!held) return;
+                try {
+                  if (!stillOwnsRecord()) { held = false; close(); log(JSON.stringify({ step: "test_slot.refresh_lost", label, path })); return; }
+                  writeRecord(JSON.stringify({ ...record(), heartbeatAt: clock.iso() }));
+                } catch (error) {
+                  held = false; close(); log(JSON.stringify({ step: "test_slot.refresh_failed", label, path, error: String(error) }));
+                }
               },
               release: () => {
                 if (!held) return;
@@ -584,10 +607,11 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 } catch (error) {
                   // The run's verdict stands; a record we could not remove ages out by its lease.
                   log(JSON.stringify({ step: "test_slot.release_failed", label, path, error: String(error) }));
-                }
+                } finally { close(); }
               },
             };
           } catch (error) {
+            if (openedFd !== undefined) closeSync(openedFd);
             // Only "someone holds it" is a slot answer; anything else is the outer slot_unavailable.
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           }
