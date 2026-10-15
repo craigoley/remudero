@@ -1,0 +1,44 @@
+- id: W1-T9587
+  title: "THE CLOCK SWEEP RUNS EACH SUITE WITHOUT THE TEST PRELOAD, so 30 suites fail at +0 days on `which claude` and every PR touching clock-sweep.yml (each GitHub Actions bump) reds clock-sweep-report for a reason no diff caused; runSuite imports test/setup/tmp-hygiene.ts exactly as `npm test` and CI do"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low  # Rule 19: one concern — the clock sweep's per-suite harness matches the CI harness
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: dependabot #11793's clock-sweep-report red, diagnosed as pre-existing"
+  plan_refs: [W1-T4944, W1-T5033, W1-T6078, W1-T9584]
+  files: [scripts/clock-sweep.mjs, test/the-clock-sweep-runs-suites-under-the-test-preload.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14T23:56Z, clock-sweep-report job 116169208905 on #11793 (head 2d5030059, an actions bump):
+    download-artifact@9000827c (the bumped v8.0.2) downloaded all 10 shard artifacts with matching digests, so
+    the bump did not break the report. The aggregate then printed "WALL-CLOCK DRIFT — 30 suite(s) pass today and
+    FAIL in the future", each one "fails by: +0 days - NOT CLOCK DRIFT", with the error "could not resolve the
+    `claude` binary for config at /home/runner/.config/remudero/config.json (config creation was entered):
+    Command failed: which claude" (e.g. test/a-finished-plan-merge-frees-the-next-light-pass.test.ts and the
+    W1-T9212 held-plan-PR tests).
+    READ at origin/main 7cfdd7775:
+    - scripts/clock-sweep.mjs runSuite spawns `node --test --test-reporter=tap --import tsx --import
+      scripts/clock-shift.mjs test/<suite>.test.ts`, with no `--import ./test/setup/tmp-hygiene.ts`.
+    - test/setup/tmp-hygiene.ts writes the per-process test config with `claudeBin: process.execPath`; package.json
+      `test` and `test:ci` both preload it. Without it, loadConfig's creation branch reaches resolveClaudeBin
+      (src/lib/config.ts), which shells out to `which claude`, absent on a GitHub runner.
+    - clock-sweep.yml runs on pull_request only for its own paths, which include .github/workflows/clock-sweep.yml,
+      so every Dependabot actions bump runs it and inherits the red; the weekly schedule run on main does too.
+    OVERLAP: W1-T6078 (queued, open branch run-W1-T6078-1791712365337) also edits scripts/clock-sweep.mjs, for
+    its probe documentation only; its diff does not touch runSuite's argv.
+  design: |
+    runSuite adds `--import <REPO>/test/setup/tmp-hygiene.ts` before the clock-shift import, keeping its private
+    TMPDIR; the printed `reproduce` line names the same preload, so a reproduction runs the harness that judged it.
+    The suite list, shift and exclusions are unchanged.
+  acceptance:
+    - claim: "the clock sweep runs each suite with the same test preload as CI, and its reproduce line names it"
+      proof: 'grep: test("W1-T9587: the clock sweep runs each suite under the tmp-hygiene preload" in test/the-clock-sweep-runs-suites-under-the-test-preload.test.ts'
+  falsifier: |
+    Drop the preload from runSuite: the injected exec in the fixture records argv without tmp-hygiene.ts and the
+    test fails.

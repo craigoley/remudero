@@ -104,7 +104,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T8800 deliberately corrects ONLY the shared local-range/hosted-title checkpoint contract.
   // Actual rendered-byte comparison leaves prerequisite/recon/diagnose unchanged below; retain
   // full fingerprints and compatibility re-exports, not a pattern that could hide other drift.
-  assert.equal(sha256(fix), "4364805a0f3685a2262ef45471263ecc9daa91c18c7a66fbdd55e4bc92bd031c");
+  // W1-T9561 re-baselined fix: NEEDS_SCOPE now says a red the diff cannot reach is FLAKE
+  // (test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts pins the new text itself).
+  assert.equal(sha256(fix), "0f9331f3032ee38baa3d328f5c4000ae9729afe20ef283d1ef08b6af587cb76d");
   assert.equal(sha256(prerequisite), "802d1ed90dfcdf9bafe73c210c63c61a2856e36228cd268235bc412543518b2b");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted

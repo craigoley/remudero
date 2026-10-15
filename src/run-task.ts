@@ -42,7 +42,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
-import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
+import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
@@ -227,6 +227,7 @@ import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCovera
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
+import { daemonBreakerRunbookHost, releaseBreaker } from "./lib/breaker-release.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
@@ -1091,7 +1092,6 @@ import {
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
   markLedgerProcessActor,
-  matchesRepoScopedTask,
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
@@ -1649,7 +1649,6 @@ import {
   loadCreditStore,
   saveCreditStore,
   buildCommitTrailerIndex,
-  buildLedgerIndex,
   classifyGhFailure,
   createDispatchBreakerCache,
   deriveStatus,
@@ -13901,7 +13900,15 @@ export async function runFixRung(opts: {
     };
     const fixReport = workerTranscript(fixResult);
     let fixOutcome = anchoredFixOutcome(fixReport);
-    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+    const attributeRed = async (outcome: TypedFixOutcome | undefined) => outcome?.kind !== "NEEDS_SCOPE" ? undefined : readRedAttribution({
+      failingTestFiles: baseReproductionFiles(priorCiFailures ?? []), headSha: priorHeadSha, prNumber, ledger: roundLedger, rerunReproduced: refutedFlake,
+      isHarnessPath: isCiHarnessPath, mainTip: () => deps.readMainTip ? deps.readMainTip() : mainTipViaGit(opts.worktreePath),
+      changedPaths: async (main, head) => (await hostWorktreeGitAsync(opts.worktreePath, ["diff", "--name-only", "-z", `${main}...${head}`])).split("\0").filter(Boolean),
+      closure: buildImportClosureRead(opts.worktreePath, deps.log),
+      namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
+        .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
+    });
+    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -13956,7 +13963,7 @@ export async function runFixRung(opts: {
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
@@ -14226,6 +14233,12 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes: strikes - 1, retriggers,
           reason: "flake claim repeated after refutation — no-op round" };
       }
+      const rerouted = fixAction.rerouted;
+      if (rerouted) {
+        const saved = await hostWorktreeGitAsync(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]).then(workerChangedPaths, () => undefined);
+        deps.log("fix.scope_rerouted", { ...scopeReroutedFields(rerouted, fixReport, saved?.filter((path) => !fixDeclaredPaths.includes(path))), head_sha: priorHeadSha });
+        fixClaimFields.flake_claim_source = "scope-rerouted";
+      }
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
@@ -14259,6 +14272,7 @@ export async function runFixRung(opts: {
           const handoff = ciHandoff(ci);
           if (handoff) { logFixDone(); return handoff; }
           green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
+          for (const row of rerouted && !deferred ? fixRoundFlakeRetryRows(rerouted, green, prNumber, priorHeadSha) : []) deps.log("test.flake_retry", row);
         } catch (error) {
           deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
         }
@@ -14275,7 +14289,8 @@ export async function runFixRung(opts: {
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
     if (fixAction.kind === "scope-needed") {
-      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
+      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
+        ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
       let amendment: ScopeAmendmentOutcome;
       const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
       if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
@@ -40145,7 +40160,16 @@ export async function daemonCommand(
                       // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
                       runbookPass: daemonSreRunbookPass(
                         sreRunbookCatalog(
-                          daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
+                          {
+                            ...daemonSreRunbookHost({ root: config.root, repoDir: repoRoot, owner: self.owner, repo: self.repo }),
+                            // W1-T8241: release-non-worker-breaker reads this ledger and writes through releaseBreaker.
+                            breakers: daemonBreakerRunbookHost({
+                              ledgerPath,
+                              owner: self.owner,
+                              repo: self.repo,
+                              closeIssue: (repo) => ghIssueGatewayAsync(self.owner, repo).closeWithComment,
+                            }),
+                          },
                           () => readRunbookReceipts(ledgerPath),
                         ),
                         ledgerPath,
@@ -56051,63 +56075,27 @@ async function releaseCommand(rest: string[]): Promise<number> {
 
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
-  const lines = readLedgerLines(ledgerPath);
-  const index = buildLedgerIndex(lines);
-  // The count this release resets — read BEFORE the row below is appended, so it names what the
-  // operator is releasing rather than the post-release (already zero) value.
-  const releasedCount = dispatchesWithoutNewOwnedPr(lines, taskId, index);
-  const runId = `RELEASE-${taskId}-${systemClock.now()}`;
-  const actor = process.env.USER ?? "operator";
-
-  appendLedger(ledgerPath, {
-    run_id: runId,
-    task_id: taskId,
-    task: taskId,
+  // W1-T8241: one release writer — the `release-non-worker-breaker` runbook calls the same function.
+  const result = await releaseBreaker({
+    ledgerPath,
+    taskId,
     repo: task.repo,
-    step: "dispatch.breaker_released",
     reason,
-    released_count: releasedCount,
-    actor,
+    actor: process.env.USER ?? "operator",
+    releasedBy: `operator (\`rmd release ${taskId}\`)`,
+    closeIssue: (url, comment) => {
+      const { owner } = resolveOwnerRepo();
+      ghIssueGateway(owner, task.repo).closeWithComment?.(url, comment);
+    },
   });
-
-  // Best-effort: close the open circuit-breaker escalation, if this task raised one and no earlier
-  // `rmd release` already retired it. Never throws past this point — the ledger row above is the
-  // sanctioned reset and must land whether or not the issue can be closed.
-  let lastEscalationIndex = -1;
-  let issueUrl: string | undefined;
-  let priorReleaseAfterEscalation = false;
-  lines.forEach((l, i) => {
-    if (l.step === "dispatch.circuit_broken.escalated" && matchesRepoScopedTask(l, task.repo, taskId)) {
-      lastEscalationIndex = i;
-      issueUrl = typeof l.issue_url === "string" ? l.issue_url : undefined;
-      priorReleaseAfterEscalation = false;
-    } else if (
-      lastEscalationIndex >= 0 &&
-      i > lastEscalationIndex &&
-      l.step === "dispatch.breaker_released" &&
-      matchesRepoScopedTask(l, task.repo, taskId)
-    ) {
-      priorReleaseAfterEscalation = true;
-    }
-  });
-  if (issueUrl && !priorReleaseAfterEscalation) {
-    const { owner } = resolveOwnerRepo();
-    const issues = ghIssueGateway(owner, task.repo);
-    try {
-      issues.closeWithComment?.(
-        issueUrl,
-        `Released by operator (\`rmd release ${taskId}\`): ${reason}\n\n` +
-          `Recorded as \`dispatch.breaker_released\` (run ${runId}) — the task is dispatchable on the next ` +
-          `tick. This did not diagnose or fix the underlying block; it authorizes another attempt.`,
-      );
-      console.log(`### rmd release — closed ${issueUrl} (the circuit-breaker escalation this release resets).`);
-    } catch (e) {
-      console.error(`rmd release: could not close ${issueUrl}: ${(e as Error)?.message ?? e} — release row still written.`);
-    }
+  if (result.issue.kind === "closed") {
+    console.log(`### rmd release — closed ${result.issue.url} (the circuit-breaker escalation this release resets).`);
+  } else if (result.issue.kind === "close_failed") {
+    console.error(`rmd release: could not close ${result.issue.url}: ${result.issue.error} — release row still written.`);
   }
 
   console.log(
-    `### rmd release — ${taskId}: circuit breaker released (was ${releasedCount} dispatch(es) with no new ` +
+    `### rmd release — ${taskId}: circuit breaker released (was ${result.releasedCount} dispatch(es) with no new ` +
       `owned PR). Reason: ${reason}. Dispatchable on the next tick; append-only, no ledger rewrite.`,
   );
   return 0;
