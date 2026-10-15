@@ -79,7 +79,7 @@
 #   RMD_CLEANUP_FSID            command taking a path and printing its filesystem id
 #   RMD_CLEANUP_LSOF            the lsof command (must accept -Fn and print n<path> lines)
 #   RMD_CLEANUP_CONTAINER_MAP   host_prefix:container_prefix — a held container-side name also counts
-#   RMD_CLEANUP_NO_FETCH=1      do not `git fetch` before judging a worktree saved
+#   RMD_CLEANUP_NO_FETCH       legacy no-op: publication never fetches objects
 #   RMD_CLEANUP_WATCH_ROOTS     roots scanned for WATCH: lines (files >= WATCH_MB, never removed)
 #   RMD_CLEANUP_ONLY_TMP=1      run the guarded temporary-root and scratch sweeps
 #   RMD_CLEANUP_SCRATCH_ROOTS   colon-separated roots whose immediate scratch units are swept;
@@ -97,7 +97,6 @@
 #                               A parent sharing a filesystem with RMD_CLEANUP_ROOT_FS (the disk is
 #                               not mounted) is not swept at all.
 #   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
-#   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
 #   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  pins scratch-unit payload inactivity (default: the idle
 #                               window; under 360 is clamped to 360)
 #   RMD_CLEANUP_NESTED_COVERAGE_ROOTS  colon-separated roots walked (depth <= 6, same device, no
@@ -169,7 +168,6 @@ host-cleanup-worktree-archive lost+found remudero-console-state remudero-site-st
 if [ -n "${RMD_CLEANUP_STATE_PARENTS+x}" ]; then STATE_PARENTS="$RMD_CLEANUP_STATE_PARENTS"
 elif [ "$RUN_UID" = 0 ] && [ "$ROOT_FS" = / ]; then STATE_PARENTS=/mnt/rmd
 else STATE_PARENTS=""; fi  # a fixture root or a blind (non-root lsof) pass never inherits the host disk
-RUNUSER_CMD="${RMD_CLEANUP_RUNUSER:-runuser}"
 if [ -n "${RMD_CLEANUP_NESTED_COVERAGE_ROOTS+x}" ]; then NESTED_COVERAGE_ROOTS="$RMD_CLEANUP_NESTED_COVERAGE_ROOTS"
 else
   NESTED_COVERAGE_ROOTS="$TMP_ROOTS:$SCRATCH_ROOTS:$SCRATCH_PARENTS"
@@ -387,22 +385,7 @@ bare_repository_scan() {
 # THIS repo's physical top (what Git compares against), never '*'. These calls only read the repo
 # (status runs with GIT_OPTIONAL_LOCKS=0) or remove it, so root creates no files inside it.
 rgit() {
-  local repo="$1" top
-  shift
-  top="$(cd -P -- "$repo" 2>/dev/null && pwd -P)" || return 128
-  git -c safe.directory="$top" -C "$repo" "$@"
-}
-# The one call that WRITES into a repo is fetch (objects, refs, FETCH_HEAD). Run as root it would
-# leave root-owned files in the operator's .git that break their next fetch, so a root pass runs it
-# as the repo's owner, whose Git needs no exception.
-repo_fetch() {
-  local repo="$1" uid owner
-  shift
-  uid="$(stat -c %u -- "$repo" 2>/dev/null || stat -f %u -- "$repo" 2>/dev/null)" || return 1
-  if [ "$RUN_UID" != 0 ] || [ "$uid" = "$RUN_UID" ]; then rgit "$repo" fetch "$@"; return; fi
-  owner="$(stat -c %U -- "$repo" 2>/dev/null || stat -f %Su -- "$repo" 2>/dev/null)" || return 1
-  case "$owner" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  (cd -- "$repo" && $RUNUSER_CMD -u "$owner" -- git -C "$repo" fetch "$@")
+  rmd_retirement_git "$@"
 }
 worktree_clean() {
   local status
@@ -503,9 +486,6 @@ sweep_worktree() {
     1) log "KEEP $wt: ignored data includes paths beyond node_modules/coverage"; return ;;
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
-  if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
-    repo_fetch "$wt" --quiet origin 2>/dev/null || true
-  fi
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt"; then log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; return; fi
   if [ "$kind" = "standalone clone" ]; then
@@ -856,11 +836,6 @@ sweep_scratch_unit() {
   for repo in ${SCRATCH_LIVE_REPOS[@]+"${SCRATCH_LIVE_REPOS[@]}"}; do
     if ! rmd_remote_outside_retirement "$repo" "$p"; then
       log "KEEP $p: remote publication lender is inside removal unit or unverified ($repo)"; return
-    fi
-    if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
-      if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
-        keep_scratch_for_repo "$p" "Git fetch failed (unknown)" "$entries"; return
-      fi
     fi
     head="$(rgit "$repo" rev-parse HEAD 2>/dev/null)" || { keep_scratch_for_repo "$p" "HEAD is unreadable" "$entries"; return; }
     if ! scratch_repo_saved "$repo"; then

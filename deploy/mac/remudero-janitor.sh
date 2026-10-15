@@ -389,7 +389,7 @@ clean_artifact() {
   parent=$(dirname "$artifact")
   while [ "$parent" != / ]; do
     if [ -e "$parent/.git" ]; then
-      status=$(GIT_OPTIONAL_LOCKS=0 git -C "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
+      status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
       }
       if [ -n "$status" ]; then log "SKIP dirty $artifact (checkout=$parent)"; return; fi
@@ -515,7 +515,7 @@ ignored_only_dependency_symlinks() {
     esac
     [ -L "$repo/$rel" ] && continue
     [ -d "$repo/$rel" ] && [ -f "$repo/package.json" ] || return 1
-    tracked=$(git -C "$repo" ls-files -- "$rel" 2>/dev/null) || return 1
+    tracked=$(rmd_retirement_git "$repo" ls-files -- "$rel" 2>/dev/null) || return 1
     [ -z "$tracked" ] || return 1
     found=$(find "$repo/$rel" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || return 1
     [ -z "$found" ] || return 1
@@ -560,7 +560,7 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       case "$repo" in "$protected_parent"/*)
         if [ -e "$protected_parent/.git" ]; then
           relative_path=${repo#"$protected_parent"/}
-          if ! tracked_parent=$(git -C "$protected_parent" ls-files -- "$relative_path" 2>/dev/null); then
+          if ! tracked_parent=$(rmd_retirement_git "$protected_parent" ls-files -- "$relative_path" 2>/dev/null); then
             log "SKIP git-unverified enclosing checkout $repo"; nested_source=1; break
           fi
           if [ -n "$tracked_parent" ]; then log "SKIP protected tracked-nested-source $repo"; nested_source=1; break; fi
@@ -603,8 +603,8 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       skipped_open=$((skipped_open+1)); log "SKIP unverified-open $repo"; continue
     fi
 
-    origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || origin=""
-    status=$(git -C "$repo" status --porcelain --untracked-files=all 2>/dev/null)
+    origin=$(rmd_retirement_git "$repo" remote get-url origin 2>/dev/null) || origin=""
+    status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null)
     status_rc=$?
     if [ "$status_rc" -ne 0 ]; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue
@@ -612,23 +612,23 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     if [ -n "$status" ]; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP dirty      $repo"; continue
     fi
-    ignored=$(git -C "$repo" clean -ndx 2>/dev/null)
+    ignored=$(rmd_retirement_git "$repo" clean -ndx 2>/dev/null)
     ignored_rc=$?
     if [ "$ignored_rc" -ne 0 ] || ! ignored_only_dependency_symlinks "$repo" "$ignored"; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP ignored-or-unverified $repo"; continue
     fi
 
-    branch=$(git -C "$repo" branch --show-current 2>/dev/null)
-    head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null)
+    branch=$(rmd_retirement_git "$repo" branch --show-current 2>/dev/null)
+    head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null)
     [ -n "$head" ] || {
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue;
     }
-    head_file=$(git -C "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || head_file=""
+    head_file=$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) || head_file=""
     head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0
     if [ "$head_stamp" -eq 0 ] || [ "$((NOW - head_stamp))" -lt "$((WORKTREE_AGE_HOURS * 3600))" ]; then
       log "SKIP recent-or-unverified-git-head $repo"; continue
     fi
-    if [ -n "$branch" ] && ! git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    if [ -n "$branch" ] && ! rmd_retirement_git "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP branch-unverified $repo"; continue
     fi
 
@@ -636,12 +636,12 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       if ! rmd_workspace_published "$repo"; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP $RMD_PUB_REASON $repo (HEAD=$head)"; continue
       fi
-      listing=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || listing=""
+      listing=$(rmd_retirement_git "$repo" worktree list --porcelain 2>/dev/null) || listing=""
       registration=$(worktree_registration "$listing" "$repo")
       if [ "$registration" != "registered" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP worktree-$registration $repo"; continue
       fi
-      common_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+      common_dir=$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
       if [ -z "$common_dir" ] || [ ! -d "$common_dir" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue
       fi
@@ -667,15 +667,15 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         if [ "$latest_activity" -eq 0 ] || [ "$latest_age" -lt "$WORKTREE_AGE_HOURS" ]; then
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP recent-before-remove ${latest_age}h $repo"; continue
         fi
-        if ! status=$(git -C "$repo" status --porcelain --untracked-files=all 2>/dev/null); then
+        if ! status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null); then
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP changed-before-remove $repo"; continue
         fi
-        ignored=$(git -C "$repo" clean -ndx 2>/dev/null)
+        ignored=$(rmd_retirement_git "$repo" clean -ndx 2>/dev/null)
         ignored_rc=$?
         if [ "$ignored_rc" -ne 0 ] || [ -n "$status" ] || ! ignored_only_dependency_symlinks "$repo" "$ignored"; then
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP changed-before-remove $repo"; continue
         fi
-        current_head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || current_head=""
+        current_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) || current_head=""
         if [ "$current_head" != "$head" ] || ! rmd_workspace_published "$repo" head 1; then
           log "SKIP ref-changed-or-not-proven-published-before-remove $repo"; continue
         fi
@@ -697,13 +697,13 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
             removed_link_targets+=("$link_target")
           fi
         done
-        ignored_after=$(git -C "$repo" clean -ndx 2>/dev/null)
+        ignored_after=$(rmd_retirement_git "$repo" clean -ndx 2>/dev/null)
         ignored_after_rc=$?
         if [ "$ignored_after_rc" -ne 0 ] || ! ignored_only_dependency_symlinks "$repo" "$ignored_after"; then
           restore_dependency_symlinks
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP ignored-changed-before-remove $repo"; continue
         fi
-        if git -C "$common_repo" worktree remove "$repo"; then
+        if rmd_retirement_git "$common_repo" worktree remove "$repo"; then
           removed_worktrees=$((removed_worktrees+1)); reclaimed_kb=$((reclaimed_kb+kb))
           log "REMOVED-WORKTREE ${activity_age}h $((kb/1024))M $repo (branch=$branch retained)"
         else
@@ -723,12 +723,12 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       if [ -n "$ignored" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP ignored-or-unverified $repo"; continue
       fi
-      listing=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || listing=""
+      listing=$(rmd_retirement_git "$repo" worktree list --porcelain 2>/dev/null) || listing=""
       worktree_count=$(printf '%s\n' "$listing" | awk '$1 == "worktree" { n++ } END { print n+0 }')
       if [ "$worktree_count" -ne 1 ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP base-has-linked-worktrees $repo"; continue
       fi
-      local_branches=$(git -C "$repo" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
+      local_branches=$(rmd_retirement_git "$repo" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
       if [ "$local_branches" != "$branch" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP extra-local-branches $repo"; continue
       fi
@@ -817,19 +817,19 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         if [ ! -f "$repo/package.json" ]; then
           log "SKIP no-package-marker $artifact"; continue
         fi
-        tracked=$(git -C "$repo" ls-files -- node_modules/ 2>/dev/null) || {
+        tracked=$(rmd_retirement_git "$repo" ls-files -- node_modules/ 2>/dev/null) || {
           log "SKIP git-unverified $artifact"; continue;
         }
         if [ -n "$tracked" ]; then
           log "SKIP tracked   $artifact"; continue
         fi
       else
-        ignore_rule=$(git -C "$repo" check-ignore -v --no-index -- coverage 2>/dev/null)
+        ignore_rule=$(rmd_retirement_git "$repo" check-ignore -v --no-index -- coverage 2>/dev/null)
         case "$ignore_rule" in
           .gitignore:*|"$repo/.gitignore:"*) ;;
           *) log "SKIP not-repo-ignored $artifact"; continue ;;
         esac
-        tracked=$(git -C "$repo" ls-files -- coverage/ 2>/dev/null) || {
+        tracked=$(rmd_retirement_git "$repo" ls-files -- coverage/ 2>/dev/null) || {
           log "SKIP git-unverified $artifact"; continue;
         }
         if [ -n "$tracked" ]; then
@@ -944,7 +944,7 @@ for parent in "$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/r
     case "$child" in */.git|*/node_modules|*/coverage|*/.remudero-coverage|*/.rmd-coverage) continue ;; esac
     # Tracked source directories inside the operator checkout are not workspaces.
     if [ "$parent" = "$USER_HOME/Remudero/remudero" ]; then
-      tracked=$(git -C "$parent" ls-files -- "${child##*/}" 2>/dev/null) || { log "SKIP git-unverified $child"; continue; }
+      tracked=$(rmd_retirement_git "$parent" ls-files -- "${child##*/}" 2>/dev/null) || { log "SKIP git-unverified $child"; continue; }
       [ -n "$tracked" ] && continue
     fi
     log "SKIP unknown-directory $child (no independently verifiable Git state; data retained)"

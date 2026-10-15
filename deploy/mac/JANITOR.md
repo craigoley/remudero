@@ -29,6 +29,9 @@ can prove the exact pushed tip even after its branch was deleted. Cached
 remote-tracking refs, a task trailer, missing metadata, and a rescue archive are
 not permission to delete. An unavailable remote fails closed. Publication is
 cached only within a pass and refreshed before deletion.
+Git object reads never hydrate partial clones: lazy fetching is disabled, and
+older Git without that control holds promisor repositories before reading their
+objects. The janitor does not fetch objects or update remote-tracking refs.
 
 Protected operator clones, seed stores, dirty/unpublished work, unknown ignored
 data, broken Git pointers and unreadable safety probes stay put. Mac standalone

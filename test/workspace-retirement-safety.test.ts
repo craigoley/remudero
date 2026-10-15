@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { age, fixture, git, repos, run, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
@@ -81,6 +81,36 @@ test("standalone publication includes side branches, tags, stash and reflog-only
       assert.equal(publication(main).status, 0, "HEAD alone remains published");
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
   }
+});
+
+test("retirement object reads never hydrate a partial clone, including on older Git", () => {
+  const fx = fixture();
+  try {
+    const { main } = repos(fx);
+    const origin = join(fx.root, "origin.git");
+    git(origin, "config", "uploadpack.allowFilter", "true");
+    const partial = join(fx.root, "partial");
+    git(fx.root, "clone", "--filter=blob:none", "--single-branch", `file://${origin}`, partial);
+    git(main, "commit", "--allow-empty", "-m", "remote object not present locally");
+    git(main, "push", "origin", "HEAD:main");
+    const missing = git(main, "rev-parse", "HEAD").trim();
+    const packs = join(partial, ".git/objects/pack");
+    const before = readdirSync(packs).sort();
+    const read = spawnSync("bash", ["-c", 'source "$1"; rmd_retirement_git "$2" cat-file -e "$3"', "proof", GUARD, partial, missing]);
+    assert.notEqual(read.status, 0, "missing objects must remain missing, not be fetched");
+    assert.notEqual(publication(partial).status, 0, "unavailable ancestry fails closed");
+    assert.deepEqual(readdirSync(packs).sort(), before, "no new object packs");
+
+    // Model Azure's Git 2.43, which silently ignores GIT_NO_LAZY_FETCH.
+    const nativeGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const calls = join(fx.root, "git-calls");
+    writeFileSync(join(fx.root, "bin/git"), `#!/bin/bash\nprintf '%s\\n' "$*" >> '${calls}'\nif [ "$1" = --no-lazy-fetch ]; then exit 129; fi\nexec '${nativeGit}' "$@"\n`, { mode: 0o755 });
+    const old = spawnSync("bash", ["-c", 'source "$1"; rmd_retirement_git "$2" cat-file -e HEAD', "proof", GUARD, partial], {
+      env: { ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}` },
+    });
+    assert.notEqual(old.status, 0, "old Git must hold the promisor before reading objects");
+    assert.doesNotMatch(readFileSync(calls, "utf8"), /cat-file/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
 test("Mac janitor retires only published idle workspaces across Remudero, operator descendants and rmd-work", () => {

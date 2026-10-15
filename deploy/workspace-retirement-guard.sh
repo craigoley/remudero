@@ -9,10 +9,21 @@ RMD_PUB_URLS=(); RMD_PUB_ROWS=()
 RMD_PUB_REFS=""; RMD_PUB_REASON="publication-unverified"
 RMD_PUB_GRAPH_KEY=""; RMD_PUB_GRAPH=""
 RMD_DECISION_PASS_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# Git reads can otherwise hydrate promisor objects. Older Git (including the
+# Azure host's 2.43) ignores GIT_NO_LAZY_FETCH, so hold partial clones there.
+export GIT_NO_LAZY_FETCH=1
+RMD_RETIREMENT_NO_LAZY_FETCH=0
+if git --no-lazy-fetch --version >/dev/null 2>&1; then RMD_RETIREMENT_NO_LAZY_FETCH=1; fi
 rmd_retirement_git() {
-  local repo="$1" top
+  local repo="$1" top partial
   shift
   top=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || return 128
+  if [ "$RMD_RETIREMENT_NO_LAZY_FETCH" != 1 ]; then
+    partial=$(git -c safe.directory="$top" -C "$repo" config --get-regexp '^(extensions\.partialclone|remote\..*\.promisor)$' 2>/dev/null)
+    # Config reads don't access objects. Any configured promisor is held,
+    # including an ambiguous value, before status/cat-file can fetch as root.
+    if [ -n "$partial" ]; then return 128; fi
+  fi
   GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$top" -C "$repo" "$@"
 }
 rmd_publication_snapshot() {

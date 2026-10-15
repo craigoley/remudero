@@ -11,7 +11,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
@@ -492,7 +491,7 @@ test("the root pass keeps unpublished repos another user owns and retires publis
   assert.deepEqual([...scopes].sort(), tops);
 });
 
-test("a root pass fetches a scratch repo as the repo's owner, never as root", () => {
+test("a root pass proves publication without fetching objects or invoking runuser", () => {
   const fx = fixture();
   repos(fx);
   const unit = scratchDir(fx, "fetch-unit", false);
@@ -510,7 +509,7 @@ test("a root pass fetches a scratch repo as the repo's owner, never as root", ()
     RMD_CLEANUP_NO_FETCH: "", RMD_CLEANUP_RUNUSER: runuser, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
   });
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(readFileSync(runuserLog, "utf8"), `-u ${userInfo().username} -- git -C ${repo} fetch --quiet --all\n`);
+  assert.equal(existsSync(runuserLog), false, "fresh remote advertisement needs no object fetch");
   assert.equal(existsSync(unit), false, r.stdout);
 });
 
