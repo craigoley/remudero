@@ -112,6 +112,22 @@ test("selected mode revisions invalidate deferred arm observations", async () =>
   } finally { fx.cleanup(); }
 });
 
+test("selected mode recheck preserves a real reader refusal cause", async () => {
+  const fx = fixture("shadow");
+  try {
+    assert.equal(await fx.effects.arm!(pr), "armed");
+    const original = fx.rows().at(-1)?.binding_digest;
+    const current = readFileSync(fx.selected, "utf8");
+    assert.ok(current.includes("    state_dir:"), "the actual selected row is present");
+    writeFileSync(fx.selected, current.replace("    state_dir:", "    future_field: unexpected\n    state_dir:"));
+    assert.equal(await fx.effects.arm!(pr), "armed", "SHADOW must preserve the independent legacy effect");
+    assert.equal(fx.rows().at(-1)?.selected_outcome, "would-refuse");
+    assert.equal(fx.rows().at(-1)?.reason, "unsupported_field", "retain the real reader's cause, not a generic revision change");
+    assert.equal(fx.rows().at(-1)?.binding_digest, original);
+    assert.equal(fx.arms(), 2);
+  } finally { fx.cleanup(); }
+});
+
 test("selected mode snapshots survive caller and transport mutation", async () => {
   const fx = fixture("shadow");
   try {
