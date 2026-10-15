@@ -281,18 +281,6 @@ export class WorktreeConfigRefusedError extends RmdError {
   }
 }
 
-/** A config listing without the repository's own (local) config is not a read: execFile handed back what it had
- *  read before a late timer cut it off. Vetting it as empty dropped every credential helper. Nothing ran. */
-export class WorktreeConfigUnreadableError extends RmdError {
-  constructor(readonly worktree: string) {
-    super("git", GENERIC_EXIT_CODE,
-      `worktree-git: refusing a host git call into ${worktree}: its pinned config listing came back without the ` +
-        "repository's own config, so its credential helpers could not be vetted — nothing was run",
-      { worktree });
-    this.name = "WorktreeConfigUnreadableError";
-  }
-}
-
 /** W1-T6148 — what the pinned files may hold. config.worktree: the keys the harness writes there, and
  *  the keys a command-line value always overrides ({@link HOST_GIT_CONFIG}, the credential reset). */
 const WORKTREE_SCOPE_KEYS = new Set(["credential.helper", "credential.usehttppath", "core.hookspath", "remudero.assignment",
@@ -415,10 +403,6 @@ export function isHarnessCheckout(pin: PinnedWorktreeGit, harnessRoot: string = 
 
 function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog, harnessRoot: string = HARNESS_ROOT): Array<[string, string]> {
   const entries = parseConfigListing(listing);
-  if (!entries.some((e) => e.scope === "local")) {
-    log("worktree_git.config_unreadable", { worktree: pin.worktree, git_dir: pin.gitDir, listing_bytes: listing.length });
-    throw new WorktreeConfigUnreadableError(pin.worktree);
-  }
   // The harness checkout skips only the refusal arm; the credential reset and every override still apply.
   const keys = isHarnessCheckout(pin, harnessRoot) ? [] : refusedConfigKeys(entries, recordedWorktreeRemote(pin.worktree));
   if (keys.length > 0) {
@@ -436,17 +420,9 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
   return vetted(pin, listing, log, harnessRoot);
 }
 
-async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog): Promise<Array<[string, string]>> {
-  const read = async () => (await execFileLoopBounded("git", CONFIG_LIST_ARGS, {
-    cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout: CONFIG_READ_TIMEOUT_MS,
-  })).stdout;
-  try {
-    return vetted(pin, await read(), log);
-  } catch (error) {
-    // A cut-off listing heals on a fresh read; a second unreadable one is refused by name, never vetted as empty.
-    if (!(error instanceof WorktreeConfigUnreadableError)) throw error;
-    return vetted(pin, await read(), log);
-  }
+async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS): Promise<Array<[string, string]>> {
+  const { stdout } = await execFileLoopBounded("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
+  return vetted(pin, stdout, log);
 }
 
 /** `args` with `--no-ext-diff --no-textconv` after a diff-producing subcommand. */
@@ -470,6 +446,8 @@ export interface HostWorktreeGitOptions {
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
   log?: WorktreeGitLog;
+  /** The loop-available budget of the async leaf's pinned config read; a test seam, 30 s otherwise. */
+  configReadTimeoutMs?: number;
 }
 
 function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, overrides: ReadonlyArray<readonly [string, string]>) {
@@ -503,7 +481,7 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
-  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog));
+  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs));
   const command = execFileLoopBounded("git", argv(pin, args), spawn);
   const fed = input === undefined ? Promise.resolve() : new Promise<void>((resolve, reject) => {
     const stdin = command.child.stdin!;

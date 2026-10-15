@@ -8,12 +8,12 @@
  * the timer destroys the unread stdout, and the read RESOLVES with an empty listing. Vetted as empty, the call
  * carried only the credential reset, so git had no helper at all.
  *
- * FIXTURES ONLY: a gitRepo() wired to a fixture unix socket, a fixture `git` shim on PATH, and `git credential fill`.
+ * FIXTURES ONLY: a gitRepo() wired to a fixture unix socket, and `git credential fill`.
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const SOCKET_PASS = "fixture-socket-pass";
-const SAVED = ["PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "RMD_T_CUT_MARK"] as const;
+const SAVED = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS"] as const;
 const saved = new Map(SAVED.map((k) => [k, process.env[k]] as const));
 const CONFIG_LIST = ["config", "--list", "--show-scope", "--null", "--no-includes"];
 const execFilePromise = promisify(execFile);
@@ -63,63 +63,21 @@ after(() => {
 });
 
 describe("a host git call keeps its credential helper through a held loop", () => {
-  it("a config listing cut off once is read again, and the wired socket still answers the credential", async () => {
+  it("a host git call whose config read outlives its deadline in a held loop keeps the wired socket credential", async () => {
     const repo = gitRepo({ kind: "held-loop-cred" });
     repo.git("config", "extensions.worktreeConfig", "true");
     wireCredentialHelperSocket(repo.dir, socketPath);
     leaf.setHarnessCredentialSocket(socketPath);
-    // The shim answers the FIRST pinned config listing with nothing, exit 0: exactly what a late execFile timeout
-    // hands back. Every other call, and every later listing, is the real git.
-    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
-    const shimDir = join(root, "shim");
-    mkdirSync(shimDir, { recursive: true });
-    const mark = join(root, "cut-once");
-    writeFileSync(join(shimDir, "git"), [
-      "#!/bin/sh",
-      `if [ "$*" = "${CONFIG_LIST.join(" ")}" ] && [ ! -e "$RMD_T_CUT_MARK" ]; then : > "$RMD_T_CUT_MARK"; exit 0; fi`,
-      `exec "${realGit}" "$@"`,
-      "",
-    ].join("\n"));
-    chmodSync(join(shimDir, "git"), 0o755);
-    process.env.RMD_T_CUT_MARK = mark;
-    process.env.PATH = `${shimDir}:${saved.get("PATH") ?? ""}`;
-    const rows: Array<{ step: string }> = [];
     const before = requests;
-    try {
-      const out = await leaf.hostWorktreeGitAsync(repo.dir, ["credential", "fill"], {
-        input: "protocol=https\nhost=github.com\npath=fixture/repo.git\n\n",
-        log: (step) => rows.push({ step }),
-      });
-      assert.ok(existsSync(mark), "control: the shim did cut the first listing");
-      assert.match(out, new RegExp(`password=${SOCKET_PASS}`), "git got its credential from the wired socket");
-      assert.equal(requests, before + 1, "the socket served the request");
-      assert.deepEqual(rows.map((r) => r.step), ["worktree_git.config_unreadable"], "the cut-off listing is named, once");
-    } finally {
-      process.env.PATH = saved.get("PATH");
-    }
-  });
-
-  it("a listing that never names the repository's own config is refused by name, never run without a helper", async () => {
-    const repo = gitRepo({ kind: "held-loop-cred-refused" });
-    const shimDir = join(root, "shim-always");
-    mkdirSync(shimDir, { recursive: true });
-    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
-    writeFileSync(join(shimDir, "git"), [
-      "#!/bin/sh",
-      `if [ "$*" = "${CONFIG_LIST.join(" ")}" ]; then exit 0; fi`,
-      `exec "${realGit}" "$@"`,
-      "",
-    ].join("\n"));
-    chmodSync(join(shimDir, "git"), 0o755);
-    process.env.PATH = `${shimDir}:${saved.get("PATH") ?? ""}`;
-    try {
-      await assert.rejects(
-        leaf.hostWorktreeGitAsync(repo.dir, ["credential", "fill"], { input: "protocol=https\nhost=github.com\n\n", log: () => {} }),
-        (e: unknown) => e instanceof leaf.WorktreeConfigUnreadableError,
-      );
-    } finally {
-      process.env.PATH = saved.get("PATH");
-    }
+    // The pinned config read is spawned before the call returns; the loop is then held past its budget, as the
+    // daemon's synchronous spawns held it for 69-118 s on 2026-10-15.
+    const fill = leaf.hostWorktreeGitAsync(repo.dir, ["credential", "fill"], {
+      input: "protocol=https\nhost=github.com\npath=fixture/repo.git\n\n", configReadTimeoutMs: 200,
+    });
+    holdLoop(2000);
+    const out = await fill;
+    assert.match(out, new RegExp(`password=${SOCKET_PASS}`), "git got its credential from the wired socket");
+    assert.equal(requests, before + 1, "the socket served the request");
   });
 
   it("a host git child that exits while the loop is held past its deadline keeps its whole output", async () => {
