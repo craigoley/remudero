@@ -74,6 +74,7 @@ import {
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
+  securityArmRefusalAtHead, securityHoldReason,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -6162,6 +6163,8 @@ const REVIEW_POLICY = loadReviewPolicy();
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   stageBackstops: {
     "awaiting-arm": { kind: "BACKSTOP", minutes: 30 },
+    "security-alert-hold": { kind: "BACKSTOP", minutes: 30 },
+    "security-unknown-hold": { kind: "BACKSTOP", minutes: 30 },
     "conflict": { kind: "BACKSTOP", minutes: 30 },
     "own-red": { kind: "BACKSTOP", minutes: 45 },
     "awaiting-review": { kind: "BACKSTOP", minutes: 30 },
@@ -15155,7 +15158,7 @@ export async function runSweep(
           (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
-    const diagnoses: string[] = [];
+    const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
     if (fields.blocker === "awaiting-review") {
@@ -16364,6 +16367,10 @@ export async function runSweep(
     }
     // A green, reviewed PR under an operator merge hold is waiting on a person: name the hold, never "arming".
     const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
+    const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
+      ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
+    const securityText = securityHold && securityHoldReason(securityHold,
+      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined);
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
@@ -16374,7 +16381,7 @@ export async function runSweep(
       : undefined;
     const shownReason = mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
-      : notDispatched !== undefined
+      : securityText ? securityText : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
@@ -16391,6 +16398,7 @@ export async function runSweep(
       ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
       operatorHold: mergeHold !== undefined,
       dispatchHeld: dispatchHold !== undefined,
+      securityArmRefusal: securityHold,
     });
     const planRepairCapable =
       (metadataWait && typeof deps.repairMetadata === "function") ||
@@ -16399,7 +16407,8 @@ export async function runSweep(
       (planProofBlockedPrs.has(pr.prNumber) && typeof deps.dispatchPlanOnlyRepair === "function" &&
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
-      ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
+      ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
+        blocker.startsWith("security-") ? securityText : undefined),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
@@ -21953,10 +21962,12 @@ export async function runStaleEscalationRejudge(
 /** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
 export const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
 
-/** One holder's slice of the ledger union: the steps it reads, and the name its durable digest is kept under. */
+/** A holder's ledger slice: its steps, digest name, and the fields it keeps (`project` keeps `step`, is idempotent; bump `version`). */
 export interface EscalationTriageSlice {
   holder: string;
   steps: readonly string[];
+  project?: (row: Record<string, unknown>) => Record<string, unknown>;
+  version?: string;
 }
 
 /** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
@@ -22000,7 +22011,8 @@ export function createEscalationTriageHistoryReader(
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
   const steps = [...slice.steps];
-  const identity = { holder: slice.holder, reducerVersion: "1" };
+  const project = slice.project ?? ((row: Record<string, unknown>) => row);
+  const identity = { holder: slice.holder, reducerVersion: slice.version ?? "1", project };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -22033,7 +22045,7 @@ export function createEscalationTriageHistoryReader(
       if (loaded.get(entry.path) !== key) fresh.push(entry);
     }
     if (fresh.length > 0) {
-      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)), {
+      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
         holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
