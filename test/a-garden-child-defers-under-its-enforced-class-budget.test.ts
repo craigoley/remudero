@@ -1,6 +1,7 @@
 /**
- * Operator 2026-10-14: the host memory budget enforces for GARDEN children only. Builds, fixes and reviews stay in shadow
- * until W1-T8472 lands. A garden child that would not fit is deferred to its next pass, with one
+ * Operator 2026-10-14 introduced per-class garden admission. Operator 2026-10-15 extends the shipped ruling to
+ * build, fix, review and advisory after W1-T8472 landed. The isolated garden-only fixture below retains that seam.
+ * A garden child that would not fit is deferred to its next pass, with one
  * memory_budget.enforce_defer row, and never dropped: the next pass asks again and runs once memory frees.
  * Each case asserts a state only the per-class mode produces: the shipped mode per class, a deferral row, a child that
  * never started, or a later pass that did.
@@ -136,14 +137,17 @@ function scratchDir(prefix: string): string {
   return mkdtempSync(join(parent, `${RMD_TMP_PREFIX}${prefix}`));
 }
 
-test("the shipped budget enforces garden children only and keeps builds, fixes and reviews in shadow", () => {
+test("the operator-ratified budget enforces builds fixes reviews advisory and garden without promoting other classes", () => {
   const block = (parseYaml(readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8")) as { sweep: { hostMemoryBudget: unknown } })
     .sweep.hostMemoryBudget;
   const shipped = parseHostMemoryBudgetPolicy(block);
   assert.equal(shipped.mode, "shadow", "the block's own mode stays shadow");
   assert.equal(hostMemoryBudgetModeFor(shipped, "garden"), "enforce", "operator 2026-10-14: garden children enforce");
-  for (const workerClass of ["implement", "fix", "review", "check-proof", "test", "advisory"] as const) {
-    assert.equal(hostMemoryBudgetModeFor(shipped, workerClass), "shadow", `${workerClass} stays in shadow until W1-T8472 lands`);
+  for (const workerClass of ["implement", "fix", "review", "advisory"] as const) {
+    assert.equal(hostMemoryBudgetModeFor(shipped, workerClass), "enforce", `${workerClass} enforces the operator's 2026-10-15 ruling`);
+  }
+  for (const workerClass of ["check-proof", "test", "push-gate", "unclassified", "run-child-probe"] as const) {
+    assert.equal(hostMemoryBudgetModeFor(shipped, workerClass), "shadow", `${workerClass} is outside the approved promotion`);
   }
   const row = (value: unknown) => ({ value, origin: "proposal" });
   const base = block as Record<string, unknown>;
@@ -153,6 +157,38 @@ test("the shipped budget enforces garden children only and keeps builds, fixes a
   const { classModes: _dropped, ...withoutOverrides } = base;
   void _dropped;
   assert.equal(parseHostMemoryBudgetPolicy(withoutOverrides).classModes, undefined, "a block with no classModes has no override");
+});
+
+test("the shipped worker budget waits through pressure and admits after headroom recovers without changing thresholds", async () => {
+  const block = (parseYaml(readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8")) as { sweep: { hostMemoryBudget: unknown } })
+    .sweep.hostMemoryBudget;
+  const shipped = parseHostMemoryBudgetPolicy(block);
+  const { mode: _mode, classModes: _classModes, ...thresholds } = shipped;
+  void _mode; void _classModes;
+  const { mode: _fixtureMode, classModes: _fixtureClasses, ...expectedThresholds } = POLICY;
+  void _fixtureMode; void _fixtureClasses;
+  assert.deepEqual(thresholds, { ...expectedThresholds, serveColdStartReserveMib: 6144 });
+  for (const workerClass of ["implement", "fix", "review", "advisory"] as const) {
+    resetShadowMemoryStateForTests();
+    resetMemoryAdmissionStateForTests();
+    const w = world();
+    w.state.availableMib = 2500;
+    w.running.entries = [{ id: "already-running", workerClass: "implement" }];
+    const outcome = await awaitMemoryAdmission({ workerClass, root: "/home/node/Remudero" }, ports(w, {
+      policy: () => shipped,
+      sleep: async (ms) => {
+        w.sleeps.push(ms);
+        w.now.ms += ms;
+        w.state.availableMib = 9000;
+      },
+    }));
+    assert.equal(outcome.kind, "admitted", `${workerClass} eventually resumes`);
+    assert.equal(w.sleeps.length, 1, `${workerClass} waits, rather than starting under the measured shortfall`);
+    assert.equal(w.rows[0]!.step, ENFORCE_WAIT_STEP);
+    assert.equal(w.rows[0]!.worker_class, workerClass);
+    assert.equal(w.running.entries[0]!.id, "already-running", "the existing worker is not removed");
+    assert.equal(w.running.entries.length, 2, "only the recovered admission publishes a new reservation");
+  }
 });
 
 test("under the per-class budget a build start stays in shadow while a short garden start is deferred, not waited for", async () => {
