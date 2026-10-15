@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fchmodSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeSync } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -556,9 +556,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           let openedFd: number | undefined;
           try {
             concurrency = perFile === undefined ? testRunConcurrency(load(), slots) : sized(namedPeaks(othersThan(i)));
-            // Readers in other accounts retain access; only the creating account may rewrite the lease.
-            // The exclusive descriptor remains the heartbeat target, never a later path replacement.
-            const fd = openSync(path, "wx+", 0o644); openedFd = fd;
+            // Created owner-only, then widened on the descriptor to peer-READ: other accounts parse the holder, only
+            // the creating account may rewrite it. The exclusive descriptor stays the heartbeat target, never the path.
+            const fd = openSync(path, "wx+", 0o600); openedFd = fd;
+            fchmodSync(fd, 0o644 & ~process.umask());
             const writeRecord = (body: string): void => {
               const bytes = Buffer.from(body); let offset = 0;
               while (offset < bytes.length) {
