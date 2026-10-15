@@ -153,8 +153,9 @@ function stored(fragmentYaml: string): DraftedCandidate {
 
 test("W1-T9039: the draft lint blocks a new module with no call site", () => {
   const violations = lintDraftedFragment(UNCALLED_MODULE, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile);
-  assert.deepEqual(checks(violations), ["call-site"], JSON.stringify(violations));
+  assert.deepEqual(checks(violations), ["call-site", "draft-call-site-absent"], JSON.stringify(violations));
   assert.match(violations.find((v) => v.check === "call-site")!.message, /new module src\/lib\/ledgerCaller\.ts/);
+  assert.match(violations.find((v) => v.check === "draft-call-site-absent")!.message, /ledgerCaller\.ts.*CREATES/);
   assert.deepEqual(lintDraftedFragment(CALLED_MODULE, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile), [],
     "control: a call proof in a different src file clears it");
   // The production default resolves the same facts against the harness checkout, where ledgerCaller.ts is absent too.
@@ -238,7 +239,8 @@ test("W1-T9039: the approve relint applies the draft floor repo facts", () => {
     const relinted = relintRatificationFragment(fragment, PROPOSAL_ID, facts);
     assert.equal(relinted.ok, false, `${check}: approve must refuse what the push floor refuses`);
     assert.match(relinted.ok ? "" : relinted.reason, new RegExp(`\\[${check}\\]`));
-    assert.deepEqual(checks(lintDraftedFragment(fragment, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile)), [check],
+    assert.deepEqual(checks(lintDraftedFragment(fragment, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile)),
+      check === "call-site" ? ["call-site", "draft-call-site-absent"] : [check],
       "the draft floor refuses the same thing");
   }
   const healed = relintRatificationFragment(BLOCKED, PROPOSAL_ID, facts);

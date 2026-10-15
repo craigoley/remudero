@@ -1,0 +1,176 @@
+- id: W1-T9647
+  title: "THE DAEMON NAMES WHAT HOLDS ITS HEAP, AND ITS CENSUS FILES THE TOP HOLDERS — after the slack reclaimer's full collection the core daemon still holds 867 MiB p50 (563-1,154 p10-p90, 282 rows), and memo_sizes names 7 MiB of it; nothing says what the rest is, so no heap reduction can be aimed or its saving checked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high # two concerns: a live sampler on the daemon loop and an offline census script that feeds filing
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go with all … think deeply and do research to get it right and innovate; lean into automation and self improvement"): box CPU/memory plan, 2026-10-15 swap-owner census'
+  plan_refs: [W1-T6782, W1-T7092, W1-T9105, W1-T5175, W1-T5355, W1-T8883, W1-T9106, W1-T9091, W1-T9117]
+  files: [src/lib/daemon-memory-census.ts, src/lib/ledger-union.ts, src/run-task.ts, scripts/daemon-heap-census.mts, test/the-daemon-names-what-holds-its-heap.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15, Azure host (16 GB RAM, box swap ~5.8 GB), operator session reading /proc and cgroup files:
+    - The core daemon PROCESS holds ~3.8 GB anon: 1.5-2.0 GB RSS plus 1.7-2.0 GB of its own pages in swap,
+      VmHWM 3.7 GB. It is the largest swap owner on the box (container 3.17 GB of 5.8 GB at 06:22Z).
+    - Its swap falls in bursts (-5..-25 MB per 2 s at 06:30:55-06:31:07Z, -290 MB at 06:38:16-26Z) and climbs
+      back (1.37 to 2.0 GB, 06:31-06:37Z). Bursts reach ~3,800 pages/s host-wide, and they are what holds serve's
+      handoff on `swap_in` (bound 256 pages/s). INFERRED: V8 major collections walk old-generation pages the kernel
+      had swapped out. The memory-budget shadow found swap-in predicts PSI stall only weakly (91% vs 87% base rate).
+    - The container hit memory.high 1,604 times (lifetime) and memory.peak 8.38 GB, but there were no high events
+      in a 4-minute window while the daemon swapped. What triggers the swap-out is NOT established.
+    OBSERVED, core ledger, the 24 newest archives (2026-10-14 06:37Z to 10-15 12:15Z), read with node over zcat:
+    - daemon.slack_reclaim `reclaimed` rows (n=282) put heap_used_after_bytes, the heap left after the existing
+      reclaimer's full compacting collection, at p10 563 / p50 867 / p90 1,154 MiB. That is LIVE data, not
+      garbage V8 has yet to collect.
+    - daemon.alive memory rows (n=239): heap used p50 852 MiB, p90 1,352. W1-T9105's `memo_sizes` (five memos)
+      sums to 7 MiB p50, 9 MiB max. More than 99% of the live heap is unattributed.
+    - Positive control for the counts: 336 daemon.alive, 387 daemon.slack_reclaim and 28 daemon.boot rows were
+      found in the same 24 archives. On 10-15 06:16Z-12:18Z only 15 daemon.alive rows carried a memory sample, because
+      it rides the in-flight ticker. One sample's own telemetry_sample_us was 675,000 (10:33:26Z).
+    - read_model.memo_retention: the daemon reports one rotation memo (cost-anomaly, 1,749 rows over 363
+      archives). Its other rotation memos have no holder name and report nothing.
+    - The newest row (12:17:56Z) puts the main isolate at 1.37 GB used. Its worker threads are small: read-plane
+      178 MB, others 5-11 MB. The heap that matters is the main thread's.
+    WHY NOW: the queued heap work reduces load cost or caps the heap, but does not say what the heap holds.
+    W1-T9106 caps the heap, W1-T9091/W1-T9117 reduce load cost, and W1-T9527/9544/9545 move reads off the loop.
+    Serve answered this question for itself with `serve.memory` holders (W1-T5175/W1-T5355): its first 50 rows
+    named 2.6 MB of 3-4 GB, and the holder book then aimed every later serve relief. The daemon has no such book.
+    CANDIDATE HOLDERS, read on origin/main 84bbbbe73. They are ranked by INFERRED retained size; none is measured.
+    (1) Plan copies. The parsed plan is 3,789 shards, 22.9 MB of YAML, INFERRED 25-60 MB per parse. Copies:
+        - the dispatch phase's `snapshots` (src/lib/daemon.ts) holds one per distinct reloaded plan per phase;
+        - each in-flight lane holds its own `synced.plan` (src/run-task.ts runTask) and the admitted-plan slot;
+        - the boot `plan` is closed over by buildSweepHook/buildSweepLightHook for the life of the process;
+        - `activePlanRef.current` holds the current plan;
+        - the published tick read (`tickReadGeneration`) holds a structured clone carrying a full Plan;
+        - read-plane.ts `structuredClone(input)` holds a clone per queued read.
+        INFERRED: 3 copies in steady state, 8-15 during a multi-lane dispatch phase.
+    (2) Source maps and source text. VERIFIED: tsx 4.23.15 calls process.setSourceMapsEnabled(true), and
+        bin/rmd execs tsx src/run-task.ts (584 modules, 20.5 MB of TS). read-plane.ts callerFrame and
+        worker-heaps.ts spawnSite format stacks on every sync spawn and worker spawn, which makes Node build and
+        keep a decoded map per module on the stack. INFERRED >100 MB.
+    (3) Closed-PR rows with full bodies. BoardPrRest.body (open-prs-rest.ts) for ~10k PRs is held in
+        projectionGithub, laneGithubFor, the sweep's boardGithub and the board snapshot cache's `closed`
+        (board-snapshot-cache.ts closedSeed). INFERRED 10-100+ MB.
+    (4) Ledger memos without a size. Two escalation-triage unions (escalationTriageHistory and
+        escalationTriageEvidence, over sweep.ts createIncrementalLedgerUnion) cover every rotation with no time
+        window. There are also status.ts creditScanMemo/syncCreditScanMemo (the same reducer twice), the detector
+        rotation memos (foreign-pause, idle-capacity, stranded-task, sre-lane, operator-agent, fleet-flow) and
+        sweep.ts terminalUncreditableHeadsByLedger/handedOffHeadJudgmentsByLedger. INFERRED 10-30 MB each at most.
+        W1-T9105's approximateMemoBytes is JSON length, which INFERRED under-counts V8 objects by 2-4x.
+    (5) Compiled code: bytecode and feedback for 584 modules. INFERRED 10-100 MB.
+    (6) Grow-only books: runDaemon measuredRuns/attempted/merged/dirtyBlockedShas, and status.ts
+        changedFilesByUrl/reviewStateCache per gateway. INFERRED <10 MB.
+    The census below replaces this ranking with measurement. Do not trust the ranking until it has run.
+    HARD CONSTRAINTS (operator rule): NO heap snapshot, NO forced collection, NO inspector session and NO
+    --cpu-prof in the LIVE daemon. The live row uses cheap counters only. Heap snapshots and forced collections
+    are allowed ONLY in the offline census process the builder starts. The existing slack reclaimer's collections
+    are not this task's, and this task adds none.
+    NOTE: src/lib/ledger-union.ts is in BAKED_RUNTIME_SOURCE_PATHS, so this PR rebuilds the image once.
+  design: |
+    1. src/lib/daemon-memory-census.ts (new) builds the `daemon.memory` row. It is a new step in the daemon.*
+       family, mirroring serve.memory. daemon.alive stays as it is: its memory sample rides the in-flight ticker
+       (15 rows in 6 h on 10-15), so a holder series cannot be built on it. The row carries:
+       - heap_spaces: per space from v8.getHeapSpaceStatistics() (new, old, code, large_object,
+         code_large_object, new_large_object, read_only, and any other space reported): used, size, physical.
+       - heap: from v8.getHeapStatistics() (used, total, physical, external_memory, malloced,
+         number_of_native_contexts, number_of_detached_contexts, used_global_handles_size), plus
+         v8.getHeapCodeStatistics() (bytecode_and_metadata_size, external_script_source_size).
+       - process: from process.memoryUsage() (rss, external, arrayBuffers), and from /proc/self/status (VmRSS,
+         VmSwap, VmHWM, RssAnon, RssFile). An unreadable value is named in `mem_proc`, never written as zero.
+       - source_maps_enabled: process.sourceMapsEnabled.
+       - holders[]: {name, kind, entries, bytes, basis: "accounted" | "census" | "walked", error?}, using
+         serve-memory.ts's HolderReading shape. Import its types only, never serve's modules.
+       - attributed_bytes; live_after_gc_bytes and its age_ms, from the most recent daemon.slack_reclaim
+         `reclaimed` reading the reclaimer already holds (no new collection); and unattributed_live_bytes =
+         live_after_gc_bytes - attributed_bytes, omitted with a reason when there is no reclaim reading.
+       - boot_head_sha (12 hex) and uptime_s, so each row names its generation.
+       - sample_us for the whole sample, per-holder sample_us, and late_ms (how late the timer fired).
+    2. Holders are registered in src/run-task.ts's daemon command through a registry keyed by name, as serve's is.
+       They cover the structures in the rationale:
+       - plan copies: count DISTINCT Plan objects reachable from the registered refs, using a WeakSet over
+         snapshots, lanes, boot plan, active plan and tick read. Bytes = distinct copies x per-copy bytes.
+       - the closed-PR row sets: entries plus summed body length.
+       - every createIncrementalLedgerUnion and rotation memo the daemon builds.
+       - the five W1-T9105 memos.
+       - the grow-only books.
+       Sizing on the loop is never an unbounded walk. A holder reports either bytes accounted at insert (the
+       sized-memo pattern), or entries x a per-entry figure the census measured (basis "census", carried with its
+       calibration id), or a budgeted approxBytes walk sliced across turns with setImmediate between holders.
+       src/lib/ledger-union.ts: createLedgerRotationMemo's retention() gains approx_bytes, accounted when a
+       rotation is loaded, and every daemon-side memo gets a `holder` name.
+    3. `startDaemonMemoryCensus(...)`, exported by src/lib/daemon-memory-census.ts and called from src/run-task.ts's
+       daemon command, runs the sampler on its own unref'd timer every DAEMON_MEMORY_SAMPLE_MS and returns its stop.
+       A throwing holder is named with its error and never drops the row. A failed sample writes
+       `daemon.memory_sample_failed` and the next tick runs again. The row is bounded to
+       DAEMON_MEMORY_ROW_MAX_BYTES: the holders are sorted by bytes, the top ones kept, and the rest summed as
+       `holders_omitted {count, bytes}`.
+    4. scripts/daemon-heap-census.mts is the OFFLINE census. It is never run by the daemon. Run with
+       `node --expose-gc --import tsx` in a private process against a private COPY of a state dir (or
+       `--synthetic <rows>`, a generator that writes a ledger corpus at production scale: rotation count, rows per
+       rotation and step mix taken from the copy's own listing) and the plan at a given ref. For each holder
+       constructor the daemon uses (plan load via PlanBlobCache, each ledger union/memo with its real reducer,
+       a board snapshot cache seeded from the corpus's closed PRs, the tick read's structured clone, and the
+       module graph imported under tsx vs the ADR 0006 bundle), it:
+       - builds the holder at production scale;
+       - collects twice and reads heapUsed; drops the holder, collects twice and reads again; the difference is
+         retained_bytes;
+       - divides by entries for per_entry_bytes;
+       - optionally (`--snapshot`) writes a heap snapshot IN THAT PROCESS and reports the top retainer classes.
+       Output is a ranked JSON and a markdown table: holder, entries, retained_bytes, share of the measured live
+       set, per_entry_bytes. Each holder whose share is at or above CENSUS_FILING_SHARE also gets a
+       `proposed_task` stub: subject, evidence lines, files, and the daemon.memory holder name its acceptance must
+       read. The per-entry figures are written to src/lib/daemon-memory-census.ts's calibration table, with the
+       census sha and date, so the live row's "census" estimates are measured, not guessed. The measuring and
+       ranking live in an exported function the script calls, with the collector and heap reader injected, so a
+       unit test drives the ranking without --expose-gc.
+    5. THE SELF-IMPROVEMENT LOOP (the rule this task establishes):
+       - The census's ranked output is the filing input. Every holder at or above CENSUS_FILING_SHARE becomes its
+         own filed task. That task cites the census line and the holder's daemon.memory series, and its
+         acceptance names the holder whose bytes it reduces.
+       - Each fix's saving is verified by the row: the holder's bytes p50 over daemon.memory rows before vs after
+         the fix's boot_head_sha (one generation each side). The live row's `unattributed_live_bytes` shrinking is
+         the census's own coverage measure.
+       - A calibration whose live entries x per_entry_bytes drifts from the census by more than the census's own
+         spread is re-run, not trusted.
+       Automatic filing from the census JSON, through the garden/backlog proposal path, is a FOLLOW-UP proposal,
+       not this task.
+    OPERATOR DECISIONS (named, not chosen here; the builder proposes, the operator rules before merge):
+       - DAEMON_MEMORY_SAMPLE_MS: proposed 180_000, serve's SERVE_MEMORY_SAMPLE_MS.
+       - DAEMON_MEMORY_ROW_MAX_BYTES: proposed 6 KiB. daemon.alive rows already run 2-27 KB.
+       - The per-turn sizing budget: proposed 10 ms of synchronous work between yields.
+       - CENSUS_FILING_SHARE: proposed 5% of the measured live set, or 50 MiB, whichever is lower.
+       No existing threshold, limit, ceiling or baseline changes.
+    NOT IN SCOPE: reducing any holder (each is a filed follow-up); W1-T9106's heap ceiling; moving the daemon to the
+    bundle (W1-T9117); why the container swaps without memory.high events; and the slack reclaimer's own forced
+    collections. INFERRED from 06:42:32Z, swap 1,378 to 711 MiB across one reclaim: those collections may themselves
+    cause swap-in bursts. That is reported for a separate task.
+    Tests go in the new file, titled verbatim as in the proofs. Inject v8, /proc and clock seams. Add one test that
+    reads the REAL getHeapSpaceStatistics and /proc/self/status, so the defaults are covered.
+  acceptance:
+    - claim: "a holder the daemon grows appears on daemon.memory with its entries and a non-zero byte estimate that grows with it"
+      proof: 'grep: test("W1-T9647: a holder the daemon grows appears on the memory row with a non-zero estimate" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "the memory row carries every V8 heap space, the code statistics and the process swap; an unreadable proc file is named, never zero"
+      proof: 'grep: test("W1-T9647: the memory row carries every heap space and the process swap, and unknown is never zero" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "the row is written on its cadence from an unref'd timer, a slow holder is sliced across turns, and a throwing holder is named without dropping the row"
+      proof: 'grep: test("W1-T9647: the memory row is written on its cadence and a slow holder never blocks the loop" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "unattributed live bytes subtract the holders from the reclaimer's last measured live set and are omitted with a reason when there is none"
+      proof: 'grep: test("W1-T9647: unattributed live bytes are the last measured live set less the holders" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "the offline census ranks a holder grown tenfold above an unchanged one and proposes a task only at or above the filing share"
+      proof: 'grep: test("W1-T9647: the offline census ranks holders by retained bytes and proposes tasks for the top ones" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "the default seams read this process's real heap spaces and proc status"
+      proof: 'grep: test("W1-T9647: the default seams read the real heap spaces and proc status" in test/the-daemon-names-what-holds-its-heap.test.ts'
+    - claim: "the daemon command starts the memory census"
+      proof: 'grep: startDaemonMemoryCensus( in src/run-task.ts'
+  falsifier: |
+    On origin/main no daemon.memory row exists, so the first test finds no row. Register a sized memo, insert 1,000
+    entries and sample. With the change, the holder reads 1,000 entries and bytes > 0, and after 1,000 more
+    entries it reads a larger figure. Size the holder with a single unbounded approxBytes walk instead, with an
+    injected clock charging 1 ms per node: the third test sees one synchronous slice over the per-turn budget and
+    goes red. Let the census measure retained bytes without dropping the holder: both holders read the same
+    retained figure and the fifth test goes red.
