@@ -15006,7 +15006,7 @@ export interface FullPreludeTimer {
 }
 
 export function createFullPreludeTimer(
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  emit: (fields: Record<string, unknown>) => void,
   clock: () => number = () => systemClock.now(),
 ): FullPreludeTimer {
   const startedAtMs = clock();
@@ -15037,8 +15037,7 @@ export function createFullPreludeTimer(
     write(walkReached) {
       if (written) return;
       written = true;
-      log("sweep.full_prelude", { ...fields, elapsed_ms: Math.max(0, clock() - startedAtMs),
-        walk_reached: walkReached, stages: { ...stages } });
+      emit({ ...fields, elapsed_ms: Math.max(0, clock() - startedAtMs), walk_reached: walkReached, stages: { ...stages } });
     },
   };
   return timer;
