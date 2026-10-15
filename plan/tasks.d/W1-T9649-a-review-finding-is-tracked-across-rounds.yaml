@@ -1,0 +1,52 @@
+- id: W1-T9649
+  title: "THE SAME REVIEW FINDING GETS A NEW IDENTITY EVERY ROUND — a finding id hashes the head sha and the anchor line, so the outcome fold can only call an older finding `superseded` and cannot tell a finding the fix round cleared from one the reviewer raised again; add a round-independent lineage key and split `superseded` into `persisted` and `not-re-raised`, as telemetry only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19 span: the receipt writer and the outcome fold. One concern — finding lineage across rounds; no gate, status or repair label reads it
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T4849]
+  files: [src/lib/review-findings.ts, src/lib/review-finding-outcomes.ts, test/a-review-finding-is-tracked-across-rounds.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    - `extractReviewFindings` builds a finding's id from the owner, repo, PR, head sha, criterion, category and an
+      evidence digest of the anchor's path, line and text (src/lib/review-findings.ts:126-127). After any push the same
+      issue gets a new id.
+    - `deriveReviewFindingOutcomes` (src/lib/review-finding-outcomes.ts:95) labels an older finding `superseded`
+      whenever a later head of the same PR was reviewed (:125-128). That says nothing about the finding itself.
+    - So nothing measures whether a fix round made a finding go away, or whether the reviewer raised the same issue
+      again. Each extra round costs a fix worker and a full CI run of about 16 minutes.
+    - W1-T4849's ruling stands: a resolved thread or a merge is workflow activity, never correctness. These labels are
+      flow telemetry and claim nothing about whether a finding was right.
+    Found while reading msitarzewski/agency-agents (security/security-ai-generated-code-auditor.md): a stable finding
+    fingerprint lets a rescan say still here, resolved, or new.
+  design: |
+    1. Each receipt gains `lineage_key`: a digest of owner, repo, PR, criterion, category, anchor path and anchor text.
+       It has no head sha and no line number, so a moved line keeps its key.
+    2. In `deriveReviewFindingOutcomes`, `superseded` splits into:
+       - `persisted`: a later reviewed head of the same PR carries a finding with the same `lineage_key`;
+       - `not-re-raised`: no later head does.
+       The confirmed-repair, human-accepted, human-rejected, conflicting and unknown counts are unchanged.
+    3. Nothing that gates, posts a status, or labels a repair reads either label.
+    New tests go in test/a-review-finding-is-tracked-across-rounds.test.ts, with `test(` titles exactly as in the
+    proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-review-finding-is-tracked-across-rounds.test.ts"
+    - claim: "a finding raised again at a later head on a moved line is counted persisted"
+      proof: 'grep: test("W1-T9649: a finding raised again at a later head on a moved line is persisted" in test/a-review-finding-is-tracked-across-rounds.test.ts'
+    - claim: "a finding no later head raises is counted not re-raised, and confirmed-repair counts are unchanged"
+      proof: 'grep: test("W1-T9649: a finding no later head raises is not re-raised and repairs are unchanged" in test/a-review-finding-is-tracked-across-rounds.test.ts'
+  falsifier: |
+    Put the anchor line number back into `lineage_key`. The first test's moved finding is then counted `not-re-raised`.
+  note: |
+    ADJACENT, NOT IN SCOPE: a finding first raised at a later head on text the earlier reviewed head already carried
+    (a "late" finding) needs a git read at the earlier head inside `extractReviewFindings`'s caller
+    (src/run-task.ts:9053). File it once `persisted` rows show repeat rounds matter.

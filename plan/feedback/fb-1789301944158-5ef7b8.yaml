@@ -11,7 +11,10 @@ raw: "Observed on PR #5379: the daemon posted remudero-review=success for the
   fact, bounded behavior, and unit falsifiers."
 attachments: []
 origin: cli
-status: grilling
+status: rejected
+# Already decided: W1-T5376, merged as PR #9150, implements the fresh-fact
+# handoff in src/lib/sweep.ts with test/failed-arm-fresh-evidence.test.ts.
+# Original report preserved; this does not assert the cause of historical PR #5379.
 reply_to: null
 proposal_pr: null
 summary: null

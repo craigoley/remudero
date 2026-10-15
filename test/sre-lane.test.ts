@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { listFeedback } from "../src/lib/feedback.js";
+import { overlayQueuedFeedbackEntries } from "../src/lib/feedback-landing.js";
 import {
   aggregateIncidents,
   daemonSreLaneInput,
@@ -244,7 +245,9 @@ test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own 
   const lane = startSreLane(daemonSreLaneInput(input))(60_000);
   await lane.settled();
   lane.stop();
-  const entries = listFeedback(root);
+  // W1-T9615: the daemon input stages the filing in its state root's landing queue (here `root`), not the checkout.
+  assert.equal(listFeedback(root).length, 0, "the daemon's filing waits in the landing queue, not the checkout");
+  const entries = overlayQueuedFeedbackEntries(listFeedback(root), root);
   assert.deepEqual(entries.map((e) => e.origin), [incidentFeedbackOrigin(FP_A)], "only the INCIDENT rows count");
   assert.ok(entries[0].raw.includes("Count: 2"), "both incident steps are read, the torn row is not");
   assert.ok(entries[0].raw.includes("Instance(s): r"));
