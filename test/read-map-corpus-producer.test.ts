@@ -172,7 +172,7 @@ function corpusProbe(body: string, timeout = 3000) {
     finally {Object.assign(fs,real);syncBuiltinESMExports();fs.rmSync(home,{recursive:true,force:true});}
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
-    cwd: ROOT, encoding: "utf8", timeout, env: { ...process.env, NODE_V8_COVERAGE: "" },
+    cwd: ROOT, encoding: "utf8", timeout, env: { ...process.env },
   });
   assert.equal(child.error, undefined, child.error?.message);
   assert.equal(child.status, 0, child.stderr || child.stdout);
