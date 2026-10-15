@@ -9,11 +9,13 @@
  * the loop is held past its budget keeps its full stdout; a child that outlives its budget on a free loop is stopped
  * and REJECTS, even when it traps the signal and exits 0.
  */
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { ChildProcess, execFile, spawn } from "node:child_process";
 
 import { boundChildByLoopTime, execFileLoopBounded, LoopBoundedChildTimeout } from "../src/lib/loop-bounded-child.js";
+import { clockFromMillisFn, systemClock } from "../src/lib/clock.js";
+import { withGhKillEscalation } from "../src/lib/github-transport.js";
 
 /** Holds the event loop the way the daemon's synchronous spawns did. */
 function holdLoop(ms: number): void {
@@ -132,4 +134,142 @@ test("without a positive budget the promise form is plain execFile", async () =>
     (e: unknown) => !(e instanceof LoopBoundedChildTimeout) && (e as { code?: unknown }).code === 3,
     "a child that fails inside its budget keeps execFile's own error",
   );
+});
+
+test("GH grace follows actual primary expiry after a held loop", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(systemClock, "now", () => now);
+  const signals: Array<{ at: number; signal: NodeJS.Signals | number }> = [];
+  const warnings: string[] = [];
+  const child = Object.assign(new ChildProcess(), {
+    exitCode: null,
+    signalCode: null,
+    kill(signal: NodeJS.Signals | number) { signals.push({ at: now, signal }); return true; },
+  });
+  const primary = boundChildByLoopTime(child, 6000, { clock: clockFromMillisFn(() => now) });
+  let finish!: (out: { stdout: string; stderr: string }) => void;
+  const command = Object.assign(new Promise<{ stdout: string; stderr: string }>(resolve => { finish = resolve; }), { child });
+  const result = withGhKillEscalation(command, ["fixture-no-gh-call"], 6000, { graceMs: 500, warn: line => warnings.push(line) });
+  try {
+    now = 6550;
+    t.mock.timers.tick(6550);
+    assert.deepEqual(signals, [], "a held loop cannot let KILL overtake the re-armed primary");
+    now = 7100;
+    t.mock.timers.tick(550);
+    assert.deepEqual(signals, [{ at: 7100, signal: "SIGTERM" }]);
+    now = 7600;
+    t.mock.timers.tick(500);
+    assert.deepEqual(signals, [{ at: 7100, signal: "SIGTERM" }, { at: 7600, signal: "SIGKILL" }]);
+    assert.equal(warnings.length, 1);
+    assert.equal(primary.timedOut, true);
+  } finally {
+    primary.cancel();
+    finish({ stdout: "", stderr: "" });
+    await result;
+    child.removeAllListeners();
+  }
+});
+
+test("GH grace cancels on child exit, error, and explicit cancellation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(systemClock, "now", () => now);
+  for (const event of ["exit", "error", "cancel"] as const) {
+    const signals: Array<NodeJS.Signals | number> = [];
+    const child = Object.assign(new ChildProcess(), {
+      exitCode: null, signalCode: null,
+      kill(signal: NodeJS.Signals | number) { signals.push(signal); return true; },
+    });
+    const bound = boundChildByLoopTime(child, 1000);
+    let finish!: (out: { stdout: string; stderr: string }) => void;
+    const command = Object.assign(new Promise<{ stdout: string; stderr: string }>(resolve => { finish = resolve; }), { child });
+    const result = withGhKillEscalation(command, ["fixture-no-gh-call"], 1000, { graceMs: 500, warn: () => assert.fail("cancelled escalation warned") });
+    now += 1000;
+    t.mock.timers.tick(1000);
+    assert.deepEqual(signals, ["SIGTERM"]);
+    if (event === "cancel") bound.cancel();
+    else child.emit(event, event === "error" ? new Error("fixture child error") : 0);
+    now += 500;
+    t.mock.timers.tick(500);
+    assert.deepEqual(signals, ["SIGTERM"], `${event} cancels the attached grace`);
+    finish({ stdout: "", stderr: "" });
+    await result;
+    child.removeAllListeners();
+  }
+});
+
+/** Real helper + GH wrapper, with a readiness marker and an independent hard cleanup, never a live gh call. */
+async function readyGhCommand(t: TestContext, script: string) {
+  const warnings: string[] = [];
+  const command = execFileLoopBounded(process.execPath, ["-e", script], { encoding: "utf8", timeout: 2000 });
+  const closed = new Promise<void>(resolve => command.child.once("close", () => resolve()));
+  const hardCleanup = setTimeout(() => command.child.kill("SIGKILL"), 10_000);
+  t.after(async () => {
+    clearTimeout(hardCleanup);
+    if (command.child.exitCode === null && command.child.signalCode === null) command.child.kill("SIGKILL");
+    await closed;
+  });
+  const result = withGhKillEscalation(command, ["fixture-no-gh-call"], 2000, { graceMs: 200, warn: line => warnings.push(line) });
+  // Observe rejection before waiting for readiness; an early spawn/exit failure cannot become unhandled.
+  const outcome = result.then(value => ({ value, error: undefined }), (error: unknown) => ({ value: undefined, error }));
+  await Promise.race([printed(command.child, "ready\n"), closed.then(() => assert.fail("child closed before readiness"))]);
+  return { outcome, warnings };
+}
+
+for (const [name, handler, expectedSignal, childExitCode, warningCount] of [
+  ["TERM", "", "SIGTERM", null, 0],
+  ["exit zero after TERM", 'process.on("SIGTERM", () => process.exit(0));', "SIGTERM", 0, 0],
+  ["ignored TERM", 'process.on("SIGTERM", () => {});', "SIGKILL", null, 1],
+] as const) {
+  test(`real GH-bound child preserves refusal for ${name}`, async (t) => {
+    const { outcome, warnings } = await readyGhCommand(t, `${handler} process.stdout.write("ready\\n"); setInterval(() => {}, 1000);`);
+    const { error, value } = await outcome;
+    assert.equal(value, undefined, "a stopped child never resolves successfully");
+    assert.ok(error instanceof LoopBoundedChildTimeout);
+    assert.equal(error.kind, "child_process");
+    assert.equal(error.exitCode, 1, "CLI refusal stays nonzero even if the child reports zero");
+    assert.equal(error.code, null);
+    assert.equal(error.childExitCode, childExitCode);
+    assert.equal(error.signal, expectedSignal);
+    assert.equal(error.stdout, "ready\n");
+    assert.match(error.message, /^Command failed: /);
+    assert.equal(warnings.length, warningCount);
+  });
+}
+
+test("GH grace keeps spawn failures and successful output unchanged", async (t) => {
+  const good = execFileLoopBounded(process.execPath, ["-e", 'process.stdout.write("complete\\n")'], { encoding: "utf8", timeout: 2000 });
+  t.after(() => { if (good.child.exitCode === null && good.child.signalCode === null) good.child.kill("SIGKILL"); });
+  assert.deepEqual(await withGhKillEscalation(good, ["fixture-no-gh-call"], 2000), { stdout: "complete\n", stderr: "" });
+  const absent = execFileLoopBounded("/nonexistent/remudero-w9651-child", [], { encoding: "utf8", timeout: 2000 });
+  await assert.rejects(withGhKillEscalation(absent, ["fixture-no-gh-call"], 2000), (error: unknown) =>
+    !(error instanceof LoopBoundedChildTimeout) && (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("zero GH grace retains TERM then KILL at the same primary deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  t.mock.method(systemClock, "now", () => now);
+  const signals: Array<NodeJS.Signals | number> = [];
+  const child = Object.assign(new ChildProcess(), {
+    exitCode: null, signalCode: null,
+    kill(signal: NodeJS.Signals | number) { signals.push(signal); return true; },
+  });
+  const primary = boundChildByLoopTime(child, 1000);
+  let finish!: (out: { stdout: string; stderr: string }) => void;
+  const command = Object.assign(new Promise<{ stdout: string; stderr: string }>(resolve => { finish = resolve; }), { child });
+  const warnings: string[] = [];
+  const result = withGhKillEscalation(command, ["fixture-no-gh-call"], 1000, { graceMs: 0, warn: line => warnings.push(line) });
+  try {
+    now = 1000;
+    t.mock.timers.tick(1000);
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(warnings.length, 1);
+  } finally {
+    primary.cancel();
+    finish({ stdout: "", stderr: "" });
+    await result;
+    child.removeAllListeners();
+  }
 });
