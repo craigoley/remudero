@@ -429,9 +429,10 @@ export function treeMembers(roots: readonly { pid: number; start: string }[], li
 }
 
 export interface TreePeakSampler {
+  /** End through the public finish hook, returning separately labelled current-RSS and legacy-HWM peaks. */
   finishMeasurement?(id: string): { peakMib?: number; legacyPeakMib?: number };
   track(id: string, pid: number, hooks?: TrackHooks): void;
-  /** Stop tracking `id` after one final sample; the peak in MiB, or undefined when the tree was never observed. */
+  /** Legacy sum-of-HWM peak, retained for existing adapters; concurrent training uses finishMeasurement. */
   finish(id: string): number | undefined;
   sampleNow(): void;
   size(): number;
@@ -504,11 +505,11 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         }
       } catch (error) {
         // A confirmed exit holds nothing now; denied or failed reads must not create an underestimated sample.
-        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") complete = false;
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") { complete = false; legacyComplete = false; }
       }
     }
     if (!complete) entry.rssIncomplete = true;
-    if (complete && legacyComplete && legacyKb > 0) entry.legacyPeakMib = Math.max(entry.legacyPeakMib ?? 0, legacyKb / 1024);
+    if (legacyComplete && legacyKb > 0) entry.legacyPeakMib = Math.max(entry.legacyPeakMib ?? 0, legacyKb / 1024);
     return complete ? kb / 1024 : undefined;
   };
 
@@ -619,13 +620,13 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     stopIfIdle();
   };
 
-  const finishMeasurement = (id: string): { peakMib?: number; legacyPeakMib?: number } => {
+  const finishLegacy = (id: string): number | undefined => {
     sampleNow();
     const entry = tracked.get(id);
     tracked.delete(id);
     if (entry) flushFiles(entry, new Set());
     stopIfIdle();
-    return entry ? { ...(entry.observed && !entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib: entry.legacyPeakMib } : {};
+    return entry?.legacyPeakMib;
   };
   return {
     track(id, pid, hooks) {
@@ -646,8 +647,14 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         void error; // No /proc (or the root already exited): this tree is never observed and records nothing.
       }
     },
-    finish: id => finishMeasurement(id).peakMib,
-    finishMeasurement,
+    finish: finishLegacy,
+    finishMeasurement(this: TreePeakSampler, id: string) {
+      const entry = tracked.get(id);
+      // run-child wraps finish to capture its legacy result. Dispatch through that adapter, not around it.
+      const legacyPeakMib = this.finish(id);
+      return entry ? { ...(entry.observed && !entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib }
+        : { legacyPeakMib };
+    },
     sampleNow,
     size: () => tracked.size,
   };

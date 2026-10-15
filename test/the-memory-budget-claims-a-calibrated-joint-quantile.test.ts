@@ -12,7 +12,7 @@ import {
   type CalibrationIo, type CalibrationState, type MemoryForecast,
 } from "../src/lib/host-memory-calibration.js";
 import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
-import { installShadowMemorySink, loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-15T00:00:00Z");
@@ -85,6 +85,26 @@ test("W1-T8879: the existing heartbeat invokes the real bounded collector withou
     const b = kernelMemoryObservation(NOW + 1, path => path.endsWith("memory.current") || path.endsWith("memory.peak") ? "2097152" : path.endsWith("/stat") ? `1 (init) S 0 ${"1 ".repeat(17)}5 0 0` : "fixture");
     assert.equal(a.mib, 1); assert.equal(b.mib, 2); assert.equal(a.generation, b.generation, "CPU counters do not change cgroup generation identity");
   } finally { installShadowMemorySink(undefined); repo.cleanup(); }
+});
+
+test("W1-T8879: missing qualification is distinct from an unsupported scenario and neither blocks ordinary shadow recording", () => {
+  const inherited = loadHostMemoryBudgetPolicy(new URL("../plan/policy.yaml", import.meta.url).pathname, fixedClock(NOW));
+  const policy = { ...inherited, mode: "enforce" as const, classModes: { implement: "enforce" as const }, claimModel: JOINT_MODEL };
+  const ports: ShadowMemoryPorts = {
+    clock: fixedClock(NOW), nowNs: () => 0n,
+    readFile: () => { throw Object.assign(new Error("fixture has no input"), { code: "ENOENT" }); },
+    readTail: () => "", readLedger: () => undefined, policy: () => policy, write: undefined,
+    readReviewDemand: () => { throw new Error("not a gather input"); },
+    priorityPolicy: () => { throw new Error("not a gather input"); },
+    stderr: () => undefined, instance: () => "fixture", daemonPid: () => undefined,
+    listStateDir: () => [], estimate: () => 1024, typical: () => 512, writeFile: () => undefined,
+  };
+  const start = { root: "/fixture/core", workerClass: "implement" as const, estimateMib: 1024 };
+  assert.throws(() => gatherShadowInputs(start, ports, policy), /qualification evidence is missing/);
+  assert.throws(() => gatherShadowInputs(start, ports, { ...policy,
+    jointQualification: { generation: "fixture", scenarios: ["serve-steady"] } }), /current scenario is not qualified/);
+  const shadow = gatherShadowInputs(start, ports, { ...policy, mode: "shadow", classModes: { implement: "shadow" } });
+  assert.equal(shadow.serve.scenario, "unknown", "unknown input stays visible without turning a shadow read into an approval hold");
 });
 
 test("W1-T8879: frozen predictions grade later starts, correlated tails and incomplete windows honestly", () => {
@@ -206,7 +226,9 @@ test("W1-T8879: tree peaks measure concurrent RSS rather than unrelated historic
   sampler.track("concurrent", 10);
   phase = 1;
   sampler.sampleNow();
-  assert.equal(sampler.finish("concurrent"), 300, "max(sum of current RSS) is 300 MiB, not sum of two 900 MiB historical highs");
+  const measured = sampler.finishMeasurement!("concurrent");
+  assert.equal(measured.peakMib, 300, "max(sum of current RSS) is 300 MiB, not sum of two 900 MiB historical highs");
+  assert.equal(measured.legacyPeakMib, 1800);
 });
 
 test("W1-T8879: legacy and concurrent peak bases survive the real store serializer and compaction", () => {
@@ -240,7 +262,7 @@ test("W1-T8879: incomplete or denied tree readings are not recorded as smaller m
       setTimer: () => undefined, clearTimer: () => undefined,
     });
     sampler.track(fault, 10);
-    assert.equal(sampler.finish(fault), undefined, `${fault} is missing evidence, not a lower or zero tree peak`);
+    assert.equal(sampler.finishMeasurement!(fault).peakMib, undefined, `${fault} is missing evidence, not a lower or zero tree peak`);
   }
 });
 
@@ -268,5 +290,18 @@ test("W1-T8879: binding a root twice does not count its concurrent RSS twice", (
   });
   sampler.track("root", 10);
   sampler.track("root", 10);
-  assert.equal(sampler.finish("root"), 400);
+  assert.deepEqual(sampler.finishMeasurement!("root"), { peakMib: 400, legacyPeakMib: 800 });
+});
+
+test("W1-T8879: the production-style finish adapter still sees the legacy result while training records concurrent RSS", () => {
+  const base = createTreePeakSampler({
+    listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
+    readFile: path => path.endsWith("/stat") ? `10 (node) S 1 ${"0 ".repeat(17)}5 0 0` : "VmRSS: 409600 kB\nVmHWM: 819200 kB\n",
+    setTimer: () => undefined, clearTimer: () => undefined,
+  });
+  let calls = 0, captured: number | undefined;
+  const wrapped = { ...base, finish: (id: string) => { calls++; captured = base.finish(id); return captured; } };
+  wrapped.track("wrapped", 10);
+  assert.deepEqual(wrapped.finishMeasurement!("wrapped"), { peakMib: 400, legacyPeakMib: 800 });
+  assert.equal(calls, 1); assert.equal(captured, 800); assert.equal(wrapped.size(), 0);
 });

@@ -1481,8 +1481,10 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   };
   const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
-  if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce" &&
-      !policy.jointQualification?.scenarios.includes(inputs.serve.scenario)) throw new Error("joint enforce unavailable: current scenario is not qualified");
+  if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") {
+    if (policy.jointQualification === undefined) throw new Error("joint enforce unavailable: qualification evidence is missing");
+    if (!policy.jointQualification.scenarios.includes(inputs.serve.scenario)) throw new Error("joint enforce unavailable: current scenario is not qualified");
+  }
   const candidate = jointClaimFor(gathered, ports, policy);
   if (candidate.kind !== "joint") {
     if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") throw new Error(`joint enforce unavailable: ${candidate.reason}`);
