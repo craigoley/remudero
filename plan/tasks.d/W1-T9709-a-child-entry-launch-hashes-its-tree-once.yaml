@@ -1,0 +1,74 @@
+- id: W1-T9709
+  title: "A CHILD-ENTRY LAUNCH HASHES ITS SOURCE TREE ONCE, AND AN UNCHANGED TREE IS NOT RE-READ — childEntryArgv judges the tree (childEntryIsCurrent hashes all of src/, ~590 files, 20.7 MB), then materializeFromStore hashes it again and a store hit judges it a third time; nothing is kept between launches, so every garden, pre-open and check-proof launch re-reads 20.7 MB on the daemon loop (~34 hashes an hour on core, 2026-10-15)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how often a launch hashes its tree; which bundle runs, and the integrity checks, are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9601 (#12083) follow-up'
+  plan_refs: [W1-T9601, W1-T8776, W1-T8778, W1-T9077, W1-T9370]
+  files:
+    - src/lib/child-entry-argv.ts
+    - src/lib/child-entry-store.ts
+    - scripts/build-child-entries.mjs
+    - test/a-child-entry-launch-hashes-its-tree-once.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/child-entry-argv.ts childEntryArgv calls judge(), which is scripts/build-child-entries.mjs
+      childEntryIsCurrent(root, name) with no treeHash. judgeBundleFile then runs `treeHash ?? sourceHash(root)`.
+      sourceHash reads every file under src/ plus HASHED_ROOT_FILES.
+    - On a not-current verdict childEntryArgv calls materializeFromStore(root, storeRoot)
+      (src/lib/child-entry-store.ts). It runs `script.sourceHash(treeRoot)` again, although a `source-changed`
+      verdict already carries the hash as `now`.
+    - On a store hit childEntryArgv calls judge() a third time, again with no treeHash.
+    - startWorker's decide() (the same file) already keeps a per-root hash in `treeHashes`, but only for workers.
+      Nothing keeps a hash between child launches, so a launch from an unchanged tree re-reads it.
+    - Callers on the daemon loop: garden-registry.ts gardenChildNodeArgv (every garden pass), preopen-gate.ts,
+      pr-open.ts and plan-pr-emitter.ts (check-proof children).
+    OBSERVED, core ledger 2026-10-15 11:22-18:52Z (one rotation plus the live file, read with node):
+    - child_entry.spawned: run-task bundle source-hash-match 110, run-child bundle 12 (1 hash each).
+    - child_entry.store_miss: source-changed 35 (2 hashes each), no-manifest 33 (1 each).
+    - child_entry.store_hit: no-manifest 9 (2 each), source-changed 5 (3 each).
+    - That is at least 258 hashes in 7.5 h (~34 an hour). 54 of them are a second or third hash of a tree the
+      same launch had already hashed. check-proof launches with a current bundle log no row, so this is a floor.
+    - OBSERVED offline (2026-10-15, this host, a copy of origin/main's tree): src/ is 590 files, 20.7 MB;
+      sourceHash took 74, 53 and 23 ms on three runs. The W1-T9601 builder measured 21-85 ms (585 files, 21 MB).
+    INFERRED: ~0.7 GB an hour of reads on the daemon loop, about 1-2.5 s of loop time an hour. A tree changes only
+    when its checkout moves (a few times an hour), so a per-tree memo should cut most of the 34 hashes an hour.
+  design: |
+    1. One hash per launch. A `source-changed` verdict's `now` is passed to materializeFromStore (a new optional
+       argument), which uses it instead of hashing. Its stored/staged checks already take treeHash. The
+       re-judge after a hit passes the same hash.
+    2. A per-tree memo across launches. Key: the tree root plus a cheap signature of every input sourceHash
+       reads: for each file under src/ and each HASHED_ROOT_FILES entry, its relative path, size, mtimeNs,
+       ctimeNs and inode, plus RECIPE_VERSION and the esbuild version. The signature is a stat walk, never a read.
+       A matching signature reuses the hash; any difference re-hashes. ctime and inode are in the key so an edit
+       that restores size and mtime is still seen. The memo holds one entry per root, replaced when the root's
+       signature changes. If the builder finds it needs a size bound, that bound is an OPERATOR DECISION and is
+       named in the PR, not chosen.
+    3. Measure in production. child_entry.store_miss, child_entry.store_hit and child_entry.spawned gain
+       `hash: {computed: n, reused: n, bytes_read, ms}` for the launch, so the fleet can count hashes and bytes per
+       hour before and after the change from the ledger.
+    4. Unchanged: which bundle runs, every integrity refusal, and the store's own checks. Any doubt still runs tsx.
+    Tests go in test/a-child-entry-launch-hashes-its-tree-once.test.ts, titled verbatim as in the proofs, over a
+    real temp tree and store with a counting hash seam.
+  acceptance:
+    - claim: "a source-changed launch that misses the store, and one that hits it, each hash the tree once"
+      proof: 'grep: test("W1-T9709: a source-changed launch hashes its tree once, on a store miss and on a store hit" in test/a-child-entry-launch-hashes-its-tree-once.test.ts'
+    - claim: "a second launch from an unchanged tree reuses the hash and reads no source bytes"
+      proof: 'grep: test("W1-T9709: a launch from an unchanged tree reuses its hash" in test/a-child-entry-launch-hashes-its-tree-once.test.ts'
+    - claim: "an edit that keeps a file's size and mtime is still re-hashed"
+      proof: 'grep: test("W1-T9709: an edit that restores size and mtime is still re-hashed" in test/a-child-entry-launch-hashes-its-tree-once.test.ts'
+    - claim: "the launch rows carry how many hashes were computed and reused and the bytes read"
+      proof: 'grep: test("W1-T9709: the launch rows name the hashes computed and reused" in test/a-child-entry-launch-hashes-its-tree-once.test.ts'
+  falsifier: |
+    On origin/main, count sourceHash calls through a seam: a source-changed tree with no stored build hashes twice,
+    and with a stored build three times, so the first test fails. Launch twice from an unchanged tree: the second
+    launch hashes again, so the second test fails. Key the memo on size and mtime alone, rewrite one file with the
+    same length and restore its mtime with utimes: the memo reuses a stale hash and the third test fails.
