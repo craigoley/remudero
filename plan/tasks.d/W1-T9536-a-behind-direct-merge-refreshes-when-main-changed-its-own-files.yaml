@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: main red 19:08-20:10Z (#11758 x #11744 child-entry collision), root-caused while confirming the main repair"
   plan_refs: [W1-T5748, W1-T5780, W1-T5696, W1-T6022, W1-T7214, W1-T2855, W1-T3694]
   files: [src/lib/arm-auto-merge.ts, src/lib/plan-pr-merge-safety.ts, test/a-behind-pr-is-not-direct-merged-when-main-changed-its-own-files.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

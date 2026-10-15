@@ -1198,13 +1198,15 @@ export function createNowView(opts: NowViewOptions): {
     ["board", (instance, b) => {
       const name = instance.name;
       let h = held.get(name);
-      // One projection per store, kept across snapshot re-saves: the gateway is swapped in and only a
-      // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
+      // One projection per store, kept across snapshot re-saves: the gateway is swapped in, and a change in what the
+      // snapshot holds re-derives only the tasks whose GitHub reads it moved (W1-T6016). Behind the lease it persists,
+      // so a restart reuses it.
       if (!h || h.db !== b.db) {
         const board = createBoardProjection({
           db: b.db, ...(b.lease ? { lease: b.lease } : {}), ledgerPath: ledgerPathOf(instance), readPlan: () => planCache.get(name)!.plan, clock, instance: name,
           // The held gateway, read per derive: a value here pinned the store's first gateway and its snapshot for the store's life (E33).
           get github() { return held.get(name)!.gateway.github; },
+          // When this moves, each task's own GitHub reads are replayed against the new gateway (W1-T6016).
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
           ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),

@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: optimize and right-size what we have"
   plan_refs: []
   files: [src/lib/host-resource-gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/a-low-yield-garden-is-paced-by-its-inputs.test.ts, test/a-garden-pass-spawns-only-when-its-inputs-changed.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

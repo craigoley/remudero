@@ -1,0 +1,19 @@
+id: fb-1792030220612-23cac4
+ts: 2026-10-15T02:10:20.612Z
+raw: "[answer to feedback#fb-1789927053247-879a03] confirm-closure. Covered by
+  W1-T3884, merged 2026-09-21 in #6402 (8b0ae0915, \"serve the console-v1
+  projection envelope\"), the day after this feedback was captured: `GET
+  /v1/analytics?projection=console-v1` now returns only the `consoleV1`
+  projection (`src/lib/analytics-route.ts`, `sendJson(res, 200, requestedVersion
+  === undefined ? snapshot : resolution.projection)`), not the full snapshot; it
+  measured ~100 KB on 2026-09-22, under the console's 128 KiB ceiling. If the
+  Analytics tab is still refused, file a new entry with the current byte count."
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1789927053247-879a03
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#10241:comment:6124537064
+thread_id: null

@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-11 (\"Release the pause on core. Pause should only impact serve until it's back.\") + detection research: foreign-pause detector"
   plan_refs: [W1-T4429, W1-T7727, W1-T7839, W1-T2262, W1-T8235]
   files: [src/lib/foreign-pause-detector.ts, src/lib/sre-lane.ts, plan/policy.yaml, test/a-pause-set-from-outside-the-fleet-is-an-incident-by-its-cost.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

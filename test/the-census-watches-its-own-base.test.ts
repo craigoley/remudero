@@ -34,7 +34,7 @@ const { CENSUS_MAIN_BRANCH_RUN, main } = (await import(pathToFileURL(SCRIPT).hre
     recordedPopulationByFile?: Record<string, number>;
     baseRefOverride?: string;
     env?: NodeJS.ProcessEnv;
-  }) => number;
+  }) => Promise<number>;
 };
 
 const DAY = 86_400_000;
@@ -61,9 +61,9 @@ function seamExecFile(over: Partial<Record<string, () => string>> = {}) {
 
 // ── acceptance 1 & falsifier half A: the base's own run goes red for a stamp sitting on main ────
 
-test("W1-T3655: on the base's own run, a stamp inside the margin blocks -- the run that owns main goes red", () => {
+test("W1-T3655: on the base's own run, a stamp inside the margin blocks -- the run that owns main goes red", async () => {
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: seamExecFile(),
     readFile: () => CROSSING_LINE,
     now: () => NOW,
@@ -78,9 +78,9 @@ test("W1-T3655: on the base's own run, a stamp inside the margin blocks -- the r
   assert.doesNotMatch(output.join("\n"), /inherited from the base/, "main has no earlier base to inherit a crossing from");
 });
 
-test("W1-T3655: CENSUS_MAIN_BRANCH_RUN skips the base probe entirely -- an explicit flag decides the arm, not a rev-parse that could coincidentally match HEAD", () => {
+test("W1-T3655: CENSUS_MAIN_BRANCH_RUN skips the base probe entirely -- an explicit flag decides the arm, not a rev-parse that could coincidentally match HEAD", async () => {
   const calls: string[] = [];
-  main({
+  await main({
     execFile: (cmd, args) => {
       calls.push(`${cmd} ${args.join(" ")}`);
       return seamExecFile({
@@ -105,13 +105,13 @@ test("W1-T3655: CENSUS_MAIN_BRANCH_RUN skips the base probe entirely -- an expli
 // ── falsifier half B, verbatim: "Point the base ref at the commit under test and the strict- ────
 // reading arm must refuse, or a main run excuses its own bomb."
 
-test("W1-T3655 falsifier: a base ref that resolves to the commit under test still refuses, never excuses", () => {
+test("W1-T3655 falsifier: a base ref that resolves to the commit under test still refuses, never excuses", async () => {
   // Without CENSUS_MAIN_BRANCH_RUN, a base ref that happens to equal HEAD -- exactly the shape a
   // push-triggered checkout produces, since `origin/main` IS the commit just pushed -- would read
   // its OWN fixture back as "the base" and mark every crossing inherited. This is the arm the
   // task's design calls "the one most likely to be got wrong, since it fails open and looks green."
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: seamExecFile({
       "rev-parse": () => "deadbeef\n",
       show: () => CROSSING_LINE, // the "base" IS this diff -- byte-identical content, same stamp
@@ -129,11 +129,11 @@ test("W1-T3655 falsifier: a base ref that resolves to the commit under test stil
 
 // ── acceptance 3 & falsifier half C: an inherited crossing is reported but no longer blocks ─────
 
-test("W1-T3655: an inherited crossing is reported and NAMED, but no longer decides the pull request's exit code", () => {
+test("W1-T3655: an inherited crossing is reported and NAMED, but no longer decides the pull request's exit code", async () => {
   // Reconstructs the falsifier's PR side: "a PR that touches nothing near it... must go green with
   // the crossing NAMED."
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: seamExecFile({
       "rev-parse": () => "deadbeef\n",
       show: () => CROSSING_LINE, // the SAME stamp already sits on origin/main
@@ -151,9 +151,9 @@ test("W1-T3655: an inherited crossing is reported and NAMED, but no longer decid
   assert.match(output.join("\n"), /inherited from the base -- NOT this diff/);
 });
 
-test("W1-T3655: a crossing this diff itself introduces still blocks, even with a base reader present", () => {
+test("W1-T3655: a crossing this diff itself introduces still blocks, even with a base reader present", async () => {
   const output: string[] = [];
-  const code = main({
+  const code = await main({
     execFile: seamExecFile({
       "rev-parse": () => "deadbeef\n",
       show: () => `  lastActivityAt: "${at(-400 * DAY)}",\n`, // a DIFFERENT, already-expired stamp

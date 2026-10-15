@@ -20,10 +20,10 @@ const green = { passed: true, pass: 15, tests: 15 };
 const red = { passed: false, pass: 14, tests: 15 };
 const stamp = (days: number) => new Date(NOW + (days - 14) * DAY).toISOString();
 
-function check(runSuite: Runner, days = 0.5, inherited = false, duplicate = false) {
+async function check(runSuite: Runner, days = 0.5, inherited = false, duplicate = false) {
   const text = `updated_at: "${stamp(days)}",\n${duplicate ? `updatedAt: "${stamp(days / 2)}",` : ""}`;
   const output: string[] = [];
-  const code = census.main({
+  const code = await census.main({
     execFile: (command: string, args: string[]) => {
       if (command === "node") return JSON.stringify({ staleDays: 14 });
       if (args[0] === "ls-files") return FILE;
@@ -37,9 +37,9 @@ function check(runSuite: Runner, days = 0.5, inherited = false, duplicate = fals
   return { code, report: output.join("\n") };
 }
 
-test("W1-T7812: a near crossing whose shifted re-run goes red blocks as confirmed", () => {
+test("W1-T7812: a near crossing whose shifted re-run goes red blocks as confirmed", async () => {
   const calls: Array<[string, number]> = [];
-  const result = check((file, days) => {
+  const result = await check((file, days) => {
     calls.push([file, days]);
     return days < 1 ? green : red;
   }, 0.5, true, true);
@@ -49,9 +49,9 @@ test("W1-T7812: a near crossing whose shifted re-run goes red blocks as confirme
   assert.deepEqual(calls, [[FILE, gardener.DEFUSE_CONTROL_SHIFT_DAYS], [FILE, 2]]);
 });
 
-test("W1-T7812: a near crossing that stays green proposes the exemption marker with its pass counts", () => {
+test("W1-T7812: a near crossing that stays green proposes the exemption marker with its pass counts", async () => {
   const calls: number[] = [];
-  const result = check((_file, days) => { calls.push(days); return green; }, 0.75, false, true);
+  const result = await check((_file, days) => { calls.push(days); return green; }, 0.75, false, true);
   assert.equal(result.code, 0);
   assert.match(result.report, /shifted_passed/);
   assert.match(result.report, /CLEAR/);
@@ -63,7 +63,7 @@ test("W1-T7812: a near crossing that stays green proposes the exemption marker w
   writeFileSync(join(root, file), 'import { test } from "node:test";\ntest("green", () => {});\n');
   const output: string[] = [];
   try {
-    const code = census.main({
+    const code = await census.main({
       execFile: (command: string, args: string[]) => command === "node"
         ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
       readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
@@ -75,10 +75,10 @@ test("W1-T7812: a near crossing that stays green proposes the exemption marker w
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("W1-T7812: a re-run with no verdict blocks as run_error", () => {
+test("W1-T7812: a re-run with no verdict blocks as run_error", async () => {
   for (const atControl of [true, false]) {
     let calls = 0;
-    const result = check(() => {
+    const result = await check(() => {
       calls++;
       if (!atControl && calls === 1) return green;
       throw new Error("no # tests TAP summary; run timed out");
@@ -95,7 +95,7 @@ test("W1-T7812: a re-run with no verdict blocks as run_error", () => {
   writeFileSync(join(root, file), "export {};\n");
   const output: string[] = [];
   try {
-    const code = census.main({
+    const code = await census.main({
       execFile: (command: string, args: string[]) => command === "node"
         ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
       readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
@@ -114,7 +114,7 @@ test("exits before finishing", async () => {
 });
 `);
     output.length = 0;
-    const interrupted = census.main({
+    const interrupted = await census.main({
       execFile: (command: string, args: string[]) => command === "node"
         ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? file : "",
       readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
@@ -128,23 +128,23 @@ test("exits before finishing", async () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("W1-T7812: control red blocks as control_failed without a shifted run", () => {
+test("W1-T7812: control red blocks as control_failed without a shifted run", async () => {
   let calls = 0;
-  const result = check(() => { calls++; return red; }, 0.5, true);
+  const result = await check(() => { calls++; return red; }, 0.5, true);
   assert.equal(result.code, 1);
   assert.equal(calls, 1);
   assert.match(result.report, /control_failed.*red without any shift/);
 });
 
-test("W1-T7812: a crossing beyond the 24 h tier runs no suite and keeps the attributed rule", () => {
+test("W1-T7812: a crossing beyond the 24 h tier runs no suite and keeps the attributed rule", async () => {
   const never = (): Measurement => { throw new Error("far crossing ran a suite"); };
-  assert.equal(check(never, 1.0001).code, 1);
-  const inherited = check(never, 1.0001, true);
+  assert.equal((await check(never, 1.0001)).code, 1);
+  const inherited = await check(never, 1.0001, true);
   assert.equal(inherited.code, 0);
   assert.match(inherited.report, /inherited/);
   assert.doesNotMatch(inherited.report, /confirmed|run_error|shifted_passed|control_failed/);
   assert.equal(census.NEAR_CROSSING_HOURS, 24);
-  assert.equal(check(never, 1, true).code, 0, "exactly 24 h is outside the strictly inside tier");
+  assert.equal((await check(never, 1, true)).code, 0, "exactly 24 h is outside the strictly inside tier");
 });
 
 test("W1-T7812: pre-push runs the shifted-crossing proof when its implementation or roster changes", () => {
@@ -204,7 +204,7 @@ test("private root", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("W1-T7812: the shared default runner measures a real clock-sensitive suite", () => {
+test("W1-T7812: the shared default runner measures a real clock-sensitive suite", async () => {
   const root = fixture();
   const file = join(root, "test", "bomb.test.ts");
   writeFileSync(file, `import { test } from "node:test";
@@ -215,7 +215,7 @@ test("crosses", () => assert.ok(Date.now() < ${Date.now() + DAY}));\n`);
     assert.deepEqual(measured(root, file, 2), { passed: false, pass: 0, tests: 1 });
     assert.equal(gardener.runSuiteShifted(root, file, 2), false);
     const reports: string[] = [];
-    const code = census.main({
+    const code = await census.main({
       execFile: (command: string, args: string[]) => command === "node"
         ? JSON.stringify({ staleDays: 14 }) : args[0] === "ls-files" ? "test/bomb.test.ts" : "",
       readFile: () => `updated_at: "${stamp(0.5)}",`, now: () => NOW,
@@ -275,7 +275,7 @@ test("W1-T7812: shifted proof children do not inherit outer coverage instrumenta
   }
 });
 
-test("W1-T7812: incomplete TAP counts block as run_error and clean the private root", () => {
+test("W1-T7812: incomplete TAP counts block as run_error and clean the private root", async () => {
   const root = fixture();
   const file = join(root, "test", "counts.test.ts");
   writeFileSync(file, 'import { test } from "node:test";\ntest("green", () => {});\n');
@@ -296,7 +296,7 @@ test("W1-T7812: incomplete TAP counts block as run_error and clean the private r
     },
   });
   try {
-    const result = check(() => run(summary));
+    const result = await check(() => run(summary));
     assert.equal(result.code, 1);
     assert.match(result.report, /run_error.*incomplete TAP verdict/);
     assert.doesNotMatch(result.report, /expiring-fixture: exempt/);
@@ -315,7 +315,7 @@ test("W1-T7812: incomplete TAP counts block as run_error and clean the private r
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("W1-T7812: inconsistent or missing end-of-run tallies block as run_error", () => {
+test("W1-T7812: inconsistent or missing end-of-run tallies block as run_error", async () => {
   const root = fixture();
   const file = join(root, "test", "tally.test.ts");
   writeFileSync(file, 'import { test } from "node:test";\ntest("measured", () => {});\n');
@@ -324,7 +324,7 @@ test("W1-T7812: inconsistent or missing end-of-run tallies block as run_error", 
       const output = `# Subtest: measured\n# tests 1\n# pass ${1 - failed}\n# fail ${failed}\n# cancelled 0\n# skipped 0\n# todo 0\n`;
       for (const summary of [null, { tests: 2, failed }, { tests: 1, failed: 1 - failed }]) {
         let calls = 0;
-        const result = check(() => {
+        const result = await check(() => {
           if (calls++ === 0) return green;
           return measured(root, file, 2, {
             execFile: (_command: string, args: string[]) => {

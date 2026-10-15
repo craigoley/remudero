@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T147, W1-T7806, W1-T8139, W1-T8170, W1-T8198, W1-T8927, W1-T9069, W1-T4945, W1-T6273, W1-T9087, W1-T9086]
-  files: [src/lib/daemon.ts, src/run-task.ts, src/lib/deploy-judge.ts, src/lib/run-child.ts, src/lib/run-child-mode.ts, plan/policy.yaml, test/the-restart-yield-machinery-retires-once-runs-are-children.test.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts, test/the-daemon-freshness-reads-never-block-the-loop.test.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts, test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts, test/a-decided-restart-names-the-lanes-it-waits-on.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts, test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts]
+  files: [src/lib/daemon.ts, src/run-task.ts, src/lib/deploy-judge.ts, src/lib/run-child.ts, src/lib/run-child-mode.ts, plan/policy.yaml, test/the-restart-yield-machinery-retires-once-runs-are-children.test.ts, test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts, test/the-daemon-freshness-reads-never-block-the-loop.test.ts, test/a-latched-restart-ends-a-worker-round-with-no-boundary.test.ts, test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts, test/a-decided-restart-names-the-lanes-it-waits-on.test.ts, test/a-daemon-run-yields-on-the-daemons-restart-latch.test.ts, test/the-daemon-entry-point-and-daemon-scoped-commits-restart-it-at-once.test.ts, test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts, test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts, test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts, test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts, src/lib/advance-declarations.ts, test/a-run-task-change-outside-the-daemons-declarations-waits-for-the-age-horizon.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -40,6 +40,12 @@
        override in `ciWaitFreshness`; the in-process runOne path.
     3. Delete `DAEMON_SELF_PATH_PREFIXES` and `DAEMON_SELF_COMMIT_SCOPE` (src/lib/deploy-judge.ts); `freshnessAdvanceWorth`
        falls through to `deterministicDeployWorth` for every advance the closure task calls material.
+       AMENDED 2026-10-15 (operator session): delete #11861's stop-gap with them. That is src/lib/advance-declarations.ts
+       (`withTouchedDeclarations` and its parser), `entryChangeOutsideTheDaemon` in src/lib/deploy-judge.ts, the
+       src/run-task.ts import and wiring, and
+       test/a-run-task-change-outside-the-daemons-declarations-waits-for-the-age-horizon.test.ts. #11861 (merged
+       2026-10-15 01:04Z) gives full restart weight only to the src/run-task.ts declarations it names as the daemon's
+       own. Once the self-path list it refines is gone, it weighs nothing.
     4. Keep, triggered by an image recycle only: `commitAndPushRestartCheckpoint`, `restoreBoundaryCheckpoint`, the
        `run.freshness_handoff` receipts and readers, the leftover-branch guards, `externalWaitRecycle`,
        `inflight.recycle_yield`, `deploy.drain_handoff`, `drainBeforeRestart`.
@@ -56,5 +62,7 @@
       proof: 'grep: test("W1-T9089: a contract failure escalates once no in-process path exists" in test/the-restart-yield-machinery-retires-once-runs-are-children.test.ts'
     - claim: "the daemon wiring escalates a failing contract"
       proof: 'grep: escalateRunChildContract( in src/run-task.ts'
+    - claim: "retiring the self-path list also deletes src/lib/advance-declarations.ts and entryChangeOutsideTheDaemon"
+      proof: 'grep: test("W1-T9089: the declaration-weighed stop-gap is deleted with the self-path list" in test/the-restart-yield-machinery-retires-once-runs-are-children.test.ts'
   falsifier: |
     Leave the latch in place: the first test sees a `daemon.restart_yield_asked` row for a child run.

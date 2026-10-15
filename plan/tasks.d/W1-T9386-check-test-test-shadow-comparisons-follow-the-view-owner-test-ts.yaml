@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.11
   status: queued
@@ -36,10 +36,14 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record supplies recurrence counts, failing-check names, and prior touched-file lists, but no failure details or diagnosed mechanism connecting those rounds to a specific remedy; its causal finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not execute a behavioral check demonstrating prevention or self-healing without a fix round."
-    judged_at: "2026-10-14T06:03:37.067Z"
-    pin: "34144a8fefc8515b10b89a1b37569a1e119716a9ed162a99ea3d79d6e95581e3"
+      - "The declared files are src/lib/read-model-worker.ts and a new test file. Neither touches secrets, credentials, auth, permissions, merge, deploy, infrastructure or review policy, according to the description."
+      - "The acceptance criterion is a single grep for a test name in a new test file. That is verifiable from what is shown, and no operator-only decision (priorities, budget, policy) is requested."
+      - "The change deletes no data, branches or history, and the described action is not irreversible. The PR still goes through CI and review."
+      - "The ci-friction family has a mixed record (25 merged, 40 declined), and no bounded change view was supplied. Both lower my confidence somewhat but are not enough to call it high."
+      - "The rationale cites repeated hand fixes to read-model-worker.ts, which fits a plausible remedy in that file. The test file is declared as absent at base and would be created by this change, consistent with a new-file addition."
+    judged_at: "2026-10-15T02:38:24.290Z"
+    pin: "45a2278313dd4044f211391a2624f30f258945ad4a49eb194bcaf4d9580dfee4"

@@ -138,9 +138,9 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
 
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
 export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
-  "operator_human" | "operator_ai" | "unknown" | "operator";
+  "operator_human" | "operator_ai" | "unknown" | "operator" | "run_child";
 
-export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation"): void {
+export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation" | "run_child"): void {
   process.env.REMUDERO_PROCESS_ACTOR = actor;
 }
 
@@ -149,6 +149,21 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
 export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
+
+/** W1-T9085: mark THIS process as a run child (src/run-child-main.ts): every ledger row it writes from here on reports
+ *  `actor: "run_child"` (ADR 0007 A.3). The daemon spawned it, so it inherited the daemon's own marker; that one is dropped.
+ *  Returns the call that puts both back. */
+export function markRunChildProcessActor(env: NodeJS.ProcessEnv = process.env): () => void {
+  const kind = env.REMUDERO_PROCESS_ACTOR;
+  const daemon = env[DAEMON_PROCESS_ACTOR_ENV];
+  env.REMUDERO_PROCESS_ACTOR = "run_child";
+  delete env[DAEMON_PROCESS_ACTOR_ENV];
+  return () => {
+    if (kind === undefined) delete env.REMUDERO_PROCESS_ACTOR;
+    else env.REMUDERO_PROCESS_ACTOR = kind;
+    if (daemon !== undefined) env[DAEMON_PROCESS_ACTOR_ENV] = daemon;
+  };
+}
 
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
  *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
@@ -172,7 +187,7 @@ export function deriveLedgerActor(
   if (env.NODE_TEST_CONTEXT) return "test";
   if (env[WORKER_SCOPE_ENV]) return "worker";
   const kind = env.REMUDERO_PROCESS_ACTOR;
-  if (kind === "service" || kind === "host_automation" || kind === "daemon") return kind;
+  if (kind === "service" || kind === "host_automation" || kind === "daemon" || kind === "run_child") return kind;
   if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
   if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_SESSION_ID) return "operator_ai";
   return isTTY ? "operator_human" : "unknown";
@@ -187,7 +202,7 @@ export type LedgerRowActor = LedgerActor;
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   switch (line.actor) {
     case "daemon": case "worker": case "service": case "host_automation": case "test":
-    case "operator_human": case "operator_ai": case "operator": return line.actor;
+    case "operator_human": case "operator_ai": case "operator": case "run_child": return line.actor;
     default: return "unknown";
   }
 }

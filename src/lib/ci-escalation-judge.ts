@@ -317,13 +317,13 @@ export function productionCiJudgePorts(opts: {
   suiteIds?: CiJudgePorts["suiteIds"];
   floor?: CiJudgePorts["floor"];
 }): CiJudgePorts {
-  const ghJson = opts.ghJson ?? ((args: string[]) => ghJsonAsync(args));
+  const readJson = opts.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const ghText = opts.ghText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
   const slug = `${opts.owner}/${opts.repo}`;
   return {
     stateDir: opts.stateDir,
     openPrs: async () => {
-      const rows = await ghJson(["api", `repos/${slug}/pulls?state=open&per_page=50`]);
+      const rows = await readJson(["api", `repos/${slug}/pulls?state=open&per_page=50`]);
       if (!Array.isArray(rows)) throw new Error("the open pull request list is not an array");
       return rows.flatMap((row: { number?: unknown; head?: { sha?: unknown } }) =>
         typeof row.number === "number" && typeof row.head?.sha === "string" ? [{ number: row.number, headSha: row.head.sha }] : []);

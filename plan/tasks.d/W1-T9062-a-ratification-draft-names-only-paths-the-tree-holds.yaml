@@ -19,7 +19,7 @@
     - test/drafting-prompts-require-scope.test.ts
     - test/an-operator-verdict-releases-a-parked-task.test.ts
     - test/inbox.test.ts
-  status: queued
+  status: merged
   priority: 0.915 # operator-2026-10-13: ranked after W1-T9252 and W1-T8776; every reframed proposal came back READY with invented paths, so no operator approval of a redraft is usable
   attempts: 0
   rationale: |

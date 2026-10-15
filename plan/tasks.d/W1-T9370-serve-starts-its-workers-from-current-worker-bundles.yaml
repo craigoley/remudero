@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-14: 'go with your recommendation. It doesn't feel like a one way door. We can always undo it' (serve runs its workers from precompiled bundles)"
   plan_refs: [W1-T7729, W1-T8776, W1-T8777]
   files: [src/lib/child-entry-argv.ts, src/lib/read-model-worker.ts, src/lib/read-model-slow-lane.ts, src/lib/status.ts, src/lib/board-worker.ts, test/serve-starts-its-workers-from-current-worker-bundles.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

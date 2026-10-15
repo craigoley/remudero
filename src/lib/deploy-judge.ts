@@ -60,6 +60,8 @@ export interface DeployWorthChange {
   sha: string;
   subject?: string;
   files: readonly string[];
+  /** The top-level declarations of src/run-task.ts this commit touched (advance-declarations.ts); absent when unread. */
+  declarations?: readonly string[];
 }
 
 export interface DeployWorthVerdict {
@@ -369,8 +371,25 @@ export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
 /** W1-T6273: a conventional-commit scope naming the daemon's own machinery, e.g. `perf(daemon): …`. */
 export const DAEMON_SELF_COMMIT_SCOPE = /^[a-z]+\((?:daemon|drain|dispatch|sweep)\)!?:/i;
 
+/** W1-T6273's entry module, weighed by the declarations a commit touched (advance-declarations.ts). */
+const DAEMON_ENTRY_MODULE = "src/run-task.ts";
+
+/** A top-level declaration of the entry module that is the daemon's own: daemonCommand, its gateways, its hooks. */
+export const DAEMON_DECLARATION = /daemon/i;
+
+/**
+ * An entry-module change whose touched declarations are all read, named and none the daemon's own. Every other
+ * shape keeps full weight: no declarations read, an empty list, or an unnamed hunk all fail toward restarting.
+ */
+function entryChangeOutsideTheDaemon(change: DeployWorthChange, selfFiles: readonly string[]): boolean {
+  const declarations = change.declarations;
+  return selfFiles.every((file) => file === DAEMON_ENTRY_MODULE) && declarations !== undefined && declarations.length > 0 &&
+    declarations.every((name) => name.length > 0 && !DAEMON_DECLARATION.test(name));
+}
+
 export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
-  if (change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)))) {
+  const selfFiles = change.files.filter((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)));
+  if (selfFiles.length > 0 && !entryChangeOutsideTheDaemon(change, selfFiles)) {
     return {
       score: 18,
       reason: "the daemon's own loop, dispatch, drain or ledger code changed",

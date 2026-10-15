@@ -1,0 +1,77 @@
+- id: W1-T9583
+  title: "EVERY RED-MAIN REPAIR LANE CUTS A HEAD BOTH IDENTITY GATES ADMIT — the lane's ratchet-record PR #11831 (head main-repair-ratchet-7d510a2ff698-1792017976611) could never merge: its commit has no Remudero-Task trailer, so the required head-identity-gate refuses it, and adding one makes worker-branch-shape refuse its non-run head; the revert and fix lanes cut the same non-run main-repair-* heads, and no lane-opened PR has merged since the lane shipped (#10712 and #11860 were hand fixes)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the head ref, commit trailer and body trailer the three main-repair openers give their PRs; no gate is relaxed
+  band_meaning: blast-radius
+  origin: "operator request 2026-10-14: \"get them green, resolve the root causes that prevented automated flow… We need the pr queue to be automated.\" Main red at e04e9867f on two comment-load ceilings; the lane's #11831 could not merge and a hand PR (#11860) recorded them. Operator approved this filing 2026-10-15 (\"go with all recommended follow ups\")"
+  plan_refs: [W1-T6403, W1-T8575, W1-T8572, W1-T3388, W1-T2491, W1-T4004]
+  files:
+    - src/run-task.ts
+    - test/a-red-main-on-a-ratified-ceiling-records-itself.test.ts
+    - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
+    - test/helpers/identity-gates.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main ccec3f20f. Symbols, not lines.
+    THE INCIDENT. Main went red at e04e9867f: comment-load-signal --strict read src/lib/sweep.ts 5021 > 5000 and
+    src/run-task.ts 18251 > 18250. The main-health lane classified it ratchet-only and `openMainRatchetRecordPr`
+    (src/run-task.ts) opened #11831 on `main-repair-ratchet-7d510a2ff698-1792017976611`. A session had to open #11860
+    (run-unfiled-1792023660528) to record the same two rows.
+    THE TWO GATES. Neither reads a PR body.
+      (a) head-identity-gate (required; scripts/head-identity-gate.mjs `evaluateHeadIdentityGate`) admits a head whose
+          ref is run-shaped (`isDispatchedRunBranch`, /^run-.+-\d+$/) or whose head commit carries an anchored trailer,
+          plus the filing, gardener, dependency-bump and non-code forms. A baseline JSON under scripts/ is code.
+      (b) worker-branch-shape (scripts/worker-branch-shape.mjs `evaluateWorkerBranchShape`, run by `rmd preflight`)
+          refuses a head whose commits claim an id by trailer unless its ref is `run-<that id>-<epochMs>`.
+    ALL THREE LANES FAIL (a).
+      - Ratchet record: `openMainRatchetRecordPr` commits with no trailer on `main-repair-ratchet-<sha12>-<epoch>`. Adding
+        a trailer fails (b) instead. Its body trailer also named another sha: #11831's said fce9217b9459 (main's tip at
+        commit time) while its ref said 7d510a2ff698 (`request.headSha`).
+      - Revert: `openMainRepairRevertPr` commits `git revert --no-edit` (no trailer) on `main-repair-revert-<sha12>-<epoch>`.
+      - Fix: `dispatchMainRepairFixRun` cuts `main-repair-fix-<sha12>-<epoch>`. `mainRepairFixPrompt` asks the worker for
+        no trailer and `ensureTaskTrailer` stamps only the body, so a trailerless worker commit fails (a). A worker that
+        adds the body's trailer fails (b).
+    Reproduced on the Mac against both gates' real predicates and readers. The sweep's head re-home
+    (src/lib/head-rehome.ts) can later move such a PR to a run-unfiled head, but only once head-identity is its only red,
+    every check has finished and a quiet judgment passes: a CI round and a judge call per incident, and a `run-unfiled-`
+    head's task id reads as the `unfiled` sentinel, which loses `isMainRepairPr` (src/lib/sweep.ts, W1-T8575).
+  design: |
+    1. ONE ID PER LANE PR, NAMED ON THE REF, THE COMMIT AND THE BODY. Each opener cuts `run-<its id>-<epochMs>`:
+       - ratchet: `mainRatchetRecordTaskId(sha)` = `main-repair-ratchet-<sha12>` from `request.headSha`;
+         `MAIN_RATCHET_RECORD_BRANCH_PREFIX` becomes `run-main-repair-ratchet-`; the commit carries
+         `Remudero-Task: <id>` and the body ends with the same id.
+       - revert: `mainRepairRevertTaskId(sha)` = `main-repair-revert-<sha12>`; after `git revert --no-edit` the commit is
+         amended locally (never after a push) with `--trailer Remudero-Task: <id>`; `mainRepairRevertBody` ends with it.
+       - fix: the existing `mainRepairTaskId(sha)`; the branch is `run-<that id>-<epochMs>`. The worker's commit passes
+         either way: with no trailer by the run-shaped ref, with the body's trailer because the ref names that id.
+       Every id starts `main-repair-`, so `isMainRepairPr` holds, and the three ids differ, so a fix and a revert of one
+       merge are not read as a duplicate build of one task.
+    2. Supersession still finds the ratchet lane's older PRs on the pre-change prefix: /^(?:run-)?main-repair-ratchet-/.
+    3. No gate changes. A shared test helper (test/helpers/identity-gates.ts) runs each gate's own readers and predicate
+       on a checkout of the pushed head, so no verdict is re-implemented.
+    4. Ledger rows keep `task_id: mainRepairTaskId(sha)`; only the PR identity changes.
+  acceptance:
+    - claim: "a ratchet-record PR the production opener pushes passes both gates, judged by each gate's own readers on a checkout of the pushed head"
+      proof: "grep: W1-T9583: a ratchet-record PR head passes head-identity-gate and worker-branch-shape in test/a-red-main-on-a-ratified-ceiling-records-itself.test.ts"
+    - claim: "a revert PR the production opener pushes passes both gates and its commit names the body's id"
+      proof: "grep: W1-T9583: a revert PR head passes head-identity-gate and worker-branch-shape in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+    - claim: "a fix worker's head passes both gates with or without the dispatcher's trailer"
+      proof: "grep: W1-T9583: a fix worker head passes head-identity-gate and worker-branch-shape, with or without its trailer in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+    - claim: "the ratchet lane cuts its record branch on a run-shaped prefix"
+      proof: 'grep: MAIN_RATCHET_RECORD_BRANCH_PREFIX = "run-main-repair-ratchet-" in src/run-task.ts'
+  falsifier: |
+    Restore origin/main's branch lines and the ratchet test reds with head-identity-gate's "REFUSED — this head matches
+    neither conforming form" (the #11831 red); the revert test reds with worker-branch-shape's "REFUSED — this branch
+    claims main-repair-revert-…"; the fix test reds on its run-shaped branch assertion. Drop the revert's amend trailer and
+    its test reds because worker-branch-shape no longer judges a claim. All measured on the Mac before filing.
+  note: |
+    EFFECT, measured after merge from the core ledger: the next `main.repair.ratchet_opened` row's PR reaches
+    `main.repair.ratchet_resolved` with by "record", with no hand PR. Also count head-identity-gate reds on PRs whose
+    task id starts `main-repair-`. Healthy shape: none.

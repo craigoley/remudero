@@ -47,6 +47,16 @@
     composed default in test/serve-browser-teardown.test.ts (1 hit at head, 0 at base). The two
     unit tests stay in the suite and keep running in CI as behaviour coverage. Claims, design,
     files and the third proof are unchanged.
+    RESTORATION 2026-10-14, separately authorized by the operator after source #11201
+    actually merged as d3a775a7a91119ebd10e5ccd61d6dd85547a50ed. Both original unit
+    titles now exist on main 9379975805c08e54122617f157bfb8e8cfb6a4ee; each also
+    selects its shipped-guard behavioral case, not only a new-helper fixture. The
+    retained exact277b273e4/actual7b8bbbfcf shipped proof receipt reports head PASS,
+    base FAIL and discriminates for both. Current-main resolution and this plan's
+    own proof-field discrimination are separate checks, not another source merge
+    or a claim the existing behavioral tests newly fail on current main. Restore
+    only the first two original proof fields; keep this amendment history, every
+    failed/unknown receipt, claims, design, files, budget and third proof unchanged.
   design: |
     1. Extract a small test-only trackedBrowserTestSources reader into
        test/lib/browser-test-corpus.ts. Enumerate Git-tracked test/*.test.ts recursively
@@ -82,9 +92,9 @@
        services, live policy/config, scheduler, infrastructure, credentials or schedules.
   acceptance:
     - claim: The real reader includes tracked nested browser suites without traversing transient fixtures
-      proof: 'grep: "ls-files", "-z", "--", "test" in test/lib/browser-test-corpus.ts'
+      proof: 'unit test: browser teardown corpus reads tracked nested tests without traversing transient fixtures'
     - claim: Unavailable real source refuses without hiding a tracked browser regression
-      proof: 'grep: assertTrackedBrowserTeardown(REPO_ROOT); in test/serve-browser-teardown.test.ts'
+      proof: 'unit test: browser teardown corpus refuses unavailable tracked sources without hiding a real regression'
     - claim: Browser-source discovery has an explicit tracked test-corpus reader
       proof: 'grep: function trackedBrowserTestSources in test/lib/browser-test-corpus.ts'
   files: [test/serve-browser-teardown.test.ts, test/lib/browser-test-corpus.ts, test/browser-test-corpus.test.ts]

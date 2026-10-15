@@ -1,0 +1,28 @@
+id: incident-120e58789b683ded
+ts: 2026-10-15T05:23:07.216Z
+raw: >-
+  Incident 120e58789b68: intervention breaker:escalate
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=dispatch.breaker_released target=W1-T7742 actor=unknown cause=breaker:escalate — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#120e58789b683ded3c3fbb3f1e3f504365cade732081fbf9afdbb4978a8f39e6
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
