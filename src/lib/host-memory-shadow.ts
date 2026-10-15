@@ -231,6 +231,7 @@ export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath(), c
     policy = parseHostMemoryBudgetPolicy(mapping("sweep", doc.sweep).hostMemoryBudget);
     cachedPolicies.set(path, policy);
   }
+  if (policy.mode === "enforce" && policy.claimModel !== JOINT_MODEL) throw new Error("enforce refused: select a qualified joint claim model; the existing class override is not global permission");
   if (policy.claimModel === JOINT_MODEL && (policy.mode === "enforce" || Object.values(policy.classModes ?? {}).includes("enforce"))) {
     if (!policy.calibrationStateDir) throw new Error("joint enforce refused: calibrationStateDir is missing");
     const now = clock.now(), state = readCalibrationState(policy.calibrationStateDir), current = observe(now);

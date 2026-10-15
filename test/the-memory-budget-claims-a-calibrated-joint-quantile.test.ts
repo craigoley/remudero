@@ -51,6 +51,9 @@ test("W1-T8879: the real config loader refuses unsupported joint enforcement and
   const legacyPath = join(repo.dir, "legacy.yaml");
   writeFileSync(legacyPath, stringifyYaml(doc));
   assert.equal(loadHostMemoryBudgetPolicy(legacyPath, fixedClock(now)).claimModel, undefined, "the existing garden-only legacy policy is unchanged");
+  policy.mode.value = "enforce";
+  const unsupported = join(repo.dir, "unsupported-global.yaml"); writeFileSync(unsupported, stringifyYaml(doc));
+  assert.throws(() => loadHostMemoryBudgetPolicy(unsupported, fixedClock(now)), /enforce refused/, "global enforcement cannot bypass qualification by omitting the new model selection");
   policy.claimModel = { value: JOINT_MODEL, origin: "proposal" };
   policy.mode.value = "enforce";
   policy.calibrationStateDir = { value: stateDir, origin: "proposal" };
