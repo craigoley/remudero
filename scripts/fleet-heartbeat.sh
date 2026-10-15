@@ -275,22 +275,106 @@ else
   # watch workflow escalated #4782 on that reading.
   #
   # So this reads all THREE forms, which is CLAUDE.md's standing rule for any ledger question:
-  # `state/ledger.ndjson`, the plain rotations, and the gzipped ones. `zgrep` reads plain input
-  # transparently, so the fix is the GLOB, never the tool. A form that matches nothing contributes
-  # nothing; the union is still whatever the other forms hold.
-  LEDGER_UNION_GLOB="${RMD_ROOT}/state/ledger.ndjson ${RMD_ROOT}/state/ledger.*.ndjson ${RMD_ROOT}/state/ledger.*.ndjson.gz"
-  ledger_union_grep() {
-    # shellcheck disable=SC2086 — the glob is intentional; unmatched patterns fall through and fail
-    # into /dev/null per form, which is exactly "this form contributes nothing".
-    zgrep -h "$1" $LEDGER_UNION_GLOB 2>/dev/null
+  # `state/ledger.ndjson`, the plain rotations, and the gzipped ones. A form that matches nothing
+  # contributes nothing; the union is still whatever the other forms hold.
+
+  # ── ONE NEWEST-FIRST PASS, STOPPED WHEN EVERY ANSWER IS FINAL ───────────────────────────────
+  # Three whole-union zgreps per beat read ~6 GB from a disk near its IOPS cap. This one pass
+  # answers T (the max leading ts over `"step":"daemon\.` lines), S (the last daemon step token on
+  # a line carrying `"ts":"<T>"`) and B (the last daemon.boot line). S and B are LAST in union
+  # order (live, plain, gzipped; glob order within each), as `tail -n 1` had them, so an archived
+  # boot still outranks a newer live one: a separate defect, kept here byte-for-byte.
+  # THE STOP: a rotation's stamp bounds every row in it (rotateLedgerLocked; W1-T4100 heals a name
+  # only down to its mtime; compactedArchiveName; the rule rotationWindowMs relies on), so one
+  # stamped a whole second before T cannot change T or S. B is final once no unread file outranks
+  # its file. An unstamped name bounds nothing and is always read; an absent answer is searched
+  # for to the oldest rotation, so "none" means none. LC_ALL=C makes `>` the byte order of `sort`.
+  # Falsifier: test/the-beat-answers-its-ledger-questions-in-one-pass.test.ts.
+  ledger_union_answers() {
+    local _f
+    {
+      printf '%s\n' "$LEDGER"
+      for _f in "${RMD_ROOT}/state/"ledger.*.ndjson "${RMD_ROOT}/state/"ledger.*.ndjson.gz; do
+        [ -e "$_f" ] && printf '%s\n' "$_f"
+      done
+    } | LC_ALL=C awk '
+      # A single-quoted path for the one command this runs; the quote char is made, never written,
+      # so this program never closes the single quotes it is written inside.
+      function shq(s,   q) { q = sprintf("%c", 39); gsub(q, q "\"" q "\"" q, s); return q s q }
+      function stampof(p,   n) {
+        n = p; sub(/.*\//, "", n)
+        if (n ~ /^ledger\.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z\.ndjson(\.gz)?$/)
+          return substr(n, 8, 10) "T" substr(n, 19, 2) ":" substr(n, 22, 2) ":" substr(n, 25, 2)
+        return "~"
+      }
+      function consider(line, r, ln,   rest, p, m, ts, v, tok, s) {
+        if (wantQ && index(line, "\"step\":\"daemon") && line ~ /"step":"daemon\./) {
+          if (substr(line, 1, 7) == "{\"ts\":\"") {
+            rest = substr(line, 8); p = index(rest, "\"")
+            if (p > 0) { ts = substr(rest, 1, p - 1); if (!haveMax || ts > max) { max = ts; haveMax = 1 } }
+          }
+          tok = ""; s = line
+          while (match(s, /"step":"daemon\.[^"]*"/)) { tok = substr(s, RSTART + 8, RLENGTH - 9); s = substr(s, RSTART + RLENGTH) }
+          if (tok != "") {
+            s = line
+            while ((p = index(s, "\"ts\":\"")) > 0) {
+              s = substr(s, p + 6); m = index(s, "\"")
+              if (m == 0) break
+              v = substr(s, 1, m - 1); s = substr(s, m + 1)
+              if (haveMax && v < max) continue
+              if (!(v in candTok) || r > candRank[v] || (r == candRank[v] && ln >= candLine[v])) {
+                candTok[v] = tok; candRank[v] = r; candLine[v] = ln
+              }
+            }
+          }
+        }
+        if (index(line, "daemon") && line ~ /"step":"daemon.boot"/ && r >= bootRank) { bootLine = line; bootRank = r }
+      }
+      function scanfile(i,   p, cmd, line, ln) {
+        p = path[i]; ln = 0
+        if (p ~ /\.gz$/) {
+          cmd = "gzip -dc -- " shq(p) " 2>/dev/null"
+          while ((cmd | getline line) > 0) consider(line, i, ++ln)
+          close(cmd)
+        } else {
+          while ((getline line < p) > 0) consider(line, i, ++ln)
+          close(p)
+        }
+      }
+      { path[NR - 1] = $0; n = NR - 1 }
+      END {
+        for (i = 1; i <= n; i++) { st[i] = stampof(path[i]); ord[i] = i }
+        for (i = 2; i <= n; i++) {
+          k = ord[i]; j = i - 1
+          while (j >= 1 && (st[ord[j]] < st[k] || (st[ord[j]] == st[k] && ord[j] < k))) { ord[j + 1] = ord[j]; j-- }
+          ord[j + 1] = k
+        }
+        suf[n + 1] = -1
+        for (k = n; k >= 1; k--) suf[k] = (ord[k] > suf[k + 1]) ? ord[k] : suf[k + 1]
+        haveMax = 0; max = ""; bootRank = -1; bootLine = ""; wantQ = 1
+        if (n >= 0) scanfile(0)
+        for (k = 1; k <= n; k++) {
+          i = ord[k]
+          if (wantQ && haveMax && st[i] != "~" && st[i] < substr(max, 1, 19)) wantQ = 0
+          if (!wantQ && suf[k] <= bootRank) break
+          if (!wantQ && i <= bootRank) continue
+          scanfile(i)
+        }
+        print "T=" max
+        print "S=" ((max != "" && (max in candTok)) ? candTok[max] : "")
+        print "B=" bootLine
+      }' 2>/dev/null
   }
-  DAEMON_LAST_TS="$(ledger_union_grep '"step":"daemon\.' \
-    | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p' | sort | tail -n 1)"
-  if [ -n "$DAEMON_LAST_TS" ]; then
-    DAEMON_LAST_STEP="$(ledger_union_grep "\"ts\":\"${DAEMON_LAST_TS}\"" \
-      | grep -o '"step":"daemon\.[^"]*"' | tail -n 1 | cut -d'"' -f4)"
-  fi
-  BOOT_LINE="$(ledger_union_grep '"step":"daemon.boot"' | tail -n 1)"
+  BOOT_LINE=""
+  while IFS= read -r _answer; do
+    case "$_answer" in
+      T=*) DAEMON_LAST_TS="${_answer#T=}" ;;
+      S=*) DAEMON_LAST_STEP="${_answer#S=}" ;;
+      B=*) BOOT_LINE="${_answer#B=}" ;;
+    esac
+  done <<LEDGER_ANSWERS
+$(ledger_union_answers)
+LEDGER_ANSWERS
   if [ -n "$BOOT_LINE" ]; then
     DAEMON_BOOT_TS="$(printf '%s' "$BOOT_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
     DAEMON_BOOT_SHA="$(printf '%s' "$BOOT_LINE" | grep -o '"head_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
