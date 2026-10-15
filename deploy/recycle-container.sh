@@ -423,18 +423,16 @@ RECYCLE_PAUSE_BODY=""
 #
 # W1-T8138: THE 3000 BELOW IS NOW ONLY THE NO-HISTORY FALLBACK, NOT THE SIZING. The deploy supervisor
 # (src/lib/deployer.ts, deriveRecycleWait) reads the observed `implement.done` run lengths and the in-flight
-# lanes' ages, passes the wait it needs as RMD_RECYCLE_WAIT_S with RMD_RECYCLE_WAIT_SOURCE, and ledgers it as
-# `deploy.recycle_wait_derived`. A hand run, or a supervisor with no history to read, reaches the constant, and
-# every message below says so (WAIT_SOURCE). The distribution above is why 3000 was a sound fallback, not
-# why a fleet of two-minute runs and a fleet of ninety-minute runs should wait the same time.
+# lanes' ages, passes the wait it needs as `--wait-s N --wait-source S` (applied after argument parsing, below),
+# and ledgers it as `deploy.recycle_wait_derived`. A hand run, or a supervisor with no history to read, reaches
+# the constant, and every message below says so (WAIT_SOURCE). RMD_RECYCLE_WAIT_S still wins over the flag. The
+# distribution above is why 3000 was a sound fallback, not why a fleet of two-minute runs and a fleet of
+# ninety-minute runs should wait the same time.
 WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"
-if [ -n "${RMD_RECYCLE_WAIT_SOURCE:-}" ]; then
-  WAIT_SOURCE="${RMD_RECYCLE_WAIT_SOURCE}"
-elif [ -n "${RMD_RECYCLE_WAIT_S:-}" ]; then
-  WAIT_SOURCE="operator"
-else
-  WAIT_SOURCE="no_history_fallback"
-fi
+WAIT_SOURCE="no_history_fallback"
+[ -z "${RMD_RECYCLE_WAIT_S:-}" ] || WAIT_SOURCE="operator"
+CLI_WAIT_S=""
+CLI_WAIT_SOURCE=""
 POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
 
 # The distribution above, in the exact words a refusal below reuses — an operator reading a timeout
@@ -519,12 +517,25 @@ while [ $# -gt 0 ]; do
     --image)       IMAGE="${2:?--image needs a value}"; CLI_RETARGET="${CLI_RETARGET} --image"; shift 2 ;;
     --container)   CONTAINER_NAME="${2:?--container needs a value}"; CLI_RETARGET="${CLI_RETARGET} --container"; shift 2 ;;
     --instance)    shift 2 ;;
+    --wait-s)      CLI_WAIT_S="${2:?--wait-s needs a value}"; shift 2 ;;
+    --wait-source) CLI_WAIT_SOURCE="${2:?--wait-source needs a value}"; shift 2 ;;
     --first-boot)  FIRST_BOOT=1; shift ;;
     --commission-git-author) shift ;;
     -h|--help)     COMMISSION_GIT_AUTHOR=0; sed -n '1,72p' "$0"; exit 0 ;;
     *) echo "recycle-container: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# W1-T8138: the supervisor's derived wait, unless an operator already set one in the environment.
+case "${CLI_WAIT_S}" in
+  "") ;;
+  *[!0-9]*) echo "recycle-container: --wait-s needs a whole number of seconds, got '${CLI_WAIT_S}'" >&2; exit 2 ;;
+  *)
+    if [ -z "${RMD_RECYCLE_WAIT_S:-}" ]; then
+      WAIT_SECONDS="${CLI_WAIT_S}"
+      WAIT_SOURCE="${CLI_WAIT_SOURCE:-supervisor}"
+    fi ;;
+esac
 
 REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"
 echo "recycle-container: container ${CONTAINER_NAME}, target image ${REF}"

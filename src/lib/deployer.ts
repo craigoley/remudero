@@ -2672,9 +2672,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
       // there is no answer rather than being replaced by a guess.
       const script = recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript];
-      // W1-T8138: the drain wait comes from the observed run lengths and the lanes' ages, unless an operator
-      // already set one. With no history nothing is passed and the script keeps its labelled fallback.
-      const derived = process.env.RMD_RECYCLE_WAIT_S === undefined ? deriveDrainWait() : undefined;
+      // W1-T8138: the drain wait comes from the observed run lengths and the lanes' ages; an operator's own
+      // environment override still wins inside the script. With no history nothing is passed and the script
+      // keeps its labelled fallback.
+      const derived = deriveDrainWait();
       if (derived === undefined) {
         exec("bash", script);
         return;
@@ -2686,7 +2687,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         quantile: derived.quantile,
         lanes: derived.lanes,
       });
-      exec("env", [`RMD_RECYCLE_WAIT_S=${derived.waitS}`, `RMD_RECYCLE_WAIT_SOURCE=${derived.source}`, "bash", ...script]);
+      exec("bash", [...script, "--wait-s", String(derived.waitS), "--wait-source", derived.source]);
     },
   };
 

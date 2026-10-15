@@ -349,13 +349,13 @@ function writeStubs(dir: string): void {
 }
 
 
-function runScript(state: string, extraEnv: Record<string, string>): { status: number; stderr: string } {
+function runScript(state: string, extraEnv: Record<string, string>, args: string[] = []): { status: number; stderr: string } {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-blockers-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-blockers-rec-`));
   const cashKeyPath = join(state, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
   writeStubs(dir);
-  const r = spawnSync("bash", [SCRIPT], {
+  const r = spawnSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
@@ -372,7 +372,6 @@ function runScript(state: string, extraEnv: Record<string, string>): { status: n
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-blockers-test-no-such-dockerenv-marker"),
       STUB_CLEAR_AFTER_CALLS: "0",
       RMD_RECYCLE_WAIT_S: "",
-      RMD_RECYCLE_WAIT_SOURCE: "",
       ...extraEnv,
     },
   });
@@ -391,7 +390,7 @@ function writeLock(state: string, taskId: string): void {
 test("W1-T8138: the script's refusal names its blockers and where its wait came from", () => {
   const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-blockers-state-`));
   writeLock(state, "W1-T8138-held");
-  const derived = runScript(state, { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1", RMD_RECYCLE_WAIT_SOURCE: "observed_distribution", STUB_CLEAR_AFTER_CALLS: "999999" });
+  const derived = runScript(state, { RMD_RECYCLE_POLL_S: "1", STUB_CLEAR_AFTER_CALLS: "999999" }, ["--wait-s", "1", "--wait-source", "observed_distribution"]);
   assert.notEqual(derived.status, 0);
   assert.match(derived.stderr, /WAIT_SECONDS=1 was derived by the deploy supervisor from the observed run lengths/);
   const named = parseDrainBlockers(derived.stderr);
@@ -415,6 +414,13 @@ test("W1-T8138: the script's refusal names its blockers and where its wait came 
   assert.match(fallback.stderr, /source: no_history_fallback\./);
   const hand = runScript(state, { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" });
   assert.match(hand.stderr, /WAIT_SECONDS=1 was sized against 115 implement\.done rows.*source: operator\./);
+  // The operator's environment beats the supervisor's flag; a malformed flag is refused before anything runs.
+  const both = runScript(state, { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" }, ["--wait-s", "2", "--wait-source", "observed_distribution"]);
+  assert.match(both.stderr, /still in flight after 1s/);
+  assert.match(both.stderr, /source: operator\./);
+  const bad = runScript(state, {}, ["--wait-s", "soon"]);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /--wait-s needs a whole number of seconds/);
 });
 
 function supervisor(root: string, calls: Array<{ cmd: string; args: string[] }>, logged: Array<{ step: string; data?: Record<string, unknown> }>) {
@@ -445,80 +451,62 @@ function row(step: string, extra: Record<string, unknown>): string {
 }
 
 test("W1-T8138: the supervisor hands the script a wait read from the ledger and the locks", () => {
-  const saved = process.env.RMD_RECYCLE_WAIT_S;
-  delete process.env.RMD_RECYCLE_WAIT_S;
-  try {
-    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-wait-derive-`));
-    mkdirSync(join(root, "state", "inflight"), { recursive: true });
-    const started = (ageS: number) => new Date(Date.now() - ageS * 1000).toISOString();
-    const lock = (task: string, run: string, ageS: number) =>
-      writeFileSync(join(root, "state", "inflight", `${task}.lock`), JSON.stringify({ pid: 1, run_id: run, host: "h", startedAt: started(ageS) }));
-    lock("W1-T1", "run-live", 600);
-    lock("W1-T2", "run-ended", 100);
-    writeFileSync(join(root, "state", "inflight", "W1-T3.lock"), "{ not json");
-    const durations = Array(10).fill(0).map(() => row("implement.done", { worker_duration_ms: 1_800_000 }));
-    writeFileSync(
-      join(root, "state", "ledger.ndjson"),
-      [
-        ...durations,
-        "{ torn",
-        row("worker.recycle_yield", { run_id: "run-ended", decision: "acted" }),
-        row("worker.quiet_judged", { run_id: "run-live", action: "none", decision: "left_alone" }),
-        row("worker.quiet_judged", { run_id: "run-live", action: "end_round", decision: "action_failed" }),
-        "",
-      ].join("\n"),
-    );
-    // One rotated, gzipped sibling joins the population.
-    writeFileSync(join(root, "state", "ledger.2026-10-01.ndjson.gz"), gzipSync(row("implement.done", { worker_duration_ms: 600_000 })));
-    assert.equal(readImplementDurationsMs(join(root, "state", "ledger.ndjson")).length, 11);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-wait-derive-`));
+  mkdirSync(join(root, "state", "inflight"), { recursive: true });
+  const started = (ageS: number) => new Date(Date.now() - ageS * 1000).toISOString();
+  const lock = (task: string, run: string, ageS: number) =>
+    writeFileSync(join(root, "state", "inflight", `${task}.lock`), JSON.stringify({ pid: 1, run_id: run, host: "h", startedAt: started(ageS) }));
+  lock("W1-T1", "run-live", 600);
+  lock("W1-T2", "run-ended", 100);
+  writeFileSync(join(root, "state", "inflight", "W1-T3.lock"), "{ not json");
+  const durations = Array(10).fill(0).map(() => row("implement.done", { worker_duration_ms: 1_800_000 }));
+  writeFileSync(
+    join(root, "state", "ledger.ndjson"),
+    [
+      ...durations,
+      "{ torn",
+      row("worker.recycle_yield", { run_id: "run-ended", decision: "acted" }),
+      row("worker.quiet_judged", { run_id: "run-live", action: "none", decision: "left_alone" }),
+      row("worker.quiet_judged", { run_id: "run-live", action: "end_round", decision: "action_failed" }),
+      "",
+    ].join("\n"),
+  );
+  // One rotated, gzipped sibling joins the population.
+  writeFileSync(join(root, "state", "ledger.2026-10-01.ndjson.gz"), gzipSync(row("implement.done", { worker_duration_ms: 600_000 })));
+  assert.equal(readImplementDurationsMs(join(root, "state", "ledger.ndjson")).length, 11);
 
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const logged: Array<{ step: string; data?: Record<string, unknown> }> = [];
-    const backend = supervisor(root, calls, logged).restartBackends!().find((b) => b.name === "recycle-container")!;
-    backend.restart();
-    const run = calls.find((c) => c.cmd === "env")!;
-    assert.ok(run, "the script runs under the derived wait");
-    const waitS = Number(/^RMD_RECYCLE_WAIT_S=(\d+)$/.exec(run.args[0])![1]);
-    // A lock that will not parse has no readable age, so it is read as a run just begun: the whole 1800s governs.
-    assert.equal(waitS, 1800);
-    assert.equal(run.args[1], "RMD_RECYCLE_WAIT_SOURCE=observed_distribution");
-    assert.deepEqual(run.args.slice(2, 4), ["bash", join(root, "deploy", "recycle-container.sh")]);
-    const derived = logged.find((l) => l.step === "deploy.recycle_wait_derived")!.data!;
-    assert.equal(derived.wait_s, waitS);
-    assert.equal(derived.samples, 11);
-    const lanes = derived.lanes as Array<{ task_id: string; basis: string; remaining_s: number }>;
-    assert.equal(lanes.find((l) => l.task_id === "W1-T2")!.basis, "round_ended");
-    // run-live is 600s old on runs that mostly last 1800s: about 1200s remain, and its failed round end does not excuse it.
-    const live = lanes.find((l) => l.task_id === "W1-T1")!;
-    assert.equal(live.basis, "round_end_failed");
-    assert.ok(live.remaining_s >= 1190 && live.remaining_s <= 1230, `remaining ${live.remaining_s}`);
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const logged: Array<{ step: string; data?: Record<string, unknown> }> = [];
+  const backend = supervisor(root, calls, logged).restartBackends!().find((b) => b.name === "recycle-container")!;
+  backend.restart();
+  const run = calls.find((c) => c.cmd === "bash")!;
+  assert.ok(run, "the script runs under the derived wait");
+  const flagAt = run.args.indexOf("--wait-s");
+  const waitS = Number(run.args[flagAt + 1]);
+  // A lock that will not parse has no readable age, so it is read as a run just begun: the whole 1800s governs.
+  assert.equal(waitS, 1800);
+  assert.deepEqual(run.args.slice(flagAt + 2), ["--wait-source", "observed_distribution"]);
+  assert.equal(run.args[0], join(root, "deploy", "recycle-container.sh"));
+  const derived = logged.find((l) => l.step === "deploy.recycle_wait_derived")!.data!;
+  assert.equal(derived.wait_s, waitS);
+  assert.equal(derived.samples, 11);
+  const lanes = derived.lanes as Array<{ task_id: string; basis: string; remaining_s: number }>;
+  assert.equal(lanes.find((l) => l.task_id === "W1-T2")!.basis, "round_ended");
+  // run-live is 600s old on runs that mostly last 1800s: about 1200s remain, and its failed round end does not excuse it.
+  const live = lanes.find((l) => l.task_id === "W1-T1")!;
+  assert.equal(live.basis, "round_end_failed");
+  assert.ok(live.remaining_s >= 1190 && live.remaining_s <= 1230, `remaining ${live.remaining_s}`);
 
-    // An operator's own RMD_RECYCLE_WAIT_S is left alone: the script runs bare.
-    process.env.RMD_RECYCLE_WAIT_S = "77";
-    calls.length = 0;
-    backend.restart();
-    assert.equal(calls[0].cmd, "bash");
-  } finally {
-    if (saved === undefined) delete process.env.RMD_RECYCLE_WAIT_S;
-    else process.env.RMD_RECYCLE_WAIT_S = saved;
-  }
 });
 
 test("W1-T8138: with no run lengths on record the script runs bare and keeps its labelled fallback", () => {
-  const saved = process.env.RMD_RECYCLE_WAIT_S;
-  delete process.env.RMD_RECYCLE_WAIT_S;
-  try {
-    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-wait-nohistory-`));
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const logged: Array<{ step: string; data?: Record<string, unknown> }> = [];
-    supervisor(root, calls, logged).restartBackends!().find((b) => b.name === "recycle-container")!.restart();
-    assert.equal(calls[0].cmd, "bash");
-    assert.equal(logged.some((l) => l.step === "deploy.recycle_wait_derived"), false);
-    assert.deepEqual(readImplementDurationsMs(join(root, "nothing.ndjson")), []);
-  } finally {
-    if (saved === undefined) delete process.env.RMD_RECYCLE_WAIT_S;
-    else process.env.RMD_RECYCLE_WAIT_S = saved;
-  }
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-wait-nohistory-`));
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const logged: Array<{ step: string; data?: Record<string, unknown> }> = [];
+  supervisor(root, calls, logged).restartBackends!().find((b) => b.name === "recycle-container")!.restart();
+  assert.equal(calls[0].cmd, "bash");
+  assert.equal(logged.some((l) => l.step === "deploy.recycle_wait_derived"), false);
+  assert.deepEqual(readImplementDurationsMs(join(root, "nothing.ndjson")), []);
 });
 
 test("W1-T8138: the marker keeps the named blockers and the supervisor reads them back against the ledger and the lanes", () => {
