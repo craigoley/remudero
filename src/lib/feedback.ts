@@ -511,13 +511,12 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
-/** W1-T9624: origin/main's entry for `id` (a lagging HEAD can lack it), or `null`; a git failure is absent. */
 export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
   let parsed: unknown;
   try {
     parsed = parseYaml(git(["show", `origin/main:${feedbackEntryRelPath(root, id)}`]));
   } catch {
-    return null;
+    return null; // W1-T9624: a lagging HEAD can lack origin/main's entry; a git failure is absent, never "exists"
   }
   const entry = parsed as Partial<FeedbackEntry> | null;
   return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string" ? (entry as FeedbackEntry) : null;
