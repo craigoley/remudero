@@ -89,15 +89,15 @@ test("W1-T3756: each not-stale arm names itself", async () => {
     const plan = fixturePlan();
     const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-arm-`));
     const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
-    let ticks = 0;
+    const hatch = tickHatch(root, 3, "test done", (step, data = {}) => logs.push({ step, data }));
     const summary = await runDaemon(plan, {
       refreshMerged: () => () => true,
       runOne: async (id) => okResult(id),
       sleep: async () => {},
       now: () => now,
-      log: (step, data = {}) => logs.push({ step, data }),
+      log: hatch.log,
       checkFreshness: () => freshness,
-      checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+      checkStop: hatch.checkStop,
     });
     assert.equal(summary.stopReason, "stopped");
     assert.deepEqual(logs.find((entry) => entry.step === "daemon.freshness_not_stale")?.data, expectedRow);
@@ -109,14 +109,14 @@ test("W1-T3756: degraded is not silently a pass", async () => {
   const plan = fixturePlan();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-degraded-`));
   const logs: Array<{ step: string; data: Record<string, unknown> }> = [];
-  let ticks = 0;
+  const hatch = tickHatch(root, 3, "test done", (step, data = {}) => logs.push({ step, data }));
   const summary = await runDaemon(plan, {
     refreshMerged: () => () => true,
     runOne: async (id) => okResult(id),
     sleep: async () => {},
-    log: (step, data = {}) => logs.push({ step, data }),
+    log: hatch.log,
     checkFreshness: () => daemonFreshnessFromService({ status: "degraded", reason: "git fetch origin failed" }),
-    checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+    checkStop: hatch.checkStop,
   });
 
   assert.equal(summary.stopReason, "stopped");
@@ -219,6 +219,45 @@ const okResult = (id: string): RunResult => ({
   verdict: "merged",
 });
 
+// W1-T9672 — an escape hatch counts loop TICKS (the `daemon.tick` row runDaemon writes first on every
+// iteration), never checkStop CALLS: #11994 added checkStop reads inside one cycle, so a call count
+// stopped the IDLE GATE loop as `stopped` before its freshness restart.
+function tickHatch(root: string, limit: number, reason: string, onLog?: DaemonDeps["log"]) {
+  const counts = { ticks: 0, checkStopCalls: 0 };
+  const log: NonNullable<DaemonDeps["log"]> = (step, data) => {
+    if (step === "daemon.tick") counts.ticks += 1;
+    onLog?.(step, data);
+  };
+  const checkStop = (): string | undefined => {
+    counts.checkStopCalls += 1;
+    return counts.ticks >= limit ? (requestStop(root, reason), stopDetail(root)) : undefined;
+  };
+  return { counts, log, checkStop };
+}
+
+test("W1-T9672: an escape hatch counts loop ticks, not checkStop reads", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-freshness-wiring-hatch-`));
+  const hatch = tickHatch(root, 4, "escape hatch");
+  // Every consultation reads checkStop ten times, and freshness never reports stale: the planted
+  // regression the hatch exists for must still end as `stopped`, on its tick count, never hang.
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => true,
+    runOne: async (id) => okResult(id),
+    sleep: async () => {},
+    log: hatch.log,
+    checkStop: () => {
+      for (let i = 0; i < 9; i++) hatch.checkStop();
+      return hatch.checkStop();
+    },
+    checkFreshness: () => daemonFreshnessFromService({ status: "assessed", dirty: false, behind: null }),
+  });
+  assert.equal(s.stopReason, "stopped", "a never-stale loop is still bounded by the hatch");
+  assert.equal(hatch.counts.ticks, 4, "the hatch waited for its tick count, however often checkStop was read");
+  assert.ok(hatch.counts.checkStopCalls >= 40, `checkStop really was read many times (${hatch.counts.checkStopCalls})`);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("loop, THROUGH THE ADAPTER: a service assessment of clean+behind stops the daemon as stale", async () => {
   const plan = fixturePlan();
   // THE ESCAPE HATCH IS LOAD-BEARING, not tidiness. Without it a regression that made the adapter
@@ -228,12 +267,13 @@ test("loop, THROUGH THE ADAPTER: a service assessment of clean+behind stops the 
   // under the never-stale mutant. `checkStop` is consulted BEFORE freshness each tick, so a broken
   // adapter now stops as `stopped` and fails the assertion below in one line.
   const root = mkdtempSync(join(tmpdir(), "daemon-freshness-wiring-stale-"));
-  let ticks = 0;
+  const hatch = tickHatch(root, 4, "escape hatch");
   const s = await runDaemon(plan, {
     refreshMerged: () => () => true,
     runOne: async (id) => okResult(id),
     sleep: async () => {},
-    checkStop: () => (++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
+    log: hatch.log,
+    checkStop: hatch.checkStop,
     checkFreshness: () => daemonFreshnessFromService(CLEAN_BEHIND),
   });
   assert.equal(s.stopReason, "stale", "behind origin -> the loop asks for a restart, promptly");
@@ -243,6 +283,7 @@ test("loop, THROUGH THE ADAPTER: a service assessment of clean+behind stops the 
   // that clean+behind reaches the loop as `stale` at all — and that is unchanged. The bound stays
   // tight on purpose: the escape hatch fires at 4, so a regression that never returned stale still
   // fails here rather than hanging, which is what the comment above is protecting.
+  const ticks = hatch.counts.ticks;
   assert.ok(ticks <= 2, `freshness wins within the one granted cycle; it must not take ${ticks} ticks to notice`);
   rmSync(root, { recursive: true, force: true });
 });
@@ -251,18 +292,18 @@ test("loop, THROUGH THE ADAPTER: a NOT-behind assessment never stops as stale, a
   const plan = fixturePlan();
   const root = mkdtempSync(join(tmpdir(), "daemon-freshness-wiring-fresh-"));
   const lines: string[] = [];
-  let ticks = 0;
   let calls = 0;
+  const hatch = tickHatch(root, 5, "test done", (step) => lines.push(step));
   const s = await runDaemon(plan, {
     refreshMerged: () => () => true,
     runOne: async (id) => okResult(id),
     sleep: async () => {},
-    log: (step) => lines.push(step),
+    log: hatch.log,
     checkFreshness: () => {
       calls += 1;
       return daemonFreshnessFromService({ status: "assessed", dirty: false, behind: null });
     },
-    checkStop: () => (++ticks >= 5 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+    checkStop: hatch.checkStop,
   });
   assert.equal(s.stopReason, "stopped", "a current daemon runs on — it does not restart");
   assert.ok(calls >= 3, `the adapter really was consulted each tick (got ${calls})`);
@@ -279,10 +320,10 @@ test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the 
   // Same escape hatch, same reason as the stale-direction test above: a regression must FAIL here,
   // never hang. checkStop runs before freshness, so a broken adapter stops as `stopped`.
   const root = mkdtempSync(join(tmpdir(), "daemon-freshness-wiring-idle-"));
-  let ticks = 0;
+  const hatch = tickHatch(root, 4, "escape hatch", (step) => order.push(`log:${step}`));
   const s = await runDaemon(plan, {
     refreshMerged: () => () => false,
-    checkStop: () => (++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
+    checkStop: hatch.checkStop,
     runOne: async (id) => {
       order.push("runOne:start");
       // origin/main moves WHILE the worker is in flight — the exact race the brief asks about.
@@ -292,7 +333,7 @@ test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the 
       return okResult(id);
     },
     sleep: async () => {},
-    log: (step) => order.push(`log:${step}`),
+    log: hatch.log,
     checkFreshness: (): DaemonFreshness =>
       daemonFreshnessFromService(advanced ? CLEAN_BEHIND : { status: "assessed", dirty: false, behind: null }),
   });
