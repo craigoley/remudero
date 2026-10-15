@@ -69,7 +69,7 @@
   acceptance:
     - claim: "three settled passes of 1,384, 2,373 and 4,995 s bound the next full pass at no less than 3 x 4,995 s with bound_basis settled_max_fallback, not the 559 s policy value"
       proof: 'grep: test("W1-T9632: three settled passes of 1,384-4,995 s bound the next pass at 3x the longest, not the 559 s policy value" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
-    - claim: "a boot whose settled rows sit only in a rotated archive, with an empty live ledger, seeds the learner from the union and bounds its first pass by observed_passes"
+    - claim: "a boot whose long settled passes sit only in a rotated archive, with only short ones in the live ledger, seeds the learner from the union once per row and bounds its first pass by observed_passes"
       proof: 'grep: test("W1-T9632: a boot whose settled passes were rotated into archives keeps its samples" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
     - claim: "an unreadable union seeds the learner from the live ledger"
       proof: 'grep: test("W1-T9632: an unreadable archive union seeds the sweep bound from the live ledger" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
@@ -78,7 +78,7 @@
   falsifier: |
     Hold 3 settled durations of 1,384, 2,373 and 4,995 s with a 559 s policy value. On origin/main
     `learnedSweepBound` returns 559 s with no_history_fallback, so the first test fails; with the change it returns
-    14,985 s with settled_max_fallback. Write 10 settled rows into a gzipped rotation, leave the live ledger empty,
+    14,985 s with settled_max_fallback. Write 8 settled rows of the 11-35 min population into a gzipped rotation, 2 short ones into the live ledger,
     and run `runDaemon` with `readRestartHistory` reading that state dir through `readRestartHistoryLines`: on
     origin/main the step is not in the read and the seed ignores it, so the first pass starts on the policy value
     and is abandoned, and the second test fails. Seed from the live lines only again, or drop the step from the
