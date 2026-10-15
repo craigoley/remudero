@@ -3969,12 +3969,14 @@ test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount,
   assert.ok(start >= 0, "DaemonOpts must still exist verbatim");
   const end = daemonSrc.indexOf("\n}", start);
   const body = daemonSrc.slice(start, end);
-  // Every declared field, in order — matches `name?: type;` (JSDoc lines are skipped, they
-  // carry no trailing semicolon at column 2). A second lane-shaped field (e.g.
-  // `reviewLaneCount`/`reviewBudget`) would show up here as an extra match.
+  // W1-T9097 adds a shadow/enforce selector, not a second sizing budget. Check its type
+  // before admitting it; another field such as reviewLaneCount/reviewBudget still fails.
   const fields = [...body.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]);
   const laneFields = fields.filter((f) => /lane|budget/i.test(f));
-  assert.deepEqual(laneFields, ["laneCount"], `DaemonOpts's only lane/budget-shaped field must still be laneCount; found ${JSON.stringify(laneFields)}`);
+  assert.match(body, /^ {2}laneGovernorMode\?: LaneGovernorMode;$/m,
+    "the governor option must remain an optional shadow/enforce mode, not a numeric lane budget");
+  assert.deepEqual(laneFields, ["laneCount", "laneGovernorMode"],
+    `DaemonOpts must keep one lane-sizing knob and its governor mode; found ${JSON.stringify(laneFields)}`);
 });
 
 test("W1-T513: the review-key mutex is now cross-call — two concurrent runSweep passes over the SAME PR never both post (closes the exact race design (iv) named)", async () => {
