@@ -173,3 +173,69 @@ test("no test imports a mutated module copy from outside the project root — th
       `copy under test/ instead:\n${offenders.join("\n")}`,
   );
 });
+
+// THE SAME COLLAPSE, A SECOND SHAPE (#11757). The mechanism under both is tsx's MODULE FORMAT, not the
+// path: a `.ts`/`.js` file outside any `"type": "module"` package scope (os.tmpdir() has none) is compiled
+// as COMMONJS, and every real src module it imports is then `require()`d and compiled as CommonJS too,
+// with `import.meta` substituted by a `define` that esbuild names `<define:import.meta>` in the source
+// map. Under coverage that becomes `SF:src/lib/<define:import.meta>`. The pre-push harness of
+// test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts wrote
+// `harness/src/lib/git-push.ts` re-exporting the real module into a tmp dir with no package.json; its
+// hook children carried the record into coverage shard 3, and coverage-merge-ratchet refused #11757.
+// The guard above only sees `await import(<id>)` of a tmpdir path, so this shape walked past it.
+
+/** The offending shape: a generated `.ts`/`.js` module whose text imports the real `src/` through an
+ *  interpolated specifier, written as `<write>(join(<dir>, "...ts"), \`...\`)` into a `<dir>` the file never
+ *  makes an ESM scope (`join(<dir>, "package.json")` holding `type: "module"`). An `.mts`/`.mjs` name is ESM by
+ *  extension and never matches. BLIND SPOT: a path held in a variable rather than a literal `join(...)`. */
+function cjsScopeSourceWrappers(text: string): string[] {
+  const bad: string[] = [];
+  const write = /\b(?:writeFileSync|writeFile|put)\(\s*join\(\s*([A-Za-z_$][\w$]*)\s*,([^`;]*?\.(?:ts|tsx|cts|js|cjs))"\s*\)\s*,\s*`([^`]*)`/g;
+  for (const m of text.matchAll(write)) {
+    const [, dir, file, body] = m;
+    if (!/(?:\bfrom\s*|\bimport\s*\(\s*)\$\{[^}]*\bsrc["/]/.test(body)) continue;
+    const esmScope = new RegExp(`join\\(\\s*${dir.replace(/\$/g, "\\$")}\\s*,\\s*"package\\.json"\\s*\\)[^;]*\\btype"?\\s*:\\s*"module"`);
+    if (!esmScope.test(text)) bad.push(`${dir}:${file.trim().replace(/^"/, "")}`);
+  }
+  return bad;
+}
+
+test("no test compiles the real src graph as CommonJS through a generated module outside an ESM scope — the <define:import.meta> record is forbidden", () => {
+  // BOTH DIRECTIONS, as above: the #11757 harness construction verbatim must fire; the same wrapper in a
+  // directory given `{"type":"module"}` must not, nor an .mjs wrapper, nor a .ts fixture importing nothing real.
+  const wrapper = 'put(join(harness, "src/lib/git-push.ts"), `import * as p from ${url("src/lib/git-push.ts")};\nexport const x = p;\n`);\n';
+  assert.deepEqual(cjsScopeSourceWrappers(wrapper), ['harness:src/lib/git-push.ts'], "the detector must fire on the #11757 shape, or it is vacuous");
+  assert.deepEqual(
+    cjsScopeSourceWrappers(`put(join(harness, "package.json"), JSON.stringify({ type: "module" }));\n${wrapper}`),
+    [],
+    "a wrapper inside a declared ESM scope compiles as ESM and must stay silent",
+  );
+  assert.deepEqual(
+    cjsScopeSourceWrappers('writeFileSync(join(root, "child.mjs"), `import { f } from ${JSON.stringify(pathToFileURL(join(REPO, "src/lib/x.ts")).href)};`);\n'),
+    [],
+    "an .mjs wrapper is ESM by extension",
+  );
+  assert.deepEqual(
+    cjsScopeSourceWrappers('writeFileSync(join(root, "test", "a.test.ts"), `import { test } from "node:test";\ntest("a", () => {});\n`);\n'),
+    [],
+    "a generated test importing no real src module is not this shape",
+  );
+
+  const testDir = join(repoRoot, "test");
+  // SKIPPED: this file, whose controls above are the offending shape as literals, and the one suite that builds
+  // the shape ON PURPOSE to prove the mechanism — it points its probe child's NODE_V8_COVERAGE at its own temp
+  // dir, so the record it makes never reaches a shard's lcov.
+  const SKIP = new Set(["architecture-fitness.test.ts", "a-define-import-meta-coverage-record-names-its-commonjs-cause.test.ts"]);
+  const offenders: string[] = [];
+  for (const file of readdirSync(testDir)) {
+    if (!/\.test\.ts$/.test(file) || SKIP.has(file)) continue;
+    for (const hit of cjsScopeSourceWrappers(readFileSync(join(testDir, file), "utf8"))) offenders.push(`${file}: ${hit}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "a generated .ts/.js module outside an ESM package scope compiles the real src graph as CommonJS and plants " +
+      "SF:src/lib/<define:import.meta> in coverage, which coverage-merge-ratchet refuses; write " +
+      `{"type":"module"} into that directory's package.json, or name the module .mts/.mjs:\n${offenders.join("\n")}`,
+  );
+});

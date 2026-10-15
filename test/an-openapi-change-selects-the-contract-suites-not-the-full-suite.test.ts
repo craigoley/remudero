@@ -41,7 +41,7 @@ test(proof, () => {
 });
 
 test(`${proof}: unusable read maps keep contract readers and report the map problem`, () => {
-  const map: NonNullable<ReadMapInput["map"]> = { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} };
+  const map: NonNullable<ReadMapInput["map"]> = { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] };
   const cases: Array<{ readMap?: ReadMapInput; problem?: string }> = [
     {},
     { readMap: { mapProblem: "file not found", drift: { changedSinceMap: [] } }, problem: "no read map (file not found)" },
@@ -64,7 +64,7 @@ test(`${proof}: unusable read maps keep contract readers and report the map prob
 
 test(`${proof}: other contract-tree paths still force a full run and name the path`, () => {
   const readMaps: Array<ReadMapInput | undefined> = [undefined, {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   }];
   for (const path of ["openapi/other.yaml", "packages/api-client/src/client.ts"]) {

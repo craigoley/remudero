@@ -128,7 +128,11 @@ test("W1-T9082: a shadow probe writes its status and its shadow row", { timeout:
   assert.equal(row.plan_tasks, TASKS.length, "the probe read the plan snapshot the daemon wrote");
   assert.equal(typeof row.load_ms, "number");
   assert.ok((row.load_ms as number) >= 0);
-  assert.ok(typeof row.tree_peak_bytes === "number" && row.tree_peak_bytes > 0, `a tree peak from the reservation release: ${row.tree_peak_bytes}`);
+  if (process.platform === "darwin") {
+    assert.equal(row.tree_peak_bytes, null, "without Linux /proc no tree peak is invented");
+  } else {
+    assert.ok(typeof row.tree_peak_bytes === "number" && row.tree_peak_bytes > 0, `a tree peak from the reservation release: ${row.tree_peak_bytes}`);
+  }
   assert.ok(typeof row.child_max_rss_bytes === "number" && row.child_max_rss_bytes > 0, "the child's own peak resident size rides the row");
   const dir = runDir(fx.state, String(row.run_id));
   const status = readStatus(dir);
@@ -143,7 +147,11 @@ test("W1-T9082: a shadow probe writes its status and its shadow row", { timeout:
   assert.equal(snapshot.tasks.length, TASKS.length);
   assert.equal(only(rows, "child_entry.spawned").verb, "--probe");
   const learned = readPeakSamples("run-child-probe", fx.store);
-  assert.equal(learned.length, 1, "the probe's tree peak is learned like the other classes'");
+  if (process.platform === "darwin") {
+    assert.equal(learned.length, 0, "an unavailable tree peak creates no learned sample");
+  } else {
+    assert.equal(learned.length, 1, "the probe's tree peak is learned like the other classes'");
+  }
 });
 
 test("W1-T9082: a failing probe never touches the in-process run", async () => {
