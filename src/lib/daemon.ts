@@ -16,6 +16,7 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
+import { startRecommendationBackfill, type RecommendationBackfillDeps } from "./inbox-recommendation.js";
 import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
@@ -1427,6 +1428,8 @@ export interface DaemonDeps {
   /** W1-T4087: writes plain-language messages for operator-owned inbox items that have none yet,
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
+  /** W1-T8950: writes a recommended decision for each operator inbox item, on its own timer beside the plain backfill. */
+  recommendationBackfill?: RecommendationBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps<number | Promise<number>>;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
@@ -3631,6 +3634,7 @@ export async function runDaemon(
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
+  const recommendationBackfill = deps.recommendationBackfill ? startRecommendationBackfill(deps.recommendationBackfill, pollIntervalMs, log) : undefined;
   // W1-T4089: the fleet's own findings, filed at the pace the fleet merges work.
   const fleetLaneDeps = deps.fleetLane;
   const fleetLane = fleetLaneDeps ? startFleetLane(() => triageFleetLaneAsync(fleetLaneDeps), pollIntervalMs, log) : undefined;
@@ -3670,7 +3674,7 @@ export async function runDaemon(
     try { if (pauseReview.clock) await stopPauseReviewClock(report); }
     catch (reason) { /* Retained in the cleanup AggregateError, after every other stop is attempted. */ failures.push(reason); }
     for (const stop of [
-      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => fleetLane?.stop(),
+      () => prActionPumpRef.stop(), () => plainBackfill?.stop(), () => recommendationBackfill?.stop(), () => fleetLane?.stop(),
       () => inboxResponder?.stop(), () => gardenerRef.stop(), () => livenessPulse?.stop(),
     ]) {
       try { stop(); }
@@ -5993,7 +5997,7 @@ export async function runDaemon(
               }
             });
             if (!hasUnblockedTask && !(await stopInterphaseReviewClock()) &&
-              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) &&
+              !prActionPumpRef.isBusy() && (!plainBackfill || !plainBackfill.isBusy()) && (!recommendationBackfill || !recommendationBackfill.isBusy()) &&
               (!inboxResponder || !inboxResponder.isBusy()) &&
               !deps.pendingKicks?.().length && !deps.pendingPrActions?.().length) {
               log("daemon.idle_starved.enter", { repo: deps.targetRepo, open_prs: 0, plan_tasks: planForBatch.tasks.length });

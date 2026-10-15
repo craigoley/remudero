@@ -3694,6 +3694,7 @@ export interface components {
       proposalId: string;
       summary?: string;
       plain?: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       stampLine?: string;
       draftedTasks?: (InboxDraftedTask)[];
       spawnedAt?: string;
@@ -4528,6 +4529,24 @@ export interface components {
       predicate: "drafted" | "deps_merged" | "deps_observable" | "evidence_anchors" | "lint_clean" | "no_conflict";
       detail: string;
     };
+    /** W1-T8950: the decision the fleet recommends on an operator inbox item (src/lib/inbox-recommendation.ts's `ServedRecommendation`). Served only while current for the item's summary, lane and task record; fleet items never carry it. `route` is attached at serve time with the option mapping (approve only on a ready item; keep carries none). */
+    InboxRecommendation: {
+      action: "approve" | "decline" | "reframe" | "reply" | "keep";
+      /** The exact reason, feedback or reply text the action posts as its input. */
+      text?: string;
+      /** One plain sentence. */
+      why: string;
+      /** Merged PR numbers ("#11199"), shas on main, task ids, or file paths. */
+      evidence: (string)[];
+      /** True only with evidence of a merged change on main that resolves the subject. */
+      obsolete: boolean;
+      /** The shared root cause, when several items are one cause. */
+      group?: string;
+      /** When the recommendation was written (ISO 8601). */
+      generatedAt: string;
+      source: "writer" | "operator-session-seed";
+      route?: PlainOptionAction;
+    };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
       from?: InboxSender;
@@ -4543,6 +4562,7 @@ export interface components {
       /** The raw proposal summary (the console's Details). */
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** The drafted fragment's stamp line, when the draft carries one. */
       stampLine?: string;
       draftedTasks: (InboxDraftedTask)[];
@@ -4561,6 +4581,7 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** When the drafting worker was spawned; an empty string when unrecorded. */
       spawnedAt: string;
     };
@@ -4578,6 +4599,7 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       reasons: (InboxPredicateFailure)[];
       state?: "not_ready" | "deferred_with_trigger";
       /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
@@ -4608,6 +4630,7 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** The latest `panel.proposal_declined` row's reason, verbatim. */
       reason: string;
     };
