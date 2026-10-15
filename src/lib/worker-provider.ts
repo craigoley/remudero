@@ -1582,7 +1582,6 @@ export async function readCodexRuntime(
       return pending;
     };
     const deadlineSetAt = monotonicNow();
-    // W1-T9651: loop-available time, so a reply already waiting behind a held loop is read before the deadline expires.
     const cancelDeadline = loopAvailableDeadline(systemClock, timeoutMs, () => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
       // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.

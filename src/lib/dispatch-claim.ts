@@ -471,7 +471,6 @@ export function gitClaimRunnerAsync(
     new Promise((resolve) => {
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
         bound.cancel();
-        // W1-T9651: a git stopped at its bound is a timeout even when it exits 0 after the signal.
         if (bound.timedOut) {
           const said = stderr.trim() ? ` git said: ${stderr.trim()}` : "";
           return resolve({ status: 1, stdout, stderr: `git ${args[0]} timed out after ${timeoutMs}ms and was killed.${said}` });

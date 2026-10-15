@@ -17,13 +17,14 @@
 import { execFile, type ChildProcess, type ExecFileOptionsWithStringEncoding, type PromiseWithChild } from "node:child_process";
 import { promisify } from "node:util";
 import { loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 const execFilePromise = promisify(execFile);
 
 /** A child stopped at its loop-available budget. Shaped like execFile's own kill error (`Command failed: <cmd>`,
  *  `killed`, `signal`, `code: null`, `stdout`, `stderr`), so a caller that classifies those keeps working; but it is
  *  always a rejection, never a success. */
-export class LoopBoundedChildTimeout extends Error {
+export class LoopBoundedChildTimeout extends RmdError {
   readonly killed = true;
   /** Never an exit status: a caller reading a numeric `code` as one must not see a stopped child as exit 0. */
   readonly code = null;
@@ -31,17 +32,17 @@ export class LoopBoundedChildTimeout extends Error {
   /** The signal the child died by, or the one it was sent when it trapped it. */
   readonly signal: NodeJS.Signals | null;
   /** The exit code the child reported after the signal (0 when it trapped it), or null when the signal ended it. */
-  readonly exitCode: number | null;
+  readonly childExitCode: number | null;
   readonly stdout: string;
   readonly stderr: string;
 
   constructor(command: string, budgetMs: number, facts: ChildFacts = {}) {
     const stderr = typeof facts.stderr === "string" ? facts.stderr : "";
-    super(`Command failed: ${command}\nstopped${facts.signal ? ` by ${facts.signal}` : ""} at its ${budgetMs}ms loop-available budget${stderr ? `\n${stderr}` : ""}`);
+    super("child_process", GENERIC_EXIT_CODE, `Command failed: ${command}\nstopped${facts.signal ? ` by ${facts.signal}` : ""} at its ${budgetMs}ms loop-available budget${stderr ? `\n${stderr}` : ""}`);
     this.name = "LoopBoundedChildTimeout";
     this.budgetMs = budgetMs;
     this.signal = facts.signal ?? null;
-    this.exitCode = facts.exitCode ?? null;
+    this.childExitCode = facts.exitCode ?? null;
     this.stdout = typeof facts.stdout === "string" ? facts.stdout : "";
     this.stderr = stderr;
   }

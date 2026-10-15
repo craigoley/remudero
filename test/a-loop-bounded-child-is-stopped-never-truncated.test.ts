@@ -91,7 +91,7 @@ test("W1-T9651: a child stopped at its budget rejects and never resolves with pa
   assert.ok(error instanceof LoopBoundedChildTimeout, `rejects with LoopBoundedChildTimeout, got ${String(error)}`);
   assert.equal(error.killed, true);
   assert.equal(error.code, null, "never an exit status a caller could read as success");
-  assert.equal(error.exitCode, 0, "the child did exit 0 after trapping the signal");
+  assert.equal(error.childExitCode, 0, "the child did exit 0 after trapping the signal");
   assert.equal(error.stdout, "partial\n", "the partial output is carried on the error, never returned as a result");
   assert.match(error.message, /^Command failed: /, "keeps execFile's message shape for callers that classify it");
   assert.match(error.message, /stopped by SIGTERM at its 300ms loop-available budget/);
