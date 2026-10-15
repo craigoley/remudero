@@ -38,6 +38,7 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.j
 import {
   decidePlanPrMergeSafety,
   mainChangedOwnFiles,
+  mergedTreeUnread,
   planPrRefreshesFromLedger,
   planSafetyGitAsync,
   planSafetyGitSync,
@@ -976,7 +977,7 @@ export interface DirectMergePreflightEvidence {
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread";
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
   ownFilesCause?: "overlap" | "baseline" | "unread";
   mainChangedOwnFiles?: string[];
@@ -1231,6 +1232,16 @@ function* directMergePreflightSteps(
         refreshedHeads,
       };
       return { proceed: false, result: { outcome: "plan-pr-held", ...context, directMergePreflight } };
+    }
+    // A merged tree git could not READ is re-read next pass; only a head it stays unread on is refreshed.
+    if (safety.action === "refresh" && mergedTreeUnread(readings) && observedHead !== undefined &&
+        !(deps.ledgerLines?.() ?? []).some((l) => l.step === "automerge.direct_merge_preflight_refused" &&
+          l.reason === "plan_merge_unread" && l.pr_url === prUrl && l.prior_head_sha === observedHead)) {
+      deps.say(`automerge.direct_merge_preflight_refused: ${safety.why} — re-reading head ${observedHead} next pass: ${prUrl}`);
+      const directMergePreflight: DirectMergePreflightEvidence = {
+        ...baseEvidence, planTouch, remedy: "retry-later", reason: "plan_merge_unread", planMergeUnsafe: safety.why,
+      };
+      return { proceed: false, result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight } };
     }
     if (safety.action === "refresh") planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why };
   }

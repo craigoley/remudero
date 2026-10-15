@@ -112,6 +112,7 @@ import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
+import { readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -1792,6 +1793,8 @@ export interface InboxReadyItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
 }
@@ -1804,6 +1807,8 @@ export interface InboxDraftingItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   spawnedAt: string;
 }
 
@@ -1820,6 +1825,8 @@ export interface InboxDeclinedItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
   reason: string;
 }
@@ -1833,6 +1840,8 @@ export interface InboxNotReadyItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   reasons: PredicateFailure[];
   state?: "not_ready" | "deferred_with_trigger";
   trigger?: InboxClassification["trigger"];
@@ -2211,6 +2220,8 @@ export interface InboxStores {
   provenance?: Record<string, InboxProvenance>;
   /** W1-T8831: the archived and still-snoozed items, as of the pass that read them; absent from a file written before triage. */
   triage?: Record<string, InboxTriage>;
+  /** W1-T8950: the stored recommendations; absent from a file written before they were served. */
+  recommendations?: RecommendationStore;
 }
 
 /** W1-T8831: one item the operator set aside. A snooze is carried only while it is still ahead of the pass that read it. */
@@ -2373,7 +2384,7 @@ export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id
   const stateDir = join(inboxRoot, "state");
   const ids = new Set(proposals.map((p) => p.id));
   const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
-  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), recommendations: narrow(readRecommendationStore(recommendationStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
 }
 
 /** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
@@ -2390,6 +2401,11 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
 
   // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
   const servedPlain = (proposal: { id: string; summary: string }, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id);
+  // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
+  const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
+    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
+    return recommendation ? { recommendation } : {};
+  };
 
   const allReady: InboxReadyItem[] = [];
   const allDrafting: InboxDraftingItem[] = [];
@@ -2405,24 +2421,26 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: servedPlain(proposal, "ready"),
+        ...recommended(proposal, "ready"),
         stampLine: classification.draft?.stampLine,
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
     } else if (classification.state === "drafting") {
-      allDrafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });
+      allDrafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), ...recommended(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });
     } else if (classification.state === "declined") {
       allDeclined.push({
         ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: servedPlain(proposal, "declined"),
+        ...recommended(proposal, "declined"),
         reason: classification.declinedReason ?? "declined by an operator",
       });
     } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       allNotReady.push({
-        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), reasons: classification.reasons,
+        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), ...recommended(proposal, "notReady"), reasons: classification.reasons,
         state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
         resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
       });

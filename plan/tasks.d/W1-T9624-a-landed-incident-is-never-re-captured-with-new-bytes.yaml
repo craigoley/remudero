@@ -1,0 +1,48 @@
+- id: W1-T9624
+  title: "A LANDED INCIDENT IS NEVER RE-CAPTURED WITH NEW BYTES: acknowledgeLandedQueueCopies deletes an untracked plan/feedback copy as soon as FETCHED origin/main carries it, while the daemon's checkout HEAD does not, so the SRE lane's open-incident check (openIncidentFeedbackOrigins, listFeedback over the working tree) and captureFeedback's explicit-id guard both miss it, and a recurrence re-writes the same incident-<fp>.yaml with a new ts and Count; on 2026-10-15 that made 45 untracked files that differ from main and refused every boot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — whether a machine-origin capture treats an entry origin/main already holds as existing
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: core outage 08:22-10:29Z root-cause investigation (read-only on the host)"
+  plan_refs: [W1-T9623, W1-T2749, W1-T5732, W1-T1054]
+  files: [src/lib/feedback.ts, src/lib/sre-lane.ts, test/a-landed-incident-is-never-re-captured-with-new-bytes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only). The core daemon ran on boot sha 52c19d0 from 05:38:35 to 08:22:44.
+    #11901 merged at 06:06 and landed 42 incident files; #11946 merged at 07:48 and landed 3 more.
+    - incident-04ed80b8cbe6d7d0.yaml: landed copy ts 04:41:37. The local copy has ts 06:40:40 (sre_lane.filed 06:41:16).
+    - incident-fc02119ad9d1b757.yaml: landed copy ts 06:17:14, Count 1 (sre_lane.filed 06:18:53). The local copy has
+      ts 08:10:31, Count 8 (sre_lane.filed 08:11:25, count 8).
+    - All 45 local copies (now under state/recovered-feedback/2026-10-15-entrypoint/) differ from their blob at
+      32cfb064f. They made the boot checkout refuse from 08:22:44 to 10:28:42 (W1-T9623).
+    READ at origin/main 8b45ddbe7:
+    - landPendingSteps (src/lib/feedback-landing.ts) fetches, then acknowledgeLandedQueueCopies unlinks every untracked
+      copy under the owned dir whose bytes equal origin/main:<rel>. It does not check that the checkout's HEAD has the
+      file. W1-T5732 closed the same gap for the queue (acknowledgeLandedFeedbackQueue waits for the served checkout),
+      but not for these working-tree copies.
+    - runSreLanePass (src/lib/sre-lane.ts) skips a fingerprint only if openIncidentFeedbackOrigins(root) has it. That
+      reads listFeedback(root), the working tree only.
+    - captureFeedback (src/lib/feedback.ts) returns an explicit-id entry untouched only if existsSync(feedbackEntryPath).
+      That is also the working tree only (#11528).
+    INFERRED: while HEAD lags origin/main, an acknowledged incident is in neither the tree nor HEAD. Its next recurrence
+    passes both guards and writes the same path with new bytes. The landing then keeps upstream (decideFeedbackStage),
+    so the divergent copy stays untracked until a boot tries to check out past it.
+  design: |
+    A machine-origin capture with an explicit id treats an entry that origin/main already holds as existing. In
+    captureFeedback, when opts.id is given and the working-tree file is absent, read origin/main:plan/feedback/<id>.yaml.
+    If it is present, return that entry parsed, without writing. openIncidentFeedbackOrigins also includes open incident#
+    entries that origin/main holds and the working tree lacks. A git failure (no origin/main, an unreadable tree) keeps
+    today's behaviour and is never treated as "exists". Measure the extra git read's cost on the SRE pass and name it
+    in the PR.
+  acceptance:
+    - claim: "a recurring incident whose entry origin/main already holds, but the working tree lacks, is not re-written into the working tree"
+      proof: "grep: a landed incident is never re-captured with new bytes in test/a-landed-incident-is-never-re-captured-with-new-bytes.test.ts"
+  falsifier: |
+    Revert the origin/main read: the second capture writes plan/feedback/<id>.yaml with a new ts, and the test fails.

@@ -8724,6 +8724,9 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
     "recorded decision entries — provenance the DECISIONS floor validates, not a gate's own thresholds",
   "plan/tasks.yaml":
     "the task monolith, the same paperwork as a shard; denying it the carve-out would tax every filing",
+  "plan/seeds/inbox-recommendations-2026-10-13.json":
+    "W1-T8950's operator-session recommendations, imported once as the inbox items' suggested decisions; " +
+    "no gate reads them, and every action they suggest still goes through the inbox route's own tier and auth",
 };
 
 /** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED EVIDENCE named on
