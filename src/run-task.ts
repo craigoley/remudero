@@ -54736,6 +54736,7 @@ export async function openMainRatchetRecordPr(
     if (open.length > 0) await git(["fetch", "--quiet", "--no-tags", "origin", ...open.map((pr) => `refs/pull/${pr.number}/head`)]);
     const superseded: string[] = [];
     for (const pr of open) {
+      if (isMainRatchetRecordBranch(pr.ref) && !pr.ref.startsWith(MAIN_RATCHET_RECORD_BRANCH_PREFIX)) { superseded.push(pr.url); continue; } // pre-run- head (#11831) can never merge
       let covers = true;
       for (const [path, rows] of raised) {
         const theirs = baselineRowsOf(await readAt(pr.sha, path)) ?? {};

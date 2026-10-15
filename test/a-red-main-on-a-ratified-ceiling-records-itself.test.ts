@@ -584,6 +584,18 @@ test("an older recorded-baseline PR of the lane that no longer covers is closed 
   }
 });
 
+test("W1-T9583: a legacy-shaped lane PR that covers the ceiling is superseded, never stood on", async () => {
+  const fx = openerFixture([
+    { number: 11831, ref: "main-repair-ratchet-7d510a2ff698-1792017976611", row: 2000 }, // covers, but can never pass head-identity-gate
+  ]);
+  try {
+    assert.deepEqual(await fx.run(), { opened: LANE_PR }, "the lane replaces its unmergeable PR instead of standing down on it");
+    assert.deepEqual(fx.closed, [`repos/${OWNER}/${FIXTURE_REPO}/pulls/11831`]);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("W1-T9583: a ratchet-record PR head passes head-identity-gate and worker-branch-shape", async () => {
   const fx = openerFixture();
   try {
