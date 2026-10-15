@@ -14,6 +14,7 @@ import {
   checkRecommendation,
   gitRecommendationEvidence,
   readRecommendationStore,
+  realRecommendationWriter,
   recommendationFingerprint,
   recommendationStorePath,
   startRecommendationBackfill,
@@ -21,6 +22,7 @@ import {
   type RecommendationEvidence,
   type StoredRecommendation,
 } from "../src/lib/inbox-recommendation.js";
+import { writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
 import { inboxLanes } from "../src/lib/panel-graph.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -274,4 +276,42 @@ test("W1-T8950: the backfill runs on its own timer and logs what it wrote", asyn
   assert.deepEqual(rows, ["inbox.recommendation_written"]);
   assert.ok(existsSync(recommendationStorePath(stateDir)));
   assert.equal(JSON.parse(readFileSync(recommendationStorePath(stateDir), "utf8"))[READY_ID].action, "approve");
+});
+
+test("W1-T8950: unreadable stores, seeds, records and logs read as nothing, and the real writer parses one answer", async (t) => {
+  const { stateDir } = stateRoot(t);
+  writeFileSync(recommendationStorePath(stateDir), "{not json");
+  assert.deepEqual(readRecommendationStore(recommendationStorePath(stateDir)), {}, "a torn store reads as empty");
+
+  const failing = gitRecommendationEvidence(async (args) => {
+    if (args[0] === "ls-tree") return "";
+    throw new Error(`git ${args[0]} failed`);
+  }, { planDir: "plan", planMonolith: "plan/tasks.yaml" });
+  assert.equal(await failing.shardText("plan/tasks.d/W1-T1-x.yaml"), undefined, "a record gone from main is no context");
+  assert.equal(await failing.resolve("#11199"), undefined, "an unreadable log resolves nothing");
+  assert.equal(await failing.resolve("../outside/file.ts"), undefined, "a path leaving the tree resolves nothing");
+
+  // The default lanes come from serve's classification snapshot; an unreadable seed seeds nothing.
+  writeClassificationSnapshot(stateDir, [{ proposalId: READY_ID, state: "ready" }, { proposalId: OBSOLETE_ID, state: "retired" }]);
+  const tick = await backfillRecommendations({
+    stateDir, evidence: mainEvidence({ "#11199": "pr" }), readProposals: () => [{ id: READY_ID, summary: READY_SUMMARY }, { id: OBSOLETE_ID, summary: OBSOLETE_SUMMARY }],
+    readSeed: () => "{not json",
+    summarize: async () => ({ action: "approve", why: "Its proof passed.", evidence: ["#11199"], obsolete: false }),
+  }, 5);
+  assert.deepEqual({ seeded: tick.seeded, written: tick.written }, { seeded: 0, written: 1 }, "only the item the snapshot places in a lane");
+  assert.deepEqual(Object.keys(readRecommendationStore(recommendationStorePath(stateDir))), [READY_ID]);
+
+  const answers = ['Here it is: {"action": "keep", "why": "x", "evidence": [], "obsolete": false}', "no json at all", "{not: json}"];
+  const prompts: string[] = [];
+  const writer = realRecommendationWriter({
+    mount: { model: "m", effort: "low", maxTurns: 1 } as never, cwd: stateDir, settingsFile: "settings.json",
+    spawn: (async (args: { prompt: string }) => {
+      prompts.push(args.prompt);
+      return { text: answers.shift() };
+    }) as never,
+  });
+  assert.deepEqual(await writer({ context: "the recommendation prompt" }), { action: "keep", why: "x", evidence: [], obsolete: false });
+  assert.equal(prompts[0], "the recommendation prompt", "the prompt is sent whole");
+  assert.equal(await writer({ context: "p" }), null, "no object in the answer");
+  assert.equal(await writer({ context: "p" }), null, "an unparseable object");
 });
