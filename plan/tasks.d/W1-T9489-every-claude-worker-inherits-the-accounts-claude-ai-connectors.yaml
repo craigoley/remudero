@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-14: read-only sdk_init_summary investigation, 120 ledger rows (~/Remudero-notes/mcp-sdk-init-rows.ndjson), and the staged opt-in in PR #11666"
   plan_refs: [W1-T505, W1-T981, W1-T2591, W1-T3668, W1-T4094]
   files: [src/lib/worker.ts, src/lib/worker-mcp-isolation.ts, scripts/worker-mcp-exposure-census.mjs, test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts, test/worker-mcp-isolation.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -1,0 +1,64 @@
+- id: W1-T9570
+  title: "SERVE'S TIER-2 SHED READS FREE MEMORY ONCE, AT ONCE, AND BLIND TO SWAP: the supervisor reads free memory a single time right after the shed reply, before terminated worker heaps are returned, and never reads memory.swap.current, so a shed that freed swapped pages reads as a shortfall; the tier-2 row reads free memory until it settles, within a cap, and records swap and free before and after"
+  repo: remudero
+  depends_on: [W1-T9508]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the supervisor measures after a tier-2 shed and records in its row
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: items (c) and (d) that W1-T9508's build (#11855) deferred to serve-supervisor.ts; filing approved"
+  plan_refs: [W1-T9508, W1-T8873, W1-T9542, W1-T9504]
+  files: [src/lib/serve-supervisor.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts, test/the-tier-2-shed-settles-free-memory-and-records-swap.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 (live ledger union, 399 rotations plus ledger.ndjson, newest serve row 2026-10-14T21:13:54Z):
+    - 72 tier-2 serve.handoff_shed phase:shed rows from 2026-10-13T23:48:41Z to 2026-10-14T21:06:06Z, 0 answered.
+      durationMs is 10000-10010 (the shed backstop). freeAfter minus freeBefore is -382 MB to +1078 MB, p50 -6 MB.
+      The row's fields are generation, answered, freeBefore, freeAfter, needBytes and durationMs. It has no swap field.
+    - 13 read_model.worker_recycled rows on 2026-10-14, 00:34Z to 08:31Z. Compare the serve.memory free_bytes of the
+      same generation just before and just after each recycle:
+      - first sample 6-8 s after (03:36:53Z, 05:12:21Z, 05:35:15Z): +0.68, +0.41 and +0.85 GB;
+      - first sample 14-37 s after: -0.48 to +2.30 GB (04:04:11Z +2.30 at +21 s; 07:42:49Z +2.21 at +30 s).
+      The before-sample is 15-732 s old, so this is suggestive, not a measured settling time.
+    - The coordinator's read-only analysis, cited as such: the serve cgroup holds about 692 MB in swap (max 1 GiB),
+      and serve's VmSwap is about 672 MB.
+    READ at origin/main and at #11855's head (eaeba45c8):
+    - shedWorkers() in serve-supervisor.ts awaits the shed_workers_done reply, then makes one freeMemory() call
+      (freeAfter), ledgers the tier-2 row, and returns that one reading to handoff(). handoff() then compares it
+      against the need and restores the workers when the reading is still short.
+    - #11855 (W1-T9508) makes the generation terminate its read-model worker (the views lanes, heavy views, slow lane
+      and oracle are its nested threads) and its board worker, and it replies once they have exited. Its PR body
+      defers (c), re-reading free memory until it settles, and (d), recording memory.swap.current and free before
+      and after, to serve-supervisor.ts. #11855 does not touch serve-supervisor.ts.
+    - Nothing in serve-supervisor.ts reads memory.swap.current.
+    INFERRED:
+    - A thread's exit resolving does not mean the kernel has returned its heap to the cgroup. A single read right
+      after the reply can undercount the shed, then restore workers that had in fact freed enough.
+    - Heap pages sitting in swap are released from memory.swap.current, not memory.current. Without swap in the
+      row, "the shed freed little" and "the shed freed swap" read the same.
+  design: |
+    1. After the tier-2 reply, read free memory with the supervisor's own reader once a second until two consecutive
+       reads differ by less than a named step (for example 64 MiB), or a named cap is reached (for example 10 s).
+       Return the last reading to handoff(). Both values are new named constants, and no existing threshold changes.
+    2. The tier-2 row adds the first reading after the reply (freeAfterFirst), the read count, settleMs, and whether
+       it settled or reached the cap. freeAfter stays the value handoff() judges.
+    3. Read the cgroup's memory.swap.current through a new port, so tests inject it, with a real default. The row
+       records swapBefore (read before the shed is sent) and swapAfter (read with the settled free reading).
+       An unreadable or absent file records nothing for that field, never a zero.
+    4. A generation that never answers keeps today's path: no settle loop past the backstop. Tier 1, admission, the
+       need, the restore rule and every limit stay unchanged. W1-T9542 changes the reader and the need, not this
+       measurement; whichever lands second rebases onto the other in serve-supervisor.ts.
+    5. Cover the real swap reader's default and its catch arm with a test (doctrine: cover-the-real-default).
+  acceptance:
+    - claim: "after a tier-2 shed the supervisor re-reads free memory until two reads settle within the step or the cap is reached, judges the settled reading, and records the first reading, the read count and settleMs in the tier-2 row"
+      proof: 'grep: test("W1-T9570: the tier-2 shed reads free memory until it settles" in test/the-tier-2-shed-settles-free-memory-and-records-swap.test.ts'
+    - claim: "the tier-2 row records the cgroup swap before and after the shed, and an unreadable swap file records no swap field rather than a zero"
+      proof: 'grep: test("W1-T9570: the tier-2 shed records swap before and after" in test/the-tier-2-shed-settles-free-memory-and-records-swap.test.ts'
+  falsifier: |
+    Return the first freeMemory() reading after the reply again. The fixture's free memory rises only on the third
+    read, so the shed reads short, restores the workers and defers, and the first test fails. Drop the swap port and
+    the second test's row has no swapBefore or swapAfter.

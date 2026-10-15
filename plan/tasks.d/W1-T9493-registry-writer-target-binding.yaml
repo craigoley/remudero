@@ -12,7 +12,7 @@
   origin: "operator instruction 2026-10-14: continue the staged public-core/private-ops split without duplicate work, activation, schedules or worker stops"
   plan_refs: [W1-T4266, W1-T9435, W1-T7727]
   files: [src/lib/onboarding-golive.ts, src/lib/serve.ts, test/onboarding-golive.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ actual main d61a3afe29308abefff5ef9b0e2d0a15a0ade1a4 after source
