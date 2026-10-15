@@ -33,7 +33,8 @@ test("recordFailureTail writes the bare tail and the excerpt, bounded to the las
   const many = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
   recordFailureTail(w!, ["a"], 3, many, "tail err");
   const lines = (w!.failureTail ?? "").split("\n");
-  assert.equal(lines.length, 40);
+  assert.equal(lines.length, 41);
+  assert.equal(lines[0], "(61 earlier lines omitted)");
   assert.equal(lines.at(-1), "tail err");
   assert.ok(!lines.includes("line 0"));
   assert.match(w!.failureOutput ?? "", /\nexit 3\n/);

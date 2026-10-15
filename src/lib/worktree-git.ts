@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
@@ -35,6 +36,18 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
  */
 
 const execFilePromise = promisify(execFile);
+
+/** A host git child bounded by LOOP-AVAILABLE time. execFile's own `timeout` is a plain timer: after a held loop it
+ *  fires ahead of an exit already waiting, destroys the unread stdout, and the call RESOLVES with what it had read. On
+ *  2026-10-15 that turned `git config --list` into an empty listing, and three pushes ran with no credential helper. */
+export function execFileLoopBounded(file: string, args: readonly string[], opts: ExecFileOptionsWithStringEncoding) {
+  const { timeout, killSignal, ...rest } = opts;
+  const command = execFilePromise(file, [...args], rest);
+  if (timeout === undefined || timeout <= 0) return command;
+  const cancel = loopAvailableDeadline(systemClock, timeout, () => command.child.kill(killSignal ?? "SIGTERM"));
+  command.then(cancel, cancel);
+  return command;
+}
 
 /** The harness's own code root (this module lives in `src/lib/`). */
 const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -407,10 +420,8 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
   return vetted(pin, listing, log, harnessRoot);
 }
 
-async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog): Promise<Array<[string, string]>> {
-  const { stdout } = await execFilePromise("git", CONFIG_LIST_ARGS, {
-    cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout: CONFIG_READ_TIMEOUT_MS,
-  });
+async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS): Promise<Array<[string, string]>> {
+  const { stdout } = await execFileLoopBounded("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
   return vetted(pin, stdout, log);
 }
 
@@ -435,6 +446,8 @@ export interface HostWorktreeGitOptions {
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
   log?: WorktreeGitLog;
+  /** The loop-available budget of the async leaf's pinned config read; a test seam, 30 s otherwise. */
+  configReadTimeoutMs?: number;
 }
 
 function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, overrides: ReadonlyArray<readonly [string, string]>) {
@@ -468,8 +481,8 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
-  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog));
-  const command = execFilePromise("git", argv(pin, args), spawn);
+  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs));
+  const command = execFileLoopBounded("git", argv(pin, args), spawn);
   const fed = input === undefined ? Promise.resolve() : new Promise<void>((resolve, reject) => {
     const stdin = command.child.stdin!;
     stdin.once("error", reject);

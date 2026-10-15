@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -21,3 +21,13 @@
     Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.
     Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.
     Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan confines the remedy to one test file and requires census and affected-case checks before and after the named clock crossing."
+      - "The rationale rejects moving the fixed date and requires clock-relative stamping or a proven injected-clock exemption, consistent with repository instructions on expiring fixtures."
+      - "The supplied scope requests no sensitive access, destructive operation, policy change, irreversible action, or operator preference decision; filing-time gates state no additional concern."
+    judged_at: "2026-10-15T12:20:33.506Z"
+    pin: "3337e15c46498ebab5553618acd13a8f013ec1a7d349ff36eff6ec511c4fd527"
