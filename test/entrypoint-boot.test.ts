@@ -425,9 +425,11 @@ test("W1-T9623: when the move aside cannot be made, the checkout still refuses a
   advanceOrigin(origin, "collide.txt", "incoming\n");
 
   const second = boot(home, origin);
-  assert.notEqual(second.status, 0, "a collision that cannot be moved aside must still DIE, not continue");
+  // W1-T9631: the refused checkout no longer kills the boot; it runs the tree that last booted, by name.
+  assert.equal(second.status, 0, `a refused checkout is a STALE BOOT, never an exit: ${second.stderr}`);
   assert.match(second.stderr, /moving it aside to .* failed/, "the failed move is named");
   assert.match(second.stderr, /CHECKOUT FAILED/, "and the refusal says so by name, exactly as before");
+  assert.match(second.stderr, new RegExp(`STALE BOOT: .* continuing on HEAD ${before}`), "on the HEAD that last booted");
   assert.equal(headOf(home), before, "HEAD must be left where it was, not silently regressed");
   assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "local\n", "and the local file must be untouched, not discarded");
 });
@@ -484,9 +486,10 @@ test("entrypoint: an unreadable incoming blob refuses instead of clearing", () =
   unlinkSync(objectPath);
 
   const second = boot(home, origin);
-  assert.notEqual(second.status, 0, "an unreadable blob is not provably redundant, so the boot must refuse");
+  assert.equal(second.status, 0, `W1-T9631: a refused checkout is a STALE BOOT, never an exit: ${second.stderr}`);
   assert.match(second.stderr, /cannot read the incoming blob/, "and say why, rather than silently leaving it or clearing it");
   assert.match(second.stderr, /CHECKOUT FAILED/, "the checkout must still refuse, exactly as an ordinary collision does");
+  assert.match(second.stderr, new RegExp(`STALE BOOT: .* continuing on HEAD ${before}`), "and run the HEAD that last booted, by name");
   assert.equal(headOf(home), before, "HEAD must be left where it was");
   assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "same\n", "and the local file must be untouched");
 });
