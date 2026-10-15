@@ -791,6 +791,7 @@ import {
   onDrainRequest,
   onShedRequest,
   onRestoreRequest,
+  onShedWorkersRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -1861,7 +1862,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { terminalUnionScans } from "./lib/sweep.js";
+import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -41836,6 +41837,8 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
+    // W1-T9508: tier 2, which no generation answered (0 of 122 rows answered on 10-13/14), so every ask timed out.
+    onShedWorkersRequest(channel, { shed: () => generation?.shedWorkers(), restore: (reason) => generation?.restoreWorkers(reason) });
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
@@ -48351,7 +48354,8 @@ export function lightPassActionable(
   // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.
   repairFixAllowed: boolean = false,
 ): boolean {
-  if (disposition === "post-review") return true;
+  // W1-T9558: all three review-lane dispositions; the cheap modes otherwise waited on a full pass.
+  if (isReviewLaneDisposition(disposition)) return true;
   if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker. Both
   // take `runSweep`'s per-claim fix-capacity admission (`claimFixAdmission`, after the per-head
