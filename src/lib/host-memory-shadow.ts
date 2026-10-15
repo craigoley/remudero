@@ -1594,6 +1594,14 @@ function reviewPriorityOf(
   }
 }
 
+/** W1-T9557: per measured daemon, what its charged growth is: a median split, or all of it with the reason why. */
+function daemonGrowthBasisOf(growth: ShadowInputs["daemonGrowth"]): string {
+  const measured = growth.filter((g) => g.growthMib !== undefined);
+  if (measured.length === 0) return "no daemon growth measured";
+  return measured.map((g) => `${g.instance}: ${g.typicalBasis ?? (g.typicalMib === undefined
+    ? `all typical: no typical split of ${g.basis ?? "its growth"}` : `median of ${g.samples} ${g.basis ?? "sample(s)"}`)}`).join("; ");
+}
+
 /**
  * W1-T7095: routine deferrals become ONE machine row per (class, instance, reason), never an escalation; a sustained
  * zero-worker shortfall is queued ONCE per scenario for the sweep, which owns the escalation path.
@@ -1629,7 +1637,9 @@ function recordDiagnostics(
       scenario: verdict.scenario,
       memAvailableMib: verdict.numbers.memAvailableMib,
       workersResidentMib,
-      daemonGrowthMib: verdict.numbers.daemonGrowthMib,
+      daemonGrowthChargedMib: verdict.numbers.daemonGrowthTypicalMib,
+      daemonGrowthBasis: daemonGrowthBasisOf(inputs.daemonGrowth),
+      daemonGrowthPeakMib: verdict.numbers.daemonGrowthMib,
       coldStartReserveMib: verdict.numbers.coldStartReserveMib,
       hostReserveMib: policy.hostReserveMib,
     }, ports.priorityPolicy());
