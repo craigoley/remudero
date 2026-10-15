@@ -884,18 +884,16 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   return upstreamCapture(root, entry, opts, publication);
 }
 
-/** {@link stageFeedbackCapture}'s answer: the entry, and whether its record now waits in the landing queue. */
+/** {@link stageFeedbackCapture}'s answer: `queued` is false for an existing entry (nothing written) or an unstaged copy. */
 export interface StagedFeedbackCapture {
   entry: FeedbackEntry;
-  /** False for an entry that already existed (nothing was written), or a failed stage, whose copy stays in the checkout. */
   queued: boolean;
   error?: string;
 }
 
-/** W1-T9615: {@link captureFeedback} for a DAEMON-LOOP caller. The entry is written, upstreamed as before, then MOVED into
- *  W1-T5460's landing queue under `stateRoot`, which the per-poll async sweep drains; nothing lands inline, so the sync
- *  plan-PR preflight never runs on the loop. An id already queued is that entry, untouched. With no `stateRoot`, or
- *  after a failed stage, the copy stays in the checkout, where the same sweep's dirty scan lands it. */
+/** W1-T9615: {@link captureFeedback} for a DAEMON-LOOP caller: written and upstreamed as before, then MOVED into W1-T5460's
+ *  landing queue under `stateRoot` for the per-poll async sweep, so the sync plan-PR preflight never runs on the loop. A
+ *  queued id is returned untouched. Unstaged (no `stateRoot`, or a failed move), the checkout copy waits for that sweep. */
 export function stageFeedbackCapture(root: string, stateRoot: string | undefined, opts: Omit<CaptureFeedbackOptions, "land">): StagedFeedbackCapture {
   const existing = existingCapture(root, opts, stateRoot, true);
   if (existing) return { entry: existing, queued: false };
@@ -925,7 +923,6 @@ function existingCapture(root: string, opts: CaptureFeedbackOptions, stateRoot: 
   return readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
 }
 
-/** Validate `opts` and write its new entry (and attachments) under `root`. */
 function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");

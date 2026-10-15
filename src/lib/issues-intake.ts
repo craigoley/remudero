@@ -180,8 +180,7 @@ export interface IssuesIntakeDeps {
   dryRun?: boolean;
   /** W1-T7754: explicit shadow only; absent preserves legacy capture and selection. */
   admission?: FeedbackAdmissionContext;
-  /** W1-T9615: the daemon's state root. Set (the daemon's intake rung), a new issue entry is staged in its landing
-   *  queue for the per-poll async sweep and never landed on the loop; absent (the CLI), it lands inline as before. */
+  /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
   landingStateRoot?: string;
 }
 

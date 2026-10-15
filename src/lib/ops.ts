@@ -536,8 +536,7 @@ export interface OpsPollDeps {
   /** Landing-bridge options for the reconciler's status flip — `{}` (the default) is the real
    *  bridge, exactly what `captureFeedback` already passes. Tests inject a recorder. */
   land?: LandFeedbackOpts;
-  /** W1-T9615: the daemon's state root. Set (the daemon's intake rung), a new alert entry is staged in its landing
-   *  queue for the per-poll async sweep and never landed on the loop; absent (the CLI), it lands inline as before. */
+  /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
   landingStateRoot?: string;
 }
 
