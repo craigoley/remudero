@@ -42,6 +42,7 @@ import {
   type SweepDeps,
   type SweepPolicy,
 } from "./helpers/sweep-test.js";
+import { buildSweepEffects } from "../src/lib/sweep.js";
 
 const NOW = 1_800_000_000_000;
 const POLICY: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, reviewWaitingBranchRefreshEnabled: true, reviewWaitingBranchRefreshThreshold: 10 };
@@ -329,4 +330,29 @@ test("W1-T7735: the production refresh judge has an off switch, a single flight,
   const many = Array.from({ length: 205 }, (_, i) => `f${i}.ts`);
   assert.match(buildRefreshJudgePrompt({ prNumber: 1, headSha: "h", prFiles: many, baseFiles: [], baseTruncated: true,
     cause: "c", ciInFlight: true }, ""), /5 more cut[\s\S]*GitHub truncated this list/);
+});
+
+test("W1-T7735: the production sweep effects read main's protection strictness and wire the judge only for production", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t7735-effects-"));
+  try {
+    const reads: string[][] = [];
+    const build = (productionProgressJudge: boolean, reply: unknown) => buildSweepEffects({
+      owner: "craigoley", repo: "remudero", config: { claudeBin: "/usr/bin/true", root } as never,
+      ledgerPath: join(root, "ledger.ndjson"), runId: "SWEEP-W1-T7735", plan: { tasks: [] } as never, log: () => {},
+      policy: undefined, reviewRunner: undefined, spawnImpl: undefined, pushEmptyCommit: undefined,
+      issuesImpl: { create: () => { throw new Error("no issue is filed here"); } } as never,
+      stallNotice: undefined, armImpl: undefined, armSessionPrsOverride: undefined, updateBranchImpl: undefined,
+      captureRepairFeedbackImpl: undefined, productionProgressJudge,
+      ghJsonImpl: ((args: string[]) => { reads.push(args); return reply; }) as never,
+    } as never);
+    const fixture = build(false, { strict: false });
+    assert.equal(fixture.readBranchProtectionStrict!(), false);
+    assert.deepEqual(reads, [["api", "repos/craigoley/remudero/branches/main/protection/required_status_checks"]]);
+    assert.equal(build(false, { strict: true }).readBranchProtectionStrict!(), true);
+    assert.equal(build(false, { contexts: [] }).readBranchProtectionStrict!(), undefined, "no boolean strict is unread, never false");
+    assert.equal(fixture.refreshJudge, undefined, "a fixture spends no model call");
+    assert.equal(typeof build(true, {}).refreshJudge, "function");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
