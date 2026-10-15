@@ -6,11 +6,11 @@ import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { openWeightEstimatedTokens, spawnDecisionPoint } from "../src/lib/worker-provider.js";
-import { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } from "../src/lib/workspace-cleanup-contract.js";
 
 // Real common dispatcher, synthetic provider boundaries: no paid calls or live credentials.
 for (const provider of ["claude", "codex", "cash"] as const) {
   test(`the real ${provider} worker receives cleanup duties without changing its task or authority`, async () => {
+    const { WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("../src/lib/workspace-cleanup-contract.js");
     const root = mkdtempSync(join(tmpdir(), "rmd-cleanup-contract-"));
     const task = 'Return exactly {"ok":true}; do not change repository files.';
     let received = "";
@@ -50,7 +50,8 @@ for (const provider of ["claude", "codex", "cash"] as const) {
   });
 }
 
-test("provider fallback keeps exactly one cleanup contract and preserves the original task", () => {
+test("provider fallback keeps exactly one cleanup contract and preserves the original task", async () => {
+  const { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } = await import("../src/lib/workspace-cleanup-contract.js");
   const prompt = "build the task";
   const first = withWorkspaceCleanup(prompt);
   assert.equal(first, `${prompt}\n\n${WORKSPACE_CLEANUP_INSTRUCTIONS}`);
@@ -75,7 +76,8 @@ test("cleanup instructions preserve the auction seed and assignment", async () =
       onSelectionAssignment: value => { assignments.push(value); },
     });
     assert.equal(result.text, "done");
-    assert.equal(received, withWorkspaceCleanup(task.prompt));
+    assert.ok(received.startsWith(`${task.prompt}\n\n# WORKSPACE CLEANUP\n`));
+    assert.equal(received.split("# WORKSPACE CLEANUP").length, 2);
     assert.equal(assignments.length, 1);
     assert.equal(assignments[0]!.routing.propensity?.draw?.key?.point, spawnDecisionPoint(task));
     assert.notEqual(spawnDecisionPoint(task), spawnDecisionPoint({ ...task, prompt: received }), "control: the extra instructions would change the routing seed");
@@ -102,7 +104,8 @@ test("cash context estimates include the cleanup prompt actually sent", async ()
         writeStatus: () => {},
       },
     });
-    assert.equal(received, withWorkspaceCleanup(task));
+    assert.ok(received.startsWith(`${task}\n\n# WORKSPACE CLEANUP\n`));
+    assert.equal(received.split("# WORKSPACE CLEANUP").length, 2);
     assert.equal(estimated, openWeightEstimatedTokens(Buffer.byteLength(received, "utf8")));
     assert.ok(estimated! > openWeightEstimatedTokens(Buffer.byteLength(task, "utf8")), "control: ignoring the added instructions understates the request");
   } finally { rmSync(root, { recursive: true, force: true }); }
