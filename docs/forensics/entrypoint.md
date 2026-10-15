@@ -252,8 +252,16 @@ paths against the INCOMING diff and only conflicts on the overlap; `rmd sync` (W
 classifies a local path as provably lossless when its bytes equal the origin blob at that path.
 This is that same predicate, in bash, at boot: an untracked path is removable ONLY IF the incoming
 target ADDS that same path AND the local bytes are IDENTICAL to the incoming blob there. Anything
-else — untracked and not in the incoming diff, or in it with different content — is left alone, so
-the checkout below fails exactly as it always has and the operator sees the same diagnosis.
+else — untracked and not in the incoming diff — is left alone.
+
+W1-T9623 (2026-10-15): IN THE INCOMING DIFF WITH DIFFERENT BYTES IS MOVED ASIDE, NOT LEFT. Leaving it
+protected nothing: no later boot could ever check out past it. On 2026-10-15 45 re-captured
+`plan/feedback/incident-*.yaml` files differed from the copies #11901/#11946 had landed, and every
+boot from 08:22:44 died on CHECKOUT FAILED, about a second each, until a hand move at 10:28:42.
+`move_untracked_aside` now moves each such file to `state/recovered-untracked/<stamp>/<path>`, names
+it in the log and in an `entrypoint.untracked_moved_aside` ledger row (both blobs and the reason), and
+the boot proceeds. Nothing is discarded. A move that fails leaves the file in place, and the checkout
+fails exactly as before.
 
 BYTES, NOT TEXT. Comparing content requires reading it into a shell string, which mangles binary
 data and trailing newlines. `git hash-object` on the local path against the incoming blob's own sha
