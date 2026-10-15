@@ -1205,6 +1205,7 @@ function modeInstallerFixture(t: TestContext) {
   const invoke = (extra: string[], script = SCRIPT) => {
     writeFileSync(registry, [...row, ...extra.map(line => `    ${line}`)].join("\n") + "\n");
     return run(["--install", "--instance", "fixture"], { RMD_INSTANCE_REGISTRY: registry,
+      RMD_GH_APP_PRIVATE_KEY_HOST_PATH: "",
       RMD_CASH_SECRET_DIR: join(root, "secrets"), RMD_CLEANUP_PATH: "", RMD_LEGACY_USER_UNIT_DIR: "",
       RMD_CRONTAB_CMD: join(traps, "crontab"), PATH: `${traps}:${process.env.PATH ?? ""}` }, output, script, "/bin/bash");
   };
@@ -1230,9 +1231,9 @@ test("installer accepts existing shadow and live mode without activating it", t 
 test("installer refuses invalid or duplicate mode before effects", t => {
   const control = modeInstallerFixture(t);
   assert.equal(control.invoke(["mode: shadow"]).status, 0);
-  const rows = [[], ["mode: LIVE"], ["mode:"], ["mode: unknown"], ['mode: "shadow'], ['mode: live"'],
+  const rows = [["mode: LIVE"], ["mode:"], ["mode: unknown"], ['mode: "shadow'], ['mode: live"'],
     ['mode: "live"suffix"'], ["mode: 'shadow'"], ["mode: shadow extra"], ["mode: shadow", "mode: live"],
-    ["mode: shadow", "mode: shadow"], ["mode:", "mode: live"]].slice(1);
+    ["mode: shadow", "mode: shadow"], ["mode:", "mode: live"]];
   for (const fields of rows) {
     const f = modeInstallerFixture(t), result = f.invoke(fields);
     assert.equal(result.status, 2, `${fields.join(" / ")}: ${result.stderr}`);

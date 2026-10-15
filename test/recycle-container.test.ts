@@ -1220,7 +1220,8 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
     ...opts,
     args: ["--instance", "fixture"],
     stateDir: dirs.state,
-    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config, ...opts.extraEnv },
+    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
+      RMD_RECYCLE_HOST_LOCK: join(root, "host-recycle.lock"), RMD_RECYCLE_LOCK_WAIT_S: "2", ...opts.extraEnv },
   });
 }
 
