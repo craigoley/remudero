@@ -18,7 +18,7 @@ import {
   type DaemonHolderReading, type DaemonMemoryHolder,
 } from "../src/lib/daemon-memory-census.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerMemoHolders, memoCreationSite,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, LEDGER_ROTATION_LOAD_LINES_PER_TURN, ledgerMemoHolders, memoCreationSite,
 } from "../src/lib/ledger-union.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -132,6 +132,14 @@ test("W1-T9647: rotation memo bytes are accounted when a rotation is kept, on ev
     await streamed.load([entry]);
     const expected = Buffer.byteLength(JSON.stringify(lines.map((line) => JSON.parse(line))));
     assert.equal(streamed.approxBytes(), expected);
+    // A rotation past one slice is measured a slice per turn: the slices' arrays sum to the rows' JSON.
+    const bigLines = Array.from({ length: LEDGER_ROTATION_LOAD_LINES_PER_TURN + 5 }, (_, i) => JSON.stringify({ step: "keep", n: i }));
+    const bigRotation = join(dir, "ledger.2026-10-15T01-00-00Z.ndjson");
+    writeFileSync(bigRotation, bigLines.join("\n") + "\n");
+    const sliced = createLedgerRotationMemo((r) => r, { statKey: () => "fixed" });
+    await sliced.load([{ path: bigRotation, form: "plain" }]);
+    const whole = Buffer.byteLength(JSON.stringify(bigLines.map((line) => JSON.parse(line))));
+    assert.equal(sliced.approxBytes(), whole + 1, "two slices: one more bracket pair, one fewer comma");
     // Injected-buffer load measures the same rows the same way.
     const buffered = createLedgerRotationMemo((r) => r, { statKey: () => "fixed", readFile: async () => Buffer.from(lines.join("\n") + "\n") });
     await buffered.load([entry]);

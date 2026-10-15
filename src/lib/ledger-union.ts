@@ -1361,14 +1361,15 @@ export function createLedgerRotationMemo(
     }
     return serialized;
   };
-  /** The kept rows' bytes, measured a slice per turn, like the load that kept them. */
+  /** The kept rows' bytes, measured a slice per turn, like the load that kept them. Its yields are its own, never
+   *  `io.yieldTurn`: that seam counts the load's parse slices (test/ledger-rotation-memo.test.ts). */
   const measureRows = async (rows: ReadonlyArray<Record<string, unknown>>): Promise<number | undefined> => {
     let bytes = 0;
     for (let at = 0; at < rows.length; at += LEDGER_ROTATION_LOAD_LINES_PER_TURN) {
+      if (at > 0) await new Promise<void>((resolve) => setImmediate(resolve));
       const slice = memoRowBytes(rows.slice(at, at + LEDGER_ROTATION_LOAD_LINES_PER_TURN));
       if (slice === undefined) return undefined;
       bytes += slice;
-      await yieldTurn();
     }
     return bytes;
   };
