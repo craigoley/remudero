@@ -467,10 +467,15 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
 
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
-  if (opts.input !== undefined) throw new Error("hostWorktreeGitAsync takes no input; use hostWorktreeGit");
   const pin = pinWorktreeGit(worktreePath, opts.log);
-  const { stdio: _stdio, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog));
-  const { stdout } = await execFilePromise("git", argv(pin, args), spawn);
+  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog));
+  const command = execFilePromise("git", argv(pin, args), spawn);
+  const fed = input === undefined ? Promise.resolve() : new Promise<void>((resolve, reject) => {
+    const stdin = command.child.stdin!;
+    stdin.once("error", reject);
+    stdin.end(input, (error?: Error | null) => error ? reject(error) : resolve());
+  });
+  const [{ stdout }] = await Promise.all([command, fed]);
   if (opts.stdio === "inherit-stdout") {
     if (stdout) process.stdout.write(stdout);
     return "";

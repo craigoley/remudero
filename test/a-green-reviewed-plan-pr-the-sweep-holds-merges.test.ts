@@ -77,6 +77,8 @@ function remoteFacts(mergeableState: string, behindBy = 0) {
       prPlanPaths: ["plan/tasks.d/W1-T6358-the-drain-reads-the-ledger-once-per-pass.yaml"],
       mainPlanPaths: ["plan/tasks.d/W1-T6600.yaml"],
       mergedTree: { state: "loads" },
+      // W1-T9536: the same compares' lists — main changed none of this plan-only PR's own files.
+      ownFiles: { prFiles: [], mainFiles: { files: ["plan/tasks.d/W1-T6600.yaml"], truncated: false } },
     }),
     stackPrerequisite: () => ({ state: "unstacked" as const, parentNumbers: [] }),
     closingReferences: () => ({ state: "clean" as const, defused: [] }),

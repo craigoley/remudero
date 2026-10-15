@@ -81,6 +81,7 @@ import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, work
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
@@ -192,6 +193,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
+import { dependabotRefreshVerdict, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -240,6 +242,7 @@ import {
   tryEscalate,
   type AskType,
   type Escalation,
+  type EscalationCause,
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
@@ -2747,9 +2750,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // is judged unattended. The command's exit code conflates hold/escalate, so
     // the DECISION is read back off the dep-review.decided ledger line it just
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
-    depReview: async (pr) => {
+    depReview: async (pr, refresh) => {
       await observePr(pr, "review");
-      await depReviewCommand(String(pr.prNumber), ["--repo", repo]);
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...(refresh?.kind === "request" ? ["--dependabot-refresh", refresh.cause] : [])]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
@@ -3229,7 +3232,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ...(reason.startsWith("PR stage stalled:") || reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
-          cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          cause: question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
           detail:
@@ -10789,54 +10792,12 @@ export interface ArmedStalledPr {
   matchingBaseFiles?: readonly string[];
 }
 
-/** W1-T5696 — the files `main` changed since a PR head, from the same compare call that measures the
- *  distance. `truncated` when GitHub capped the list (300), so absence of a path proves nothing. */
-export interface BaseChangedFiles {
-  files: readonly string[];
-  truncated: boolean;
-}
-
-/** W1-T5696 — main-side paths that move a PR's verdict without touching any of the PR's own files:
- *  recorded baselines, the two CI workflows, and the dependency/compiler manifests. `*` matches within
- *  one path segment. */
-export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
-  "scripts/*-baseline.json",
-  ".github/workflows/ci.yml",
-  ".github/workflows/ci-gate.yml",
-  "package.json",
-  "package-lock.json",
-  "tsconfig*.json",
-];
-
 /** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. BACKSTOP: the
  *  primary control is the main-side file intersection; this only catches a PR so far behind that
  *  an unrelated-looking base is no longer trusted. */
 export const DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING = 60;
 
-/** `*` is the only glob character; every other character in a path glob is literal. */
-function refreshPathMatches(glob: string, path: string): boolean {
-  const parts = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
-  return new RegExp(`^${parts.join("[^/]*")}$`).test(path);
-}
-
-/** W1-T5696 — does `main` carry a change this PR must re-run against, and which files say so? A
- *  missing map entry, unknown PR file list or truncated base list is `distance-unknown`: today's
- *  refresh is kept. */
-export function distanceRefreshCause(
-  behindBy: number,
-  prFiles: readonly string[] | undefined,
-  base: BaseChangedFiles | undefined,
-  ceiling: number,
-): { reason: "distance-overlap" | "distance-baseline" | "distance-ceiling" | "distance-unknown" | undefined; files: string[] } {
-  if (base === undefined || prFiles === undefined || base.truncated) return { reason: "distance-unknown", files: [] };
-  const own = new Set(prFiles);
-  const overlap = base.files.filter((f) => own.has(f));
-  if (overlap.length > 0) return { reason: "distance-overlap", files: overlap };
-  const relevant = base.files.filter((f) => REFRESH_RELEVANT_BASE_PATHS.some((glob) => refreshPathMatches(glob, f)));
-  if (relevant.length > 0) return { reason: "distance-baseline", files: relevant };
-  if (behindBy > ceiling) return { reason: "distance-ceiling", files: [] };
-  return { reason: undefined, files: [] };
-}
+export { distanceRefreshCause, REFRESH_RELEVANT_BASE_PATHS, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 
 /** P22's "required contexts green, review success": the `mergeable` disposition row's own match. */
 /** W1-T6595 — the `mergeable` row's reason for a plan PR, which is merged directly, never armed. */
@@ -11106,7 +11067,7 @@ export function selectUpdateBranchDecision(
   ready?: ReadyRefreshFacts,
   /** W1-T7735: the value test; a candidate it refuses is never selected, nor held as the pending guard. */
   admit?: (candidate: ArmedStalledPr, view: OpenPrView) => boolean,
-): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr } {
+): { target: ArmedStalledPr | undefined; pendingGuard?: ArmedStalledPr; dependabotDeferred?: ArmedStalledPr[] } {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
   // carries no meaning the comparator below reads.
@@ -11121,14 +11082,20 @@ export function selectUpdateBranchDecision(
   const candidates = [...combined.values()];
   if (candidates.length === 0) return { target: undefined };
   const byNumber = new Map<number, OpenPrView>(prs.map((pr) => [pr.prNumber, pr]));
+  const dependabotDeferred: ArmedStalledPr[] = [];
   const commonEligible = candidates.filter((s) => {
     const view = byNumber.get(s.prNumber);
     if (!view) return false; // cannot happen — both predicates only derive from `prs` itself
     if (view.isDraft === true || s.updateReason === "ready-unknown") return false;
     const runTaskId = taskIdFromRunBranch(view.headRefName);
     if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
+    if (view.isDependabot === true) { // W1-T9584: a fleet merge ends Dependabot's management of its branch
+      dependabotDeferred.push(s);
+      return false;
+    }
     return admit === undefined || admit(s, view);
   });
+  const deferredField = dependabotDeferred.length > 0 ? { dependabotDeferred } : {};
   // Hold only positively pending input snapshots; all other eligibility guards remain in force.
   const eligible = commonEligible.filter((s) => byNumber.get(s.prNumber)!.checksState !== "pending");
   const winnerView = oldestActivityFirst(eligible.map((s) => byNumber.get(s.prNumber)!), now);
@@ -11138,7 +11105,7 @@ export function selectUpdateBranchDecision(
     ? oldestActivityFirst(commonEligible.map((s) => byNumber.get(s.prNumber)!), now) : undefined;
   const pendingGuard = withoutPendingGuard?.checksState === "pending"
     ? commonEligible.find((s) => s.prNumber === withoutPendingGuard.prNumber) : undefined;
-  return { target, ...(pendingGuard ? { pendingGuard } : {}) };
+  return { target, ...(pendingGuard ? { pendingGuard } : {}), ...deferredField };
 }
 
 /** W1-T7735 — what one refresh candidate brings to {@link decideRefresh}. A shared file is `direct`.
@@ -11359,6 +11326,9 @@ export interface ClarificationQuestion {
   /** W1-T186: which named {@link ObservedBlockerState} this escalation observed, or `undefined`
    *  for an ordinary review-failure block where the criterion fields already say everything. */
   observedState?: ObservedBlockerState;
+  /** W1-T8167: the escalation's own cause when it is not derivable from the PR's merge/CI state (a
+   *  stalled-stage report is "stage-stall"); absent leaves the closure's `escalationCause` read. */
+  cause?: EscalationCause;
 }
 
 /** Render ONE blocked-ambiguous PR's clarification question deterministically, from ledger ground
@@ -12542,7 +12512,7 @@ export interface SweepDeps {
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold", which re-runs next sweep because a red check can go green on the SAME sha. */
-  depReview?: (pr: OpenPrView) => string | void | Promise<string | void>;
+  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
@@ -15043,6 +15013,20 @@ export function noteReviewDuration(ms: number): void {
   if (idleMemo.reviewMs.length > IDLE_MEMO_WINDOW) idleMemo.reviewMs.shift();
 }
 
+/** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */
+const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.post_failed", "review.post_refused"]);
+
+/** W1-T8167: the (ledger, PR, stage) keys this process has already ledgered a `pr.stuck.deferred` for, so a
+ *  live review is announced once, not on every pass. Bounded; a restart re-announces once, which is harmless. */
+const deferredStageKeys = new Set<string>();
+const DEFERRED_STAGE_KEYS_CAP = 1000;
+
+/** PURE. How long a review may run before it counts as overdue: the longest of the observed durations
+ *  (the window's upper bound), or undefined when none are observed so the caller keeps its stand-in. */
+export function observedReviewOverrunBoundMs(durationsMs: readonly number[]): number | undefined {
+  return durationsMs.length === 0 ? undefined : Math.max(...durationsMs);
+}
+
 /** A PR whose head differs from the one this process last saw for it was pushed to. */
 export function noteHeadObservation(prNumber: number, headSha: string, atMs: number): void {
   idleMemo.sinceMs ??= atMs;
@@ -15308,6 +15292,30 @@ export async function runSweep(
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
     const diagnoses: string[] = [];
+    // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
+    // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
+    if (fields.blocker === "awaiting-review") {
+      const admitted = stageRows.findLast(row => row.step === "sweep.review_admitted" &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
+      const admittedAtMs = admitted === undefined ? NaN : Date.parse(String(admitted.ts));
+      if (admitted !== undefined && Number.isFinite(admittedAtMs) &&
+          !stageRows.some(row => LIVE_REVIEW_CLOSING_STEPS.has(String(row.step)) &&
+            Date.parse(String(row.ts)) >= admittedAtMs)) {
+        const observedBoundMs = observedReviewOverrunBoundMs(idleMemo.reviewMs);
+        const overdueAfterMs = observedBoundMs ?? bound.minutes * 60_000;
+        if (now - admittedAtMs <= overdueAfterMs) {
+          const deferredKey = `${deps.ledgerPath}\u0000${key}`;
+          if (!deferredStageKeys.has(deferredKey)) {
+            if (deferredStageKeys.size >= DEFERRED_STAGE_KEYS_CAP) deferredStageKeys.clear();
+            deferredStageKeys.add(deferredKey);
+            record("pr.stuck.deferred", { ...fields, admitted_at: admitted.ts, review_age_ms: now - admittedAtMs,
+              overdue_after_ms: overdueAfterMs, overdue_basis: observedBoundMs === undefined ? "backstop" : "observed" });
+          }
+          return;
+        }
+        diagnoses.push("review running past its observed length");
+      }
+    }
     const stalledFiles = baseReproductionFiles(pr.ciFailures ?? []);
     if (fields.blocker === "own-red" && mainTipSha !== undefined &&
         (deps.behindMainByPr?.get(pr.prNumber) ?? 0) > 0 &&
@@ -15376,6 +15384,7 @@ export async function runSweep(
       await deps.escalate(pr, reason, {
         taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
         criterion: "", reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [],
+        cause: "stage-stall",
         resolutions: [
           { label: "repair the stalled stage", detail: `Inspect ${fields.blocker} and its ${diagnosis} diagnosis.` },
           { label: "close the PR", detail: "Close it if the work is redundant or no longer needed." },
@@ -19109,7 +19118,14 @@ export async function runSweep(
               break;
             case "dep-review":
               if (deps.depReview) {
-                depReviewOutcome = (await deps.depReview(pr)) ?? "unknown";
+                const refresh = dependabotRefreshVerdict(decideBaseRed(pr, mainLatestRun, baseRedHistory),
+                  fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache));
+                if (refresh.kind === "wait" && !baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) {
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber,
+                    head_sha: pr.headSha, check_name: refresh.check, main_sha: mainLatestRun?.sha ?? "unread", step: BASE_RED_STOOD_DOWN_STEP });
+                }
+                if (isBlockedCi(pr)) extraDisposedFields = { ...extraDisposedFields, dependabot_refresh: refresh.kind === "request" ? refresh.cause : refresh.kind };
+                depReviewOutcome = (await deps.depReview(pr, refresh)) ?? "unknown";
               } else {
                 acted = false;
                 standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";
@@ -19598,6 +19614,7 @@ export async function runSweep(
     );
     let target = decision.target;
     const pendingGuard = decision.pendingGuard;
+    ledgerDependabotDeferrals(decision.dependabotDeferred ?? [], ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId);
     if (pendingGuard && !recordedPendingGuards.has(JSON.stringify([pendingGuard.prUrl, pendingGuard.prNumber, pendingGuard.headSha]))) {
       appendLine(deps.ledgerPath, {
         run_id: deps.runId, task_id: pendingGuard.taskId ?? "SWEEP",
@@ -19701,6 +19718,20 @@ export async function runSweep(
   return summary;
 }
 
+export const DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP = "sweep.update_branch.dependabot_deferred";
+
+function ledgerDependabotDeferrals(
+  deferred: readonly ArmedStalledPr[], ledgerLines: readonly Record<string, unknown>[],
+  append: (row: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void, runId: string, source?: string,
+): void {
+  for (const c of deferred) {
+    if (ledgerLines.some((l) => l.step === DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP && l.pr_number === c.prNumber && l.head_sha === c.headSha)) continue;
+    append({ run_id: runId, task_id: c.taskId ?? "SWEEP", step: DEPENDABOT_UPDATE_BRANCH_DEFERRED_STEP, pr_number: c.prNumber,
+      head_sha: c.headSha, ...(c.updateReason === undefined ? {} : { update_reason: c.updateReason }),
+      ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }), ...(source === undefined ? {} : { source }) });
+  }
+}
+
 let lightPassReadyRefreshInFlight = false;
 
 export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-overlap refresh, once per light pass
@@ -19755,12 +19786,14 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
     }
     const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
     const inFlight = deps.inFlightTaskIds ?? new Set<string>();
+    const dependabotDeferred = candidates.filter((c) => byNumber.get(c.prNumber)!.isDependabot === true);
+    ledgerDependabotDeferrals(dependabotDeferred, ledgerLines, (row) => appendLine(deps.ledgerPath, row), deps.runId, "light_pass");
     // W1-T7735: the same value test as the full sweep's slot, built once for this light pass.
     const valueGate = await buildRefreshValueGate(deps, openPrs, ledgerLines, now, appendLine);
     const eligible = candidates.filter((c) => {
       const view = byNumber.get(c.prNumber)!;
       const runTaskId = taskIdFromRunBranch(view.headRefName);
-      return view.checksState !== "pending" && (runTaskId === undefined || !inFlight.has(runTaskId)) &&
+      return view.checksState !== "pending" && view.isDependabot !== true && (runTaskId === undefined || !inFlight.has(runTaskId)) &&
         valueGate.admit(c, view, "ready-light");
     });
     const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);

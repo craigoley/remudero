@@ -1,0 +1,88 @@
+- id: W1-T9597
+  title: "THE FLOW-REMEDY OWNER SEARCH ATTRIBUTES A BLOCKER BY ITS OWNER, NOT BY TEXT MATCH — `draftShard` greps src for the cause key's reason text and takes the top hit, so W1-T9533's `base-red:required checks red` (declared owner main-health) went to src/lib/fix-lane-gardener.ts, the alphabetical first of four one-hit files, a remedy filer that never touches a PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which source module a flow-remedy draft names as its owner; high for blast radius: every flow-blocker filing's files: comes from it
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: W1-T9533 misattributed to src/lib/fix-lane-gardener.ts by the flow gardener's owner search; operator approved this filing 2026-10-14 (\"keep going with any recommended next steps\")"
+  plan_refs: [W1-T9533, W1-T9595, W1-T5984, W1-T9059, W1-T9503, W1-T9042, W1-T5995]
+  files:
+    - src/lib/flow-remedy-gardener.ts
+    - src/lib/pr-blocker.ts
+    - test/the-flow-remedy-owner-search-attributes-a-blocker-by-its-owner.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ on origin/main (f87f7907c):
+      - src/lib/flow-remedy-gardener.ts `draftShard` splits the cause key `<blocker>:<reason class>`. It calls
+        `search.filesContaining(<reason class>)`, falls back to `filesContaining(<blocker>)` and then to the kind's
+        `fallbackFiles`. It sorts by hit count, breaks ties by file name, and writes `files[0]` into the shard's
+        `files:` and its "Source owner:" line.
+      - `filesContaining` is `gitCiFrictionOwnerSearch`'s (src/lib/ci-friction-gardener.ts): `git grep -c -F -w`
+        over src and scripts, with ci-friction files and tests excluded.
+      - `reasonClass` keeps only the text before the first " — ". For a blocked-fixable row that text is the generic
+        "required checks red" written at sweep.ts's `checksState === "red"` describe. The decisive detail is in the
+        row's `stand_down_reason`, e.g. "base red: … this pass's one branch refresh is spent or unwired", which
+        `reasonClass` drops.
+    MEASURED (`git grep -c -F 'required checks red' origin/main -- src scripts`). Four files, one hit each:
+      - src/lib/fix-lane-gardener.ts: the `red-no-actionable-test` evidence string;
+      - src/lib/machine-filing.ts: a doc comment quoting W1-T5984's cause key;
+      - src/lib/sweep.ts;
+      - src/run-task.ts.
+    With every count equal, the name tie-break picked fix-lane-gardener.ts. The class's DECLARED owner was in the
+    row all along: `blocker_owner: main-health`, from src/lib/pr-blocker.ts `PR_BLOCKER_OWNERS`
+    (`"base-red": "main-health"`). The search never reads it.
+    Second occurrence of the class: W1-T5984 (`own-red:required checks red`, owner fix-lane), filed against
+    src/lib/sweep.ts and withdrawn.
+    NOT COVERED ELSEWHERE:
+      - W1-T9059 (merged) and W1-T9503 (queued) fix the CI-FRICTION ladder's owner. A failing test's import closure
+        decides it there. Neither touches the flow ladder's `draftShard`.
+      - W1-T9042 (merged) masks a quoted cause key from the machine judge's backstop. It does not change the owner.
+  design: |
+    1. A DECLARED OWNER-TO-MODULE MAP. Add `PR_BLOCKER_OWNER_MODULES` beside `PR_BLOCKER_OWNERS` in
+       src/lib/pr-blocker.ts.
+       - It maps each owner to the source module that EMITS that blocker's disposition. For `main-health` that is
+         src/lib/sweep.ts, where the W1-T4351 base-red rung writes the stand-down; the main-health rung only observes.
+       - The builder fills the rest by reading where each disposition reason is written. It never guesses from
+         a name.
+       - `NONE` and `operator` map to no module.
+       - A census test asserts:
+         - every other owner in `PR_BLOCKER_OWNERS` has an entry;
+         - every entry exists at base;
+         - each entry is not a gardener or remedy filer (`src/lib/*-gardener.ts`, src/lib/machine-filing.ts).
+    2. THE FLOW LADDER RESOLVES OWNERS THROUGH THE MAP.
+       - When the cause key's blocker is in `PR_BLOCKERS` (FLOW_LADDER and ADMISSION_FLOW_LADDER), `draftShard`
+         reads the episode's declared `blocker_owner` (the `owner` its charges already carry) and takes the module
+         from `PR_BLOCKER_OWNER_MODULES`.
+       - It does not call `filesContaining` for that key.
+       - The "Source owner:" line names the owner and the module, e.g. `main-health → src/lib/sweep.ts`.
+    3. NO OWNER IS AN ESCALATION, NEVER A TIE-BREAK. An owner with no module escalates through the ladder's existing
+       no-owner path. That covers `NONE`, `operator`, an owner missing from the map, and charges carrying different
+       owners. The draft never falls back to a repo-wide text match or a name-ordered pick.
+    4. The fix-lane ladder (FIX_LANE_LADDER, `commit-refused:*` keys, `fallbackFiles`) and the ci-friction ladder
+       are unchanged. Their keys are not `PR_BLOCKERS`.
+    5. OUT OF SCOPE: re-deriving `reasonClass` from `stand_down_reason`. That changes every cause key the ladder has
+       already filed under, and needs its own measurement.
+  acceptance:
+    - claim: "a base-red cause whose reason text appears in several src files is attributed to the module main-health declares, and the text search is never called"
+      proof: "unit test: W1-T9597: a base-red blocker is owned by its declared owner module"
+    - claim: "a flow blocker whose declared owner names no module escalates as no owner instead of taking a text-match file"
+      proof: "unit test: W1-T9597: a flow blocker whose owner declares no module escalates as no owner"
+    - claim: "every declared blocker owner except NONE and operator names an existing module that is not a remedy filer"
+      proof: "unit test: W1-T9597: every declared blocker owner names an existing module that is not a remedy filer"
+    - claim: "the suite exists under its own title"
+      proof: "grep: W1-T9597: a base-red blocker is owned by its declared owner module in test/the-flow-remedy-owner-search-attributes-a-blocker-by-its-owner.test.ts"
+    - claim: "the declared owner-to-module map exists"
+      proof: "grep: PR_BLOCKER_OWNER_MODULES in src/lib/pr-blocker.ts"
+  falsifier: |
+    Fixture: `sweep.disposed` rows for one PR with blocker `base-red`, `blocker_owner: main-health`, and reason
+    "required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED …". Inject an `OwnerSearch` whose `filesContaining`
+    returns the four measured one-hit files and records each call. At origin/main `draftShard` names
+    src/lib/fix-lane-gardener.ts and calls `filesContaining("required checks red")`, so the first test fails on both
+    counts. Swap the owner for `NONE`: at base the draft still takes the text-match file, so the second test fails.
+    Remove the `main-health` entry after the change: the census test and the first test both go red.

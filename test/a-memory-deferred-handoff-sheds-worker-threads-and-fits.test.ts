@@ -84,6 +84,9 @@ function harness(opts: { workersFree: boolean; neverReady?: boolean; extra?: Par
     sleep: (ms) => (ms === BACKSTOP_MS ? new Promise<void>(() => {}) : ms >= DEFER_MS ? new Promise<void>((resolve) => void retries.push(resolve)) : Promise.resolve()),
     pollMs: 1,
     drainBackstopMs: 1,
+    // W1-T9570: a short shed's settle reads end at once here; their spacing and cap are that task's own test's.
+    shedSettleIntervalMs: 1,
+    shedSettleCapMs: 3,
     // Free memory is short until the worker threads are gone and, once they are back, short again.
     freeMemory: () => (opts.workersFree && workersShed() && !workersBack() ? FITS : SHORT),
     rss: () => NEED,

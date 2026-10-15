@@ -1,0 +1,97 @@
+- id: W1-T9601
+  title: "THE DAEMON BUILDS THE CHILD-ENTRY STORE FOR ITS OWN TREE: W1-T9374 fills the store only from fresh run worktrees, so no build ever exists for the source hash of the daemon's own checkout, the tree every garden child starts from. After each restart, or when that checkout moves, every garden child misses the store with `no-stored-build` and starts under tsx"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which trees the shared child-entry store is filled for; high for blast radius: every garden child, the pre-open gate's consumer launch and the PR-open check-proof child start through childEntryArgv
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: read-only investigation of the core daemon's CPU and memory, 02:25-02:57Z (coordinator brief, task A)"
+  plan_refs: [W1-T9374, W1-T8776, W1-T8777, W1-T8778, W1-T9077, W1-T9117, W1-T9091, W1-T9555]
+  files: [src/lib/child-entry-argv.ts, src/lib/child-entry-store.ts, test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED. Core ledger union, 41 rotations named 2026-10-13 to 2026-10-15 plus ledger.ndjson. Every one of the 42 files
+    contributed rows (the coverage control). child_entry rows run from 2026-10-14T15:41Z to 2026-10-15T03:01Z.
+    - All 9 child_entry.store_built rows have lane run-task. The only child_entry.store_build_requested source is
+      run-worktree. Two of the builds are W1-T9307's a5fee13c (01:37:15Z) and W1-T8138's 65c3f009 (02:10:30Z).
+    - The daemon started at 02:05:28Z (DAEMON-1792029894265). Its garden run-task launches then missed the store 41
+      times, with reason no-stored-build each time. The first 37 were at hash f18efb8f (02:20:09Z to 02:57:32Z) and
+      the last 4 at 4fbe1c04 (02:59:02Z to 03:01:30Z). No build, present or hit row names either hash.
+      The hash changed without a new daemon.start, so the daemon's checkout can move while the daemon is running.
+    - Garden spawns (child_entry.spawned, verb "garden run <name>") from 2026-10-14T16:00Z to 2026-10-15T03:00Z:
+      1,023 in all, 775 tsx and 248 bundle. All 248 bundle launches have reason source-hash-match, meaning the
+      tree's own dist/ was current. None came from the store: the window has zero store_hit rows with entry
+      run-task in the daemon lane.
+    - Per daemon process: pid 1306071 (booted 20:10:58Z) ran 229 bundle launches and then 234 tsx launches with
+      reason source-changed. Each of those 234 missed the store at hash cedf87a1. The current daemon (pid 3134564)
+      has run 41 garden launches, all tsx.
+    - In the 02:00Z hour there were 9 bundle launches, all between 02:00:18Z and 02:02:29Z (before the restart),
+      and 40 tsx launches.
+    - Process samples (the investigation's samp1..4.json, 02:26-02:52Z), matched by start time to a garden
+      spawned row. Short gate, export and test garden children used 1.63-2.13 CPU-s and peaked at 283-306 MB RSS
+      each. They started under tsx.
+    READ at origin/main:
+    - child-entry-store.ts: buildIntoStore is single-flight per (storeRoot, tree) and never rejects.
+      materializeFromStore returns { outcome: "miss", reason: "no-stored-build", hash } when the store has other
+      builds but none for this tree's sourceHash.
+    - child-entry-argv.ts: on a miss, childEntryArgv ledgers child_entry.store_miss and returns the tsx launch.
+      Nothing asks for a build of the tree that missed.
+    - run-task.ts (W1-T9374): the only buildIntoStore caller passes the fresh run worktree, after worktree add.
+    - garden-registry.ts: gardenChildNodeArgv passes HARNESS_ROOT, the daemon's own checkout, which
+      deploy/entrypoint.sh's sync_tree moves (W1-T9077). preopen-gate.ts and pr-open.ts also launch from the
+      harness root for some children: a consumer-repo gate, and check-proof-main.
+    INFERRED:
+    - A run worktree's hash matches the daemon checkout's only when both sit on the same source revision.
+      The daemon restarts about hourly (46 daemon run ids in the selected rows over 51 h from 10-13 00:00Z), and main moves between a restart
+      and the next build, so the two rarely match.
+    - One build costs 2.5-22 s wall time in a child process (store_built ms). Today about 40 garden starts per
+      restart each pay a tsx start. The CPU each start would save under a bundle is not measured here, because no
+      bundle-started garden child was sampled.
+    - W1-T9117 (the daemon runs from the bundle) needs a current bundle for this same tree, and this task is what
+      produces one after the tree moves.
+  design: |
+    1. Fill on the first miss for the daemon's own tree. When childEntryArgv's store lookup misses with reason
+       no-stored-build or store-empty, the tree is this package's own root (the HARNESS_ROOT that garden-registry.ts
+       and preopen-gate.ts use), and the process is daemon-owned (daemonOwnedProcess), request a store build for
+       that tree. It is fire-and-forget: the current spawn still starts under tsx, and nothing on the spawn path
+       waits for the build.
+    2. Single-flight per hash. Add an export to child-entry-store.ts (for example fillStoreForOwnTree) that
+       calls buildIntoStore at most once per (storeRoot, tree, source hash) per process. A miss with no hash
+       (store-empty) keys on the tree alone until a build reports its hash. A second miss while a build is running
+       joins it. A failed build (including src/ moving during the build) is not retried at the same hash. It is
+       retried when a later miss reports a different hash. Ledger child_entry.store_build_requested with source
+       daemon-tree, the hash and the tree.
+    3. Retention keeps it. The fill passes the daemon's own tree in liveTrees, so pruneChildEntryStore keeps the
+       hash that tree runs.
+    4. Off the main loop, as W1-T9374's fill is. Hashing and building run in buildIntoStore's child process. The
+       materialize step that copies a stored build into the tree stays as it is today.
+    5. Not changed: W1-T9374's run-worktree fill, the currency checks (childEntryIsCurrent, workerBundle), the
+       store layout, and STORE_IDLE_MS. No new constant is added. A miss for any other tree requests nothing.
+    Tests go in test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts, with each title written as test("<title>",
+    verbatim as in the proofs. Drive childEntryArgv with a temp store and a fake fill seam. One test also builds for real from a temp
+    tree to cover the real default (doctrine/coverage-traps/cover-the-real-default.md). That fixture writes a stub
+    for every entry CHILD_ENTRIES exports, never a hand-written list (W1-T9555's lesson).
+  acceptance:
+    - claim: "a store miss for the daemon's own tree requests one store build for that tree's source hash, and the launch that missed still runs tsx"
+      proof: 'grep: test("W1-T9601: a miss for the daemon tree requests one store build" in test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts'
+    - claim: "repeated misses at one hash request no second build, and a miss at a new hash requests a new one"
+      proof: 'grep: test("W1-T9601: one build per source hash of the daemon tree" in test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts'
+    - claim: "once that build is stored, the next launch from the daemon's tree is a store hit and runs the bundle"
+      proof: 'grep: test("W1-T9601: after the fill the next garden launch from the daemon tree runs the bundle" in test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts'
+    - claim: "a miss for any other tree, or in a process the daemon does not own, requests nothing"
+      proof: 'grep: test("W1-T9601: a miss for another tree requests no build" in test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts'
+    - claim: "the new suite passes as a whole"
+      proof: "unit test: test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts"
+    - claim: "the fill names its source in the ledger"
+      proof: "grep: daemon-tree in src/lib/child-entry-argv.ts"
+  falsifier: |
+    On origin/main, give childEntryArgv a temp store holding one build at another hash, and a daemon-owned
+    environment. The lookup misses with no-stored-build, nothing requests a build, and the fake fill seam records zero
+    calls, so the first test fails. Call buildIntoStore on every miss without the per-hash memo: three misses at one
+    hash record three requests once each build settles, and the second test fails. Leave the daemon's tree out of
+    liveTrees: a prune whose clock is past STORE_IDLE_MS drops the daemon's stored hash.
