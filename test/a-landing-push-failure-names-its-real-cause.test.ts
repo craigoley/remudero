@@ -113,3 +113,28 @@ test("a lost lease records the tip it found and who wrote it", () => {
   assert.equal(result.leaseMoved?.observed, tipA, "the tip B found is the one A pushed");
   assert.match(result.leaseMoved?.by ?? "", /remudero-fleet\[bot\].*land pending filings/, "and names who wrote it");
 });
+
+test("a lost lease whose new tip cannot be read still records the move, with its author unknown", () => {
+  const origin = seededOrigin();
+  const rootA = stateRootOf(origin);
+  const rootB = stateRootOf(origin);
+  writeFeedbackEntry(rootA, "fb-cause-unread-a");
+  writeFeedbackEntry(rootB, "fb-cause-unread-b");
+
+  let tipA: string | undefined;
+  const racingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "log") throw new Error("fatal: bad object");
+    if (args[0] === "push" && tipA === undefined) {
+      assert.equal(withLiveWritesAllowed(() => landFeedback(rootA, { gh: fakeGh("https://github.com/o/r/pull/904") })).landed, true);
+      tipA = branchTip(origin);
+    }
+    return execFileSync("git", ["-C", rootB, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: opts?.env ?? process.env });
+  };
+
+  const result = withLiveWritesAllowed(() =>
+    landFeedback(rootB, { gh: fakeGh("https://github.com/o/r/pull/905"), git: racingGit }));
+
+  assert.equal(result.landed, true);
+  assert.equal(result.leaseMoved?.observed, tipA, "the move is recorded");
+  assert.equal(result.leaseMoved?.by, undefined, "only who made it is unknown");
+});
