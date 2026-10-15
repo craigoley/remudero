@@ -1483,6 +1483,8 @@ export interface DaemonDeps {
    *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
    *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
   checkFreshness?: () => DaemonFreshness | Promise<DaemonFreshness>;
+  /** W1-T9631: the sha the boot checkout could not reach; defaults to the entrypoint's RMD_BOOT_CHECKOUT_BLOCKED. */
+  bootCheckoutBlocked?: string;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
    *  restart, never after, so the relaunched process inherits a dependency tree matching `newSha`.
    *  This module stays pure; the real command wires the install (W1-T151). */
@@ -3878,6 +3880,25 @@ export async function runDaemon(
     });
   };
 
+  // W1-T9631 — a restart toward the target the boot checkout could not reach would boot into the same refusal and
+  // loop, so that reading is not stale (one row per tick); once main moves past it, the reading passes untouched.
+  const checkoutBlockedTarget = (deps.bootCheckoutBlocked ?? process.env.RMD_BOOT_CHECKOUT_BLOCKED)?.trim() || undefined;
+  let freshnessBlockedCycle = -1;
+  const gateBlockedCheckout = (freshness: DaemonFreshness): DaemonFreshness => {
+    if (!freshness.stale || freshness.newSha !== checkoutBlockedTarget) return freshness;
+    if (freshnessBlockedCycle !== cyclesEntered) {
+      freshnessBlockedCycle = cyclesEntered;
+      log("daemon.freshness_blocked", { old_sha: freshness.oldSha, new_sha: freshness.newSha, reason: "boot_checkout_blocked" });
+    }
+    return { stale: false };
+  };
+  const checkFreshness = deps.checkFreshness && checkoutBlockedTarget
+    ? (): DaemonFreshness | Promise<DaemonFreshness> => {
+        const read = deps.checkFreshness!();
+        return isPendingFreshness(read) ? read.then(gateBlockedCheckout) : gateBlockedCheckout(read);
+      }
+    : deps.checkFreshness;
+
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
   // every tick sees the same answer it acts on. Injected legacy callers may omit `notStale`; only
@@ -5164,7 +5185,7 @@ export async function runDaemon(
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
-    const freshnessRead = deps.checkFreshness?.();
+    const freshnessRead = checkFreshness?.();
     const freshness = isPendingFreshness(freshnessRead) ? await freshnessRead : freshnessRead;
     logNotStaleFreshness(freshness);
     if (freshness?.stale) {
@@ -5328,7 +5349,7 @@ export async function runDaemon(
     // this to merely COMPUTE whether this tick is stale (as opposed to acting on it) would mark a
     // restart that never happened, corrupting the very falsifier design (v) exists to hold.
     const requestStaleReviewerRestart = (): Extract<DaemonFreshness, { stale: true }> | undefined => {
-      if (tickStaleReviewerAction.kind !== "restart") return undefined;
+      if (tickStaleReviewerAction.kind !== "restart" || tickStaleReviewerAction.originMainSha === checkoutBlockedTarget) return undefined;
       staleReviewerRecurrence = staleReviewerRecurrence
         ? { ...staleReviewerRecurrence, restartRequested: true }
         : staleReviewerRecurrence;
@@ -6170,7 +6191,7 @@ export async function runDaemon(
     // never took it), which makes this branch's own `dispatchSet.length === 0` conjunct always
     // false. `reviewerCodeStale` is still computed here because `refetchedFreshness` (and the
     // `daemon.freshness_deferred` log below, which IS reached) reads it.
-    const selfFreshnessRead = deps.checkFreshness?.();
+    const selfFreshnessRead = checkFreshness?.();
     const freshnessReadsAsync = isPendingFreshness(selfFreshnessRead);
     const selfFreshness = isPendingFreshness(selfFreshnessRead) ? await selfFreshnessRead : selfFreshnessRead;
     logNotStaleFreshness(selfFreshness);
@@ -6372,7 +6393,7 @@ export async function runDaemon(
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
-      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       // W1-T6274/W1-T7806: once the latched holdouts drain, every later refill is held for the restart.
@@ -6557,11 +6578,11 @@ export async function runDaemon(
         new_sha: decided.newSha,
       });
     };
-    const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+    const onDispatchTick = checkFreshness ? (): void | Promise<void> => {
       wakeParkedLanes(Boolean(deps.checkStop?.() || deps.checkPause?.()));
       if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
-      const read = deps.checkFreshness!();
+      const read = checkFreshness!();
       if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);
       // The pool can settle while the fetch is in flight; a reading for a finished dispatch is the next tick's.
       return read.then((freshness) => {

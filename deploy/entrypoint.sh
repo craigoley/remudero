@@ -127,7 +127,8 @@ fi
 # Invariant: `origin/$REF` is tried first, so a branch name means "the tip as of the fetch that
 # just ran"; anything without a matching remote ref — a sha, a tag — falls through to the exact
 # object, so a pin still means exactly what it says. Nothing here is silenced: a checkout that
-# cannot proceed dies loudly rather than continuing on whatever HEAD happened to be.
+# cannot proceed never continues quietly on whatever HEAD happened to be — on a sync it is a named
+# STALE BOOT on the tree that last booted (W1-T9631), and on the clone path it dies.
 # Trap: the old code checked out the LOCAL branch (frozen at clone time — fetch never moves it)
 # and relied on a silenced `merge --ff-only` to climb back up, which regressed HEAD to the
 # clone-time sha whenever the merge failed and stayed there on every later boot.
@@ -153,7 +154,9 @@ MOVED_ASIDE_DIR=""
 json_escape() {
   local s="${1//\\/\\\\}"
   s="${s//\"/\\\"}"
-  printf '%s' "${s//$'\n'/\\n}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "${s//$'\n'/\\n}" | tr -d '\000-\010\013\014\016-\037'
 }
 
 move_untracked_aside() {
@@ -192,17 +195,103 @@ clear_redundant_untracked() {
   done < <(git -C "$TREE" ls-files --others --exclude-standard -z)
 }
 
-checkout_target() {
-  TARGET="$(resolve_target)" || die "ref not found: $REF (tried origin/$REF, then $REF as an exact object)"
+# Returns 1, never dies, when the target cannot be reached: CHECKOUT_DIE names the refusal and
+# CHECKOUT_ERROR carries git's own words, so each caller decides what a refusal costs.
+try_checkout_target() {
+  CHECKOUT_ERROR=""
+  if ! TARGET="$(resolve_target)"; then
+    TARGET=""
+    CHECKOUT_DIE="ref not found: $REF (tried origin/$REF, then $REF as an exact object)"
+    CHECKOUT_ERROR="$CHECKOUT_DIE"
+    return 1
+  fi
   clear_redundant_untracked "$TARGET"
   if ! out="$(git -C "$TREE" checkout --detach "$TARGET" 2>&1)"; then
-    log "CHECKOUT FAILED — refusing to run on whatever HEAD happens to be:"
+    log "CHECKOUT FAILED toward $REF ($TARGET):"
     printf '%s\n' "$out" | sed 's/^/  /' >&2
     log "  A common cause is an UNTRACKED file at a path an incoming commit also adds: the"
     log "  tracked-only dirty guard sees a clean tree, and git will not overwrite it. Remove the"
     log "  file, or start with RMD_SKIP_BOOTSTRAP=1 to inspect the tree by hand."
-    die "cannot check out $REF ($TARGET)"
+    CHECKOUT_DIE="cannot check out $REF ($TARGET)"
+    CHECKOUT_ERROR="$out"
+    return 1
   fi
+}
+
+# The clone path: no tree has booted here yet, so there is nothing to fall back to and a refusal dies.
+checkout_target() {
+  try_checkout_target || die "$CHECKOUT_DIE"
+}
+
+# ── W1-T9631: a boot whose checkout cannot advance runs the HEAD that last booted, and says so ──
+# Invariant: only sync_tree reaches this, so HEAD is the tree the previous boot ran — a refused
+# checkout leaves it untouched, which the tracked-clean check below confirms before trusting it.
+# Exiting instead was a crash loop no revive could fix (2026-10-15: 25 revives in 2 h 7 m). Loud,
+# never silent: a STALE BOOT log line, an entrypoint.stale_boot ledger row, an escalation spooled
+# for the daemon to post, and RMD_BOOT_CHECKOUT_BLOCKED=<target>, so the daemon does not
+# freshness-restart into the same refusal. Falsifier: test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts.
+STALE_BOOT_SPOOL_NAME="escalate-entrypoint-stale-boot.json"
+
+spool_host() { hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' || :; }
+
+stale_boot_spool() {
+  local head="$1" dir="$STATE_DIR/escalation-spool" now first count=1 host detail tmp
+  now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  first="$now"
+  host="$(spool_host)"
+  mkdir -p "$dir" || { log "  (the stale-boot escalation could not be spooled: cannot create $dir)"; return 0; }
+  if [ -f "$dir/$STALE_BOOT_SPOOL_NAME" ]; then
+    first="$(sed -n 's/.*"firstAt":"\([^"]*\)".*/\1/p' "$dir/$STALE_BOOT_SPOOL_NAME")"
+    count="$(sed -n 's/.*"count":\([0-9]*\).*/\1/p' "$dir/$STALE_BOOT_SPOOL_NAME")"
+    count=$(( ${count:-0} + 1 ))
+    [ -n "$first" ] || first="$now"
+  fi
+  detail="The daemon's boot checkout could not advance to $REF ($TARGET), so it is running HEAD $head, the tree that last booted, instead of exiting. It will not freshness-restart toward $TARGET; it retries once origin/main moves past it. Git said: $CHECKOUT_ERROR"
+  tmp="$dir/.$STALE_BOOT_SPOOL_NAME.tmp-$$"
+  printf '{"v":1,"key":"escalate-entrypoint-stale-boot","source":"entrypoint","host":"%s","firstAt":"%s","lastAt":"%s","count":%s,"headline":"entrypoint: STALE BOOT on %s, the boot checkout cannot reach %s","kind":"escalate","escalation":{"class":"BLOCKED","taskId":"DAEMON","summary":"daemon boot checkout cannot advance: running the tree that last booted (STALE BOOT)","detail":"%s","options":[{"label":"Fix the checkout","detail":"Remove what makes git refuse the checkout in the daemon tree (named in the detail); the next freshness restart lands on main."},{"label":"Leave it","detail":"The daemon keeps running the stale tree and retries once origin/main moves past the blocked target."}],"recommendation":"Fix the checkout"}}\n' \
+    "${host:-unknown}" "$first" "$now" "$count" "${head:0:12}" "${TARGET:0:12}" "$(json_escape "$detail")" > "$tmp" \
+    && mv -f -- "$tmp" "$dir/$STALE_BOOT_SPOOL_NAME" \
+    || { rm -f -- "$tmp"; log "  (the stale-boot escalation could not be spooled; the log line and ledger row stand)"; }
+  return 0
+}
+
+# A checkout that reached its target ends the stale boot: the daemon is told nothing is blocked, an
+# unposted escalation is withdrawn, and one the daemon already posted gets a spooled close.
+checkout_unblocked() {
+  local dir="$STATE_DIR/escalation-spool" url now
+  unset RMD_BOOT_CHECKOUT_BLOCKED
+  rm -f -- "$dir/$STALE_BOOT_SPOOL_NAME"
+  [ -f "$dir/delivered/$STALE_BOOT_SPOOL_NAME" ] || return 0
+  url="$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$dir/delivered/$STALE_BOOT_SPOOL_NAME")"
+  [ -n "$url" ] || return 0
+  now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  printf '{"v":1,"key":"close-entrypoint-stale-boot","source":"entrypoint","host":"%s","firstAt":"%s","lastAt":"%s","count":1,"headline":"entrypoint: the boot checkout advanced again, closing the STALE BOOT issue","kind":"close","url":"%s","body":"The boot checkout reached %s again (HEAD %s), so the daemon is no longer running a stale tree."}\n' \
+    "$(spool_host)" "$now" "$now" "$(json_escape "$url")" "$(json_escape "$REF")" "$(git -C "$TREE" rev-parse HEAD)" \
+    > "$dir/close-entrypoint-stale-boot.json" || log "  (the stale-boot close could not be spooled)"
+  return 0
+}
+
+stale_boot_on_head() {
+  local head dirt
+  head="$(git -C "$TREE" rev-parse --verify --quiet 'HEAD^{commit}')" \
+    || die "$CHECKOUT_DIE — and HEAD does not resolve, so there is no tree that last booted to run"
+  dirt="$(git -C "$TREE" status --porcelain --untracked-files=no)" \
+    || die "$CHECKOUT_DIE — and git cannot read the tree's status, so it cannot be vouched for as the tree that last booted"
+  [ -z "$dirt" ] \
+    || die "$CHECKOUT_DIE — and the refused checkout left tracked changes, so the tree is no longer the one that last booted"
+  log "STALE BOOT: CHECKOUT FAILED toward $REF (${TARGET:-unresolved}) — continuing on HEAD $head, the tree that last booted"
+  log "  ($CHECKOUT_DIE.) Ledgered as entrypoint.stale_boot and escalated; the daemon will not freshness-restart toward the same target."
+  if [ -n "$TARGET" ]; then
+    export RMD_BOOT_CHECKOUT_BLOCKED="$TARGET"
+  else
+    unset RMD_BOOT_CHECKOUT_BLOCKED
+  fi
+  if mkdir -p "$STATE_DIR"; then
+    printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.stale_boot","lane":"daemon","head":"%s","target":"%s","ref":"%s","error":"%s","reason":"the boot checkout could not advance, so the daemon runs the tree that last booted instead of exiting"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$head" "$TARGET" "$(json_escape "$REF")" "$(json_escape "$CHECKOUT_ERROR")" \
+      >> "$LEDGER_FILE" || log "  (the entrypoint.stale_boot ledger row could not be written; this log line stands)"
+  fi
+  stale_boot_spool "$head"
 }
 
 # ── The boot fetch retries a transient ref lock, bounded, and only a lock (W1-T2501) ─────────
@@ -334,8 +423,13 @@ sync_tree() {
     log "  fast-forward would touch. Commit or stash, or run with RMD_SKIP_BOOTSTRAP=1."
   else
     # One step, not checkout-then-merge: the target IS the freshly-fetched tip (see the resolver
-    # above), so a single detach lands on it directly — no merge to silently fail.
-    checkout_target
+    # above), so a single detach lands on it directly — no merge to silently fail. A refusal is a
+    # named STALE BOOT on the tree that last booted, never an exit (W1-T9631, above).
+    if try_checkout_target; then
+      checkout_unblocked
+    else
+      stale_boot_on_head
+    fi
   fi
 }
 
