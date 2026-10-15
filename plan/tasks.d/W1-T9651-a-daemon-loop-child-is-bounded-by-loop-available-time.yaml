@@ -1,0 +1,136 @@
+- id: W1-T9651
+  title: "A DAEMON-LOOP CHILD PROCESS IS BOUNDED BY LOOP-AVAILABLE TIME, NEVER A WALL-CLOCK TIMER — #11985 found that execFile's own `timeout` fires ahead of an exit already pending after a held loop, destroys the unread stdout and RESOLVES with an empty listing (three pushes ran with no credential helper); 34 more daemon-reachable async child calls on main still arm a wall-clock timeout"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — what bounds an async child on the daemon loop; each call's budget value and its caller's handling of a refusal are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 after #11985 (f0ccd8548, merged 13:09Z): 'fix any and all issues that you find at their root'"
+  plan_refs: [W1-T5689, W1-T9615, W1-T4446]
+  files:
+    - src/lib/clock.ts
+    - src/lib/worktree-git.ts
+    - src/lib/loop-bounded-child.ts
+    - src/lib/changed-files-cache.ts
+    - src/lib/child-entry-store.ts
+    - src/lib/clone-reaper.ts
+    - src/lib/dispatch-claim.ts
+    - src/lib/fleet-control.ts
+    - src/lib/garden-registry.ts
+    - src/lib/git-lock-reclaim.ts
+    - src/lib/github-transport.ts
+    - src/lib/host-resource-gardener.ts
+    - src/lib/merge-probe.ts
+    - src/lib/object-reaper.ts
+    - src/lib/plan-pr-merge-safety.ts
+    - src/lib/pr-open.ts
+    - src/lib/preopen-gate.ts
+    - src/lib/review.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/task-id-reservation.ts
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts
+    - test/a-loop-bounded-child-is-stopped-never-truncated.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: a wall-clock child timer turns any loop hold into a truncated SUCCESS (pushes with no credential helper)
+  attempts: 0
+  rationale: |
+    THE CLASS (#11985, f0ccd8548, merged 2026-10-15 13:09Z). When a held loop resumes, Node runs due timers before it
+    processes I/O. A child that has already exited still has its exit and its last stdout waiting in the pipe. Two
+    things then go wrong:
+    - execFile/exec with its own `timeout` option: the timer calls execFile's internal kill(), which DESTROYS stdout and
+      stderr and signals a process that is already gone. The pending exit is code 0 with no signal, so the call
+      RESOLVES with whatever it had read, often nothing. On 2026-10-15 `git config --list` resolved empty this way,
+      and three pushes (W1-T9047 04:10:39Z, #11939 and #11918 07:36:46-47Z) ran with no credential helper and died on
+      "could not read Username".
+    - a hand-rolled `setTimeout(() => child.kill())`: the timer marks the call timed out and kills a child that had
+      finished, so a complete, good result is reported as a timeout.
+    #11985 added `loopAvailableDeadline` (src/lib/clock.ts) and `execFileLoopBounded` (src/lib/worktree-git.ts), and
+    #11962 bounds the App-token exchange the same way. Only those three sites use it.
+    MEASURED at origin/main dea228455 (2026-10-15 ~13:20Z), with the walk from
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts: top-level functions, comments stripped, name-based
+    reach seeded from daemonCommand (11,416 functions, 7,123 reached). Population: a body that makes an ASYNC child
+    call (execFile, exec, spawn, or a promisify(execFile) alias) AND either passes a `timeout` option or arms a
+    setTimeout/AbortSignal.timeout that kills the child. Five sync-only hits were removed by hand (mergeDirectViaRest,
+    ghJson, ensureDeps, refreshProofToolchain, runSuiteShifted: a sync child does not race the loop). The reach is
+    name-based, so it is an upper bound.
+    34 daemon-reachable sites remain, besides execFileLoopBounded itself.
+    23 pass execFile's own `timeout` option, which can cause a truncated success:
+      src/lib/changed-files-cache.ts createChangedFilesCache
+      src/lib/child-entry-store.ts runBuildScriptInChild
+      src/lib/fleet-control.ts realSharedPauseGitDeps (its runAsync)
+      src/lib/garden-registry.ts childGardenPassSpawn (the ionice call)
+      src/lib/git-lock-reclaim.ts listProcesses
+      src/lib/github-transport.ts ghStdoutAsync, ghTextAsync (every awaited gh read, through ghJsonAsync)
+      src/lib/host-resource-gardener.ts gitHeartbeatSource
+      src/lib/merge-probe.ts defaultMergeProbeGit
+      src/lib/plan-pr-merge-safety.ts planSafetyGitAsync
+      src/lib/preopen-gate.ts defaultRunGate
+      src/lib/review.ts probeProofSandbox, startCheckAsync, defaultAsyncProofSpawner, ensureDepsAsync,
+        refreshProofToolchainAsync, ensureBrowsersOnceAsync
+      src/lib/serve-plan-reload.ts gitAsync
+      src/lib/worker-provider.ts runOpenWeightCheck, selectOpenWeightUnitTestSuitesOffLoop
+      src/lib/worker.ts provisionWorktreeNodeModules
+      src/run-task.ts spawnCensusChild, coverageSandboxStart, readPushedRunBranchesOutputAsync
+    11 arm a setTimeout that kills the child, which can cause a false timeout:
+      src/lib/clone-reaper.ts runBounded
+      src/lib/dispatch-claim.ts gitClaimRunnerAsync
+      src/lib/github-transport.ts ghLinesAsync (and withGhKillEscalation's SIGKILL timer, shared by the gh reads above)
+      src/lib/object-reaper.ts runMaintenanceGit
+      src/lib/pr-open.ts defaultProofRunnerAsync
+      src/lib/review.ts gitBlobRunnerAsync
+      src/lib/task-id-reservation.ts gitReservationRunnerAsync
+      src/lib/worker-provider.ts readCodexRuntime
+      src/run-task.ts spawnCoverageChild, planSyncGitRunnerAsync
+    Off the daemon loop by this walk, and out of scope here (serve and CLI): impossible-canary defaultRunGrader,
+    retro-preflight runRetroPrepublishCommand, review describeUnresolvedOrFailing, serve-restart-relevance
+    changedPathsSince, serve-slots runCommand, serve defaultGatewayFetch.
+    No census guards this class. The sync-spawn census (W1-T5689) counts only synchronous primitives.
+    The loop holds of 2026-10-15 (W1-T9615: 60-190 s every ~2 min) are what made these timers fire late.
+  design: |
+    1. ONE MECHANISM. Move execFileLoopBounded out of worktree-git.ts into src/lib/loop-bounded-child.ts, and keep a
+       re-export so worktree-git's callers do not change. Beside it, add `boundChildByLoopTime(child, budgetMs, opts)`
+       for a callback execFile or a spawn. Both arm loopAvailableDeadline (src/lib/clock.ts), which is unchanged:
+       a firing that is late by at least a twentieth of its budget re-arms for the held time. That bound is relative
+       to the call's own budget, so it adds no new fixed threshold (operator rule).
+       The kill uses child.kill(signal), never execFile's internal kill(), so a pending exit keeps its stdout.
+       The SIGKILL escalation (withGhKillEscalation, killAfterGrace) is armed by the same deadline.
+    2. A KILLED CHILD IS A FAILURE. When the deadline expires, the helper records it. The call then REJECTS with a
+       named LoopBoundedChildTimeout (callback forms: reports timedOut), even if the child traps the signal and
+       exits 0. A killed child never resolves as a success with empty or partial stdout. Callers that already
+       map a timeout to their own refusal (gitClaimRunnerAsync, gitReservationRunnerAsync, planSyncGitRunnerAsync,
+       gitBlobRunnerAsync, defaultProofRunnerAsync, runBounded) keep those refusal shapes.
+    3. ROUTE EVERY SITE ABOVE through the helper. Each call keeps its budget value. A site that is not a child
+       process, or not on the loop, is not changed.
+    4. CENSUS: test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts. Reuse the sync census's walk
+       (topLevelFunctions, stripComments, loopReachable seeded from daemonCommand). Export it from a shared test
+       module, or import it, but never fork a second copy that can drift. Population: a reached function whose body
+       makes an async child call with a `timeout` option, or arms a setTimeout/AbortSignal.timeout whose callback
+       kills a child. The table is EXACT, like SYNC_SPAWN_LOOP_BASELINE, and EMPTY once this PR lands: a new site is
+       named and refused. It carries a positive control (a planted execFile with `timeout:` in a reached function is
+       named), and a sync call with `timeout:` must not count.
+    5. A held-loop test drives the real helper: a child that exits at once while the loop is held past its budget
+       resolves with its full stdout. A child that outlives its budget on a free loop is killed and rejects. This
+       follows the fixture of test/a-host-git-call-keeps-its-credential-helper-through-a-held-loop.test.ts.
+  acceptance:
+    - claim: "the census names a daemon-reachable async child call that arms a wall-clock timeout, and reads zero on the real source"
+      proof: 'grep: test("W1-T9651: the census names a daemon-reachable async child call that arms a wall-clock timeout" in test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts'
+    - claim: "a child whose exit is already pending when a held loop resumes keeps its full stdout"
+      proof: 'grep: test("W1-T9651: a held loop never kills a child whose exit is already pending" in test/a-loop-bounded-child-is-stopped-never-truncated.test.ts'
+    - claim: "a child stopped at its loop-available budget rejects, even when it exits 0 after the signal"
+      proof: 'grep: test("W1-T9651: a child stopped at its budget rejects and never resolves with partial stdout" in test/a-loop-bounded-child-is-stopped-never-truncated.test.ts'
+    - claim: "every awaited gh read goes through the loop-bounded child helper, not execFile's own timeout"
+      proof: 'grep: execFileLoopBounded( in src/lib/github-transport.ts'
+    - claim: "the dispatch claim's git runner is bounded by loop-available time, not a setTimeout kill"
+      proof: 'grep: boundChildByLoopTime( in src/lib/dispatch-claim.ts'
+  falsifier: |
+    At origin/main, plant `execFile("git", ["status"], { timeout: 1000 }, cb)` in a reached function such as
+    sweepLandingSteps. No census names it. At origin/main, run ghTextAsync's execFile with its own timeout while a
+    busy-wait holds the loop past the budget and the child has already printed and exited: the call resolves 0
+    with empty stdout.

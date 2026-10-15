@@ -194,6 +194,7 @@ test("W1-T5542: the rung stamps round identities and renders refused rounds with
   const root = mkdtempSync(join(tmpdir(), "rmd-strike-rung-"));
   const rows: Row[] = [];
   const messages: string[] = [];
+  let spawns = 0;
   const initialReview = {
     state: "failure" as const, headSha: HEAD, reviewerOutcome: "failure",
     criteria: [{ claim: "the fix lands", proof: "unit test: the fix lands", met: false, reason: "blocked", proof_exec: "executed_fail" as const }],
@@ -208,11 +209,15 @@ test("W1-T5542: the rung stamps round identities and renders refused rounds with
     budgetUsd: 1, strikeCap: 2, initialReview,
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: mount },
     deps: {
-      spawn: async () => ({ sessionId: "fix-session", text: "REPORT", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], costUsd: 0, numTurns: 1, model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult),
+      spawn: async () => {
+        assert.ok(++spawns <= 2, "one no-op recheck must not become a third worker attempt");
+        return { sessionId: "fix-session", text: "REPORT", blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], costUsd: 0, numTurns: 1, model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false } as WorkerResult;
+      },
       waitForCiGreen: async () => "green" as const, fetchPrBody: async () => "REPORT",
       runReview: async () => ({ ...initialReview, state: "success" as const, criteria: [{ ...initialReview.criteria[0], met: true }] }),
       push: () => {}, issues: { create: () => "https://github.com/acme/remudero/issues/1" },
       ledgerPath: join(root, "ledger.ndjson"),
+      ledgerLines: (): Row[] => [],
       log: (step: string, extra?: Row) => rows.push({ task_id: TASK, step, ...extra }),
       say: (message: string) => messages.push(message), account: (result: WorkerResult) => result,
       harnessCommitForShellLessWorker: (input: Parameters<NonNullable<Parameters<typeof runFixRung>[0]["deps"]["harnessCommitForShellLessWorker"]>>[0]) => { input.onRefusal?.(REASON); return 0; },
@@ -220,15 +225,28 @@ test("W1-T5542: the rung stamps round identities and renders refused rounds with
     },
   };
   const refused = await runFixRung(opts);
+  assert.equal(refused.outcome, "stood_down");
   assert.equal(refused.strikes, 0);
+  assert.equal(spawns, 2, "the empty persisted reader cannot erase either locally observed refusal");
   const receipts = rows.filter((row) => ["fix.dispatch", "fix.commit_refused", "fix.done"].includes(String(row.step)));
-  assert.equal(receipts.length, 3);
+  assert.equal(receipts.length, 6);
   assert.match(String(receipts[0].round_id), /^fixture-run:1:\d+$/);
-  assert.ok(receipts.every((row) => row.round_id === receipts[0].round_id));
-  assert.ok(messages.some((message) => /refused \(1 at this head\)/.test(message)));
+  assert.ok(receipts.slice(0, 3).every((row) => row.round_id === receipts[0].round_id));
+  assert.ok(receipts.slice(3).every((row) => row.round_id === receipts[3].round_id));
+  assert.notEqual(receipts[0].round_id, receipts[3].round_id);
+  assert.ok(messages.some((message) => /refused \(2 at this head\)/.test(message)));
   assert.ok(messages.every((message) => !/strike \d+\/\d+/.test(message)));
   const refusedRows = rows.slice();
+  for (const persisted of [() => rows, () => round("foreign-head", REASON, "other-head")]) {
+    rows.length = 0;
+    spawns = 0;
+    const result = await runFixRung({ ...opts, deps: { ...opts.deps, ledgerLines: persisted } });
+    assert.equal(result.outcome, "stood_down");
+    assert.equal(result.strikes, 0);
+    assert.equal(spawns, 2, "duplicate persisted/local rows count once, and another head never consumes this head's recheck");
+  }
   rows.length = 0;
+  spawns = 0;
   opts.deps.harnessCommitForShellLessWorker = () => 1;
   let retryPrompt = "";
   const fixed = await runFixRung({ ...opts, deps: {
@@ -242,6 +260,7 @@ test("W1-T5542: the rung stamps round identities and renders refused rounds with
   assert.ok(completed.every((row) => row.round_id === completed[0].round_id));
   assert.equal(sweep.fixRoundTally(rows, TASK, HEAD).strikes, 1);
   rows.length = 0;
+  spawns = 0;
   opts.deps.push = () => { throw new Error("push failed"); };
   await assert.rejects(runFixRung(opts), /push failed/);
   assert.equal(rows.find((row) => row.step === "fix.done")?.pushed_head_sha, undefined);
