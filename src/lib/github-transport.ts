@@ -839,23 +839,24 @@ export function ghReadCadenceStampPath(env: NodeJS.ProcessEnv = process.env, buc
 
 /** ADVISORY IS THE DEFAULT, and any unrecognised value stays advisory: a typo in this variable must
  *  never start refusing the daemon's reads. Enforcement is opt-in, per design (iii). */
-export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env): "advisory" | "enforce" {
-  return env.RMD_GH_TRANSPORT_FLOOR === "enforce" ? "enforce" : "advisory";
+export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env): "advisory" | "enforce" | "wait" {
+  const mode = env.RMD_GH_TRANSPORT_FLOOR;
+  return mode === "enforce" || mode === "wait" ? mode : "advisory";
 }
 
 /**
- * Run an unattended automation lane with the read floor explicitly enforced.
+ * Run a command with its default read-floor mode and a fresh invocation burst.
  *
  * The transport keeps advisory mode as its library default so injected callers and interactive
- * diagnostics cannot be turned into a hard stop accidentally. Standalone unattended CLI handlers
- * use this boundary instead: if the operator did not choose a mode, their lifetime is protected from
- * repeated read bursts, while an explicit environment choice remains authoritative. The restore
+ * diagnostics cannot be turned into a hard stop accidentally. CLI handlers use this boundary to
+ * select enforcement or waiting, and the daemon selects advisory mode. An explicit environment
+ * choice remains authoritative. The restore
  * makes this safe for in-process tests and for a caller that runs more than one verb.
  */
-async function withGhTransportFloorMode<T>(
-  mode: "advisory" | "enforce",
+export async function withGhTransportFloorMode<T>(
+  mode: "advisory" | "enforce" | "wait",
   fn: () => T | Promise<T>,
-  env: NodeJS.ProcessEnv,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<T> {
   const previous = env.RMD_GH_TRANSPORT_FLOOR;
   if (previous === undefined) env.RMD_GH_TRANSPORT_FLOOR = mode;
@@ -903,7 +904,7 @@ export function ghReadCadenceDecision(opts: {
   isExempt: boolean;
   nowMs: number;
   lastReadMs?: number;
-  mode: "advisory" | "enforce";
+  mode: "advisory" | "enforce" | "wait";
   windowS?: number;
 }): GhReadCadenceDecision {
   const windowS = opts.windowS ?? DEFAULT_GH_READ_CADENCE_S;
@@ -922,7 +923,7 @@ export function ghReadCadenceDecision(opts: {
   if (-ageMs > windowS * 1000) return { allow: true, paced: false, windowS };
   const ageS = Math.floor(Math.max(0, ageMs) / 1000);
   if (ageS >= windowS) return { allow: true, paced: false, ageS, windowS };
-  return { allow: opts.mode === "advisory", paced: true, ageS, windowS };
+  return { allow: opts.mode !== "enforce", paced: true, ageS, windowS };
 }
 
 /** The stamp's mtime in millis, or `undefined` for absent/undecidable — never a throw. */
@@ -1117,6 +1118,7 @@ export function resetGhCadenceAdvisoryForTest(): void {
  *  arithmetic and stamp that run inside the lock. Only the WAITING differs between the two. */
 interface GhReadCadencePlan {
   evaluate(): GhReadCadenceDecision;
+  floorWaitRemainingMs(): number;
   /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
    *  coordination, so no lock, gap or stamp. */
   coordinatedStampPath: string | undefined;
@@ -1133,16 +1135,26 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   const now = deps.nowMs ?? systemClock.now;
   const isWrite = ghArgvIsWrite(args);
   const isExempt = ghArgvIsCadenceExempt(args);
+  const cooldown = env.RMD_GH_COOLDOWN_S;
+  const windowS = cooldown !== undefined && /^[0-9]+$/.test(cooldown) ? Number(cooldown) : DEFAULT_GH_READ_CADENCE_S;
+  let floorWaitMs = 0;
   const evaluate = (): GhReadCadenceDecision => {
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
     const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
+    const mode = resolveGhTransportFloorMode(env);
+    const nowMs = now();
+    const lastReadMs = readStampMs(stampPath);
     const decision = ghReadCadenceDecision({
       isWrite,
       isExempt,
-      nowMs: now(),
-      lastReadMs: readStampMs(stampPath),
-      mode: resolveGhTransportFloorMode(env),
+      nowMs,
+      lastReadMs,
+      mode,
+      windowS,
     });
+    floorWaitMs = decision.paced && !burstAllowed && mode === "wait"
+      ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs)))
+      : 0;
     // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
     // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
     // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
@@ -1151,8 +1163,11 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // GRANTED ONLY BY AN ADMITTED, GATED READ, AND ONLY INSIDE AN OPEN SCOPE. An exempt call
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
-    else if (!isWrite && !isExempt && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
-    if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
+    else if (!isWrite && !isExempt && ghReadBurstScope && floorWaitMs === 0) ghReadBurstScope.remaining = ghReadBurst(env);
+    if (floorWaitMs > 0) {
+      const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+      warn(`gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}`);
+    } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
       const warn = deps.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
       warn(
@@ -1166,6 +1181,15 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   const sharedReadGapMs = resolveGhSharedReadGapMs(env);
   return {
     evaluate,
+    floorWaitRemainingMs: () => {
+      if (floorWaitMs === 0) return 0;
+      const nowMs = now();
+      const lastReadMs = readStampMs(stampPath);
+      const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
+      return decision.paced
+        ? Math.max(0, windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs)))
+        : 0;
+    },
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
@@ -1174,11 +1198,13 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       const latest = readStampMs(path);
       const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(path) === latest;
       const elapsed = latest === undefined ? undefined : now() - latest;
-      return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+      const gapMs = ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+      return Math.max(floorWaitMs, gapMs);
     },
     stampAfterGap: (path) => {
       // Stamp only after the gap so a concurrent process observes the completed transport slot.
       stamp(path);
+      if (floorWaitMs > 0 && ghReadBurstScope) ghReadBurstScope.remaining = ghReadBurst(env);
       const stampedAt = readStampMs(path);
       if (stampedAt === undefined) ghCadenceOwnStampMs.delete(path);
       else ghCadenceOwnStampMs.set(path, stampedAt);
@@ -1210,14 +1236,23 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
       );
     }
     const decision = plan.evaluate();
+    // A sync wait would block the async holder's event loop; refuse rather than skip the floor.
+    if (plan.floorWaitRemainingMs() > 0) {
+      throw new GhReadCadenceRefusal(decision, deps.bucketOverride ?? ghArgvBucketHint(args) ?? "core", 0);
+    }
     plan.stampAfterGap(stampPath);
     return decision;
   }
   const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
   return withGhCadenceLock(stampPath, sleepSync, () => {
     const decision = plan.evaluate();
-    const remaining = plan.sharedGapRemainingMs(stampPath);
-    if (remaining > 0) sleepSync(remaining);
+    let remaining = plan.sharedGapRemainingMs(stampPath);
+    while (remaining > 0) {
+      sleepSync(remaining);
+      // The shared lock can fail open or be reclaimed during a long wait. A newer stamp
+      // still owns the floor, so recheck before granting this invocation its read and burst.
+      remaining = plan.floorWaitRemainingMs();
+    }
     plan.stampAfterGap(stampPath);
     return decision;
   });
@@ -1238,8 +1273,11 @@ export async function applyGhReadCadenceAsync(
   const sleep = deps.sleep ?? defaultTimerSleep;
   return await withGhCadenceLockAsync(stampPath, sleep, async () => {
     const decision = plan.evaluate();
-    const remaining = plan.sharedGapRemainingMs(stampPath);
-    if (remaining > 0) await sleep(remaining);
+    let remaining = plan.sharedGapRemainingMs(stampPath);
+    while (remaining > 0) {
+      await sleep(remaining);
+      remaining = plan.floorWaitRemainingMs();
+    }
     plan.stampAfterGap(stampPath);
     return decision;
   });

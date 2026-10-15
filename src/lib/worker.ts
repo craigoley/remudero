@@ -1,3 +1,4 @@
+import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
   workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
@@ -2350,6 +2351,7 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
+  const executionPrompt = withWorkspaceCleanup(args.prompt);
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
@@ -2704,7 +2706,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2792,7 +2794,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, containment: boundContainment }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2842,13 +2844,13 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
         alternatives: openWeightDeploymentReady("gpt-6.1-sol") &&
-          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(args.prompt, "utf8")))
+          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(executionPrompt, "utf8")))
           ? ["gpt-6.1-sol"] : [] }
       : selectOpenWeightModel(
       capabilities,
       args.model,
       args.effort,
-      Buffer.byteLength(args.prompt ?? "", "utf8"),
+      Buffer.byteLength(executionPrompt, "utf8"),
       {
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
@@ -2905,7 +2907,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...args, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
@@ -3218,7 +3220,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
-      const liveQuery = runQuery({ prompt: args.prompt, options });
+      const liveQuery = runQuery({ prompt: executionPrompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
         pidRef,
