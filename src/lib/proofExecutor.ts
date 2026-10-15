@@ -58,7 +58,7 @@ export function formatTail(
   const size = (): number => kept.reduce((sum, line) => sum + line.length + 1, -1);
   while (kept.length > 1 && size() > maxChars) kept = kept.slice(1);
   const last = kept[kept.length - 1];
-  if (last !== undefined && last.length > maxChars) kept = [`…${last.slice(-maxChars)}`];
+  if (last !== undefined && last.length > maxChars) kept = [`…${last.slice(last.length - maxChars + 1)}`];
   const omitted = lines.length - kept.length;
   const body = kept.join("\n");
   return omitted > 0 ? `${omittedNote(omitted)}\n${body}` : body;

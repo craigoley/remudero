@@ -30,7 +30,19 @@ test("formatTail trims by characters too and counts those lines as omitted", () 
 
 test("formatTail cuts a single over-long last line to its tail", () => {
   const out = formatTail("q".repeat(100), "", 40, 10);
-  assert.equal(out, `…${"q".repeat(10)}`);
+  assert.equal(out, `…${"q".repeat(9)}`);
+  assert.equal(out.length, 10, "the truncation marker is inside the character bound");
+  assert.equal(formatTail("xy", "", 40, 1), "…");
+  assert.equal(formatTail("q".repeat(10), "", 40, 10), "q".repeat(10), "the exact boundary needs no marker");
+});
+
+test("formatTail redacts the entire secret before cutting through a long final line", () => {
+  const token = `ghp_${"A".repeat(36)}`;
+  assert.equal(formatTail(`prefix ${token} end`, "", 40, 10), "…cted> end");
+  const out = formatTail(`discard\n${"q".repeat(3001)}`);
+  const [note, body] = out.split("\n");
+  assert.equal(note, "(1 earlier line omitted)");
+  assert.equal(body.length, 3000);
 });
 
 test("formatTail redacts secrets, including one that straddles the cut", () => {
