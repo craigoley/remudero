@@ -103,6 +103,21 @@ test("the daemon builds each spec garden's due probe from the same registry", as
   }
 });
 
+test("the daemon wires both low-yield gardens to the persistent pacing probe", async (t) => {
+  const fixture = (await import("./helpers/git-repo.js")).gitRepo({ kind: "low-yield-production-probe" });
+  t.after(() => fixture.cleanup());
+  const dir = join(fixture.dir, "state");
+  mkdirSync(dir);
+  const registry = await import("../src/lib/garden-registry.js");
+  const ctx = { config: { root: fixture.dir }, repoRoot: fixture.dir, owner: "o", repo: "r", log: () => {}, raiseDuplicate: () => "" } as unknown as GardenBuildContext;
+  for (const name of ["host-resource", "flow-remedy"] as const) {
+    const pass = await buildRegisteredGarden(name, ctx);
+    assert.equal(typeof pass.due, "function", `${name} has real production wiring`);
+    registry.recordGardenPacing(dir, name, true, { inputs: "recorded" });
+    assert.equal(pass.due!(), false, "the floor holds even when the real input reader sees a different stamp");
+  }
+});
+
 test("the daemon's due probe answers from the built garden and is due until it is built", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-due-probe-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

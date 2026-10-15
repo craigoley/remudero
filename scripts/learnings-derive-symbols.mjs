@@ -17,8 +17,9 @@
 // Usage: node --import tsx scripts/learnings-derive-symbols.mjs [--dir learnings] [--src src] [--check]
 // --check exits 1 and prints which shard(s) are stale, writing nothing -- the CI-safe arm.
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { learningsSourceFiles } from "./lib/learnings-files.mjs";
 import { parse as parseYaml } from "yaml";
 import { isMainModule, parseArgv } from "./lib/argv.mjs";
 import { collectSourceSymbols, deriveFactSymbols, extractIdentifierCandidates } from "../src/lib/knowledge-symbols.ts";
@@ -109,7 +110,7 @@ export function writeSymbolsInText(text, id, next) {
     if (hasLine) block = block.replace(/^  symbols:.*\n/m, "");
   } else if (hasLine) {
     block = block.replace(/^  symbols:.*$/m, renderSymbolsLine(next));
-  } else if (/^  files:.*$/m.test(block)) {
+  } else if (/^  files: *\S.*$/m.test(block)) {
     block = block.replace(/^  files:.*$/m, (m) => `${m}\n${renderSymbolsLine(next)}`);
   } else {
     block = block.replace(/^- id: .*$/m, (m) => `${m}\n${renderSymbolsLine(next)}`);
@@ -120,12 +121,10 @@ export function writeSymbolsInText(text, id, next) {
 /** Plan every shard's mutations under `dir`, against `knownSymbols`. Returns
  *  `{ mutations: [{filename, id, next}], staleFilenames: string[] }`. */
 export function planMutations(dir, knownSymbols) {
-  const filenames = readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml"))
-    .sort();
+  const sources = learningsSourceFiles(dir);
   const mutations = [];
   const staleFilenames = new Set();
-  for (const filename of filenames) {
+  for (const { filename } of sources) {
     for (const entry of loadShardEntries(join(dir, filename))) {
       const next = planEntrySymbols(entry, knownSymbols);
       if (next === undefined) continue;

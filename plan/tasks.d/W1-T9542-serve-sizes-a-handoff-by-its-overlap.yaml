@@ -1,0 +1,96 @@
+- id: W1-T9542
+  title: "SERVE SIZES A HANDOFF BY ITS LIFETIME PEAK, NOT ITS OVERLAP: the supervisor's container_headroom need is the active generation's lifetime VmHWM (5.31 GB), while a standby only overlaps the old generation through boot and drain (+0.9 GB p50, +2.4 GB max measured), and free is judged against memory.max although the kernel reclaims and throttles at memory.high; the need becomes the measured overlap peak with a margin, and free is judged against memory.high"
+  repo: remudero
+  depends_on: [W1-T9508]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how the serve supervisor sizes a planned handoff against its container
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: no serve handoff has completed since 10-12 06:00:59Z; filing approved 2026-10-14"
+  plan_refs: [W1-T8378, W1-T8311, W1-T8873, W1-T9508, W1-T9504]
+  files: [src/lib/serve-supervisor.ts, test/serve-supervisor.test.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts, test/serve-sizes-a-handoff-by-its-overlap.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (live ledger union: 399 rotations + ledger.ndjson, newest row 21:13:54Z):
+    - 21:04:54Z, 21:06:16Z, 21:08:21Z, 21:12:26Z: serve.handoff_deferred reason memory, hold container_headroom,
+      needBytes 5306310656 equal to activePeakBytes, freeBytes 3.78-4.17 GB, activeRssBytes 3.76-4.30 GB.
+      That generation started 20:28:37Z (serve.supervisor_start). Before it, needBytes was 5006409728.
+    - serve.memory rows of that generation, 21:04:50Z to 21:13:50Z: rss 4.07-4.61 GB, free_bytes 3.34-3.91 GB,
+      limit_bytes 8053063680. Every serve.memory row since 10-02 carries that same limit.
+    - No serve.handoff_done since 2026-10-12T06:00:59Z.
+    - Cgroup (session read): memory.max 8053063680, memory.high 5905580032 (5632 MiB), memory.current about
+      4.96 GB, memory.peak 5907701760. The peak sits at memory.high.
+    - Coordinator's read-only analysis, cited as such: memory.events high 4,418; memory.swap.current about
+      692 MB (max 1 GiB); serve VmSwap about 672 MB.
+    OBSERVED, the overlap a completed handoff really added. The positive control is that 160 serve.memory rows
+    fall inside a fork-to-done window; 146 of them have a pre-fork baseline within 200 s. serve.memory is sampled
+    every 180 s per generation, and its free_bytes is the whole cgroup, both generations included:
+    - Container use (limit_bytes - free_bytes) inside the window, minus the lowest pre-fork reading: p50 +0.86 GB,
+      p75 +1.20, p90 +1.50, p95 +1.60, max +2.37 GB. The max is the 2026-10-06T18:45:19Z sample (fork 18:44:42Z,
+      done 18:45:25Z). Samples span 2026-10-02T19:11Z to 2026-10-12T04:24Z.
+    - serve.handoff_done peakBytes (the standby's VmHWM at promotion, a per-supervisor running max) over 503
+      handoffs: 1.29-2.27 GB, p50 1.59.
+    - In 5 of the 146 samples the overlap exceeded that boot peak. The worst was 1.34x (+0.60 GB, 10-06 18:45Z),
+      because the old generation keeps allocating through the overlap.
+    - In 42 of the 160 window samples, container use was above today's memory.high, up to 7.48 GB on
+      2026-10-07T08:14:44Z. memory.high's value on those dates was not read.
+    READ at origin/main:
+    - serve-supervisor.ts handoff(): short(free) compares freeMemory() against candidatePeak(from). Since W1-T8378,
+      candidatePeak prefers the active generation's refreshed VmHWM over the boot peak sampled at promotion.
+      need() ledgers the same value as needBytes. judgeServeUpgradeAdmission gets the same peak for host_headroom.
+    - cgroupFreeMemory() is memory.max less (memory.current less clean page cache). It never reads memory.high.
+      host-memory-shadow.ts, test-slot.ts and daemon-memory-policy.ts already take the smaller of memory.high
+      and memory.max as the ceiling.
+    - serve-memory.ts also imports cgroupFreeMemory (the serve.memory free_bytes figure and its relief).
+    - serve-supervisor.ts is a baked input (baked-runtime-inputs.ts), so a merge ships by image rebuild and recycle.
+    INFERRED:
+    - A lifetime VmHWM includes a generation's own growth after the old generation has exited (drainMs is under
+      1 s), so it is not the overlap. Sizing by it asks for 2-4x what an overlap measured.
+    - A 180 s sample lands at a random point of a 10-60 s overlap, so a handoff's true overlap peak is at least
+      the sampled figure, not equal to it. The supervisor's own in-window sampling (design 1) replaces this proxy.
+    - Half (a) alone fits today (about 2.4-3.6 GB need against 3.3-4.2 GB free vs memory.max), but the standby
+      would then boot through memory.high, where this container already throttles and swaps.
+    - Half (b) alone makes it fit LESS. Free vs memory.high now is about 0.9 GB raw (5.91 - 4.96), or about
+      1.9 GB once clean page cache is credited. That is below an overlap need of about 2.4-3.6 GB.
+    - So this task lands after W1-T9508 (tier-2 shed of worker threads, in build at filing). W1-T9508 is expected
+      to free about 2.0-2.3 GB, the coordinator's INFERRED figure from 15 clean thread exits of 500 MB or more
+      returning about 91% to RSS, and read_model.worker_recycled rows on 10-14 freeing 1.1-2.2 GB.
+      Shed plus overlap sizing plus memory.high is the combination that fits honestly.
+  design: |
+    1. Measure the overlap. During each planned handoff, from just before the fork until the old generation has
+       exited, sample the container's free bytes with the same reader the supervisor judges with, at fork,
+       during each readiness poll, at promote and after drain. overlapPeakBytes is the pre-fork free less the
+       lowest free in the window. Ledger overlapPeakBytes and the sample count on serve.handoff_done.
+       A handoff with no usable sample records none and is never a zero.
+    2. The need is the largest overlapPeakBytes this supervisor has observed, times a named safety margin. The
+       margin must cover the measured 1.34x of overlap over boot peak, for example 1.5x. It is a new constant,
+       ledgered beside the need, and not a change to any existing threshold.
+    3. Cold-start fallback, when no overlap has been observed yet: use the boot peak sampled at promotion
+       (largestRss, which a cold start also samples) times the same margin. If neither is positive, keep today's
+       named peak_unknown hold. Every deferral and admission names its basis: measured overlap, boot-peak
+       fallback or unknown.
+    4. The active generation's lifetime VmHWM stays ledgered as activePeakBytes, as evidence, but no longer sizes
+       the need. This deliberately supersedes W1-T8378's estimator choice. The overlap measurement is the
+       later-observed evidence that W1-T8378 asked for.
+    5. Container free is judged against min(memory.high, memory.max), less the bytes that cannot be reclaimed,
+       because the kernel throttles and reclaims at memory.high. When memory.high reads max or is unreadable, the
+       ceiling is memory.max, as today. Change the supervisor's default reader only. cgroupFreeMemory's existing
+       callers, serve-memory.ts relief and the serve.memory free_bytes figure, stay unchanged. If the builder
+       finds memory.max is the right ceiling after all, the PR states why with evidence instead of changing it.
+    6. The host admission (judgeServeUpgradeAdmission) receives the same need. Tier 1 and tier 2 shed, spacing,
+       retry, the replace hold and every existing threshold are unchanged.
+  acceptance:
+    - claim: "a handoff whose active generation has a large lifetime high-water mark but a small measured overlap is sized by the overlap times the margin, admitted when that fits, and ledgers overlapPeakBytes on serve.handoff_done"
+      proof: 'grep: test("W1-T9542: a handoff is sized by its measured overlap, not the lifetime peak" in test/serve-sizes-a-handoff-by-its-overlap.test.ts'
+    - claim: "with no overlap observed the need is the promotion boot peak times the margin, and with neither it holds peak_unknown"
+      proof: 'grep: test("W1-T9542: with no overlap observed the need falls back to the boot peak" in test/serve-sizes-a-handoff-by-its-overlap.test.ts'
+    - claim: "container headroom is judged against memory.high when it is below memory.max, and against memory.max when memory.high is max or unreadable"
+      proof: 'grep: test("W1-T9542: container headroom is judged against the soft limit" in test/serve-sizes-a-handoff-by-its-overlap.test.ts'
+  falsifier: |
+    Restore candidatePeak as the need: the fixture's lifetime peak of 5,000 against free 3,000 defers, its
+    overlap of 1,500 would fit, and the first test fails. Read memory.max alone again: a cgroup with memory.high
+    below memory.max reads free above the soft limit, and the third test fails.

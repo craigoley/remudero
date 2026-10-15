@@ -8,6 +8,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
 import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
@@ -33,7 +34,7 @@ import {
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector()];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector(), foreignPauseDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -334,8 +335,13 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
   // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
   const flowRows = [
-    ...await evaluateIdleCapacityDetectors({ ...flowInput, detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID) }),
+    ...await evaluateIdleCapacityDetectors({
+      ...flowInput,
+      detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID && d.id !== FOREIGN_PAUSE_DETECTOR_ID),
+    }),
     ...await evaluateStrandedTaskDetectors({ ...flowInput, detectors }),
+    // W1-T8245: a foreign hold is judged by its idle cost against the instance's own automation holds, from the ledger.
+    ...await evaluateForeignPauseDetectors({ ...flowInput, detectors }),
     // W1-T8264: every hand action is a cause-classed intervention, routed as one incident per class.
     ...await routeOperatorInterventions({ ...flowInput, detectors }),
   ];
@@ -418,7 +424,9 @@ export function daemonSreLaneInput(
   return {
     stateDir: input.stateDir,
     root: input.root,
-    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
+    detectors: SRE_LANE_DETECTORS.map((detector) =>
+      detector.id === "idle-capacity" ? idleCapacityDetector(name)
+        : detector.id === FOREIGN_PAUSE_DETECTOR_ID ? foreignPauseDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))

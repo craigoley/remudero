@@ -2,7 +2,7 @@ import { reconcilePlan } from "./plan-reconcile.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -3304,6 +3304,7 @@ const CI_LEARNING_SLUG_MAX = 72;
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
 export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
+  const lessonsFile = ciLearningLessonsFile(draft.findingId);
   return [
     `- id: ${taskId}`,
     `  title: ${q(draft.title)}`,
@@ -3311,7 +3312,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([CI_LEARNING_LESSONS_FILE], draft.prs.length, population),
+    ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
     // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
@@ -3321,21 +3322,22 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     // parser for a fact the record can simply carry.
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
-    `    - ${CI_LEARNING_LESSONS_FILE}`,
+    `    - ${lessonsFile}`,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
-    `      proof: ${q(`grep: ${draft.findingId} in ${CI_LEARNING_LESSONS_FILE}`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
 
-/** The canonical CI learning shard a drafted remedy names. A concrete path, not the `learnings/*.yaml`
- *  GLOB: a `grep:` proof is a BASIC REGEX, so a glob matches nothing and the criterion would
- *  degrade silently (CLAUDE.md's proof section). Keep this pointed at the existing subsystem
- *  shard: the landing bridge writes plan records, and the eventual worker must land the lesson in
- *  the corpus that `loadLearningsCorpus` actually indexes. */
+/** Historical filings still name this shard; new filings use ciLearningLessonsFile. */
 export const CI_LEARNING_LESSONS_FILE = "learnings/ci.yaml";
+
+/** A finding owns a new path, so independent lessons never append to the same file. */
+export function ciLearningLessonsFile(findingId: string): string {
+  return `learnings/ci.d/${kebabSlug(findingId, CI_LEARNING_SLUG_MAX)}.yaml`;
+}
 
 /** Parse rendered shard bytes back and lint them. EXPORTED so BOTH arms are reachable: every draft
  *  the renderer produces takes the LINT arm, so the UNPARSEABLE one is testable only here — a catch
@@ -3446,7 +3448,7 @@ export type MeasurementCadenceChildOutcome =
       pid: number;
       attempt: number;
       /** The dead run this outcome replaced or dropped, and the rule that decided it. */
-      previous?: { runId: string; pid: number; rule: "restart_once" | "discard" | "unreadable"; detail?: string };
+      previous?: { runId: string; pid: number; rule: "restart_once" | "discard" | "unreadable"; cause?: "recycled" | "unexplained"; detail?: string };
       /** Settles with the child's result row; absent for a discard that started nothing. */
       settled?: Promise<MeasurementCadenceRunResult>;
     };
@@ -3478,6 +3480,26 @@ function readChildState(path: string): ChildStateRead {
 
 function writeChildState(path: string, state: MeasurementCadenceChildState): void {
   writeAtomic(path, `${JSON.stringify(state)}\n`);
+}
+
+function childDeathCause(statePath: string, state: MeasurementCadenceChildState): { cause: "recycled" | "unexplained"; detail: string } {
+  const path = `${statePath.replace(/\.json$/, "")}.recycled.json`;
+  let marker: { runId?: unknown; pid?: unknown; container?: unknown; at?: unknown } | undefined;
+  try {
+    marker = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`measurement cadence recycle marker unreadable: ${String(e)}\n`);
+  } finally {
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`measurement cadence recycle marker removal failed: ${String(e)}\n`);
+    }
+  }
+  const detail = measurementCadenceChildDeathDetail(statePath);
+  return marker?.runId === state.runId && marker.pid === state.pid && typeof marker.container === "string" && typeof marker.at === "string"
+    ? { cause: "recycled", detail: `container ${marker.container} recycled at ${marker.at}; ${detail}` }
+    : { cause: "unexplained", detail };
 }
 
 /** `kill(pid, 0)`: EPERM still means a live process owned by someone else. */
@@ -3544,14 +3566,14 @@ export function measurementCadenceChildRunner(opts: {
       if (isAlive(state.pid)) {
         return { kind: "adopted", runId: state.runId, pid: state.pid, attempt: state.attempt, settled: settle(state.runId, state.pid) };
       }
-      const detail = measurementCadenceChildDeathDetail(opts.statePath);
+      const { cause, detail } = childDeathCause(opts.statePath, state);
       if (state.attempt < MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS) {
         const attempt = state.attempt + 1;
         const { pid, settled } = launch(state.runId, attempt);
-        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once", detail } };
+        return { kind: "restarted", runId: state.runId, pid, attempt, settled, previous: { runId: state.runId, pid: state.pid, rule: "restart_once", cause, detail } };
       }
       writeChildState(opts.statePath, { ...state, status: "discarded", error: `child ${state.pid} died on attempt ${state.attempt}: ${detail}` });
-      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const, detail };
+      const previous = { runId: state.runId, pid: state.pid, rule: "discard" as const, cause, detail };
       return fire ? startFresh(previous) : { kind: "discarded", runId: state.runId, pid: state.pid, attempt: state.attempt, previous };
     },
   };

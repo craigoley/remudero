@@ -38,6 +38,11 @@ process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); proc
   copyFileSync(join(repo, "hooks/pre-push"), join(harness, "hooks/pre-push"));
   chmodSync(join(harness, "hooks/pre-push"), 0o755);
   symlinkSync(join(repo, "node_modules"), join(harness, "node_modules"));
+  // W1-T421: the harness is an ESM package scope, as the real daemon checkout is. Without this
+  // package.json the .ts wrapper below sits in os.tmpdir()'s CommonJS scope, tsx compiles it and the
+  // real src graph it re-exports as CommonJS, and every pre-push child under coverage emits a synthetic
+  // `SF:src/lib/<define:import.meta>` record that coverage-merge-ratchet refuses (#11757, shard 3).
+  put(join(harness, "package.json"), JSON.stringify({ type: "module" }));
   const url = (path: string) => JSON.stringify(pathToFileURL(join(repo, path)).href);
   put(join(harness, "src/lib/git-push.ts"), `import * as p from ${url("src/lib/git-push.ts")};
 export const createPrePushSandboxRunner = (cwd) => p.createPrePushSandboxRunner(cwd, {

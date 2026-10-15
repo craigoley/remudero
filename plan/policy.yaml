@@ -1749,3 +1749,15 @@ issueRevalidation:
     origin: "net-new"
     min: 1
     max: 20
+
+# W1-T8245: who may hold which instance. `automationSetters` lists the setter classes that count as the fleet's
+# OWN automation on that instance (src/lib/foreign-pause-detector.ts); every other class from W1-T7839's actor
+# evidence is foreign, and a hold with no actor evidence is `unverified`, which no policy can list. This names
+# a hold, it never refuses one: the foreign-pause detector judges a foreign hold by the idle lane-slot minutes
+# it caused against what the instance's own automation holds normally cost (ownHistoryBound), not by its clock.
+# Classes: daemon, host-recycle, human-at-a-terminal, agent-session, remote-non-interactive, host-automation.
+# For core: the daemon's freshness/restart drain and the host recycle (deploy/recycle-container.sh).
+pausePolicy:
+  core:
+    automationSetters: [daemon, host-recycle]
+    origin: "operator ruling 2026-10-11: serve work never pauses core; only the daemon's drain and the host recycle do"
