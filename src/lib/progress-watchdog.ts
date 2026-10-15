@@ -51,7 +51,7 @@ export interface ProgressWatchdogVerdict {
 export interface ProgressWatchdogInput {
   rows: ReadonlyArray<Record<string, unknown>>;
   nowMs: number;
-  /** The open-PR count (the newest `sweep.pass` row's `enumerated`), or undefined when unknown. */
+  /** The open-PR count ({@link openPrCountReadingFromRows}), or undefined when unknown. */
   openPrCount: number | undefined;
   openPrCountSource?: OpenPrCountSource;
 }
