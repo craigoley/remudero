@@ -1083,6 +1083,9 @@ export interface LedgerRotationMemo {
   pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
   size: () => number;
+  /** W1-T9647: the retained rows' serialized bytes, accounted when each rotation is kept (a digest's own length,
+   *  the digest text just written, or a sliced measure after a load), so the daemon's memory row never walks it. */
+  approxBytes: () => number;
   retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number;
     digestHits?: number; digestMisses?: number; digestOutcomes?: Record<string, number>; digestErrors?: Record<string, string> };
   reportRetention: (stateDir: string, instance?: string, log?: MemoRetentionLog) => void;
@@ -1099,7 +1102,81 @@ export function setLedgerMemoRetentionContext(context: MemoRetentionContext | un
 /** Lines one turn of the event loop parses while {@link createLedgerRotationMemo} loads a rotation. */
 export const LEDGER_ROTATION_LOAD_LINES_PER_TURN = 10_000;
 
-type MemoEntry = { key: string; read?: LedgerRotationRecords };
+type MemoEntry = { key: string; read?: LedgerRotationRecords; bytes?: number };
+
+/**
+ * W1-T9647: EVERY LEDGER MEMO THIS ISOLATE BUILT, BY HOLDER NAME, held weakly. The daemon's `daemon.memory` row
+ * (daemon-memory-census.ts) sizes them from here, so a memo built deep in a detector or the sweep is named on the
+ * row without its owner registering it. A memo built with no `holder` is named by the file that built it.
+ */
+export type LedgerMemoKind = "rotation-memo" | "incremental-union";
+interface LedgerMemoBookEntry { name: string; kind: LedgerMemoKind; ref: WeakRef<object>; measure: (target: object) => MemoSize }
+const ledgerMemoBook = new Set<LedgerMemoBookEntry>();
+const ledgerMemoFinalizer = new FinalizationRegistry<LedgerMemoBookEntry>((entry) => ledgerMemoBook.delete(entry));
+
+function enterLedgerMemoBook<T extends object>(name: string, kind: LedgerMemoKind, target: T, measure: (target: T) => MemoSize): void {
+  // `measure` takes the target, never closes over it: the book must not keep a dropped memo alive.
+  const entry: LedgerMemoBookEntry = { name, kind, ref: new WeakRef(target), measure: measure as (target: object) => MemoSize };
+  ledgerMemoBook.add(entry);
+  ledgerMemoFinalizer.register(target, entry);
+}
+
+// The book's measures live at module scope ON PURPOSE: an arrow written inside a memo's constructor shares that
+// constructor's closure context, which holds the memo itself, and the book would then keep every memo alive.
+const measureRotationMemo = (memo: LedgerRotationMemo): MemoSize => ({ entries: memo.retention().rows, approx_bytes: memo.approxBytes() });
+const measureIncrementalUnion = (union: { size(): MemoSize }): MemoSize => union.size();
+
+/** The file (and function, when named) that called a memo constructor, read from raw call sites: a stack is never
+ *  formatted, so no source map is decoded for it. */
+export function memoCreationSite(skip: number = 2): string {
+  const priorPrepare = Error.prepareStackTrace;
+  const priorLimit = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = skip + 1;
+    Error.prepareStackTrace = (_error, sites) => sites;
+    const holder: { stack?: unknown } = {};
+    Error.captureStackTrace(holder);
+    const site = (holder.stack as NodeJS.CallSite[] | undefined)?.[skip];
+    const file = site?.getFileName();
+    if (!file) return "unknown";
+    const fn = site?.getFunctionName();
+    return `${basename(file)}${fn ? `#${fn}` : ""}`;
+  } finally {
+    Error.prepareStackTrace = priorPrepare;
+    Error.stackTraceLimit = priorLimit;
+  }
+}
+
+/** {@link approximateMemoBytes} of kept rows, or undefined for rows JSON cannot serialize (a BigInt): such a rotation
+ *  stays kept and is reported unsized, never failed. */
+function memoRowBytes(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  try {
+    return approximateMemoBytes(rows);
+  } catch {
+    // deliberate: the only throw is JSON's on an unserializable value; undefined is the caller's `unsized`.
+    return undefined;
+  }
+}
+
+/** One holder name's memos in this isolate, summed: how many are alive, their entries and their accounted bytes. */
+export interface LedgerMemoHolderReading { name: string; kind: LedgerMemoKind; instances: number; entries: number; approx_bytes: number }
+
+/** W1-T9647: every live memo in {@link ledgerMemoBook}, summed per kind and name. A collected memo has left the book. */
+export function ledgerMemoHolders(): LedgerMemoHolderReading[] {
+  const byName = new Map<string, LedgerMemoHolderReading>();
+  for (const entry of ledgerMemoBook) {
+    const target = entry.ref.deref();
+    if (target === undefined) continue;
+    const size = entry.measure(target);
+    const key = `${entry.kind}:${entry.name}`;
+    const prior = byName.get(key) ?? { name: entry.name, kind: entry.kind, instances: 0, entries: 0, approx_bytes: 0 };
+    prior.instances += 1;
+    prior.entries += size.entries;
+    prior.approx_bytes += size.approx_bytes;
+    byName.set(key, prior);
+  }
+  return [...byName.values()];
+}
 
 const ROTATION_DIGEST_CODEC = "rotation-digest-codec";
 type DigestCodecRequest = { id: number; operation: "parse" | "stringify"; value: unknown };
@@ -1225,7 +1302,7 @@ export function createLedgerRotationMemo(
   };
   const digestDirectory = (stateDir: string): string => join(stateDir, "cache", "rotation-digests", encodeURIComponent(io.holder!).replaceAll(".", "%2E"));
   const digestPath = (entry: LedgerCorpusEntry): string => join(digestDirectory(dirname(entry.path)), `${basename(entry.path)}.json`);
-  const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<LedgerRotationRecords | undefined> => {
+  const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<{ read: LedgerRotationRecords; bytes: number } | undefined> => {
     let raw: Buffer;
     try {
       raw = await nodeReadFile(digestPath(entry));
@@ -1255,15 +1332,18 @@ export function createLedgerRotationMemo(
       return undefined;
     }
     digestHits++;
-    return digest.read as LedgerRotationRecords;
+    return { read: digest.read as LedgerRotationRecords, bytes: raw.length };
   };
-  const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<void> => {
+  /** Resolves to the digest text's length once it is serialized (whether or not it then lands), else undefined. */
+  const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<number | undefined> => {
+    let serialized: number | undefined;
     const path = digestPath(entry);
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
       await nodeMkdir(dirname(path), { recursive: true, mode: 0o700 });
       const text = await rotationDigestCodec<string>("stringify", { schema: 1, holder: io.holder,
         reducerVersion: io.durableDigest!.reducerVersion, archive: basename(entry.path), key, read });
+      serialized = text.length;
       await nodeWriteFile(temp, text,
       { flag: "wx", mode: 0o600, flush: true });
       await nodeRename(temp, path);
@@ -1279,6 +1359,18 @@ export function createLedgerRotationMemo(
         if (reason !== "ENOENT") outcome("cleanupFailed", reason);
       }
     }
+    return serialized;
+  };
+  /** The kept rows' bytes, measured a slice per turn, like the load that kept them. */
+  const measureRows = async (rows: ReadonlyArray<Record<string, unknown>>): Promise<number | undefined> => {
+    let bytes = 0;
+    for (let at = 0; at < rows.length; at += LEDGER_ROTATION_LOAD_LINES_PER_TURN) {
+      const slice = memoRowBytes(rows.slice(at, at + LEDGER_ROTATION_LOAD_LINES_PER_TURN));
+      if (slice === undefined) return undefined;
+      bytes += slice;
+      await yieldTurn();
+    }
+    return bytes;
   };
   const pruneDigests = async (stateDir: string): Promise<void> => {
     try {
@@ -1302,7 +1394,7 @@ export function createLedgerRotationMemo(
       if (io.durableDigest) {
         const digest = await readDigest(entry, key);
         if (digest) {
-          memo.set(entry.path, { key, read: digest });
+          memo.set(entry.path, { key, read: digest.read, bytes: digest.bytes });
           return;
         }
         digestMisses++;
@@ -1359,8 +1451,11 @@ export function createLedgerRotationMemo(
         else await pipeline(source, consume);
       }
       const read = { rows, torn, tornLines };
-      memo.set(entry.path, { key, read });
-      if (io.durableDigest) await writeDigest(entry, key, read);
+      const kept: MemoEntry = { key, read };
+      memo.set(entry.path, kept);
+      const written = io.durableDigest ? await writeDigest(entry, key, read) : undefined;
+      kept.bytes = written ?? await measureRows(rows);
+      if (kept.bytes === undefined) outcome("unsized");
     } catch {
       // deliberate: a failed load leaves a keyed marker, so the next pass parses this rotation inline and a
       // corrupt archive still lands in the union's `unread` exactly as it would without a memo.
@@ -1370,6 +1465,11 @@ export function createLedgerRotationMemo(
 
   const result: LedgerRotationMemo = {
     size: () => memo.size,
+    approxBytes: () => {
+      let bytes = 0;
+      for (const entry of memo.values()) bytes += entry.bytes ?? 0;
+      return bytes;
+    },
     reportRetention: (stateDir, instance, log) => {
       if (!io.holder) return;
       const context = memoRetentionContext;
@@ -1440,7 +1540,8 @@ export function createLedgerRotationMemo(
           return { rows: [], torn: 0, tornLines: [] };
         }
         const parsed = parse();
-        const fresh = { key, read: { rows: reduce(parsed.rows), torn: parsed.torn, tornLines: parsed.tornLines } };
+        const rows = reduce(parsed.rows);
+        const fresh = { key, read: { rows, torn: parsed.torn, tornLines: parsed.tornLines }, bytes: memoRowBytes(rows) };
         memo.set(entry.path, fresh);
         touched.set(entry.path, fresh);
         return fresh.read;
@@ -1461,6 +1562,7 @@ export function createLedgerRotationMemo(
       };
     },
   };
+  enterLedgerMemoBook(io.holder ?? memoCreationSite(), "rotation-memo", result, measureRotationMemo);
   return result;
 }
 
@@ -1927,7 +2029,9 @@ export function createIncrementalLedgerUnion(
     states.set(stateKey, state);
     return result;
   };
-  return Object.assign(reader, { size: states.size });
+  const sized = Object.assign(reader, { size: states.size });
+  enterLedgerMemoBook(opts.holder, "incremental-union", sized, measureIncrementalUnion);
+  return sized;
 }
 
 export function resolveLedgerUnion(
