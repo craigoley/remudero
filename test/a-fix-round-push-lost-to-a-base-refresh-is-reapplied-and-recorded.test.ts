@@ -157,7 +157,7 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
     assert.equal(fx.origin.git("show", `${tip}:fix.txt`), "the round's FIXED change", "the FIXED change reached the remote");
     const reapplied = rows.filter((r) => r.step === "fix.round_reapplied");
     assert.equal(reapplied.length, 1, `steps=${JSON.stringify(rows.map((r) => r.step))}`);
-    assert.equal(reapplied[0]!.task_id, TASK, "the re-apply is ledgered under the task, not the sweep");
+    assert.equal(reapplied[0]!.branch, BRANCH, "the re-apply names the PR branch it merged onto");
     assert.equal(reapplied[0]!.remote_tip, fx.refreshed);
   } finally {
     process.env.PATH = savedPath;

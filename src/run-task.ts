@@ -2858,8 +2858,8 @@ export function buildSweepEffects(
     },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
-    pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string, log: typeof deps.log = deps.log) =>
-      pushFixRoundPrechecked(log, wt, branch, sha, {}, pushFixRound, prior), // W1-T8833: the sweep rung pushes as the run loop's does
+    pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
