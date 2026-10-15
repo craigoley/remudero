@@ -293,11 +293,7 @@ if [ ! -d "${STATE_DIR}" ]; then
   exit 1
 fi
 
-# W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), serve's code dir defaults
-# to <scratch>/rmd/<key>/serve-repo, re-cloned by the container when a deallocate empties it, and the
-# daemon checkout it must never equal may be the daemon's scratch one. An explicit RMD_SERVE_REPO_DIR
-# still wins, and every refusal below still applies to whichever dir is chosen.
-SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero" # W1-T9617: scratch-checkouts on moves both code dirs (scratch-mounts.sh)
 if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
   if [ -z "${RMD_SERVE_REPO_DIR:-}" ] && SERVE_SCRATCH_REPO_DIR="$(scratch_code_dir "${STATE_DIR}" "${CONTAINER_NAME}")"; then
