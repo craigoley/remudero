@@ -16,6 +16,7 @@ test("a host test slot lease is readable by peer accounts but never group or wor
   const fx = fixture(); try {
     assert.equal(statSync(fx.path).mode & 0o022, 0);
     assert.equal(statSync(fx.path).mode & 0o600, 0o600);
+    assert.equal(statSync(fx.path).mode & 0o044, 0o044 & ~process.umask());
     fx.lease.refresh(); assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).pid, process.pid);
   } finally { fx.cleanup(); }
 });
@@ -46,5 +47,13 @@ test("an unavailable or malformed own lease record is reported without following
     writeFileSync(fx.path, "not-json"); fx.lease.refresh(); fx.lease.release();
     assert.equal(readFileSync(fx.path, "utf8"), "not-json");
     assert(fx.logs.some(x => JSON.parse(x).step === "test_slot.refresh_lost"));
+  } finally { fx.cleanup(); }
+});
+test("a missing canonical lease path closes only the owned descriptor and reports refresh failure", () => {
+  const fx = fixture(); try {
+    const orphan = join(fx.root, "owned-orphan"), before = readFileSync(fx.path, "utf8");
+    renameSync(fx.path, orphan); fx.lease.refresh(); fx.lease.release();
+    assert.equal(readFileSync(orphan, "utf8"), before);
+    assert(fx.logs.some(x => JSON.parse(x).step === "test_slot.refresh_failed"));
   } finally { fx.cleanup(); }
 });

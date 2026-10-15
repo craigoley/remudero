@@ -560,7 +560,13 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             // The exclusive descriptor remains the heartbeat target, never a later path replacement.
             const fd = openSync(path, "wx+", 0o644); openedFd = fd;
             const writeRecord = (body: string): void => {
-              writeSync(fd, body, 0, "utf8"); ftruncateSync(fd, Buffer.byteLength(body));
+              const bytes = Buffer.from(body); let offset = 0;
+              while (offset < bytes.length) {
+                const written = writeSync(fd, bytes, offset, bytes.length - offset, offset);
+                if (written < 1) throw new Error("test slot record write made no progress");
+                offset += written;
+              }
+              ftruncateSync(fd, bytes.length);
             };
             writeRecord(JSON.stringify(record()));
             const waitedMs = clock.now() - startedAt;
