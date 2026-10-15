@@ -141,6 +141,7 @@ async function realChild(label: string, mode: string, abort: SpawnRunChildPorts[
   writeFileSync(driver, DRIVER);
   const env: NodeJS.ProcessEnv = { ...process.env, DRIVER_MODE: mode };
   delete env.NODE_TEST_CONTEXT; // a test runner's marker would make every child row's actor `test`
+  env.NODE_V8_COVERAGE = undefined; // delete is a no-op under a coverage session; the child must not enrol
   delete env.REMUDERO_WORKER_SCOPE; // and a worker's marker (this suite can run inside one) outranks run_child
   const signals: Array<[string, number]> = [];
   const launched = await spawnRunChild(fx.input, {

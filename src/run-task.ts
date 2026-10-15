@@ -39983,13 +39983,8 @@ export async function daemonCommand(
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
         checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
-        // W1-T1062 (THE DISPATCH-PATH THREADING FIX): `owner: target.owner` is the whole task.
-        // Without it, `target.owner` (resolved above, possibly a FOREIGN owner from an
-        // owner-qualified `--repo owner/name`) never reaches `runTask` — the dispatched run
-        // would silently fall back to `resolveOwner()` (THIS checkout's own owner), cloning and
-        // opening its PR against the WRONG owner. That partial fix is worse than today's honest
-        // self-owner-only behaviour and is exactly what test/owner-dispatch-threading.test.ts
-        // refuses.
+        // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
+        // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
@@ -39997,8 +39992,7 @@ export async function daemonCommand(
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
           });
           if (inChild) return inChild.settled;
-          // W1-T9082: under sweep.runChild.mode shadow, one probe child measures what a run child would cost beside this run.
-          // It starts unawaited and never rejects, so it cannot touch the run; the run's own plan sync below hands it the plan.
+          // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
@@ -40011,13 +40005,9 @@ export async function daemonCommand(
             pairedTrialHost: "daemon",
             skipGitSync: !!flagValue(rest, "--plan"),
             owner: target.owner,
-            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo. Without this each lane built
-            // its own COLD `buildBatchedGithub` and paid a full-repo walk SYNCHRONOUSLY before its
-            // first yield — so `Promise.allSettled(admitted.map(runOne))` could not even ENTER
-            // lane 2 until lane 1's walk finished, and three admitted lanes minted their run ids
-            // 78 s apart (`dispatch.concurrent_set` names all three at `lane_count: 3`). Same fix
-            // and same reason as `buildInboxDraftHook`'s once-per-daemon-start construction; see
-            // `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
+            // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo — a per-lane COLD gateway paid a
+            // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
+            // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
             // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
             // fetch + ONE plan parse instead of paying for it per lane. Inert when

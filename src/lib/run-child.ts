@@ -645,7 +645,12 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
         return lost(`the child exited (${exit.code ?? exit.signal}) in state ${read.ok ? read.value.state : `unreadable: ${read.detail}`}`);
       }
       const classified = classifyRunDir(a.dir, a.probe);
-      if (classified.kind === "lost" || classified.kind === "dead") lost(classified.detail ?? classified.kind);
+      if (classified.kind === "lost" || classified.kind === "dead") {
+        // The status was read BEFORE the pid probe: a child that wrote `done` and exited in between reads as gone. Re-read first.
+        const settledSince = readStatus(a.dir);
+        if (settledSince.ok && isTerminalState(settledSince.value.state)) return settleTerminal(settledSince.value);
+        lost(classified.detail ?? classified.kind);
+      }
     };
     a.child.once("exit", (code, signal) => { exit = { code, signal }; check(); });
     a.child.once("error", (error) => {
