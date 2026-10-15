@@ -270,6 +270,46 @@ export function buildIntoStore(treeRoot: string, opts: BuildIntoStoreOptions): P
   return pass;
 }
 
+/**
+ * W1-T9601: what one request to fill the store for a tree answered. `requested` started a build, `joined` found one
+ * running for the same hash, and `already-tried` found one this process already finished for it.
+ */
+export type OwnTreeFill = "requested" | "joined" | "already-tried";
+
+export interface OwnTreeFillOptions extends Omit<BuildIntoStoreOptions, "liveTrees"> {
+  /** Who asked, ledgered as `source` on child_entry.store_build_requested. */
+  source: string;
+  /** The build. Default: {@link buildIntoStore}, which never rejects. */
+  build?: (treeRoot: string, opts: BuildIntoStoreOptions) => Promise<StoreBuildResult>;
+}
+
+/** Per (store, tree, source hash): the build still running, or `settled` once it finished, whatever its outcome. */
+const ownTreeFills = new Map<string, Promise<StoreBuildResult> | "settled">();
+
+/**
+ * W1-T9601: build `treeRoot` into the store at most once per (store, tree, source hash) in this process, unawaited.
+ * `hash` is what the missed lookup computed. A `store-empty` miss computed none, so it keys on the tree alone until
+ * the build reports a hash, and that hash is then marked too. A finished build is never retried at its hash, even
+ * a failed one: only a miss at a different hash asks again. Retention after it keeps the hash the tree runs (`liveTrees`).
+ */
+export function fillStoreForOwnTree(treeRoot: string, hash: string | undefined, opts: OwnTreeFillOptions): OwnTreeFill {
+  const tree = resolve(treeRoot);
+  const base = `${resolve(opts.storeRoot)}\0${tree}\0`;
+  const key = base + (hash ?? "");
+  const seen = ownTreeFills.get(key);
+  if (seen !== undefined) return seen === "settled" ? "already-tried" : "joined";
+  opts.log?.("child_entry.store_build_requested", { source: opts.source, tree, hash: hash ?? null });
+  const build = opts.build ?? buildIntoStore;
+  const buildOpts: BuildIntoStoreOptions = { storeRoot: opts.storeRoot, log: opts.log, runScript: opts.runScript, clock: opts.clock, liveTrees: () => [tree] };
+  const pass = build(tree, buildOpts).then((result) => {
+    ownTreeFills.set(key, "settled");
+    if ("hash" in result && result.hash !== undefined) ownTreeFills.set(base + result.hash, "settled");
+    return result;
+  });
+  ownTreeFills.set(key, pass);
+  return "requested";
+}
+
 /** The source hash a tree's own published manifest names, if any: what that live tree runs, read without hashing. */
 function liveTreeHash(tree: string): string | undefined {
   try {
