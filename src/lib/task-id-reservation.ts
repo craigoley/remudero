@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId, MAX_ALLOCATABLE_TASK_ID } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 import { systemClock, type Clock } from "./clock.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 
 /**
  * Atomic reservation of a minted task id — the piece {@link mintNextTaskIdWithHistory} skips. The
@@ -1222,21 +1223,17 @@ export function gitReservationRunnerAsync(
   const timeoutMs = opts.timeoutMs ?? RESERVATION_ANCHOR_GIT_TIMEOUT_MS;
   return (args) =>
     new Promise((resolve) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
-        clearTimeout(timer);
-        if (!err) return resolve({ status: 0, stdout, stderr });
-        if (timedOut) {
+        bound.cancel();
+        // W1-T9651: a git stopped at its bound is a timeout even when it exits 0 after the signal.
+        if (bound.timedOut) {
           const said = stderr.trim() ? ` git said: ${stderr.trim()}` : "";
           return resolve({ status: 1, stdout, stderr: `git ${args[0]} timed out after ${timeoutMs}ms and was killed.${said}` });
         }
+        if (!err) return resolve({ status: 0, stdout, stderr });
         const code = (err as { code?: unknown }).code;
         return resolve({ status: typeof code === "number" ? code : 1, stdout, stderr: stderr || err.message });
       });
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }

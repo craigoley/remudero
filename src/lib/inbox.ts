@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -27,7 +28,7 @@ import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
@@ -2468,24 +2469,19 @@ export function gitGrepAnchorTrueAsync(
       ? [...new Set(pass.anchors.filter((a) => (a.path || null) === (anchor.path || null) && batchableAnchor(a)).map((a) => a.pattern))]
       : [anchor.pattern];
     const args = ["grep", "-I", ...(grouped ? ["--no-color", "--no-line-number", "--no-column", "--no-heading", "--no-break", "-h"] : ["-q"]), ...patterns.flatMap((pattern) => ["-e", pattern]), ref, ...(anchor.path ? ["--", anchor.path] : [])];
-    let timedOut = false;
     let done = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let bound: LoopBound | undefined;
     const child = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
       done = true;
-      clearTimeout(timer);
-      if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
+      bound?.cancel();
+      if (bound?.timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
       if (!err) return resolve(grouped ? stdout : "matched");
       // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
       if ((err as { code?: unknown }).code === 1) return resolve("");
       reject(err);
     });
     if (done) return;
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child);
-    }, timeoutMs);
+    bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
   });
   if (grouped && pending === undefined) batches!.set(groupKey, result);
   return result.then(

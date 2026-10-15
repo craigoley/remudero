@@ -18,9 +18,9 @@
 // @source-text-subject: src/**/*.ts — the claim is a property of EVERY function the loop can reach,
 // including paths no single execution drives; the same shape as test/gh-transport-census.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
+
+import { loopReachable, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -282,58 +282,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   writePrBodyRest: 1,
 };
 
-interface Fn {
-  name: string;
-  file: string;
-  body: string;
-}
-
-/** Blank comment lines, keeping line numbers. Block comments are recognised only where they START a
- *  line: a naive `/\*...\*\/` regex also fires on glob strings such as "src/**\/*.ts" and swallows code. */
-function stripComments(source: string): string {
-  let inBlock = false;
-  return source
-    .split("\n")
-    .map((line) => {
-      if (inBlock) {
-        if (line.includes("*/")) inBlock = false;
-        return "";
-      }
-      if (/^\s*\/\*/.test(line)) {
-        if (!line.includes("*/", line.indexOf("/*") + 2)) inBlock = true;
-        return "";
-      }
-      return /^\s*\/\//.test(line) ? "" : line;
-    })
-    .join("\n");
-}
-
-function trackedSourceFiles(): string[] {
-  const sub = "ls" + "-files";
-  return execFileSync("git", [sub, "src/**/*.ts", "src/*.ts"], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
-}
-
-/** Column-0 function declarations (generators included) and column-0 arrow consts; a body runs to the
- *  next column-0 declaration (a closing brace at column 0 is NOT a boundary: a multi-line parameter type
- *  closes with one). */
-function topLevelFunctions(): Fn[] {
-  const fns: Fn[] = [];
-  const decl =
-    /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/;
-  const NEXT_DECL = /^(?:export\s+|declare\s+)?(?:async\s+)?(?:function|const|let|var|class|interface|type|enum|abstract)\b|^export\s/;
-  for (const file of trackedSourceFiles()) {
-    const lines = stripComments(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")).split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const m = decl.exec(lines[i]!);
-      if (!m) continue;
-      let end = i + 1;
-      while (end < lines.length && !NEXT_DECL.test(lines[end]!)) end++;
-      fns.push({ name: (m[1] ?? m[2])!, file, body: lines.slice(i, end).join("\n") });
-    }
-  }
-  return fns;
-}
-
 /** A synchronous spawn or block: the node primitives, the sync gh wrappers (`ghJsonAsync`/`ghExecAsync`
  *  do not match — the `(` must follow the name), the blocking sleep, and `Atomics.wait`. */
 const SYNC_SPAWN_CALL =
@@ -352,26 +300,6 @@ const SYNC_SPAWN_VALUE =
 function syncSpawnCalls(fn: Fn): number {
   const defines = /^(?:export\s+)?function\s+defaultBlockingSleepSync\(/.test(fn.body) ? 1 : 0;
   return (fn.body.match(SYNC_SPAWN_CALL) ?? []).length + (fn.body.match(SYNC_SPAWN_VALUE) ?? []).length - defines;
-}
-
-/** Name-based fixed point: a function is reachable when its identifier appears in a reachable body. */
-function loopReachable(fns: Fn[], seed: string): Set<string> {
-  const byName = new Map<string, Fn[]>();
-  for (const f of fns) byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
-  const reached = new Set<string>([seed]);
-  const queue = [seed];
-  while (queue.length) {
-    const name = queue.pop()!;
-    for (const f of byName.get(name) ?? []) {
-      for (const id of f.body.match(/[A-Za-z_$][\w$]*/g) ?? []) {
-        if (byName.has(id) && !reached.has(id)) {
-          reached.add(id);
-          queue.push(id);
-        }
-      }
-    }
-  }
-  return reached;
 }
 
 /** Synchronous-spawn calls per function NAME (same-named functions in different files sum). */
