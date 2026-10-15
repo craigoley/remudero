@@ -1593,7 +1593,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -2504,28 +2504,6 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
-/** W1-T9681: the newest `review.posted` verdict naming this PR's URL — a plan filing or hand PR has no task id. The
- *  live file answers first; on a miss the archive union does, since a verdict rotated out of the live file is not gone. */
-async function priorPostedReview(ledgerPath: string, pr: OpenPrView): Promise<Record<string, unknown> | undefined> {
-  const names = (line: Record<string, unknown>): boolean =>
-    line.step === "review.posted" && reviewRowNamesPr(line, pr.taskId, pr.prUrl) && Boolean(line.decision_verdict);
-  const live = readLedgerLines(ledgerPath).filter(names).at(-1);
-  if (live) return live;
-  const key = pr.taskId === undefined ? "" : `|"task_id":${JSON.stringify(pr.taskId)}`;
-  const quoted = `"pr_url":${JSON.stringify(pr.prUrl)}${key}`.replace(/[.*+?^${}()[\]\\]/g, "\\$&");
-  const union = await resolveLedgerUnionAsync(dirname(ledgerPath), new RegExp(quoted), { step: "review.posted" });
-  return parseLedger(union.matches.join("\n")).filter(names).at(-1);
-}
-
-/** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
-function missingReuseFact(prior: ReviewVerdict | undefined, inputs: Partial<ReviewReuseInputs>): string | undefined {
-  if (!prior) return "no-prior-verdict";
-  if (prior.state !== "success" && prior.state !== "failure") return "prior-not-terminal";
-  if (!Array.isArray(prior.criteria)) return "criteria-unreadable";
-  if (inputs.currentOwnDiffDigest === undefined) return "own-diff-digest-unread";
-  return inputs.currentMergeBaseSha === undefined ? "merge-base-unread" : undefined;
-}
-
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -2670,8 +2648,8 @@ export function buildSweepEffects(
 
     if (mode.kind === "discriminate-only") {
       const reuseInputs = pr as OpenPrView & Partial<ReviewReuseInputs>;
-      const prior = (await priorPostedReview(deps.ledgerPath, pr))?.decision_verdict as ReviewVerdict | undefined;
-      const missing = missingReuseFact(prior, reuseInputs);
+      const prior = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
+      const missing = missingReviewReuseFact(prior, reuseInputs);
       if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
 
       let worktreePath: string | undefined;
@@ -2786,7 +2764,7 @@ export function buildSweepEffects(
     if (mode.kind !== "reuse") {
       return fallbackToFullReview("unknown review reuse mode");
     }
-    const verdict = (await priorPostedReview(deps.ledgerPath, pr))?.decision_verdict as ReviewVerdict | undefined;
+    const verdict = (await priorPostedReviewRow(deps.ledgerPath, pr.taskId, pr.prUrl))?.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure")) {
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling);
