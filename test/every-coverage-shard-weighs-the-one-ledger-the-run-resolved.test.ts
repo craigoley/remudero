@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { nativeGhAndJq } from "./helpers/native-gh-and-jq.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const cli = join(root, "scripts/test-tier-manifest.mjs");
@@ -272,24 +273,6 @@ test("the resolver shell distinguishes API errors from a successful empty lookup
   }
 });
 
-// The shared refusal shim is intentionally bypassed ONLY by a native binary with a loopback
-// URL and an empty private config. Script wrappers never run; no real credential env is inherited.
-function nativeCli(name: "gh" | "jq"): string {
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    const candidate = join(directory, name);
-    let fd: number | undefined;
-    try {
-      fd = openSync(candidate, "r");
-      const magic = Buffer.alloc(4);
-      if (readSync(fd, magic, 0, magic.length, 0) !== magic.length) continue;
-      if (magic[0] === 0x23 && magic[1] === 0x21) continue;
-      return realpathSync(candidate);
-    } catch { /* Missing PATH entries are not a binary; an absent native CLI fails below. */ }
-    finally { if (fd !== undefined) closeSync(fd); }
-  }
-  throw new Error(`the loopback integration control requires the actual ${name} binary`);
-}
-
 function lookupParts(name: "EXISTING" | "LEDGER_ID", body: string) {
   const startToken = `${name}="$(gh api `;
   const start = body.indexOf(startToken);
@@ -306,8 +289,7 @@ function lookupParts(name: "EXISTING" | "LEDGER_ID", body: string) {
 }
 
 test("real gh pagination and external jq resolve the emitted global ledger queries over loopback", async () => {
-  const gh = nativeCli("gh");
-  const jq = nativeCli("jq");
+  const { gh, jq } = nativeGhAndJq();
   const at = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ledger-http-`));
   const requests = join(at, "requests");
   writeFileSync(requests, "");
