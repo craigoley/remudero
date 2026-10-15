@@ -1,0 +1,53 @@
+- id: W1-T9645
+  title: "A BAKED-PATH FIX IS RECYCLED IN, NOT WAITED OUT: on 2026-10-15 W1-T9623's entrypoint fix (f3f591c, image built 11:57Z) did not deploy; every 5-minute watchdog tick said the busy daemon tree da9af5ecc lacked the install head's deploy logic and deferred with deploy-logic lag 1803s, 2082s, 2378s and pressure 9, 10, 11 below a fixed 36, waiting on the daemon's own freshness restart, which keeps the old image's baked entrypoint and so can never ship a baked path; the deferral now hands a baked-path or priority-0 lag to deploy-run's busy recycle at once, and the 36 is replaced by the lag a freshness restart has actually cleared in"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern -- when the host watchdog stops waiting for the daemon's own restart to carry deploy logic
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: the W1-T9623 boot fix sat unshipped behind the deploy-logic lag deferral while core was recycled by hand"
+  plan_refs: [W1-T9623, W1-T6249, W1-T6282, W1-T3240, W1-T9094]
+  files: [deploy/install-host-units.sh, test/a-baked-path-fix-is-recycled-in-not-waited-out.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only, journalctl -u rmd-fleet-watchdog.service):
+    - 12:29:56Z, 12:34:35Z, 12:39:31Z: "deploy code -- busy, and daemon tree da9af5ecca04 lacks install head
+      <7a9076fd4|febd1bb34|84bbbbe73>'s deploy logic (deploy/ bin/ src/lib/deployer.ts ...); deferring." then
+      "deploy-logic lag 1803s / 2082s / 2378s at da9af5ecc, pressure 9 / 10 / 11 < 36; the daemon's own freshness
+      restart has it."
+    - git diff --name-only da9af5ecc f3f591c63: deploy/entrypoint.sh (W1-T9623, priority 0), a path in
+      IMAGE_BAKED_PATHS. The operator recycled core by hand to ship it.
+    READ at origin/main 84bbbbe73, deploy/install-host-units.sh:
+    - deploy_code_busy_handoff returns 1 whenever the daemon tree's DEPLOY_LOGIC_PATHS differ from the install head's,
+      so the tick ends before `rmd deploy-run --image-drift-only`, the only path that recycles onto a new image.
+    - deploy_logic_lag_pressure waits until (now - since) * 18 / 3600 >= 36, a fixed two-hour bound, for the daemon's
+      own freshness restart. That restart re-execs node in the SAME container, so deploy/entrypoint.sh, deploy/Dockerfile
+      and every other BUILD_ROLE_IMAGE_BAKED_PATHS input stay at the old image's copy: for a baked path the wait cannot
+      end in the fix, only in the 36 or a hand recycle.
+    INFERRED: the deferral protects "deploy code never older than it deploys" (W1-T4917/W1-T6282) for mounted deploy
+    logic, and is wrong for a change only a recycle can carry.
+  design: |
+    In deploy_code_busy_handoff, when the deploy-logic diff between the daemon tree and the install head names any path in
+    a launcher copy of BUILD_ROLE_IMAGE_BAKED_PATHS (src/lib/deploy-judge.ts; a test holds the two lists equal), or a
+    commit in daemon_head..install_head carries a `Remudero-Task:` trailer whose plan shard has priority below 1, the
+    handoff returns 0 and names the reason, so the tick asks deploy-run, which recycles through recycle-container.sh's
+    pause-and-drain at the next drain (W1-T6249), and only once the image that carries the change is published.
+    deploy_logic_lag_pressure keeps the recycle backstop but replaces the fixed 36 with the longest lag a freshness
+    restart has actually cleared in: each time the daemon tree's head moves off a lagging head WITHOUT a watchdog recycle
+    in between, the cleared lag is appended to state/deploy-logic-lag-history (newest entries only, a physical bound),
+    and the bound is the longest of them. With no history it is today's two horizons. A lag cleared by the watchdog's own
+    recycle is not recorded, so the bound cannot feed on itself.
+  acceptance:
+    - claim: "a busy tick whose deploy-logic lag includes a baked path or a priority-0 task asks deploy-run instead of deferring"
+      proof: "grep: a baked-path lag asks deploy-run instead of waiting in test/a-baked-path-fix-is-recycled-in-not-waited-out.test.ts"
+    - claim: "the recycle backstop's bound is the longest lag a freshness restart has cleared in, not a fixed 36"
+      proof: "grep: the lag backstop is the longest lag a freshness restart cleared in test/a-baked-path-fix-is-recycled-in-not-waited-out.test.ts"
+  falsifier: |
+    Drop the baked-path arm: the tick defers with "the daemon's own freshness restart has it" for a deploy/entrypoint.sh
+    change, and the first test fails. Restore the fixed 36: a history of short clears still waits two hours, and the
+    second test fails.
