@@ -178,7 +178,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   mergeBaseFor: 1,
   mergeDirectViaRest: 1,
   mergeShaNow: 1,
-  mergedPrsSince: 1,
   mergedTriageSubjects: 1,
   openPrFileScopes: 1,
   openPrMintTexts: 1,
