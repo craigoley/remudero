@@ -1,0 +1,60 @@
+- id: W1-T9674
+  title: "A WITHHELD REVIEW SAYS 'reservation unreadable (UNKNOWN)' AND NOTHING ELSE — the reason taskIdOwnershipFindings records (which git verb failed and what git said) never reaches the status, the ledger or the logs, so #12011 (W1-T9645) and #12024 (W1-T9647) were withheld twice each on 2026-10-15 although refs/rmd-id/W1-T9645 exists and names #12011's own branch, and at least 25 such refusals since 2026-10-04 left no cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — what an UNKNOWN reservation read reports and records; the ownership verdict itself is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: the review lane withheld #12011 while refs/rmd-id/W1-T9645 exists"
+  plan_refs: [W1-T4414, W1-T6076, W1-T9654]
+  files: [src/lib/review.ts, src/lib/task-id-reservation.ts, test/an-unknown-reservation-names-the-git-read-that-failed.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: a withheld review holds a ready filing until a human reads the anchor by hand
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger, read-only; git from the Mac):
+    - refs/rmd-id/W1-T9645 is cbfc26fb6, a one-commit chain whose holder line names branch=plan-file-1792068079473.
+      That is #12011's own head branch, so the verdict should read as owned.
+    - #12011 was reviewed `success` at head 629a8d6c9 (13:17:31Z). After one shard edit (2a61f5c40) it got
+      review.post_refused "remudero-review: FAIL — id W1-T9645 reservation unreadable (UNKNOWN) — verdict withheld"
+      at 14:05:11Z and again at 15:17:23Z.
+    - #12024 (W1-T9647) was refused the same way at 14:04:42Z and 15:17:21Z. #12021 passed ownership at 14:05:44Z.
+    - Across the newest 12 archives plus the live file there are at least 25 such refusals since 2026-10-04 (e.g. #9058,
+      #9733, #10003, #11587, #11590, #11930, #11986). No ledger row and no daemon log line in the 15:16-15:17Z window
+      names a cause.
+    READ at origin/main cd482d436:
+    - src/lib/task-id-reservation.ts readReservationAnchors / readReservationAnchorsAsync read the anchor in three
+      steps: `ls-remote origin refs/rmd-id/<id>...`, `fetch --quiet --no-tags origin refs/rmd-id/<id>`, then
+      `log --first-parent -n 16 --format=%B%x00 <sha>`. A failed ls-remote, fetch or log returns
+      `{ status: "unknown", reason: <stderr> }`.
+    - src/lib/review.ts reviewTaskIdEvidenceAsync adds its own unknown reasons: head-ref-unavailable,
+      head-checkout-unavailable, base-unreadable and baseline-unreadable (a ReviewGitTimeout).
+    - judgeTaskIdOwnership keeps `reason` on the finding. failSummary then renders only
+      `id <id> reservation unreadable (UNKNOWN) — verdict withheld`, and review.post_refused records that string.
+      The reason is dropped at the last step.
+    So the cause of these refusals is not recoverable from any record. Without it, a fix to the read itself would
+    be a guess.
+  design: |
+    1. The withheld status names the failed step in the 140-character description, e.g. "fetch failed",
+       "ls-remote failed", "base read timed out" or "no head checkout", after the id.
+    2. review.post_refused (and the review's own ledger row for the ownership evidence) carries each unknown finding
+       as `{ id, reason }`, with git's stderr tail in full.
+    3. readReservationAnchors* name the verb in the reason they return ("fetch: <stderr>"), so one string says which
+       of the three git calls failed.
+    4. The ownership verdict is unchanged: unknown still withholds, never passes, and never fails as foreign.
+    5. Once the reason is recorded, the next refusal names its cause. If a pattern repeats, the fix to the read is a
+       follow-up task citing those rows, not this one.
+  acceptance:
+    - claim: "an unknown reservation read names its failed git step in the withheld status and the ledger row"
+      proof: 'unit test: test/an-unknown-reservation-names-the-git-read-that-failed.test.ts'
+    - claim: "a failed anchor fetch is reported as a fetch failure with git's stderr"
+      proof: 'grep: test("W1-T9674: a failed anchor fetch withholds the review naming the fetch and what git said" in test/an-unknown-reservation-names-the-git-read-that-failed.test.ts'
+    - claim: "an unknown read still withholds and is never judged owned or foreign"
+      proof: 'grep: test("W1-T9674: an unknown reservation read still withholds the verdict" in test/an-unknown-reservation-names-the-git-read-that-failed.test.ts'
+  falsifier: |
+    At origin/main, inject a reservation reader whose fetch fails with "fatal: couldn't find remote ref": failSummary
+    returns "id W1-T<n> reservation unreadable (UNKNOWN) — verdict withheld" with no "fetch", so the second test
+    fails.

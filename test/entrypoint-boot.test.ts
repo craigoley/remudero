@@ -291,24 +291,25 @@ test("a SHA ref pins exactly, even when the branch has moved past it", () => {
 
 // ── DEFECTS 2 AND 3 PULL IN OPPOSITE DIRECTIONS, SO BOTH ARE PROVEN ─────────────────────────
 
-test("an untracked COLLISION refuses loudly rather than running on a stale HEAD", () => {
+test("an untracked COLLISION never runs on a stale HEAD: it is moved aside and the boot lands on the incoming commit", () => {
   // Defect 3's silent half: the tracked-only dirty guard correctly calls this tree clean, git
   // refuses to overwrite the untracked file, and the old code discarded that error and carried on
-  // at the regressed sha while printing success.
+  // at the regressed sha while printing success. W1-T9623: the collision is now moved aside (kept,
+  // never discarded), so HEAD lands on the incoming commit rather than staying stale or dying; the
+  // loud refusal survives for a move that cannot be made (the W1-T9623 refusal case below).
   const home = freshHome();
   const origin = makeOrigin();
   const first = boot(home, origin);
   assert.equal(first.status, 0);
-  const before = headOf(home);
 
   // An UNTRACKED file at a path the incoming commit also adds.
   writeFileSync(join(treeOf(home), "collide.txt"), "local\n");
-  advanceOrigin(origin, "collide.txt", "incoming\n");
+  const c2 = advanceOrigin(origin, "collide.txt", "incoming\n");
 
   const second = boot(home, origin);
-  assert.notEqual(second.status, 0, "a checkout that cannot proceed must DIE, not continue");
-  assert.match(second.stderr, /CHECKOUT FAILED/, "and it must say so by name");
-  assert.equal(headOf(home), before, "HEAD must be left where it was, not silently regressed");
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  assert.equal(headOf(home), c2, "HEAD must land on the incoming commit, never stay on a stale or regressed sha");
+  assert.doesNotMatch(second.stderr, /CHECKOUT FAILED/);
 });
 
 test("an untracked NON-colliding file (node_modules) does NOT block the sync", () => {
@@ -365,19 +366,71 @@ test("entrypoint: an identical untracked file at an incoming path is cleared and
   assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "same\n", "and land the now-tracked copy");
 });
 
-test("entrypoint: a differing untracked file at an incoming path still refuses", () => {
+// ── W1-T9623: A DIFFERING UNTRACKED FILE IS MOVED ASIDE, KEPT BYTE FOR BYTE, NEVER A BOOT-BLOCKER ──
+// MEASURED 2026-10-15: 45 such files (re-captured plan/feedback incidents) refused every boot for
+// 2 h 6 m. Leaving them in place protected nothing — no later boot could ever proceed past them.
+
+test("W1-T9623: a differing untracked file at an incoming path is moved aside byte for byte and the boot proceeds", () => {
   const home = freshHome();
   const origin = makeOrigin();
   assert.equal(boot(home, origin).status, 0);
-  const before = headOf(home);
+
+  // The shape of the 2026-10-15 outage: a re-captured incident whose landed copy has an older Count.
+  writeFileSync(join(treeOf(home), "incident-x.yaml"), "Count: 8\n");
+  const c2 = advanceOrigin(origin, "incident-x.yaml", "Count: 1\n");
+
+  const second = boot(home, origin);
+  assert.equal(second.status, 0, `a differing untracked file must not block the boot: ${second.stderr}`);
+  assert.equal(headOf(home), c2, "the checkout must proceed onto the incoming commit");
+  assert.equal(readFileSync(join(treeOf(home), "incident-x.yaml"), "utf8"), "Count: 1\n", "the tree holds the incoming copy");
+  const moved = /moved untracked 'incident-x\.yaml' aside to (\S+):/.exec(second.stderr);
+  assert.ok(moved, `the move must be named in the log: ${second.stderr}`);
+  assert.ok(moved[1].startsWith(join(home, "Remudero", "state", "recovered-untracked") + "/"), `kept under the state dir: ${moved[1]}`);
+  assert.equal(readFileSync(moved[1], "utf8"), "Count: 8\n", "and the local bytes are kept there, never discarded");
+});
+
+test("W1-T9623: a moved-aside file is written to the ledger with both blobs and the reason", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+  mkdirSync(join(home, "Remudero", "state"), { recursive: true });
+  writeFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "");
 
   writeFileSync(join(treeOf(home), "collide.txt"), "local\n");
   advanceOrigin(origin, "collide.txt", "incoming\n");
 
   const second = boot(home, origin);
-  assert.notEqual(second.status, 0, "different bytes are not provably redundant, so the boot must still refuse");
-  assert.match(second.stderr, /CHECKOUT FAILED/, "and say so by name, exactly as before this change");
-  assert.equal(headOf(home), before, "HEAD must be left where it was");
+  assert.equal(second.status, 0, `second boot failed: ${second.stderr}`);
+  const rows = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, string>);
+  const row = rows.find((r) => r.step === "entrypoint.untracked_moved_aside");
+  assert.ok(row, `no entrypoint.untracked_moved_aside row in ${JSON.stringify(rows)}`);
+  assert.equal(row.path, "collide.txt");
+  assert.match(row.local_blob, /^[0-9a-f]{40}$/);
+  assert.match(row.incoming_blob, /^[0-9a-f]{40}$/);
+  assert.notEqual(row.local_blob, row.incoming_blob);
+  assert.match(row.reason, /different bytes/);
+  assert.equal(readFileSync(row.moved_to, "utf8"), "local\n");
+});
+
+test("W1-T9623: when the move aside cannot be made, the checkout still refuses and the file stays put", () => {
+  const home = freshHome();
+  const origin = makeOrigin();
+  assert.equal(boot(home, origin).status, 0);
+  const before = headOf(home);
+  // A FILE where the recovery directory must go: mkdir -p fails, so nothing can be moved.
+  mkdirSync(join(home, "Remudero", "state"), { recursive: true });
+  writeFileSync(join(home, "Remudero", "state", "recovered-untracked"), "not a directory\n");
+
+  writeFileSync(join(treeOf(home), "collide.txt"), "local\n");
+  advanceOrigin(origin, "collide.txt", "incoming\n");
+
+  const second = boot(home, origin);
+  // W1-T9631: the refused checkout no longer kills the boot; it runs the tree that last booted, by name.
+  assert.equal(second.status, 0, `a refused checkout is a STALE BOOT, never an exit: ${second.stderr}`);
+  assert.match(second.stderr, /moving it aside to .* failed/, "the failed move is named");
+  assert.match(second.stderr, /CHECKOUT FAILED/, "and the refusal says so by name, exactly as before");
+  assert.match(second.stderr, new RegExp(`STALE BOOT: .* continuing on HEAD ${before}`), "on the HEAD that last booted");
+  assert.equal(headOf(home), before, "HEAD must be left where it was, not silently regressed");
   assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "local\n", "and the local file must be untouched, not discarded");
 });
 
@@ -433,9 +486,10 @@ test("entrypoint: an unreadable incoming blob refuses instead of clearing", () =
   unlinkSync(objectPath);
 
   const second = boot(home, origin);
-  assert.notEqual(second.status, 0, "an unreadable blob is not provably redundant, so the boot must refuse");
+  assert.equal(second.status, 0, `W1-T9631: a refused checkout is a STALE BOOT, never an exit: ${second.stderr}`);
   assert.match(second.stderr, /cannot read the incoming blob/, "and say why, rather than silently leaving it or clearing it");
   assert.match(second.stderr, /CHECKOUT FAILED/, "the checkout must still refuse, exactly as an ordinary collision does");
+  assert.match(second.stderr, new RegExp(`STALE BOOT: .* continuing on HEAD ${before}`), "and run the HEAD that last booted, by name");
   assert.equal(headOf(home), before, "HEAD must be left where it was");
   assert.equal(readFileSync(join(treeOf(home), "collide.txt"), "utf8"), "same\n", "and the local file must be untouched");
 });

@@ -1,0 +1,33 @@
+- id: W1-T9630
+  title: "Defuse the expiring fixture in test/the-sweep-reads-the-reviewers-own-summary.test.ts before 2026-10-24T05:00:00.000Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "expiring-fixture:test/the-sweep-reads-the-reviewers-own-summary.test.ts"
+  files:
+    - test/the-sweep-reads-the-reviewers-own-summary.test.ts
+  acceptance:
+    - claim: "The census reports no crossing for test/the-sweep-reads-the-reviewers-own-summary.test.ts with now past 2026-10-24T05:00:00.000Z, and the test remains green across the crossing."
+      proof: "grep: test(\"W1-T9630: test/the-sweep-reads-the-reviewers-own-summary\\.test\\.ts stays defused across 2026-10-24T05:00:00\\.000Z\" in test/the-sweep-reads-the-reviewers-own-summary.test.ts"
+  rationale: |
+    test/the-sweep-reads-the-reviewers-own-summary.test.ts:46: updated_at is stamped 2026-10-10T05:00:00.000Z; sweep.staleDays (REST updated_at -> updatedAt -> lastActivityAt) crosses on 2026-10-24T05:00:00.000Z.
+    Found 8.731425601851852 days before crossing using a 21-day lead horizon.
+    Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.
+    Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.
+    Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan limits work to one existing test file and requests a clock-relative fixture or a proven injected-clock exemption, with regression checks across the stated threshold."
+      - "The supplied scope describes no sensitive access, destructive action, policy change, or operator-only decision; the filing-time gates report no blocking condition."
+      - "No implementation or test results are supplied; this verdict assesses the proposed scope, not verified completion."
+    judged_at: "2026-10-15T12:21:18.247Z"
+    pin: "826ceb3ed91b76cbb5f028112e6a1c97ad598ac3b123a68bc279485264ad31ec"

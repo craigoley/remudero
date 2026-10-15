@@ -1,0 +1,26 @@
+- id: W1-T9659
+  title: Record the current locations of reportStuckStage, matchDuplicateEscalation and openEscalationStandDownReason in the escalate forensics page
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=791ffa0fd78e5977
+  attempts: 0
+  files:
+    - docs/forensics/escalate.md
+  acceptance:
+    - claim: docs/forensics/escalate.md names reportStuckStage and states it lives in src/lib/sweep.ts, not src/lib/escalate.ts
+      proof: "grep: reportStuckStage in docs/forensics/escalate.md"
+    - claim: docs/forensics/escalate.md names matchDuplicateEscalation as defined in src/lib/escalate.ts
+      proof: "grep: matchDuplicateEscalation in docs/forensics/escalate.md"
+  origin: followup:W1-T8167-1792019481482:2026-10-14T23:14:04.168Z:0
+  rationale: >-
+    From the 2026-10-14 follow-up on W1-T8167-1792019481482, ratified via rmd approve:
+  
+    follow-up harvest [research]: re-locate `reportStuckStage`, `matchDuplicateEscalation`
+    (`src/lib/escalate.ts`) and `openEscalationStandDownReason` (`src/run-task.ts`) at HEAD,
+    because the record's line numbers predate about 10k lines of drift. — from W1-T8167 (run
+    W1-T8167-1792019481482)

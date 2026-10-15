@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: recommendations belong in the console inbox, not a claude.ai page (operator: \"Yes\")"
   plan_refs: [W1-T4087, W1-T8825, W1-T8826, W1-T8829, W1-T8926, W1-T2604]
   files: [src/lib/inbox-recommendation.ts, src/lib/panel-graph.ts, src/lib/daemon.ts, src/run-task.ts, test/an-inbox-item-carries-a-recommended-decision.test.ts]
-  status: queued
+  status: merged
   priority: 0.92 # operator-2026-10-13: the console inbox recommendation pane waits on this core contract; at priority 1 it sat behind ~22 ready priority-1 tasks with no dispatch
   attempts: 0
   rationale: |

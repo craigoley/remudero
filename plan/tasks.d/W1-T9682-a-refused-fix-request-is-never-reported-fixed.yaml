@@ -1,0 +1,67 @@
+- id: W1-T9682
+  title: "A REFUSED FIX REQUEST IS NEVER REPORTED FIXED — routeFix ignores the shared dispatchFix return value, so an operator request whose registered checkout claim was declined records fix.disposed outcome fixed and the console reports command accepted without a repair"
+  repo: remudero
+  depends_on: [W1-T5919, W1-T5932, W1-T4077]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high # Rule 19: one concern, the existing operator fix entrypoint reports its actual dispatch outcome without weakening ownership or spending a second round
+  band_meaning: span
+  origin: "operator queue restoration request 2026-10-15: audit of all open PRs and current core fix/review receipts"
+  plan_refs: [W1-T5919, W1-T5932, W1-T4077, W1-T9618]
+  files: [src/run-task.ts, test/run-task.test.ts, test/console-pr-nudges.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED core ledger 2026-10-15T16:26:41.071Z, PR11949/W1-T7957 at exact head
+    1cdf9b520a62fdd6fe6c67d34bc2caef77067b1c, run FIX-1792081537040:
+    sweep.fix.checkout_claim_declined names registered_worktree_owner and
+    owner_recovery_reason process_cwd_probe_unreadable, process_probe_reason cwd_unreadable.
+    The same run immediately writes fix.disposed outcome fixed, reason required checks red,
+    then the console records fix command accepted. No owning dispatch is demonstrated by that return.
+    A later read under the actual production UID could read the then-current process corpus;
+    that does not establish the earlier read's cause or authorize reclaiming its checkout.
+    READ on main fc5515cac6f1843bbfe0920f404162108f15c2cf and all27 actual OPEN head trees:
+    both routeFix arms await deps.dispatchFix and unconditionally return outcome fixed.
+    W1-T5919 already defined FixClaimDeclined and dispatchFixSpent for runSweep, but routeFix
+    ignores that result. W1-T5932 handles the detached sweep failure, not this operator entrypoint.
+    W1-T9618/PR12059 merged normally during this audit; it verifies a completed round's remote
+    push, not a checkout refusal before a round starts. This is not another push verifier.
+    The full subject sweep had one W1-T5919 identity control per head and zero own changes to
+    routeFix versus each PR's actual merge base. No live claim, worker or checkout is changed here.
+  design: |
+    1. Both blocked-fixable and conflicted routeFix arms consume the existing dispatchFix result.
+       Reuse its existing result contract and dispatchFixSpent rather than creating another
+       admission policy. FixClaimDeclined and explicit false are refused, never fixed. A declined
+       result names its ownerRecoveryReason; an unspent false result must not invent that reason.
+    2. Preserve the established void/true compatibility contract for an admitted dispatch. Fixed
+       remains the legacy accepted-dispatch outcome, not a new claim that CI, a push or merge finished.
+       Do not catch a thrown dispatcher into a success. Keep actual failure handling visible.
+    3. Drive the existing fixCommand caller with the real shared buildSweepEffects checkout-decline
+       adapter and recording transports. Its fix.disposed result and exit code must reflect refusal;
+       a console-requested retry remains allowed but cannot override an occupied or unreadable owner.
+       Preserve owner override, --requested strike semantics, all review/CI/security gates and no-policy
+       legacy behavior. No claim deletion, worktree reclaim or new retry loop.
+    4. Add tests in the two existing declared suites, not a new run-task importer or a ratchet increase.
+       Cover blocked-CI and captured-conflict refusals, explicit false, thrown dispatch, admitted void/true,
+       and the real command boundary. Use forbidden-effect traps: no live repair, push, closure or arm.
+       Delete the result handling to make the new tests fail, restore it to pass, and retain both receipts.
+       Measure committed exact-head scoped coverage, all changed-source SF records, relevant census suites
+       and one native author run before normal publication. New native failures compare on its actual base.
+    OUT OF SCOPE: process-cwd reader repairs, remote-push verification, capacity bounds, task ownership
+    release, contributor-admission activation, registry cutover, scheduler changes and worker stops.
+  acceptance:
+    - claim: "both fixable and captured-conflict requests whose shared checkout dispatch declines are refused with the original owner reason and no success result"
+      proof: "unit test: W1-T9682 a declined fix request reports the owner refusal in both repair arms"
+    - claim: "an explicit unspent result and a thrown dispatcher cannot be reported fixed while admitted void and true results preserve compatibility"
+      proof: "unit test: W1-T9682 fix request outcomes preserve unspent thrown and admitted contracts"
+    - claim: "the real requested fix command records the shared adapter's refusal and returns a nonzero exit without overriding the owner"
+      proof: "unit test: W1-T9682 the requested fix command preserves a real checkout refusal"
+  falsifier: |
+    Against the unchanged filing base, return {claimDeclined:true, ownerRecoveryReason:
+    "process_cwd_probe_unreadable"} from the shared dispatcher in both repair arms. routeFix returns
+    fixed and the first test fails. An explicit false also returns fixed. Restore the existing result
+    without examining it and the real-command test again records fixed/exit0. An accepted void/true
+    dispatch is the positive control and must keep its legacy result. No real worker or remote effect runs.

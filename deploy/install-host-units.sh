@@ -98,7 +98,8 @@ read_instance_registry() {
       sub(/:$/, "", key)
       value=$0
       sub(/^    [A-Za-z_]+:[[:space:]]*/, "", value)
-      gsub(/^"|"$/, "", value)
+      if (key == "mode") sub(/[[:space:]]+$/, "", value)
+      else gsub(/^"|"$/, "", value)
       print key "=" value
     }
   ' "$registry_file"
@@ -208,8 +209,14 @@ if [ -n "$INSTANCE_NAME" ]; then
   service_name=""; watchdog_service_name=""; watchdog_timer_name=""; launcher_path=""; revival_log=""
   gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   claude_dir=""; codex_dir=""; container_config_dir=""
+  instance_mode_seen=0
   while IFS='=' read -r key value; do
     case "$key" in
+      mode)
+        [ "$instance_mode_seen" = 0 ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
+        instance_mode_seen=1
+        [ "$value" = shadow ] || [ "$value" = live ] || [ "$value" = '"shadow"' ] || [ "$value" = '"live"' ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2; }
+        ;;
       repo) repo="$value" ;;
       state_dir) state_dir="$value" ;;
       container_name) container_name="$value" ;;
@@ -399,7 +406,9 @@ deploy_code_idle() {
 }
 
 deploy_code_clean() {
-  local code="$STATE_DIR/remudero" edits
+  local code edits
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   if [ ! -e "$code/.git" ]; then
     echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
     return 1
@@ -437,13 +446,16 @@ deploy_code_clean() {
 # One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
 # only when it restored that tree; prints its one-line verdict either way.
 live_edits_ladder() {
-  local tree="$1" dir="$2" rmd="$STATE_DIR/remudero/bin/rmd" out line tmo=()
+  local tree="$1" dir="$2" code rmd out line tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   if [ ! -x "$rmd" ]; then
     echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
     return 1
   fi
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
       --tree "$tree" --checkout "$dir" --state-root "$STATE_DIR/state" --json 2>/dev/null)"; then
     echo "rmd-relaunch: live edits -- the ladder for the ${tree} failed; deferring." >&2
     return 1
@@ -455,7 +467,9 @@ live_edits_ladder() {
 }
 
 refresh_deploy_code() {
-  local container="$1" code="$STATE_DIR/remudero" install_head
+  local container="$1" code install_head
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   DEPLOY_CODE_BUSY=0
   deploy_code_idle "$container" || return 1
   deploy_code_clean || return 1
@@ -495,8 +509,8 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
-  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
-  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
+  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
 
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
@@ -506,7 +520,9 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
 # install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
 # deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
 deploy_code_busy_handoff() {
-  local container="${1:-}" code="$STATE_DIR/remudero" install_head daemon_head rc=0
+  local container="${1:-}" code install_head daemon_head rc=0
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
   deploy_code_clean || return 1
   if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
@@ -515,7 +531,7 @@ deploy_code_busy_handoff() {
     return 1
   fi
   if GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
-    rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+    deploy_logic_lag_cleared "$daemon_head"
     echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
     return 0
   fi
@@ -523,6 +539,11 @@ deploy_code_busy_handoff() {
   GIT_OPTIONAL_LOCKS=0 git -C "$code" fetch --quiet origin main 2>/dev/null || true
   GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --quiet "$daemon_head" "$install_head" -- "${DEPLOY_LOGIC_PATHS[@]}" 2>/dev/null || rc=$?
   if [ "$rc" -eq 1 ]; then
+    if why="$(deploy_logic_ships_only_by_recycle "$code" "$daemon_head" "$install_head")"; then
+      deploy_logic_lag_mark_recycled "$daemon_head"
+      echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic, but ${why}: a freshness restart keeps the old image, so asking deploy-run to recycle at the next drain."
+      return 0
+    fi
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic (${DEPLOY_LOGIC_PATHS[*]}); deferring." >&2
     deploy_logic_lag_pressure "$container" "$daemon_head"
     return 1
@@ -531,8 +552,80 @@ deploy_code_busy_handoff() {
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} vs install head ${install_head}: deploy logic unreadable (git diff exit ${rc}); deferring." >&2
     return 1
   fi
-  rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+  deploy_logic_lag_cleared "$daemon_head"
   echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} carries install head ${install_head}'s deploy logic, asking deploy-run anyway."
+}
+
+# W1-T9645 -- A CHANGE ONLY A RECYCLE CAN CARRY IS NEVER WAITED OUT. On 2026-10-15 W1-T9623's
+# deploy/entrypoint.sh fix sat behind the deferral above for the whole lag: the daemon's freshness
+# restart re-execs node in the SAME container, so the image's baked entrypoint stays the old one, and
+# the wait could end only in the backstop or a hand recycle. The build-role image inputs
+# (BUILD_ROLE_IMAGE_BAKED_PATHS in src/lib/deploy-judge.ts; a test holds the two lists equal), or a
+# commit whose Remudero-Task shard has priority below 1, go to deploy-run now: it recycles onto the
+# image that carries them, through recycle-container.sh's pause-and-drain (W1-T6249), at the next drain.
+DEPLOY_BAKED_PATHS=(deploy/Dockerfile deploy/entrypoint.sh .dockerignore deploy/package.json deploy/package-lock.json
+  deploy/codex-requirements.toml)
+
+# Prints why the daemon tree's lag must ship by recycle and returns 0, else returns 1.
+deploy_logic_ships_only_by_recycle() {
+  local code="$1" from="$2" to="$3" baked id shard
+  baked="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --name-only "$from" "$to" -- "${DEPLOY_BAKED_PATHS[@]}" 2>/dev/null | head -n 3 | tr '\n' ' ')"
+  if [ -n "$baked" ]; then
+    printf 'it changes baked path(s) %s' "${baked% }"
+    return 0
+  fi
+  for id in $(GIT_OPTIONAL_LOCKS=0 git -C "$code" log --format=%B "${from}..${to}" 2>/dev/null |
+    sed -n 's/^Remudero-Task: \(W1-T[0-9][0-9]*\)$/\1/p' | sort -u); do
+    for shard in "$CHECKOUT/plan/tasks.d/${id}"-*.yaml; do
+      [ -f "$shard" ] || continue
+      if grep -Eq '^  priority: 0([.][0-9]+)?([[:space:]]|$)' "$shard"; then
+        printf 'it carries %s, a priority-0 task' "$id"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# W1-T9645 -- THE BACKSTOP'S BOUND IS LEARNED, NOT 36. Each time the daemon tree's HEAD moves off a
+# lagging head WITHOUT a watchdog recycle in between, the lag it took is a measured freshness-restart
+# clear: "<cleared-at> <lag-s> <head>" in DEPLOY_LAG_HISTORY, newest DEPLOY_LAG_HISTORY_KEEP kept
+# (bound kind: physical). The backstop waits for the longest of them; with none yet, the two daemon
+# horizons the fixed 36 stood for (7200s). A lag the watchdog's own recycle ended is not recorded,
+# so the bound cannot feed on itself.
+DEPLOY_LAG_HISTORY="$STATE_DIR/state/deploy-logic-lag-history"
+DEPLOY_LAG_HISTORY_KEEP=20
+DEPLOY_LAG_DEFAULT_BOUND_S=7200
+
+deploy_logic_lag_bound_s() {
+  local bound
+  bound="$(tail -n "$DEPLOY_LAG_HISTORY_KEEP" "$DEPLOY_LAG_HISTORY" 2>/dev/null |
+    awk '$2 ~ /^[0-9]+$/ && $2 + 0 > m { m = $2 + 0 } END { if (m > 0) print m }')"
+  printf '%s\n' "${bound:-$DEPLOY_LAG_DEFAULT_BOUND_S}"
+}
+
+# The lag mark is "<since> <head> [recycled]". A recycle this script asked for flags it.
+deploy_logic_lag_mark_recycled() {
+  local mark="$STATE_DIR/state/deploy-logic-lag" since="" head="" flag=""
+  { read -r since head flag < "$mark"; } 2>/dev/null || true
+  [ -n "$since" ] && [ "$head" = "$1" ] || { since="$(date -u +%s)"; head="$1"; }
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s %s recycled\n' "$since" "$head" > "$mark" 2>/dev/null || true
+}
+
+# The daemon tree left the lagging head ($1 is the head it is at now): record the clear, end the mark.
+deploy_logic_lag_cleared() {
+  local mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" flag="" tmp
+  now="$(date -u +%s)"
+  { read -r since head flag < "$mark"; } 2>/dev/null || return 0
+  rm -f "$mark" 2>/dev/null || true
+  case "$since" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$head" ] && [ "$head" != "${1:-}" ] && [ -z "$flag" ] && [ "$since" -le "$now" ] || return 0
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s %s %s\n' "$now" "$((now - since))" "$head" >> "$DEPLOY_LAG_HISTORY" 2>/dev/null || return 0
+  tmp="$DEPLOY_LAG_HISTORY.tmp.$$"
+  tail -n "$DEPLOY_LAG_HISTORY_KEEP" "$DEPLOY_LAG_HISTORY" > "$tmp" 2>/dev/null && mv -f "$tmp" "$DEPLOY_LAG_HISTORY" 2>/dev/null ||
+    rm -f "$tmp" 2>/dev/null || true
 }
 
 # 2026-10-10 -- THE DEFERRAL ABOVE HAD NO AGE. While workers ran and the daemon tree lacked the
@@ -542,7 +635,8 @@ deploy_code_busy_handoff() {
 # "drain and restart" at 05:00Z, then waited out its in-flight lanes (45 min), a bounded sweep and a
 # bounded drain. That path is the right one and normally wins -- but nothing here noticed if it
 # never did. So the lag now accrues PRESSURE on the same scale, keyed to the daemon tree's HEAD:
-#   below two horizons (36) -- defer; one horizon is the daemon's own restart decision, one its drain.
+#   below the learned bound -- defer (W1-T9645: the longest lag a freshness restart has cleared in;
+#                              two horizons, 36, until one has been measured).
 #   at or above           -- hand the daemon to recycle-container.sh's pause-and-drain swap from the
 #                            INSTALL checkout (the current deploy logic, never the lagging tree's), as
 #                            W1-T6249/W1-T6282 do for a busy image recycle. It waits out the workers;
@@ -550,26 +644,34 @@ deploy_code_busy_handoff() {
 #                            WATCHDOG_RECYCLE_GAP_S, and pressure keeps growing until the tree moves.
 # Any move of the daemon tree's HEAD -- its own restart, an idle fast-forward -- resets the clock.
 deploy_logic_lag_pressure() {
-  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" pressure
+  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" flag="" pressure bound_s bound
   now="$(date -u +%s)"
-  { read -r since head < "$mark"; } 2>/dev/null || true
+  { read -r since head flag < "$mark"; } 2>/dev/null || true
   case "$since" in ''|*[!0-9]*) since="" ;; esac
+  if [ -n "$since" ] && [ -n "$head" ] && [ "$head" != "$daemon_head" ]; then
+    deploy_logic_lag_cleared "$daemon_head"
+    since=""
+  fi
   if [ -z "$since" ] || [ "$head" != "$daemon_head" ] || [ "$since" -gt "$now" ]; then
-    since="$now"
+    since="$now"; flag=""
     mkdir -p "$STATE_DIR/state" 2>/dev/null || true
     printf '%s %s\n' "$since" "$daemon_head" > "$mark" 2>/dev/null || true
   fi
+  # Shown on the daemon's own restart-pressure scale (18 per hour); the bound is the learned lag.
+  bound_s="$(deploy_logic_lag_bound_s)"
   pressure=$(( (now - since) * 18 / 3600 ))
-  if [ "$pressure" -lt 36 ]; then
-    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < 36; the daemon's own freshness restart has it." >&2
+  bound=$(( bound_s * 18 / 3600 ))
+  if [ "$((now - since))" -lt "$bound_s" ]; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < ${bound}; the daemon's own freshness restart has it (bound: the longest lag one has cleared in, ${bound_s}s)." >&2
     return 0
   fi
   if [ -z "$container" ] || ! declare -F watchdog_recycle >/dev/null; then
-    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= 36, but no recycle path is wired; deferring." >&2
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= ${bound}, but no recycle path is wired; deferring." >&2
     return 0
   fi
+  deploy_logic_lag_mark_recycled "$daemon_head"
   watchdog_recycle "$container" "deploy code" \
-    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= 36: the daemon never restarted onto it" || true
+    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= ${bound}: the daemon never restarted onto it" || true
 }
 DEPLOY_CODE_REFRESH
 }
@@ -607,11 +709,14 @@ verdict_field() {
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
 # workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
 read_progress_verdict() {
-  local rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  local code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
     echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
     return 0
   fi
@@ -680,7 +785,9 @@ watchdog_recycle() {
 
 # "sha=<origin/main> digest=<image id>" -- the two inputs a revive starts from; unreadable = unknown.
 revive_input() {
-  local code="$STATE_DIR/remudero" sha digest
+  local code sha digest
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   git -C "$code" fetch --quiet origin main >/dev/null 2>&1 || true
   sha="$(git -C "$code" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
   digest="$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
@@ -773,6 +880,28 @@ host_tmpdir_on_scratch() {
 }
 host_tmpdir_on_scratch
 HOST_TMPDIR
+}
+
+# W1-T9617 -- THE LIVE CHECKOUT, RESOLVED ONCE PER TICK. With the hot checkouts on scratch
+# (deploy/scratch-mounts.sh, /etc/remudero/scratch-checkouts.on) "$STATE_DIR/remudero" is a stale
+# copy, so every host read of the daemon's tree below -- live edits, the code refresh, the progress
+# verdict, host alerts, deploy-run -- goes to the checkout the RUNNING container binds
+# (scratch_live_checkout), resolved on first use so a STOP or boot tick asks docker nothing. With no
+# library, or an unreadable answer, it stays the literal path.
+render_daemon_code() {
+  cat <<'DAEMON_CODE'
+DAEMON_CODE=""
+daemon_code_resolve() {
+  local lib="$CHECKOUT/deploy/scratch-mounts.sh" live
+  [ -z "$DAEMON_CODE" ] || return 0
+  DAEMON_CODE="$STATE_DIR/remudero"
+  [ -r "$lib" ] || lib="$DAEMON_CODE_LIB"
+  [ -r "$lib" ] || return 0
+  live="$(. "$lib" && scratch_live_checkout "$STATE_DIR" "$DAEMON_CODE_CONTAINER" 2>/dev/null)" || return 0
+  [ -z "$live" ] || DAEMON_CODE="$live"
+  return 0
+}
+DAEMON_CODE
 }
 
 render_watchdog_tick_snapshot() {
@@ -871,11 +1000,14 @@ EDGE_HEAL
 render_host_alerts() {
   cat <<'HOST_ALERTS'
 host_alert() {
-  local condition="$1" rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  local condition="$1" code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   shift
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+  if out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
       --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
     echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
   else
@@ -929,6 +1061,10 @@ BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
 $(render_host_tmpdir)
+
+DAEMON_CODE_LIB=${BIN_DIR}/rmd-scratch-mounts
+DAEMON_CODE_CONTAINER='${CONTAINER_NAME}'
+$(render_daemon_code)
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
@@ -1196,7 +1332,11 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
-  if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+  [ "\$BOOT" -eq 1 ] || daemon_code_resolve
+  if [ "\$BOOT" -eq 0 ] && [ ! -x "\$DAEMON_CODE/bin/rmd" ]; then
+    # W1-T9617: a cold scratch checkout is still being cloned and installed by the entrypoint.
+    echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do: its checkout \$DAEMON_CODE has no bin/rmd yet (a scratch re-clone in progress, or missing)."
+  elif [ "\$BOOT" -eq 0 ]; then
     # W1-T5688: THE VERDICT IS READ BEFORE refresh_deploy_code, whose \`|| exit 0\` ends every tick
     # with workers in flight -- exactly the ticks a wedged daemon produces.
     [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
@@ -1207,15 +1347,15 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
     # Refresh the source CLI before loading it; standalone executable entrypoints own their
     # runtime and retain the supervisor invocation without requiring a source checkout.
-    if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
+    if [ -f "\$DAEMON_CODE/src/run-task.ts" ]; then
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    if watchdog_deploy_out="\$(cd "\$STATE_DIR/remudero" && \\
+    if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.

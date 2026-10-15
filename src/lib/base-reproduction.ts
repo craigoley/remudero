@@ -132,6 +132,18 @@ export function ciContradictedProbeFiles(lines: readonly Row[]): Set<string> {
   return files;
 }
 
+/** Test files a `reproduced` probe found failing at a main sha other than `mainTipSha`, unless main's own CI
+ *  judged that sha green: main once carried this red, so a head still red on it may have inherited it. */
+export function mainFormerlyFailingTestFiles(lines: readonly Row[], mainTipSha: string): Set<string> {
+  const contradicted = ciContradictedProbeFiles(lines);
+  const files = new Set<string>();
+  for (const line of lines) {
+    if (line.step !== "sweep.base_reproduction" || line.verdict !== "reproduced" || line.main_sha === mainTipSha || !Array.isArray(line.files)) continue;
+    for (const probe of line.files) if (probe?.outcome === "fails" && typeof probe.file === "string" && !contradicted.has(probe.file)) files.add(probe.file);
+  }
+  return files;
+}
+
 export function refundedStrikeKeys(lines: readonly Row[]): Set<string> {
   return new Set(lines.filter((line) => line.step === "fix.strike_refunded" &&
     typeof line.task_id === "string" && typeof line.head_sha === "string" && typeof line.strike === "number")
