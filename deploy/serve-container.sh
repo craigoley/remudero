@@ -816,7 +816,7 @@ fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 docker "${RUN_ARGS[@]}" >/dev/null
-if command -v scratch_placement_row >/dev/null 2>&1; then
+if [ "${#SCRATCH_ARGS[@]}" -gt 0 ] && command -v scratch_placement_row >/dev/null 2>&1; then
   scratch_placement_row "${STATE_DIR}/state/ledger.ndjson" "${CONTAINER_NAME}" "${SERVE_REPO_DIR}" "${SERVE_CHECKOUT_COLD}" "${SERVE_OUTGOING_READS}"
 fi
 

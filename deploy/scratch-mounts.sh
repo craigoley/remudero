@@ -250,8 +250,8 @@ scratch_fresh_tmp() {
 }
 
 # ── W1-T9617: THE PLACEMENT PROVES ITSELF ──────────────────────────────────────────────────────
-# Each recycle appends one recycle.checkout_placement row: the disk the new container's checkout
-# sits on, whether it starts cold (no .git yet: a re-clone), and what the OUTGOING container read
+# Each recycle with the scratch plan on appends a recycle.checkout_placement row: where its checkout
+# sits, whether it starts cold (no .git yet: a re-clone), and what the OUTGOING container read
 # from each whole disk over its life (cgroup io.stat, cumulative, with its age). Rows written before
 # the switch flips measure the data-disk generation and rows after it the scratch one, so reads/s
 # per disk is rios / outgoing_age_s on each side. A cold row's rebuild time is the gap from its ts

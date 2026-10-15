@@ -1256,8 +1256,8 @@ boot clones and installs on the NVMe before the daemon starts. Serve does not mo
 `./deploy/serve-container.sh --dry-run | grep serve-repo`, then `./deploy/serve-container.sh
 --replace`; the console is down while its clone and install run.
 
-**Verify, and let the fleet show the saving.** Every recycle and serve replace appends one
-`recycle.checkout_placement` row to the core ledger: `placement` (scratch or state-disk), the
+**Verify, and let the fleet show the saving.** Every recycle and serve replace with the scratch
+mounts on appends one `recycle.checkout_placement` row to its state dir's ledger: `placement` (scratch or state-disk), the
 `checkout_disk` it sits on, `cold`, and the OUTGOING generation's `outgoing_reads` per whole disk
 (cgroup `io.stat` rios/rbytes) with its `outgoing_age_s`. Rows written before the flip measure the
 data-disk generation; the first rows after the next recycle measure the scratch one. Reads per

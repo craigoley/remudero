@@ -2300,8 +2300,9 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
 fi
-# W1-T9617: where this generation's checkout landed, and what the one it replaced read per disk.
-if command -v scratch_placement_row >/dev/null 2>&1; then
+# W1-T9617: where this generation's checkout landed, and what the one it replaced read per disk —
+# recorded whenever the scratch plan is in use, so rows exist on both sides of the checkouts switch.
+if [ "${#SCRATCH_ARGS[@]}" -gt 0 ] && command -v scratch_placement_row >/dev/null 2>&1; then
   scratch_placement_row "${LEDGER_FILE}" "${CONTAINER_NAME}" "${LAUNCH_CHECKOUT}" "${LAUNCH_CHECKOUT_COLD}" "${RECYCLE_OUTGOING_READS}"
 fi
 # The memory.high annotation is the one policy argument Docker accepts without proving it reached

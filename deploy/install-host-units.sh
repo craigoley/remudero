@@ -399,7 +399,9 @@ deploy_code_idle() {
 }
 
 deploy_code_clean() {
-  local code="${DAEMON_CODE:-$STATE_DIR/remudero}" edits
+  local code edits
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   if [ ! -e "$code/.git" ]; then
     echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
     return 1
@@ -437,7 +439,9 @@ deploy_code_clean() {
 # One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
 # only when it restored that tree; prints its one-line verdict either way.
 live_edits_ladder() {
-  local tree="$1" dir="$2" code="${DAEMON_CODE:-$STATE_DIR/remudero}" rmd out line tmo=()
+  local tree="$1" dir="$2" code rmd out line tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   if [ ! -x "$rmd" ]; then
     echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
@@ -456,7 +460,9 @@ live_edits_ladder() {
 }
 
 refresh_deploy_code() {
-  local container="$1" code="${DAEMON_CODE:-$STATE_DIR/remudero}" install_head
+  local container="$1" code install_head
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   DEPLOY_CODE_BUSY=0
   deploy_code_idle "$container" || return 1
   deploy_code_clean || return 1
@@ -507,7 +513,9 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
 # install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
 # deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
 deploy_code_busy_handoff() {
-  local container="${1:-}" code="${DAEMON_CODE:-$STATE_DIR/remudero}" install_head daemon_head rc=0
+  local container="${1:-}" code install_head daemon_head rc=0
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
   deploy_code_clean || return 1
   if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
@@ -608,7 +616,9 @@ verdict_field() {
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
 # workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
 read_progress_verdict() {
-  local code="${DAEMON_CODE:-$STATE_DIR/remudero}" rmd out tmo=()
+  local code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
@@ -682,7 +692,9 @@ watchdog_recycle() {
 
 # "sha=<origin/main> digest=<image id>" -- the two inputs a revive starts from; unreadable = unknown.
 revive_input() {
-  local code="${DAEMON_CODE:-$STATE_DIR/remudero}" sha digest
+  local code sha digest
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   git -C "$code" fetch --quiet origin main >/dev/null 2>&1 || true
   sha="$(git -C "$code" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
   digest="$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
@@ -781,15 +793,18 @@ HOST_TMPDIR
 # (deploy/scratch-mounts.sh, /etc/remudero/scratch-checkouts.on) "$STATE_DIR/remudero" is a stale
 # copy, so every host read of the daemon's tree below -- live edits, the code refresh, the progress
 # verdict, host alerts, deploy-run -- goes to the checkout the RUNNING container binds
-# (scratch_live_checkout). With no library, or an unreadable answer, it stays the literal path.
+# (scratch_live_checkout), resolved on first use so a STOP or boot tick asks docker nothing. With no
+# library, or an unreadable answer, it stays the literal path.
 render_daemon_code() {
   cat <<'DAEMON_CODE'
-DAEMON_CODE="$STATE_DIR/remudero"
+DAEMON_CODE=""
 daemon_code_resolve() {
   local lib="$CHECKOUT/deploy/scratch-mounts.sh" live
-  [ -r "$lib" ] || lib="$1"
+  [ -z "$DAEMON_CODE" ] || return 0
+  DAEMON_CODE="$STATE_DIR/remudero"
+  [ -r "$lib" ] || lib="$DAEMON_CODE_LIB"
   [ -r "$lib" ] || return 0
-  live="$(. "$lib" && scratch_live_checkout "$STATE_DIR" "$2" 2>/dev/null)" || return 0
+  live="$(. "$lib" && scratch_live_checkout "$STATE_DIR" "$DAEMON_CODE_CONTAINER" 2>/dev/null)" || return 0
   [ -z "$live" ] || DAEMON_CODE="$live"
   return 0
 }
@@ -892,7 +907,9 @@ EDGE_HEAL
 render_host_alerts() {
   cat <<'HOST_ALERTS'
 host_alert() {
-  local condition="$1" code="${DAEMON_CODE:-$STATE_DIR/remudero}" rmd out tmo=()
+  local condition="$1" code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   shift
   [ -x "$rmd" ] || return 0
@@ -952,8 +969,9 @@ BOOT=0
 
 $(render_host_tmpdir)
 
+DAEMON_CODE_LIB=${BIN_DIR}/rmd-scratch-mounts
+DAEMON_CODE_CONTAINER='${CONTAINER_NAME}'
 $(render_daemon_code)
-daemon_code_resolve ${BIN_DIR}/rmd-scratch-mounts '${CONTAINER_NAME}'
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
@@ -1221,6 +1239,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
+  [ "\$BOOT" -eq 1 ] || daemon_code_resolve
   if [ "\$BOOT" -eq 0 ] && [ ! -x "\$DAEMON_CODE/bin/rmd" ]; then
     # W1-T9617: a cold scratch checkout is still being cloned and installed by the entrypoint.
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do: its checkout \$DAEMON_CODE has no bin/rmd yet (a scratch re-clone in progress, or missing)."
