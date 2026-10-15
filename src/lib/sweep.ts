@@ -16757,7 +16757,8 @@ export async function runSweep(
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
   deps.markPrelude?.("walk_setup", true);
-  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
+  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true,
+    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}) });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
