@@ -1,0 +1,48 @@
+- id: W1-T9625
+  title: "A DOWN-DAEMON ALERT REACHES GITHUB WITHOUT THE DAEMON: the launcher named CRASH LOOP at 08:43:51 on 2026-10-15 and raised host-alert crash-loop every 5 min (tier escalated, issueUrl empty), but host-alert only spools the escalation for the daemon to post, so issue #11965 was opened at 10:30:10 by the daemon that had just recovered, 1 h 46 m later; while the daemon whose death the alert reports is down, the host delivers a crash-loop escalation itself and marks the spool entry delivered"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — who posts the host's crash-loop escalation while the daemon is down
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: core outage 08:22-10:29Z; operator: the outage must reach the operator fast, through a Remudero issue"
+  plan_refs: [W1-T9623, W1-T3367, W1-T5688]
+  files: [src/lib/launcher-host-alerts.ts, src/lib/host-escalation-spool.ts, test/a-down-daemon-alert-reaches-github-without-the-daemon.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only) and on GitHub:
+    - rmd-fleet-watchdog journal, each tick from 08:43:51 to 10:29:04: "CRASH LOOP -- N consecutive revivals from exit 1.
+      Reviving anyway; this needs a human." then "host alert -- {condition crash-loop, tier escalated, count 1..21,
+      issueUrl ''}". So the host knew, and nothing was delivered.
+    - Issue #11965 "[BLOCKED] HOST-WATCHDOG-remudero-daemon-crash-loop" was created at 10:30:10. Its ledger row
+      (escalation.issue_opened, 10:30:11) comes from host 598af966ec7a, which is the core container that booted at 10:29.
+    - The off-host watch (fleet-heartbeat-watch.yml) has a CRASH_LOOP arm, but it delivers through needs-human-issue.mjs,
+      one issue per host marker. The heartbeat-azure issue #11873 ("the machine has stopped reporting") had been open since
+      01:06, so a CRASH_LOOP finding at the 08:49 or 09:46 run can only be a comment on that 7-hour-old thread (the #4825
+      lesson that W1-T3367 records). Every run of the workflow from 05:44 to 10:44 concluded failure, so its red carried
+      no news.
+    READ at origin/main 8b45ddbe7: the header of src/lib/launcher-host-alerts.ts says "The host has no GitHub credential,
+    so these now ride the escalation spool (host-escalation-spool.ts) and the daemon posts them." That is no longer true.
+    The host cron runs fleet-heartbeat.sh with GH_TOKEN from ~/.gh-token, and recycle-container.sh carries GH_APP_ID,
+    GH_APP_INSTALLATION_ID and a readable App key path (journal, 09:09:28).
+    INFERRED: an alert about a down daemon that only the daemon can deliver reaches no one until the outage is over.
+  design: |
+    When raiseLauncherAlert reaches tier escalated for the crash-loop condition and the escalation is not yet delivered,
+    rmd host-alert posts it directly, using the same Escalation, title dedup and labels the daemon's spool drain uses. It
+    authenticates with the host's own credential: a fleet App installation token minted from the configured App key,
+    else GH_TOKEN. It then records the spool entry as delivered with its issue url, so the daemon never posts a second
+    issue. The direct post runs only while the daemon is not running (the launcher's down arm). It is bounded by the
+    existing 120 s timeout and spaced by the shared gh floor. Any failure leaves the spool entry as it is today, and
+    host-alert prints the failure. Other conditions keep spool-only delivery.
+  acceptance:
+    - claim: "a crash-loop escalation raised while the daemon is down is posted by the host and its spool entry marked delivered with the issue url"
+      proof: "grep: a down-daemon alert reaches github without the daemon in test/a-down-daemon-alert-reaches-github-without-the-daemon.test.ts"
+    - claim: "a failed direct post leaves the spool entry undelivered, so the daemon still posts it later"
+      proof: "grep: a failed direct post leaves the spool for the daemon in test/a-down-daemon-alert-reaches-github-without-the-daemon.test.ts"
+  falsifier: |
+    Remove the direct post: issueUrl stays empty while the daemon is down, and the first test fails.
