@@ -8,7 +8,8 @@
  * queue, which the per-poll async sweep lands; the CLI keeps its inline capture.
  *
  * The sync spawns are observed for real: node:child_process's sync primitives are wrapped for the duration of a pass,
- * so an inline landing shows up as its `git ... fetch`, whatever seam the code under test does or does not expose.
+ * so an inline landing shows up as its `git ... fetch`, whatever seam the code under test does or does not expose. The
+ * sweep's repair filing is proven beside its other tests (test/repair-filing-respects-prior-rejection.test.ts).
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
@@ -30,7 +31,6 @@ import {
   type IncidentLedgerEvent,
   type SreLaneInput,
 } from "../src/lib/sre-lane.js";
-import { captureRepairFeedbackWithPriorVerdict } from "../src/run-task.js";
 
 const FP = "c".repeat(64);
 const ID = incidentFeedbackId(FP);
@@ -203,16 +203,4 @@ test("W1-T9615: the daemon's issue poll stages a new issue entry and skips it wh
   const second = await pollIssues([{ owner: "o", repo: "r" }], deps);
   assert.equal(second.created.length, 0);
   assert.equal(second.skippedExisting, 1, "the queued entry is the dedup hit");
-});
-
-test("W1-T9615: the daemon sweep's repair filing stages its entry and skips it while queued", async () => {
-  const { root, stateRoot } = laneRoots();
-  const filing = { id: "repair-w9615", origin: "repair#stale", raw: "repair evidence" };
-  const { spawns } = await syncSpawnsDuring(() => captureRepairFeedbackWithPriorVerdict(root, filing, () => {}, stateRoot));
-  assert.deepEqual(landingSpawns(spawns), [], "no inline landing on the daemon's sweep");
-  assert.deepEqual(queuedFeedbackLandings(stateRoot), ["plan/feedback/repair-w9615.yaml"]);
-  const bytes = readFileSync(join(queuedFeedbackDir(stateRoot), "repair-w9615.yaml"), "utf8");
-
-  captureRepairFeedbackWithPriorVerdict(root, { ...filing, raw: "newer evidence" }, () => {}, stateRoot);
-  assert.equal(readFileSync(join(queuedFeedbackDir(stateRoot), "repair-w9615.yaml"), "utf8"), bytes, "already filed this window");
 });
