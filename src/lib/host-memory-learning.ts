@@ -625,7 +625,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     tracked.delete(id);
     if (entry) flushFiles(entry, new Set());
     stopIfIdle();
-    return entry?.observed ? { ...(!entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib: entry.legacyPeakMib } : {};
+    return entry ? { ...(entry.observed && !entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib: entry.legacyPeakMib } : {};
   };
   return {
     track(id, pid, hooks) {
