@@ -1603,6 +1603,8 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
+  reconcileDependabotOwnRed,
+  DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
   decideDepReview,
@@ -23987,6 +23989,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
     } catch (error) {
       log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
+    try {
+      const ownRedFlag = flagValue(rest, "--dependabot-own-red");
+      const ownRed = reconcileDependabotOwnRed({
+        statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
+        headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
+        capture: ({ raw, submissionKey }) => (deps.captureMigrationFeedback ?? ((a) => captureFeedback(a.root, { id: a.id, raw: a.raw, origin: "repair#dep-review", submissionKey: a.submissionKey })))({ root: config.root, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      });
+      if (ownRed !== "none") console.log(`dependabot own red ${ownRed}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.own_red.failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
     }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
