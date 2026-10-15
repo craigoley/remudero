@@ -60,7 +60,9 @@ test("a failed proof's output is recorded on the review verdict: command, exit s
   const many = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
   execWhitelistedProof(w!, REPO_ROOT, 60_000, failedSpawner(`${many}\nnot ok 1 - last\n# fail 1\n`), { preflightBrowsers: () => {} });
   const tail = (w!.failureOutput ?? "").split("\n").slice(2);
-  assert.equal(tail.length, 40, "the excerpt keeps the last ~40 lines only");
+  assert.equal(tail[0], "(62 earlier lines omitted)");
+  assert.equal(tail.slice(1).length, 40, "the omission note is separate from the 40 diagnostic lines");
+  assert.equal(tail[1], "line 62", "the oldest retained diagnostic line follows the exact omitted count");
   assert.equal(tail.at(-1), "# fail 1");
   assert.ok(!tail.includes("line 0"));
 });
