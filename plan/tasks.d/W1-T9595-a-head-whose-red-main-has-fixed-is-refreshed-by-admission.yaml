@@ -63,6 +63,8 @@
         sits in front of each admission here, and its at-most-one rule applies to freshness refreshes only.
         The operator should rule on this before either builds.
       - W1-T9585 (queued) changes the open-escalation stand-down. It does not touch the refresh slot.
+      - SHARED SURFACE ONLY with W1-T100. It routes blocked_ci to the ci-log fix path in the same two files. This task
+        changes who is refreshed after a base red, not how a red is routed to a fix.
   design: |
     1. ADMISSION REPLACES THE SLOT. Remove `baseRedRefreshPr`.
        - A head qualifies when it would take the slot today:
