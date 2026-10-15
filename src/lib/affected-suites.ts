@@ -114,13 +114,14 @@ export function fullRunTrigger(changed: readonly string[], readMapUsable = false
   });
 }
 
-export const READ_MAP_FORMAT = "rmd-read-map-v1";
+export const READ_MAP_FORMAT = "rmd-read-map-v2";
 
 /** One test file's record, as test/setup/read-map.ts writes it. */
 export interface ReadMapRecord {
   suite: string;
   reads: readonly string[];
   listed: readonly string[];
+  unknownDescriptors?: boolean;
 }
 
 /** Main's merged read map: for each non-code path, the suites that read it (indices into `suites`),
@@ -132,6 +133,7 @@ export interface ReadMap {
   suites: string[];
   reads: Record<string, number[]>;
   listed: Record<string, number[]>;
+  unknownDescriptorSuites: string[];
 }
 
 /** What the selector decides from beside the map: why it is absent, and its drift against the base. */
@@ -145,7 +147,9 @@ export interface ReadMapInput {
 /** Merges per-suite records into one map keyed by `sha`. A suite named twice (a retry) is unioned. */
 export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: string }): ReadMap {
   const merged = new Map<string, { reads: Set<string>; listed: Set<string> }>();
+  const unknownDescriptorSuites = new Set<string>();
   for (const r of records) {
+    if (r.unknownDescriptors !== false) unknownDescriptorSuites.add(r.suite);
     const into = merged.get(r.suite) ?? { reads: new Set<string>(), listed: new Set<string>() };
     for (const p of r.reads) into.reads.add(p);
     for (const p of r.listed) into.listed.add(p);
@@ -159,7 +163,7 @@ export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: str
     for (const p of [...entry.reads].sort()) (reads[p] ??= []).push(i);
     for (const p of [...entry.listed].sort()) (listed[p] ??= []).push(i);
   });
-  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed };
+  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed, unknownDescriptorSuites: [...unknownDescriptorSuites].sort() };
 }
 
 /** The records one full run left in `dir` (test/setup/read-map.ts's files). A file that is not a
@@ -169,11 +173,11 @@ export function readReadRecords(dir: string): { records: ReadMapRecord[]; proble
   const problems: string[] = [];
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
     const value = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<ReadMapRecord> & { format?: string };
-    if (value.format !== "rmd-read-record-v1" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed)) {
+    if (value.format !== "rmd-read-record-v2" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed) || typeof value.unknownDescriptors !== "boolean") {
       problems.push(`${name} is not a read record`);
       continue;
     }
-    records.push({ suite: value.suite, reads: value.reads, listed: value.listed });
+    records.push({ suite: value.suite, reads: value.reads, listed: value.listed, unknownDescriptors: value.unknownDescriptors });
   }
   return { records, problems };
 }
@@ -188,7 +192,8 @@ export function readReadMap(path: string, read: (p: string) => string = (p) => r
   }
   const object = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
   if (value?.format !== READ_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
-      !object(value.reads) || !object(value.listed)) {
+      !object(value.reads) || !object(value.listed) || !Array.isArray(value.unknownDescriptorSuites) ||
+      !value.unknownDescriptorSuites.every(suite => typeof suite === "string" && value!.suites!.includes(suite))) {
     return { problem: `read map ${path} is not a ${READ_MAP_FORMAT} file` };
   }
   return { map: value as ReadMap };
@@ -207,6 +212,9 @@ export function readMapProblem(input: ReadMapInput | undefined): string | undefi
   if (!input) return "no read map supplied";
   const map = input.map;
   if (!map) return `no read map (${input.mapProblem ?? "none supplied"})`;
+  if (!Array.isArray(map.unknownDescriptorSuites) || map.unknownDescriptorSuites.length > 0) {
+    return "read map descriptor coverage is incomplete";
+  }
   if (input.drift.distance === undefined) {
     return `read map ${map.sha.slice(0, 12)} is not an ancestor of the base (${input.drift.problem ?? "unknown"})`;
   }
