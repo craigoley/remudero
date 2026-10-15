@@ -120,16 +120,20 @@ test("W1-T8086: a review-only pass and the conflicted lane keep their gates", as
   assert.equal(reviewOnly.dispatched.length, 0);
   assert.equal(reviewOnly.admitted.length, 0);
   assert.equal(reviewOnly.disposed()[0]!.stand_down_reason, DEFERRED);
+  // 2026-10-14: the conflicted lane's gate on the ordinary pass is now the same fix-capacity claim
+  // (test/a-conflicted-head-gets-its-conflict-round-on-the-light-pass.test.ts); a refused claim holds it.
   const ordinary = fixture(t);
+  const capacity = "live host capacity exhausted for this light pass";
+  ordinary.deps.claimFixAdmission = (pr) => { ordinary.admitted.push(pr.prNumber); return { admitted: false, reason: capacity }; };
   await runSweepLightPass([ownRed({
     checksState: "green", reviewState: "success", ciFailures: [], redRequiredChecks: [], mergeState: "dirty",
     headRefName: "run-W1-T8086-1791809247804",
     mergeConflict: { files: [{ path: "src/config.ts", oursDeleted: 0, theirsDeleted: 0 }], oursLog: "edit config", theirsLog: "edit config" },
   })], ordinary.deps);
   assert.equal(ordinary.disposed()[0]!.disposition, "conflicted");
-  assert.equal(ordinary.disposed()[0]!.stand_down_reason, DEFERRED);
+  assert.equal(ordinary.disposed()[0]!.stand_down_reason, capacity);
   assert.equal(ordinary.dispatched.length, 0);
-  assert.equal(ordinary.admitted.length, 0);
+  assert.deepEqual(ordinary.admitted, [10866]);
   assert.equal(lightPassActionable("conflicted", true, false, true, true), true);
   assert.equal(lightPassActionable("blocked-fixable", false), false);
   assert.equal(lightPassActionable("blocked-fixable", false, false), false);

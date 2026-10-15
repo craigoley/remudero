@@ -1,0 +1,76 @@
+- id: W1-T9545
+  title: "A REVIEW'S PLAN LINT RUNS IN AN AWAITED CHILD, NOT ON THE DAEMON LOOP — lintPlanForReview calls lintPlanCommand in-process, and its --base path reads origin's shards and diffs the plan through synchronous git: 19 shard reads held core's loop 85 s in 6 h on 2026-10-14, and one `git diff` under it held it 182 s at 04:50Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where a plan-only review's lint executes; it runs inside runReview, on the daemon loop, for every plan-only PR
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T4423, W1-T9114, W1-T8778, W1-T7745, W1-T246, W1-T9544, W1-T9549, W1-T9550, W1-T9552, W1-T9554, W1-T9556]
+  files: [src/run-task.ts, test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts]
+  status: queued
+  priority: 1  # P1: the second-largest attributed caller on core's loop, and the 182 s block of 04:50Z; the costly fix (W1-T9114) waits on three queued tasks
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; `daemon.alive` rows streamed to
+    ~/Remudero-notes/sync-spawn-filing/). In the 38 rows of 15:14-21:14Z the `sync_spawn_top` entry
+    `<anonymous> (src/run-task.ts:4788 | 4790 | 4792 | 4796)`, leaf `hostWorktreeGit`, appears 19 times: 85.1 s,
+    worst 5.6 s, often two or three per interval. Each line, read at that daemon's `boot_head_sha` (6217ba817,
+    a0a7ced05, fe8c131a0, 70f122023, abbee334d), is the body of `defaultShardGitRunner`, the sync runner that
+    `readOriginShardsAtRef` uses for its `ls-tree` and `cat-file --batch`. Earlier the same day W1-T9527's evidence
+    (~/Remudero-notes/loopblock-0450/) found a 182,282 ms `git -C … diff` under `lintPlanCommand` inside the
+    05:35:46Z `daemon.loop_lag` row (lag 2,742,587 ms).
+    WHO REACHES IT, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `readOriginShardsAtRef`'s default runner is reached only by `syncPlanFromOrigin` and `materializeOriginShards`.
+        The daemon's tick syncs through `syncPlanFromOriginAsync` (`createPlanSyncCoalescer` with
+        `quarantiningPlanSyncAsync`); the sync `syncPlanOrRefuse` runs once at daemon boot and in the `drain` CLI.
+      - `materializeOriginShards` is called by `lintPlanCommand`'s `--base` path, which also runs `git show` and
+        `git cat-file -e` through the sync `hostWorktreeGit`.
+      - `runReview` (src/run-task.ts) awaits `lintPlanForReview(headCheckoutDir)` for every plan-only PASS (W1-T4423).
+        `lintPlanForReview` runs a sync `hostWorktreeGit` fetch (120 s timeout) and merge-base, then calls
+        `lintPlanCommand([...--plan, --base], { offline: true, repoRoot })` IN PROCESS, capturing console output and
+        reading it back through `planLintOutcomeFromOutput`. The reviews run in the daemon process
+        (`trackInFlightReview(runReview(job))`, src/lib/sweep.ts).
+      - The live core ledger shows ci_judge rows for plan-only PRs 11796-11798 in the 21:11-21:13Z window; plan PRs are
+        the steady filing traffic.
+    TAKE THE CHEAP CANDIDATE BESIDE THE COSTLY ONE: W1-T9114 (queued, P1.5) moves every review into a run child under
+    ADR 0007, which would take this off the loop too. It depends on W1-T9086, which depends on W1-T9085, which depends on
+    W1-T9083, all queued, and it ships behind `sweep.runChild.mode` starting in shadow. This task moves only the lint,
+    through the child entry the garden children and the preopen gate already use (W1-T8778), and stays useful in a
+    review child (a child's lint still parses the whole plan once per review, and nothing else waits on it).
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    lintPlanForReview and materializeOriginShards. Control: main reads 7 files (W1-T428, W1-T470, W1-T504, W1-T5965,
+    W1-T6135 merged; W1-T2657 blocked; one feedback file); the one head above main is W1-T9527's filing (#11783), which
+    names this caller and leaves it to W1-T9114. None moves the review's lint off the loop.
+  design: |
+    No new bound and no fixed list.
+    1. `lintPlanForReview`'s fetch and merge-base await `hostWorktreeGitAsync` with the same argv and the same
+       outcomes (a failed fetch still prints the not-refreshed line; a missing merge base is still `ran: false`).
+    2. The lint itself runs as an awaited child: the run-task entry from `childEntryArgv` (the precompiled bundle when
+       current, else tsx), `lint-plan --plan <head>/plan/tasks.yaml --base <mergeBase>` plus an argv form of the two
+       deps the in-process call passes today (`offline`, `repoRoot`), which `lintPlanCommand` accepts as flags.
+       `child_entry.spawned` records which entry ran.
+    3. The child's stdout and stderr lines and its exit code feed `planLintOutcomeFromOutput` unchanged, so the review
+       sees the same `PlanLintOutcome`. A child that cannot start, dies on a signal, or prints no summary line reads as
+       `ran: false` with the reason, never as clean.
+    4. The child carries the review's own abort: a review that is abandoned or drained kills the lint child's process
+       group. No new timeout.
+    Tests go in test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts, with `test(` titles verbatim as in
+    the proofs below, over a temp git repo holding a small plan and the `syncBuiltinESMExports` trap
+    `startReadPlaneTelemetry` uses.
+  acceptance:
+    - claim: "the review's plan lint runs as a child with sync spawns trapped in the parent and returns the same outcome"
+      proof: 'grep: test("W1-T9545: a review plan lint runs in a child with sync spawns trapped in the parent" in test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts'
+    - claim: "a concurrent timer keeps ticking while the lint child runs"
+      proof: 'grep: test("W1-T9545: a concurrent timer ticks while the review plan lint runs" in test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts'
+    - claim: "a lint child that dies or prints no summary is ran false, never clean"
+      proof: 'grep: test("W1-T9545: a lint child that dies or prints no summary is not clean" in test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts'
+    - claim: "lint-plan accepts the offline and repo-root deps as flags"
+      proof: 'grep: test("W1-T9545: lint-plan takes offline and repo-root as flags" in test/a-reviews-plan-lint-runs-in-a-child-not-on-the-loop.test.ts'
+  falsifier: |
+    Keep `lintPlanCommand` in process: with execFileSync, spawnSync and execSync trapped to throw in the parent, the
+    first test's outcome is `ran: false` ("lint-plan threw"), and the second test's setInterval records no tick while
+    the shard read runs. Read a killed child's empty output as zero violations: the third test passes a dead lint as clean.

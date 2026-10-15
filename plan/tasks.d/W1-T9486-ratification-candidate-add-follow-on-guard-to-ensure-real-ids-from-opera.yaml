@@ -1,0 +1,22 @@
+- id: W1-T9486
+  title: "Ratification candidate: add follow-on guard to ensure real IDs from operator mapping"
+  repo: remudero
+  depends_on:
+    - W1-T9485
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  rationale: >-
+    From the 2026-10-14 proposal on proof-debt:W1-T5071, ratified via rmd approve:
+  
+    Cross-file invariant depends on both plan/tasks.yaml and MASTER-PLAN.md being consistent
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.yaml
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: "MASTER-PLAN.md records an audit step that maps the W1-T9485 ratification candidate to a real W1-T ID after operator approval"
+      proof: 'grep: ratification-audit: W1-T9485 in MASTER-PLAN.md'
+  origin: "architect"

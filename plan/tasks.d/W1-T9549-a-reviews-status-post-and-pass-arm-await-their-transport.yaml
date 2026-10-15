@@ -1,0 +1,77 @@
+- id: W1-T9549
+  title: "A REVIEW'S STATUS POST AND PASS ARM AWAIT THEIR TRANSPORT — runReview arms through the synchronous armIfVerdictPermits -> armAutoMergeDetailed -> realArmDeps (gh pr merge, the plan merge-safety git, the direct REST merge) and posts its status through execGhStatusPost and fetchPrLifecycle, all on the daemon loop: about 90 s attributed in 6 h on 2026-10-14"
+  repo: remudero
+  depends_on: [W1-T9544]  # both edit SYNC_SPAWN_LOOP_BASELINE in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts; serialized so one recomputes the exact census after the other (#10349 + #10353)
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the transport a review's own GitHub writes and arm use; it includes a merge write
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T5284, W1-T7747, W1-T9114, W1-T230, W1-T5615, W1-T2347, W1-T5689, W1-T9544, W1-T9545, W1-T9550, W1-T9552, W1-T9554, W1-T9556]
+  files: [src/run-task.ts, src/lib/arm-auto-merge.ts, src/lib/review.ts, test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
+  status: queued
+  priority: 1.5  # every PASS review arms through it; the costly fix (W1-T9114) waits on three queued tasks
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; `daemon.alive` rows streamed to
+    ~/Remudero-notes/sync-spawn-filing/). In the 38 rows of 15:14-21:14Z, the top-3 `sync_spawn_top` entries name:
+      - `Object.armAuto (src/lib/arm-auto-merge.ts:631)`, leaf `ghExec`: 8 entries, 28.1 s, worst 4.7 s;
+      - `<anonymous> (src/lib/plan-pr-merge-safety.ts:133)`, git: 7 entries, 32.5 s, worst 5.6 s;
+      - `mergeDirectViaRest (src/lib/arm-auto-merge.ts:435)`, leaf `ghExecFile`: 4 entries, 13.6 s, worst 4.1 s;
+      - `execGhStatusPost (src/lib/review.ts:9920)`, leaf `ghExec`: 2 entries, 12.8 s, worst 10.7 s;
+      - `fetchPrLifecycle (src/lib/review.ts:10176)`, leaf `ghJson`: 2.2 s.
+    The earlier 15:38-19:39Z census (~/Remudero-notes/loopblock-0450/) gave plan-pr-merge-safety 28 s and armAuto 24 s.
+    WHO REACHES THEM, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `armAuto` at that line is the SYNC member of `realArmDeps` (src/lib/arm-auto-merge.ts); the plan-pr-merge-safety
+        line is `planSafetyGitSync`'s spawnSync, which only `realArmDeps().readPlanMergeSafety` uses
+        (`realArmDepsAsync` uses `planSafetyGitAsync`). The sweep's arm already awaits
+        (`armImpl = armAutoMergeDetailedAsync`, src/lib/sweep.ts), so these come from the other caller:
+      - `runReview` (src/run-task.ts) ends a PASS with `armIfVerdictPermits(verdict, armCtx, { arm: args.arm })`, a
+        synchronous function whose default arm is `armAutoMergeDetailed`, which defaults to `realArmDeps()`. Its
+        clean-status fallback reaches `realArmDeps().mergeDirect` -> `mergeDirectViaRest`.
+      - `postReviewStatus` (src/lib/review.ts) already sleeps between retries with a timer, but each attempt calls
+        `execGhStatusPost`, a sync `ghExec`; `postReviewStatusGuarded`'s lifecycle read is the sync `fetchPrLifecycle`
+        over `ghJson`.
+      - The reviews run in the daemon process (`trackInFlightReview(runReview(job))`, src/lib/sweep.ts).
+      - The awaited forms exist: `armAutoMergeDetailedAsync` and `realArmDepsAsync` (W1-T5284), `ghJsonAsync` and
+        `ghTextAsync`.
+    TAKE THE CHEAP CANDIDATE BESIDE THE COSTLY ONE: W1-T9114 (queued, P1.5) moves reviews into run children, behind
+    W1-T9086 -> W1-T9085 -> W1-T9083 (all queued) and `sweep.runChild.mode`. Until then every PASS arms on the loop.
+    OVERLAP: W1-T7747 (queued; run branch run-W1-T7747-1791670369272 exists) converts `buildSweepEffects`' sync gh
+    calls, including the sweep's armed-idle `mergeDirectViaRest`; it does not touch `runReview`'s arm or the review's
+    status post. Both may move rows of SYNC_SPAWN_LOOP_BASELINE; the census is exact, so whichever lands second
+    recomputes its rows against main.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    armIfVerdictPermits, execGhStatusPost and "review arm async / off the loop". Control: main reads 12 files, all
+    merged tasks or feedback about arm attribution, the arm gate and the review status channel; no head reads more
+    than main.
+  design: |
+    No new bound; the same argv, the same gates, the same outcomes.
+    1. An awaited `armIfVerdictPermitsAsync` with the same gate order and ledger rows as `armIfVerdictPermits`; its
+       default arm is `armAutoMergeDetailedAsync` over `realArmDepsAsync`, so `gh pr merge --auto`, the plan
+       merge-safety git and the direct REST merge are awaited. `runReview` awaits it. The sync form stays for the CLI
+       (`rmd review <pr>` run by hand is not on the daemon loop) and `requireExplicitArmSeam` still refuses a real arm
+       reached from a test.
+    2. `postReviewStatus`' default exec awaits the gh transport (`ghTextAsync` with the reviewer-token env), keeping
+       its transient classification and retry, and `postReviewStatusGuarded`'s lifecycle read in `runReview` awaits
+       `ghJsonAsync`. The repair-lease status post follows the same exec.
+    3. Rows of SYNC_SPAWN_LOOP_BASELINE (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) whose
+       loop-reachable count changes are lowered or deleted in the same PR, as the census requires.
+    Tests go in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts, with `test(` titles verbatim as
+    in the proofs below. Use a PATH-stubbed `gh` and `git` (the test/arm-at-open.test.ts pattern) that sleep about a
+    second, and the `syncBuiltinESMExports` trap `startReadPlaneTelemetry` uses.
+  acceptance:
+    - claim: "a PASS review arms through the awaited transport with sync spawns trapped"
+      proof: 'grep: test("W1-T9549: a PASS review arms through the awaited transport with sync spawns trapped" in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts'
+    - claim: "a review's status post and lifecycle read await gh with sync spawns trapped"
+      proof: 'grep: test("W1-T9549: a review status post and lifecycle read await gh with sync spawns trapped" in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts'
+    - claim: "a slow gh during the arm does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9549: a slow gh during the review arm does not delay a concurrent timer" in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts'
+    - claim: "the awaited arm keeps the sync arm's gate order and ledger rows"
+      proof: 'grep: test("W1-T9549: the awaited review arm keeps the sync gate order and rows" in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts'
+  falsifier: |
+    Leave `runReview` on `armIfVerdictPermits` with `armAutoMergeDetailed`: with execFileSync, spawnSync and execSync
+    trapped to throw, the first test's arm throws from `realArmDeps().armAuto`, and the third test's setInterval records
+    no tick while the stubbed gh sleeps. Leave `execGhStatusPost` as the default exec: the second test's post throws.
