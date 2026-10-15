@@ -20,6 +20,7 @@ import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js"
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
@@ -1990,6 +1991,7 @@ function prepareInboxPass(
   // still looks READY (a drifted write) — re-derived from the ledger on every pass,
   // never trusted from the registry's own state.
   const verdicts = ledgerProposalVerdicts(ledgerLines);
+  const boardReferents = inboxBoardReferents(projection);
   const releasedHumanTasks = releasedHumanTaskIds(ledgerLines);
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
@@ -2001,6 +2003,7 @@ function prepareInboxPass(
     const classification = classifyProposal(proposal, drafts[proposal.id], {
       plan,
       isMerged,
+      boardReferents,
       depsUnobservable,
       grepAnchorTrue,
       // Every OTHER registry id: one shared set behind a view that excludes this proposal.
@@ -2050,11 +2053,11 @@ function planFilesStamp(planPath: string, stat: (path: string) => string | undef
   return JSON.stringify([stat(planPath), shards.map((name) => [name, stat(join(shardDir, name))])]);
 }
 
-/** Only what classifyProposal reads off a projection: merged, and an indeterminate read's reason. */
+/** What classifyProposal reads: task credit, unavailable dependencies and observed board referents. */
 function projectionDigest(projection: Map<string, StatusProjection>): string {
   const parts: string[] = [];
   for (const [id, p] of projection) parts.push(`${id}:${p.merged ? 1 : 0}:${p.indeterminate ? (p.unavailableReason ?? "unknown") : ""}`);
-  return parts.join("|");
+  return JSON.stringify([parts, [...inboxBoardReferents(projection).states].sort(([a], [b]) => a.localeCompare(b))]);
 }
 
 /** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
