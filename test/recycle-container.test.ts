@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -34,6 +34,8 @@ interface Run {
   stdout: string;
   stderr: string;
   calls: Call[];
+  fixtureRecordingDir: string;
+  fixtureStubDir: string;
 }
 
 /**
@@ -274,6 +276,8 @@ interface RunOpts {
   args?: string[];
   stateDir?: string;
   extraEnv?: Record<string, string>;
+  instanceRoot?: string;
+  shellPath?: string;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
@@ -298,7 +302,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   writeFileSync(cashKeyPath, `${durableCashKey}\n`, { mode: 0o600 });
   chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
-  const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
+  const r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
@@ -352,7 +356,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   } catch {
     calls = [];
   }
-  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", calls };
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", calls, fixtureRecordingDir: rec, fixtureStubDir: dir };
 }
 
 const isPull = (c: Call) => c.bin === "docker" && c.argv[0] === "pull";
@@ -1195,10 +1199,10 @@ test("W1-T4197: a recycle removes only the pause it wrote", () => {
 // ── W1-T4198: a recycle --instance carries the registry's app and heap fields into the container ──
 
 /** Run `--instance fixture` against a one-record registry whose optional fields are `extra`. */
-function runInstance(extra: string[], mode = "good"): Run {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-instance-`));
+function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
+  const root = opts.instanceRoot ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-instance-`));
   const dirs = { state: join(root, "state"), claude: join(root, "claude"), codex: join(root, "codex"), config: join(root, "config") };
-  for (const d of Object.values(dirs)) mkdirSync(d);
+  for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
   const registry = join(root, "daemon-instances.yaml");
   const record = [
     "  fixture:",
@@ -1213,9 +1217,11 @@ function runInstance(extra: string[], mode = "good"): Run {
   ];
   writeFileSync(registry, `${record.join("\n")}\n`);
   return runRecycle(mode, {
+    ...opts,
     args: ["--instance", "fixture"],
     stateDir: dirs.state,
-    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config },
+    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
+      RMD_RECYCLE_HOST_LOCK: join(root, "host-recycle.lock"), RMD_RECYCLE_LOCK_WAIT_S: "2", ...opts.extraEnv },
   });
 }
 
@@ -1301,4 +1307,95 @@ test("W1-T9071: a failing recycle action never stops the recycle, and no session
   assert.ok(!run.calls.find(isRun)!.argv.join(" ").includes(dst), "no bind without this instance's ready copy");
   assert.equal(readdirSync(join(state, "recycle-actions", "failed")).length, 1);
   assert.match(run.stderr, /not-a-reviewed-action FAILED \(no reviewed script/);
+});
+
+function modeRecycleRoot(t: TestContext): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function modeRecycle(t: TestContext, fields: string[], opts: RunOpts = {}): Run {
+  return runInstance(fields, "good", { instanceRoot: modeRecycleRoot(t), shellPath: "/bin/bash", ...opts });
+}
+
+function stableModeCalls(run: Run): Call[] {
+  return run.calls.map(c => ({ bin: c.bin, argv: c.argv.map(a => a.replaceAll(run.fixtureRecordingDir, "<recording>").replaceAll(run.fixtureStubDir, "<stub>")) }));
+}
+
+test("recycler accepts existing shadow and live mode without activating it", t => {
+  const root = modeRecycleRoot(t), opts = { instanceRoot: root, shellPath: "/bin/bash" };
+  const legacy = runInstance([], "good", opts);
+  assert.equal(legacy.status, 0, legacy.stderr);
+  for (const mode of ["shadow", "live", '"shadow"', '"live"', "shadow   # comment", "live   "]) {
+    const run = modeRecycle(t, [`mode: ${mode}`], opts);
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(stableModeCalls(run), stableModeCalls(legacy), `mode ${mode} changes no lifecycle effect`);
+    assert.deepEqual(runEnvValues(run, "RMD_INSTANCE_NAME"), ["fixture"]);
+    for (const name of ["RMD_INSTANCE_MODE", "RMD_SHADOW_MODE", "RMD_CONTRIBUTOR_ADMISSION"]) assert.deepEqual(runEnvValues(run, name), []);
+    assert.equal(run.calls.filter(isRun).length, 1);
+    assert.match(run.stdout, /sha256:PULLEDID/);
+  }
+});
+
+test("recycler refuses invalid or duplicate mode before effects", t => {
+  const control = modeRecycle(t, ["mode: shadow"]);
+  assert.equal(control.status, 0, control.stderr);
+  for (const fields of [["mode: LIVE"], ["mode:"], ["mode: unknown"], ['mode: "shadow'], ['mode: live"'],
+    ['mode: "live"suffix"'], ["mode: 'shadow'"], ["mode: shadow extra"], ["mode: shadow", "mode: live"],
+    ["mode: shadow", "mode: shadow"], ["mode:", "mode: live"]]) {
+    const root = modeRecycleRoot(t), run = modeRecycle(t, fields, { instanceRoot: root });
+    assert.equal(run.status, 2, `${fields.join(" / ")}: ${run.stderr}`);
+    assert.match(run.stderr, /mode/);
+    assert.deepEqual(run.calls, [], "not even the first Docker/Azure read or mutation is allowed");
+    assert.equal(existsSync(join(root, "state", "state")), false, "no PAUSE, receipt or state write before refusal");
+  }
+});
+
+test("recycler mode compatibility preserves legacy effects and owner holds", t => {
+  const root = modeRecycleRoot(t), state = join(root, "state", "state");
+  mkdirSync(state, { recursive: true });
+  const pause = JSON.stringify({ reason: "owner hold", requestedAt: new Date().toISOString(), pid: 4242, host: "owner" });
+  writeFileSync(join(state, "PAUSE"), pause);
+  writeFileSync(join(state, "STOP"), "owner STOP remains authoritative\n");
+  const legacy = modeRecycle(t, [], { instanceRoot: root });
+  assert.equal(legacy.status, 0, legacy.stderr);
+  for (const fields of [["mode: shadow"], ["mode: live"], []]) {
+    const run = modeRecycle(t, fields, { instanceRoot: root });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(stableModeCalls(run), stableModeCalls(legacy));
+    assert.equal(readFileSync(join(state, "PAUSE"), "utf8"), pause);
+    assert.equal(readFileSync(join(state, "STOP"), "utf8"), "owner STOP remains authoritative\n");
+    assert.doesNotMatch(run.stdout, /PAUSE engaged —/);
+  }
+  const unknown = modeRecycle(t, ["mode: shadow", "future_mode_policy: enabled"]);
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /unknown field 'future_mode_policy'/);
+  assert.deepEqual(unknown.calls, []);
+});
+
+test("lifecycle mode grammar falsifiers exercise the real script arms: recycler", t => {
+  const root = modeRecycleRoot(t), deploy = join(root, "deploy");
+  cpSync(join(REPO_ROOT, "deploy"), deploy, { recursive: true });
+  const script = join(deploy, "recycle-container.sh"), source = readFileSync(SCRIPT, "utf8");
+  assert.equal(modeRecycle(t, ["mode: shadow"], { scriptPath: script }).status, 0, "the unmodified copied default must run first");
+  const withoutRecognition = source.replace(/      mode\)\n[\s\S]*?        ;;\n/, "");
+  assert.notEqual(withoutRecognition, source);
+  writeFileSync(script, withoutRecognition);
+  const refused = modeRecycle(t, ["mode: shadow"], { scriptPath: script });
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /unknown field 'mode'/);
+  assert.deepEqual(refused.calls, []);
+  for (const [pattern, fields] of [
+    [/^        \[ "\$value" = shadow \].*$/m, ["mode: invalid"]],
+    [/^        \[ "\$instance_mode_seen" = 0 \].*$/m, ["mode: shadow", "mode: live"]],
+  ] as const) {
+    const mutated = source.replace(pattern, "        :");assert.notEqual(mutated, source);
+    writeFileSync(script, mutated);
+    const accepted = modeRecycle(t, [...fields], { scriptPath: script });
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(accepted.calls.filter(isRun).length, 1, "deleting validation reaches the real recorded replacement effect");
+  }
+  writeFileSync(script, source);
+  assert.equal(modeRecycle(t, ["mode: live"], { scriptPath: script }).status, 0);
 });
