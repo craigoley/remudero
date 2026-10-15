@@ -6,10 +6,10 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
-  risk: medium  # Rule 19: one concern, which settled passes W1-T9563's learner may sample; the learner in daemon.ts and the work count the real sweep returns
+  risk: high  # Rule 19: one concern, which settled passes W1-T9563's learner may sample; high for span: the learner in daemon.ts, the work count the real sweep closure in run-task.ts returns, #11879's suite and one new test
   band_meaning: span
   origin: "operator session 2026-10-14: follow-up found while reviewing #11879 (W1-T9563); operator approved it 2026-10-14 (\"go with all recommended follow ups\"). Standing ruling: no hard thresholds or floors, so the fix is a mechanism"
-  plan_refs: [W1-T9563, W1-T1044, W1-T2582, W1-T4002, W1-T9554]
+  plan_refs: [W1-T9563, W1-T1044, W1-T2582, W1-T4002, W1-T9554, W1-T147]
   files:
     - src/lib/daemon.ts
     - src/run-task.ts
@@ -34,6 +34,10 @@
       - Neither pass measures how long a pass with work takes, which is the population W1-T9563 means to learn.
     A floor under the learned value would be a hard threshold, which the operator ruling forbids. Instead the learner
     leaves out samples that measured no work.
+    RELATED, NOT OVERLAPPING: W1-T147 (queued, the overnight chaos drill) also declares src/run-task.ts and
+    src/lib/daemon.ts. It injects kill-9, ENOSPC and a GitHub-outage stub and checks each recovery ledger line. This
+    task changes which settled passes the sweep-bound learner samples. Its GitHub-outage stub would produce exactly
+    the zero-work passes this task leaves out of the sample.
   design: |
     1. The pass reports its work. `SweepCycleOutcome` (src/lib/daemon.ts) gains `prsWalked: number`, the count of open
        PR views the pass walked. The daemon sweep closure in src/run-task.ts returns it on every path: `openPrs.length`
