@@ -1,0 +1,76 @@
+- id: W1-T9708
+  title: "A CENSUS RED A PR CAUSES IS THAT PR'S OWN, NEVER A FLAKE INCIDENT — the flake-incident gardener counts a PR when its diff touches neither the failing test nor a module it imports, but a census suite walks the whole tree, so a PR that adds a site the census reports reds it without touching either; W1-T7532 (catch-erasure-ratchet) and W1-T7765 (the hardened-leaf git-spawn ratchet) were each filed from PRs that added the very site their census named"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: spans the flake-incident gardener's per-PR clear verdict and one pure census-walk reader exported beside the census-membership registry; one concern — a census red on a PR whose diff enters the census's walk is attributed to that PR
+  band_meaning: span
+  origin: "operator session 2026-10-15 (fan-out R1/R2): W1-T7532 and W1-T7765 queued at verify: auto for census reds their own PRs caused"
+  plan_refs: [W1-T6406, W1-T2969, W1-T2809, W1-T9551, W1-T9694, W1-T7532, W1-T7765, W1-T7269]
+  files: [src/lib/flake-incident-gardener.ts, src/lib/ci-parity.ts, test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: a PR-caused census red filed as a flake sends the fleet to pin an intermittent cause that does not exist (W1-T7532 and W1-T7765, retired in the same PR)
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15, verified with git against the PR heads:
+    - W1-T7532 (test/catch-erasure-ratchet.test.ts, 0 recovered, 4 also failed): CI run 37944299457 on #10354
+      failed 'PROPERTY no negated optional-chain conflator' on src/lib/read-model-worker.ts
+      `if (!live?.readPaced)`. #10354's head 3440bd48b adds that line, and its merge base has none. #10368's
+      commit 3b8a3e02b adds the same line, and #10491's commit 819d77e49 adds `!quiet?.quiet`.
+    - W1-T7765 (test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts, 0 recovered,
+      10 also failed): every cited PR adds a raw git spawn the ratchet counts. #10203 909500c21 and #10377
+      1e27fa25f add `"-C", root`, #10643 42907e7b1 adds `"-C", root`, and #10671 94c377cf9 adds
+      `"-C", repoDir`. #10310 6bc18ef00 adds a `cwd`-option git spawn (the W1-T6123 widened ratchet).
+      #10203 and #10671 exempted their site before merge.
+    - Main was green on both tests throughout: 38 and 15 sweep.base_reproduction passes, per agent R1.
+      W1-T7269 (merged) was an earlier filing for the same git-spawn census, also with 0 recovered.
+    READ at origin/main 49ee61067:
+    - src/lib/flake-incident-gardener.ts `runFlakeIncidentGardener` → `evidenceOf` clears a PR's observation
+      when its changed paths (`readChangedPaths(base, head)`) miss `own`, which is the test file plus
+      `testSourcePaths` (its relative imports). A census suite imports none of what it walks, so every PR
+      that adds a site the census reports reads as clear.
+    - src/lib/ci-parity.ts already knows which tests are censuses and what they walk. The registry
+      `CENSUS_MEMBERSHIP_SUITES` (behind `rmd census-membership`, W1-T2969) carries catch-erasure-census,
+      walks ["src/"]. The candidate recognizer behind the same command (`discoverCensusCandidates`: the
+      `ls-files|readdirSync|globSync` idiom, then `censusCandidateWalks`) names the git-spawn test, walks
+      ["src/"]. Nothing hands either to the gardener.
+    - W1-T9551 (#12088, open) routes a group with no recovered retry to main-health. Alone, it would send
+      W1-T7532's evidence to main-health as a main red; main-health would find main green and log the hint
+      resolved. It would say nothing about the PRs that caused the red, and it still counts PR-caused census
+      reds toward a group that has one recovered retry, such as W1-T7248's (1 recovered, 2 also failed).
+  design: |
+    1. ONE CENSUS READER, NEVER TWO. src/lib/ci-parity.ts exports a pure `censusWalksOf(testFile, text)`.
+       It returns the registry row's `walks` when `CENSUS_MEMBERSHIP_SUITES` names the file. Otherwise, when
+       the text carries the enumeration idiom `discoverCensusCandidates` matches, it returns
+       `censusCandidateWalks(text)`. Otherwise it returns []. `discoverCensusCandidates` reads its idiom from
+       the same constant, so the gardener and `rmd census-membership` cannot disagree on what is a census.
+    2. ATTRIBUTE, DO NOT COUNT. In `evidenceOf`, a coverage-shard observation whose retry ALSO failed, of a
+       test whose `censusWalksOf` is non-empty, is not clear when any of the PR's changed paths lies under
+       one of those walks. The PR is that red's candidate cause, exactly as a PR that edits the test is. The
+       PR therefore never counts toward a flake incident, a watch row, or W1-T9551's main-inherited
+       classification. No new ledger step and no digest bump.
+    3. A RECOVERED RETRY KEEPS TODAY'S PATH. A census that passes on retry on the same tree is timing, not
+       the tree, so a recovered observation is cleared by the existing rule alone. A PR whose diff stays
+       outside every walk, such as a plan-only or docs-only PR, also keeps today's rule. A fix-round
+       observation is unchanged: it carries no base sha to read a diff from.
+    4. MAIN RED STAYS VISIBLE. The rule only removes PRs from the count and never files anything. A census
+       main itself fails still reds PRs outside its walk, and main's own CI and W1-T9551's main-failures
+       reader still see it.
+  acceptance:
+    - claim: "a census red whose retries also failed, on PRs whose diffs enter the census's walk, files no flake incident"
+      proof: 'grep: test("W1-T9708: a census red on PRs whose diffs enter its walk files no flake incident" in test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts'
+    - claim: "a census red that recovers on retry still counts toward a flake incident"
+      proof: 'grep: test("W1-T9708: a census red that recovers on retry still counts toward a flake incident" in test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts'
+    - claim: "a census red on a PR whose diff stays outside the census's walk still counts toward a flake incident"
+      proof: 'grep: test("W1-T9708: a census red on a PR whose diff stays outside its walk still counts" in test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts'
+    - claim: "a test the census recognizer names but the registry does not is read as a census, with the walks rmd census-membership reports"
+      proof: 'grep: test("W1-T9708: a test the census recognizer names but the registry does not is a census too" in test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts'
+  falsifier: |
+    Replay W1-T7532's evidence through `runFlakeIncidentGardener`: three PRs (#10354, #10368, #10491), each
+    also_failed on test/catch-erasure-ratchet.test.ts, each with a diff that changes a src/ file. At origin/main
+    it files a flake incident. With the change it files nothing and writes no watch row. Delete the census
+    branch in `evidenceOf` and the first test goes red. Mark one row recovered, or move one PR's diff to plan/,
+    and that PR counts again.

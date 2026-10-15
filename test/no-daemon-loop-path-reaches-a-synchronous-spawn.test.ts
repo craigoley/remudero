@@ -18,9 +18,9 @@
 // @source-text-subject: src/**/*.ts — the claim is a property of EVERY function the loop can reach,
 // including paths no single execution drives; the same shape as test/gh-transport-census.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
+
+import { loopReachable, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -221,7 +221,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readyDraftViaGh: 1,
   realArmDeps: 7, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over); +1 W1-T9536: the sync own-files compare reader (realArmDepsAsync overrides it)
   realDeployDeps: 1,
-  realGitRemoteDeps: 1, // W1-T9660: daemonCommand > realDeps > composeRealDeps; no conversion filed
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
@@ -252,7 +251,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696 moved the boot sweep, daemon landContent, CI-learning and the intake/alert/revalidation/evidence/handoff captures off it. Still sync: captureFeedback from coverage-improvement, hand-run census, source-size follow-up, grilled reply, dep-review, the CLI sweep's repair capture; recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -283,63 +282,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   writePrBodyRest: 1,
 };
 
-interface Fn {
-  name: string;
-  file: string;
-  body: string;
-}
-
-/** Blank comment lines, keeping line numbers. Block comments are recognised only where they START a
- *  line: a naive `/\*...\*\/` regex also fires on glob strings such as "src/**\/*.ts" and swallows code. */
-function stripComments(source: string): string {
-  let inBlock = false;
-  return source
-    .split("\n")
-    .map((line) => {
-      if (inBlock) {
-        if (line.includes("*/")) inBlock = false;
-        return "";
-      }
-      if (/^\s*\/\*/.test(line)) {
-        if (!line.includes("*/", line.indexOf("/*") + 2)) inBlock = true;
-        return "";
-      }
-      return /^\s*\/\//.test(line) ? "" : line;
-    })
-    .join("\n");
-}
-
-function trackedSourceFiles(): string[] {
-  const sub = "ls" + "-files";
-  return execFileSync("git", [sub, "src/**/*.ts", "src/*.ts"], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
-}
-
-/** W1-T9615: a column-0 object-literal const (`const defaultPreflightChecks = {`). Its member arrows are not
- *  functions to {@link topLevelFunctions}, so a name reached only through one (plan-pr-emitter's `runInTree`, the
- *  sync preflight's in-tree spawn) is invisible to the function-only walk. */
-const OBJECT_DECL = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\{/;
-
-/** Column-0 function declarations (generators included) and column-0 arrow consts; a body runs to the
- *  next column-0 declaration (a closing brace at column 0 is NOT a boundary: a multi-line parameter type
- *  closes with one). `objectLiterals` also walks {@link OBJECT_DECL} bodies. */
-function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[] {
-  const fns: Fn[] = [];
-  const decl =
-    /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/;
-  const NEXT_DECL = /^(?:export\s+|declare\s+)?(?:async\s+)?(?:function|const|let|var|class|interface|type|enum|abstract)\b|^export\s/;
-  for (const file of trackedSourceFiles()) {
-    const lines = stripComments(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")).split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const m = decl.exec(lines[i]!) ?? (opts.objectLiterals ? OBJECT_DECL.exec(lines[i]!) : null);
-      if (!m) continue;
-      let end = i + 1;
-      while (end < lines.length && !NEXT_DECL.test(lines[end]!)) end++;
-      fns.push({ name: (m[1] ?? m[2])!, file, body: lines.slice(i, end).join("\n") });
-    }
-  }
-  return fns;
-}
-
 let censusWalk: Fn[] | undefined;
 /** W1-T9660: the ONE walk every census test reads — object-literal consts walked, strings and comments blanked
  *  ({@link codeOnly}) — so the daemon-wide census and W1-T9615's SRE-lane test cannot disagree about reach. */
@@ -366,26 +308,6 @@ const SYNC_SPAWN_VALUE =
 function syncSpawnCalls(fn: Fn): number {
   const defines = /^(?:export\s+)?function\s+defaultBlockingSleepSync\(/.test(fn.body) ? 1 : 0;
   return (fn.body.match(SYNC_SPAWN_CALL) ?? []).length + (fn.body.match(SYNC_SPAWN_VALUE) ?? []).length - defines;
-}
-
-/** Name-based fixed point: a function is reachable when its identifier appears in a reachable body. */
-function loopReachable(fns: Fn[], seed: string): Set<string> {
-  const byName = new Map<string, Fn[]>();
-  for (const f of fns) byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
-  const reached = new Set<string>([seed]);
-  const queue = [seed];
-  while (queue.length) {
-    const name = queue.pop()!;
-    for (const f of byName.get(name) ?? []) {
-      for (const id of f.body.match(/[A-Za-z_$][\w$]*/g) ?? []) {
-        if (byName.has(id) && !reached.has(id)) {
-          reached.add(id);
-          queue.push(id);
-        }
-      }
-    }
-  }
-  return reached;
 }
 
 /** Synchronous-spawn calls per function NAME (same-named functions in different files sum). */
@@ -642,8 +564,22 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   }
 });
 
+/** W1-T9696: daemon-loop captures that now stage for the async sweep, and so never name captureFeedback. */
+const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
+
+test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback", () => {
+  const fns = censusFunctions();
+  // Positive control: the CLI verbs inject the inline capture, and this walk sees it.
+  assert.ok(loopReachable(fns, "issuesCommand").has("captureFeedback") && loopReachable(fns, "opsCommand").has("captureFeedback"));
+  for (const seed of STAGED_CAPTURE_SEEDS) {
+    const reach = loopReachable(fns, seed);
+    assert.ok(reach.has("stageFeedbackCapture"), `${seed} reaches its staging capture`);
+    assert.ok(!reach.has("captureFeedback"), `${seed} reaches the inline captureFeedback`);
+  }
+});
+
 /** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody", "realGitRemoteDeps"] as const;
+const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
   const fns = censusFunctions();

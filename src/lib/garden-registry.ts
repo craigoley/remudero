@@ -12,7 +12,8 @@
  * Pacing that used to live in each starter's closure (a minimum interval, the test garden's hourly evidence
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
@@ -535,15 +536,15 @@ export function childGardenPassSpawn(
         } catch (e) {
           if (firstRefusal("nice")) log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("nice", e));
         }
-        lowered = new Promise((done) => {
-          execFile(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { timeout: 5_000 }, (e) => {
+        lowered = execFileLoopBounded(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 }).then(
+          () => undefined,
+          (e: Error) => {
             // A child that already exited cannot be re-classed; that is not the host refusing.
-            if (e && child.exitCode === null && child.signalCode === null && firstRefusal("ionice")) {
+            if (child.exitCode === null && child.signalCode === null && firstRefusal("ionice")) {
               log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("ionice", e));
             }
-            done();
-          });
-        });
+          },
+        );
       }
       child.once("error", (error) => {
         release();
@@ -623,6 +624,14 @@ export function selectorShadowGardenPass(
     // New evidence is a newly complete CI run stored, or a replay slice of history read; nothing else in
     // this pass changes without one of them.
     let found = false;
+    // W1-T9551: one main-CI read per base sha per pass, shared by the selector-shadow guard and the flake-incident classifier.
+    const mainReads = new Map<string, Promise<readonly string[] | undefined>>();
+    const readMain = selectorShadowMainFailures(owner, repo, io);
+    const mainFailures = (baseSha: string): Promise<readonly string[] | undefined> => {
+      let read = mainReads.get(baseSha);
+      if (read === undefined) mainReads.set(baseSha, read = readMain(baseSha));
+      return read;
+    };
     try {
       const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
         readJson: io.readJson,
@@ -631,7 +640,7 @@ export function selectorShadowGardenPass(
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
       const report = await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
-        undefined, undefined, selectorShadowMainFailures(owner, repo, io),
+        undefined, undefined, mainFailures,
         { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
       found = report.observations.appended > 0 || (report.replayPass?.attempted ?? 0) > 0;
     } catch (e) {
@@ -644,6 +653,7 @@ export function selectorShadowGardenPass(
       await runFlakeIncidentGardener(d, {
         mintTaskId,
         readChangedPaths: (baseSha, headSha) => readSelectorShadowChangedPaths(owner, repo, { baseSha, headSha }, io.readJson),
+        mainFailures,
       });
     } catch (e) {
       d.log("flake_incident.gardener_failed", { error: String((e as Error)?.message ?? e) });

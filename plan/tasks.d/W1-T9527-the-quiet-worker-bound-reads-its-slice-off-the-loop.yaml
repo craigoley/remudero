@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: diagnose the 04:50-05:35Z core loop block and file each still-present, uncovered synchronous caller (coordinator brief); standing rulings: no hard fixed thresholds, automated flow"
   plan_refs: [W1-T7807, W1-T9390, W1-T9406, W1-T9443, W1-T9361, W1-T9085, W1-T9516, W1-T8621]
   files: [src/run-task.ts, src/lib/quiet-worker-watchdog.ts, test/the-quiet-worker-bound-reads-its-slice-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1  # P1: the largest single cause of 2026-10-14's worst core freeze (and of the false STALLED recycle W1-T9516 files); it still runs on the loop on main
   attempts: 0
   rationale: |

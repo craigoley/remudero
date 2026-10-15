@@ -115,7 +115,7 @@ function tinyPlan(): Plan {
 
 // ── Criterion 1: THE CROSS-FILE INVARIANT — daemonBoot's OWN pass, REAL sweepFeedbackLanding ──
 
-test("W1-T530 CROSS-FILE INVARIANT: a plan/feedback/*.yaml no capture ever saw lands via daemonBoot's OWN boot pass, driving the REAL sweepFeedbackLanding end to end", () => {
+test("W1-T530 CROSS-FILE INVARIANT: a plan/feedback/*.yaml no capture ever saw lands via daemonBoot's OWN boot pass, driving the REAL sweepFeedbackLanding end to end", async () => {
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   // Written directly to disk — never through captureFeedback, so NOTHING in this process ever
@@ -130,7 +130,7 @@ test("W1-T530 CROSS-FILE INVARIANT: a plan/feedback/*.yaml no capture ever saw l
   // Neither side is stubbed: `sweepFeedbackLanding` is the REAL export from feedback-landing.ts,
   // and it is threaded into the REAL `daemonBoot` boot path — only the git/gh EXEC seams (real
   // local git, faked gh) are stubbed, per the design's own "no stub for either side" rule.
-  withLiveWritesAllowed(() =>
+  await withLiveWritesAllowed(() =>
     daemonBoot(
       log,
       process.env,

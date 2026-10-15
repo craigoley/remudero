@@ -110,7 +110,7 @@ test("W1-T3970: production adapter lands threshold drift and refuses an unlanded
   assert.throws(() => planReconcileCadence(refused!), /simulated landing refusal/);
 });
 
-test("W1-T3970: production adapter's omitted land seam invokes the real local landing bridge", () => {
+test("W1-T3970: production adapter's omitted land seam invokes the real local landing bridge", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-plan-reconcile-default-"));
   const origin = mkdtempSync(join(tmpdir(), "rmd-plan-reconcile-default-origin-"));
   const ghBin = mkdtempSync(join(tmpdir(), "rmd-plan-reconcile-default-gh-"));
@@ -149,7 +149,12 @@ test("W1-T3970: production adapter's omitted land seam invokes the real local la
     });
     assert.ok(input);
 
-    const report = withLiveWritesAllowed(() => planReconcileCadence(input));
+    // W1-T9695: the cadence starts the awaited landing; `settled` resolves once it has landed.
+    const report = await withLiveWritesAllowed(async () => {
+      const cadence = planReconcileCadence(input);
+      await input.settled();
+      return cadence;
+    });
     assert.equal(report.status, "landed");
     assert.deepEqual(report.taskIds, ids);
     assert.equal(existsSync(join(root, "plan")), false, "the landing bridge must not write the daemon checkout");
