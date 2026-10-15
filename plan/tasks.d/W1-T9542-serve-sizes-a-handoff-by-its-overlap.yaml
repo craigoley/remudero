@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: no serve handoff has completed since 10-12 06:00:59Z; filing approved 2026-10-14"
   plan_refs: [W1-T8378, W1-T8311, W1-T8873, W1-T9508, W1-T9504]
   files: [src/lib/serve-supervisor.ts, test/serve-supervisor.test.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts, test/serve-sizes-a-handoff-by-its-overlap.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

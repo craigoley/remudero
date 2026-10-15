@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit (self-improvement loop)"
   plan_refs: [W1-T4435, W1-T5538, W1-T7421, W1-T5114]
   files: [src/lib/remedy-effect.ts, src/lib/ci-friction-remedy.ts, src/lib/flow-remedy-gardener.ts, src/lib/gardener-overseer.ts, test/every-merged-gardener-remedy-is-measured-against-its-cause.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

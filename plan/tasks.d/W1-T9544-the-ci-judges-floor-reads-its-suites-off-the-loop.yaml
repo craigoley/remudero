@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
   plan_refs: [W1-T7744, W1-T5689, W1-T7745, W1-T9361, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T9554, W1-T9556]
   files: [src/lib/ci-escalation-judge.ts, test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
-  status: queued
+  status: merged
   priority: 1  # P1: the largest attributed synchronous caller on core's loop in the measured window, and the longest single block
   attempts: 0
   rationale: |
