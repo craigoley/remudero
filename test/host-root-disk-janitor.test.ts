@@ -11,7 +11,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
@@ -203,13 +202,13 @@ test("W1-T4770: a dirty or unsaved worktree is kept with its reason", () => {
   const r = run(fx, { FAKE_ARCHIVE_FSID: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(saved), false, "a clean worktree whose HEAD is on a remote branch is removed");
-  assert.equal(existsSync(landed), false, "a clean worktree whose task landed on origin/main is removed");
+assert.equal(existsSync(landed), true, "a landed task trailer does not prove the local HEAD was pushed");
   assert.equal(existsSync(dirty), true, "uncommitted changes must never be swept");
   assert.match(r.stdout, new RegExp(`KEEP ${dirty}: uncommitted changes`));
   assert.equal(existsSync(unsaved), true, "commits that are not on GitHub must never be swept");
-  assert.match(r.stdout, new RegExp(`KEEP ${unsaved}: unpublished HEAD could not be archived safely`));
+  assert.match(r.stdout, new RegExp(`KEEP ${unsaved}: not-proven-published`));
   assert.equal(existsSync(notLanded), true, "a run branch whose task is not on main is unsaved");
-  assert.match(r.stdout, new RegExp(`KEEP ${notLanded}: unpublished HEAD could not be archived safely`));
+  assert.match(r.stdout, new RegExp(`KEEP ${notLanded}: not-proven-published`));
 });
 
 test("W1-T4770: dry run changes nothing and a same-filesystem archive is refused", () => {
@@ -280,7 +279,7 @@ function ownGitDirCopy(fx: Fixture, parent: string, name: string): string {
   return p;
 }
 
-test("an unpublished worktree is bundled to the archive before it is removed", () => {
+test("an unpublished worktree stays in place even when an off-disk archive is available", () => {
   const fx = fixture();
   const { addWorktree } = repos(fx);
   const unsaved = addWorktree("unsaved", "unsaved-branch");
@@ -290,12 +289,10 @@ test("an unpublished worktree is bundled to the archive before it is removed", (
 
   const r = run(fx);
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(existsSync(unsaved), false, "once its HEAD is bundled the clean tree is reclaimable");
-  const archive = fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT;
-  const bundle = join(archive, `unsaved-${head}.bundle`);
-  assert.match(r.stdout, new RegExp(`ARCHIVE-WORKTREE ${unsaved} HEAD=${head} -> ${bundle}`));
-  assert.match(git(fx.root, "bundle", "list-heads", bundle), new RegExp(`^${head} HEAD`), "the bundle holds the unpublished HEAD");
-  assert.deepEqual(readdirSync(archive), [`unsaved-${head}.bundle`], "no temp bundle is left behind");
+  assert.equal(existsSync(unsaved), true, "unpushed work is never retired");
+  assert.equal(git(unsaved, "rev-parse", "HEAD").trim(), head);
+  assert.equal(existsSync(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT), false);
+  assert.match(r.stdout, /not-proven-published/);
 });
 
 test("a standalone clone under a configured root is removed only when clean and idle and unprotected", () => {
@@ -362,7 +359,7 @@ test("an incomplete activity walk keeps the path as unknown", () => {
   const r = run(fx, { PATH: `${join(fx.root, "bin")}:${process.env.PATH ?? ""}` });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(blind), true, "a failed walk must not delete the path for any uid");
-  assert.match(r.stdout, new RegExp(`KEEP ${blind}: activity probe failed \\(unknown\\)`));
+  assert.match(r.stdout, new RegExp(`KEEP ${blind}: repository scan failed \\(unknown\\)`));
 });
 
 test("temp-only mode sweeps scratch and coverage and leaves worktrees and transcripts alone", () => {
@@ -460,7 +457,7 @@ function loggingShim(fx: Fixture, name: string, log: string): void {
 // The 23:00Z root pass after #8977 kept 43 units as "Git metadata is unreadable or missing": Git
 // refuses root on an operator-owned repo. GIT_TEST_ASSUME_DIFFERENT_OWNER=1 is Git's own switch
 // for that refusal, so the whole root path runs here without root.
-test("the root pass judges, bundles and reaps scratch repos another user owns", () => {
+test("the root pass keeps unpublished repos another user owns and retires published linked trees", () => {
   const fx = fixture();
   const { main } = repos(fx);
   const unit = scratchDir(fx, "clone-unit", false);
@@ -483,20 +480,18 @@ test("the root pass judges, bundles and reaps scratch repos another user owns", 
   });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.doesNotMatch(r.stdout, /unreadable/, r.stdout);
-  assert.equal(existsSync(unit), false, r.stdout);
+  assert.equal(existsSync(unit), true, r.stdout);
   assert.equal(existsSync(linked), false, r.stdout);
   assert.ok(!git(main, "worktree", "list", "--porcelain").includes(linked), "removed through git worktree remove");
-  const archive = join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch");
-  const bundles = readdirSync(archive).filter(n => n.endsWith(".bundle"));
-  assert.equal(bundles.length, 1, r.stdout);
-  assert.ok(git(main, "bundle", "list-heads", join(archive, bundles[0])).includes(`${unpublished} refs/heads/unpublished`));
-  assert.ok(r.stdout.indexOf("ARCHIVE-WORKTREE") < r.stdout.indexOf(`REMOVE ${unit}`), r.stdout);
+  assert.equal(git(repo, "rev-parse", "unpublished").trim(), unpublished);
+  assert.equal(existsSync(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT), false);
+  assert.match(r.stdout, /not-proven-published/);
   // the exception is scoped to each repository's own top, never '*'
   const scopes = new Set([...readFileSync(gitLog, "utf8").matchAll(/safe\.directory=(\S+)/g)].map(m => m[1]));
   assert.deepEqual([...scopes].sort(), tops);
 });
 
-test("a root pass fetches a scratch repo as the repo's owner, never as root", () => {
+test("a root pass proves publication without fetching objects or invoking runuser", () => {
   const fx = fixture();
   repos(fx);
   const unit = scratchDir(fx, "fetch-unit", false);
@@ -514,7 +509,7 @@ test("a root pass fetches a scratch repo as the repo's owner, never as root", ()
     RMD_CLEANUP_NO_FETCH: "", RMD_CLEANUP_RUNUSER: runuser, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
   });
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(readFileSync(runuserLog, "utf8"), `-u ${userInfo().username} -- git -C ${repo} fetch --quiet --all\n`);
+  assert.equal(existsSync(runuserLog), false, "fresh remote advertisement needs no object fetch");
   assert.equal(existsSync(unit), false, r.stdout);
 });
 
@@ -541,6 +536,8 @@ test("the default lock lives beside the script both crons run, never in sticky /
   mkdirSync(install);
   const script = join(install, "rmd-host-cleanup.sh");
   copyFileSync(SCRIPT, script);
+  copyFileSync("deploy/workspace-retirement-guard.sh", join(install, "workspace-retirement-guard.sh"));
+  copyFileSync("deploy/dependency-seed-guard.sh", join(install, "dependency-seed-guard.sh"));
   const env: NodeJS.ProcessEnv = { ...process.env, ...fx.env };
   delete env.RMD_CLEANUP_LOCK_FILE;
   const r = spawnSync("bash", [script], { encoding: "utf8", env });

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileS
 import { join } from "node:path";
 import { age, fixture, git, repos, run, scratchDir } from "./helpers/host-cleanup-fixture.js";
 
-test("test/a-scratch-workspace-holding-unpushed-commits-is-bundled-before-removal.test.ts", () => {
+test("unpublished scratch commits stay in place even when an archive is available", () => {
   const fx = fixture();
   const { main } = repos(fx);
   const unit = scratchDir(fx, "gate", false);
@@ -21,18 +21,19 @@ test("test/a-scratch-workspace-holding-unpushed-commits-is-bundled-before-remova
   age(unit); age(topBundle);
   const r = run(fx, { RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(existsSync(unit), false, r.stdout);
+  assert.equal(existsSync(unit), true, r.stdout);
   assert.equal(existsSync(topBundle), false, r.stdout);
   const archive = join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch");
   const files = readdirSync(archive).filter(p => p.endsWith(".bundle"));
-  assert.equal(files.length, 2, r.stdout);
+  assert.equal(files.length, 1, r.stdout);
   for (const name of files) {
     const bundle = join(archive, name);
     git(main, "bundle", "verify", bundle);
     assert.ok(git(main, "bundle", "list-heads", bundle).includes(`${unpublished} refs/heads/unpublished`));
   }
   assert.ok(files.some(name => readFileSync(join(archive, name)).equals(original)), "top-level bundle is preserved byte for byte");
-  assert.ok(r.stdout.indexOf("ARCHIVE-WORKTREE") < r.stdout.indexOf(`REMOVE ${unit}`), r.stdout);
+  assert.doesNotMatch(r.stdout, /ARCHIVE-WORKTREE/);
+  assert.equal(git(repo, "rev-parse", "unpublished").trim(), unpublished);
 });
 
 test("unverifiable bundles and same-filesystem archives keep the scratch workspace", () => {
@@ -53,7 +54,7 @@ test("unverifiable bundles and same-filesystem archives keep the scratch workspa
     const r = run(fx, { RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, ...(failure === "filesystem" ? { FAKE_ARCHIVE_FSID: "1" } : {}) });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(unit), true, r.stdout);
-    assert.match(r.stdout, /could not be archived safely/);
+    assert.match(r.stdout, /not-proven-published/);
     const archive = join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch");
     if (existsSync(archive)) assert.deepEqual(readdirSync(archive), []);
   }
@@ -73,8 +74,8 @@ test("scratch dry run never writes an archive for unpublished branches or loose 
   assert.equal(existsSync(unit), true);
   assert.equal(existsSync(bundle), true);
   assert.equal(existsSync(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT), false);
-  assert.match(r.stdout, /ARCHIVE-WORKTREE/);
-  assert.ok(r.stdout.includes(`ARCHIVE ${bundle}`), r.stdout);
+  assert.match(r.stdout, /not-proven-published/);
+  assert.doesNotMatch(r.stdout, /ARCHIVE-WORKTREE/);
 });
 
 test("a loose bundle inside ignored coverage is archived before removing its linked worktree", () => {
