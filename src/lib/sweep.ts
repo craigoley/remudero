@@ -74,6 +74,7 @@ import {
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
+  securityArmRefusalAtHead, securityHoldReason,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -6161,6 +6162,8 @@ const REVIEW_POLICY = loadReviewPolicy();
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   stageBackstops: {
     "awaiting-arm": { kind: "BACKSTOP", minutes: 30 },
+    "security-alert-hold": { kind: "BACKSTOP", minutes: 30 },
+    "security-unknown-hold": { kind: "BACKSTOP", minutes: 30 },
     "conflict": { kind: "BACKSTOP", minutes: 30 },
     "own-red": { kind: "BACKSTOP", minutes: 45 },
     "awaiting-review": { kind: "BACKSTOP", minutes: 30 },
@@ -15122,7 +15125,7 @@ export async function runSweep(
           (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
-    const diagnoses: string[] = [];
+    const diagnoses: string[] = fields.blocker_cause ? [fields.blocker_cause] : [];
     // W1-T8167: a review admitted for this head and not yet posted/failed/refused is a live owner, not a stall.
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
     if (fields.blocker === "awaiting-review") {
@@ -16320,6 +16323,10 @@ export async function runSweep(
     }
     // A green, reviewed PR under an operator merge hold is waiting on a person: name the hold, never "arming".
     const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
+    const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
+      ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
+    const securityText = securityHold && securityHoldReason(securityHold,
+      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined);
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
@@ -16330,7 +16337,7 @@ export async function runSweep(
       : undefined;
     const shownReason = mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
-      : notDispatched !== undefined
+      : securityText ? securityText : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
@@ -16347,6 +16354,7 @@ export async function runSweep(
       ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
       operatorHold: mergeHold !== undefined,
       dispatchHeld: dispatchHold !== undefined,
+      securityArmRefusal: securityHold,
     });
     const planRepairCapable =
       (metadataWait && typeof deps.repairMetadata === "function") ||
@@ -16355,7 +16363,8 @@ export async function runSweep(
       (planProofBlockedPrs.has(pr.prNumber) && typeof deps.dispatchPlanOnlyRepair === "function" &&
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
-      ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
+      ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
+        blocker.startsWith("security-") ? securityText : undefined),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
