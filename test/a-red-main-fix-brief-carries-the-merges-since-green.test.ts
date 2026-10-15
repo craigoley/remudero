@@ -15,10 +15,10 @@ import { test } from "node:test";
 
 import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
+// A namespace import, so at a base without the brief this file still loads and each test fails on its own.
+import * as rung from "../src/lib/main-health-rung.js";
 import {
   buildMainHealthRung,
-  mainRepairMergesBrief,
-  renderMainRepairMergesSinceGreen,
   type MainHealthRungDeps,
   type MainRepairFixRequest,
   type MainRepairLane,
@@ -203,7 +203,7 @@ async function replayFix(overrides: Partial<MainHealthRungDeps> = {}, orphan?: s
 
 /** What mainRepairFixPrompt splices into the worker's prompt from the request. */
 const briefOf = (request: MainRepairFixRequest): string => {
-  const { lines, fixLine } = mainRepairMergesBrief(request);
+  const { lines, fixLine } = rung.mainRepairMergesBrief(request);
   return [...lines, fixLine].join("\n");
 };
 const fixLine = (prompt: string): string => prompt.split("\n").find((line) => line.startsWith("Fix EXACTLY ONE thing")) ?? "";
@@ -297,7 +297,7 @@ test("W1-T9665: past the brief's budget, whole non-reaching merges are cut first
   });
   const misses = Array.from({ length: 30 }, (_, i) => merge(i + 2, false));
   const since = { afterGreenSha: GREEN, merges: [merge(1, true, 60), ...misses, merge(40, undefined)] };
-  const text = renderMainRepairMergesSinceGreen(since, 1500);
+  const text = rung.renderMainRepairMergesSinceGreen(since, 1500);
   assert.ok(text.includes("(#12001)") && text.includes("+line 59"), "the reaching merge keeps its whole diff");
   assert.ok(text.includes("(#12040)"), "a merge of unknown reach is kept before a known miss");
   const omitted = /\((\d+) more merge\(s\) omitted to fit the brief, none reaching a failing test/.exec(text);
@@ -308,12 +308,12 @@ test("W1-T9665: past the brief's budget, whole non-reaching merges are cut first
   assert.ok(text.length <= 1500 + 600, `bounded: ${text.length}`);
 
   // A reaching diff past the budget keeps its head and counts the lines it cut.
-  const huge = renderMainRepairMergesSinceGreen({ afterGreenSha: GREEN, merges: [merge(1, true, 400), merge(2, false)] }, 1500);
+  const huge = rung.renderMainRepairMergesSinceGreen({ afterGreenSha: GREEN, merges: [merge(1, true, 400), merge(2, false)] }, 1500);
   assert.ok(huge.includes("+line 0") && !huge.includes("+line 399"));
   assert.match(huge, /\(\d+ more diff lines omitted\)/);
   assert.match(huge, /\(1 more merge\(s\) omitted/);
   assert.ok(huge.length <= 1500 + 200, `bounded: ${huge.length}`);
 
-  assert.match(renderMainRepairMergesSinceGreen(undefined), /not read/);
-  assert.match(renderMainRepairMergesSinceGreen({ merges: [], unreadable: "this observation read no last green main" }), /unread \(this observation read no last green main\)/);
+  assert.match(rung.renderMainRepairMergesSinceGreen(undefined), /not read/);
+  assert.match(rung.renderMainRepairMergesSinceGreen({ merges: [], unreadable: "this observation read no last green main" }), /unread \(this observation read no last green main\)/);
 });
