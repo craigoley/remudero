@@ -333,6 +333,8 @@ function childProcessPrimitives(code: string): Set<string> {
   for (const m of code.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*promisify\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
     if (names.has(m[2]!)) names.add(m[1]!);
   }
+  // W1-T9651: the loop-bounded execFile is execFile with a loop-available budget, not a git helper.
+  if (/import\s*\{[^}]*\bexecFileLoopBounded\b[^}]*\}\s*from\s*["'][./]*(?:lib\/)?loop-bounded-child\.js["']/.test(code)) names.add("execFileLoopBounded");
   return names;
 }
 
