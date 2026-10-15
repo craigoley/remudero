@@ -34,7 +34,7 @@ function recoveryProbe(program: string) {
       const readOwner=()=>JSON.parse(fs.readFileSync(slot,'utf8'));
       const assertRefused=lease=>{assert.equal(lease.executionAllowed,false);
         assert.equal(api.testSlotExecutionAllowed(lease),false);assert.match(lease.note,/NOT_RUN/);
-        if(lease.outcome!=='acquired')assert.equal(lease.childEnvironment,undefined);};
+      if(lease.outcome!=='acquired')assert.equal(lease.childEnvironment,undefined);};
       ${program}
     `, root], { encoding: "utf8", timeout: 4000, killSignal: "SIGKILL",
       env: { ...process.env, NODE_OPTIONS: undefined, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "", TSX_DISABLE_CACHE: "1",
@@ -180,7 +180,11 @@ test("failed allocation guard release refuses execution and closes every created
     fs.closeSync=fd=>{const result=nativeClose(fd);owners.delete(fd);guards.delete(fd);return result;};
     fs.unlinkSync=name=>{if(name===guardPath&&guardFailures===0){guardFailures++;throw Object.assign(Error('guard unlink denied'),{code:'EACCES'});}return nativeUnlink(name);};
     syncBuiltinESMExports();
-    const lease=api.acquireTestSlot('guard finalizer fault',options);assertRefused(lease);
+    let diagnosticFailures=0;
+    const throwingOptions={...options,log:line=>{const row=JSON.parse(line);rows.push(row);
+      if(row.step==='test_slot.mutation_cleanup_incomplete'){diagnosticFailures++;throw Error('diagnostic failure');}}};
+    const lease=api.acquireTestSlot('guard finalizer fault',throwingOptions);assertRefused(lease);
+    assert.equal(diagnosticFailures,1,'the injected finalizer diagnostic really threw');
     assert.equal(created,1,'the fault occurs after a real ownership descriptor was created');assert.equal(guardFailures,1);
     assert.equal(owners.size,0,'a throwing finalizer must not discard an open ownership descriptor');assert.equal(guards.size,0);
     assert.equal(mutation.slotMutationPending(slot),true,'failed guard removal is occupied, not stolen');
@@ -198,7 +202,10 @@ test("a release guard finalizer failure does not escape or skip the remaining bo
     fs.openSync=(name,flags,...args)=>{if(name===guardPath&&flags==='wx')guardOpens++;
       const fd=nativeOpen(name,flags,...args);if(name===slot&&flags==='wx+')owners.add(fd);return fd;};
     fs.closeSync=fd=>{const result=nativeClose(fd);owners.delete(fd);return result;};
-    syncBuiltinESMExports();const lease=api.acquireTestSlot('release finalizer fault',options);assert.equal(lease.outcome,'acquired');
+    let diagnosticFailures=0;
+    const throwingOptions={...options,log:line=>{const row=JSON.parse(line);rows.push(row);
+      if(row.step==='test_slot.mutation_cleanup_incomplete'){diagnosticFailures++;throw Error('diagnostic failure');}}};
+    syncBuiltinESMExports();const lease=api.acquireTestSlot('release finalizer fault',throwingOptions);assert.equal(lease.outcome,'acquired');
     guardOpens=0;
     fs.unlinkSync=name=>{
       if(name===slot&&canonicalFailures===0){canonicalFailures++;throw Object.assign(Error('canonical unlink denied'),{code:'EACCES'});}
@@ -207,9 +214,25 @@ test("a release guard finalizer failure does not escape or skip the remaining bo
     };
     syncBuiltinESMExports();assert.doesNotThrow(()=>lease.release());
     assert.equal(canonicalFailures,1);assert.equal(guardFailures,1);
+    assert.equal(diagnosticFailures,1,'the injected release diagnostic really threw');
     assert(guardOpens>=3&&guardOpens<=4,'guard-finalizer failure must not bypass the three-attempt release bound');
     assert.equal(owners.size,0);assert.equal(fs.existsSync(slot),true);assert.equal(mutation.slotMutationPending(slot),true);
     assert(rows.some(row=>row.step==='test_slot.cleanup_incomplete'&&row.ownerRecoveryRequired===true));
     console.log(JSON.stringify({bounded:true,ownerDescriptorsClosed:true,unresolvedOccupied:true}));
   `), { bounded: true, ownerDescriptorsClosed: true, unresolvedOccupied: true });
+});
+
+test("default reader refuses after real guard creation succeeds but its descriptor inspection fails", () => {
+  assert.deepEqual(recoveryProbe(`
+    const nativeOpen=fs.openSync,nativeStat=fs.fstatSync;let guardFd,created=0,inspections=0;
+    fs.openSync=(name,flags,...args)=>{const fd=nativeOpen(name,flags,...args);
+      if(name===guardPath&&flags==='wx'){guardFd=fd;created++;}return fd;};
+    fs.fstatSync=(fd,...args)=>{if(fd===guardFd){inspections++;throw Object.assign(Error('guard inspection failure'),{code:'EIO'});}return nativeStat(fd,...args);};
+    syncBuiltinESMExports();
+    const {ownershipProtocol,privateCoordinationRequired,...legacyOptions}=options;
+    const lease=api.acquireTestSlot('default reader after inspection failure',legacyOptions);assertRefused(lease);
+    assert.equal(created,1);assert.equal(inspections,1);assert.throws(()=>nativeStat(guardFd),{code:'EBADF'});
+    assert.equal(mutation.slotMutationPending(slot),true);assert.equal(fs.existsSync(slot),false);
+    console.log(JSON.stringify({executionAllowed:false,guardOccupied:true,descriptorClosed:true}));
+  `), { executionAllowed: false, guardOccupied: true, descriptorClosed: true });
 });

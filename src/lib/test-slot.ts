@@ -402,7 +402,8 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
     const after = fstatSync(fd);
     if (!same(after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("private reservation changed during recovery");
     return bytes.toString("utf8");
-  }) as typeof readFileSync;
+  // The shared reclaimer calls this seam only as readFileSync(fd, "utf8"); it never requests a Buffer.
+  }) as unknown as typeof readFileSync;
   const safeOpen = (name: Parameters<typeof openSync>[0]): number => {
     if (!Number.isInteger(constants.O_NOFOLLOW) || !Number.isInteger(constants.O_NONBLOCK)) throw new Error("safe private recovery flags unavailable");
     const fd = openSync(name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -561,11 +562,18 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     return testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
   };
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const cleanupLog = (row: Record<string, unknown>): void => {
+    try { log(JSON.stringify(row)); }
+    catch (error) {
+      try { process.stderr.write(`${JSON.stringify({ step: "test_slot.cleanup_diagnostic_failed", event: row.step, error: String(error) })}\n`); }
+      catch { /* Failed telemetry must never bypass descriptor cleanup or grant execution. */ }
+    }
+  };
   const finishMutation = (mutation: Extract<ReturnType<typeof acquireSlotMutation>, { state: "acquired" }>): boolean => {
     try { mutation.release(); return true; }
     catch (error) {
       privateRequired = true;
-      log(JSON.stringify({ step: "test_slot.mutation_cleanup_incomplete", label, ownerRecoveryRequired: true, error: String(error) }));
+      cleanupLog({ step: "test_slot.mutation_cleanup_incomplete", label, ownerRecoveryRequired: true, error: String(error) });
       return false;
     }
   };
@@ -701,7 +709,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const mutation = acquireSlotMutation(path);
           if (mutation.state !== "acquired") {
-            if (mutation.reason === "unavailable" && !privateRequired) throw new Error("test slot mutation directory unavailable");
+            // The usable shared parent was inspected already; failed guard acquisition
+            // cannot prove no private coordination exists, including after guard creation.
             privateRequired = true; holders.push(`slot ${i}: mutation pending; coordination UNKNOWN`); break;
           }
           let admittedLease: TestSlotLease | undefined;
@@ -744,12 +753,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
             let held = true;
             let closed = false;
-            const close = (removeProjection = true): void => {
+            const close = (): void => {
               if (closed) return;
               closed = true;
-              try { if (removeProjection) removeCapacity?.(); }
-              catch (error) { log(JSON.stringify({ step: "test_slot.capacity_release_failed", label, error: String(error) })); }
-              finally { closeSync(fd); }
+              closeSync(fd);
             };
             const stillOwnsRecord = (): boolean => {
               const open = fstatSync(fd), current = lstatSync(path);
@@ -774,10 +781,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                   log(JSON.stringify({ step: "test_slot.refresh_deferred", label, path })); return;
                 }
                 try {
-                  if (!stillOwnsRecord()) { held = false; close(false); log(JSON.stringify({ step: "test_slot.refresh_lost", label, path })); return; }
+                  if (!stillOwnsRecord()) { held = false; close(); cleanupLog({ step: "test_slot.refresh_lost", label, path }); return; }
                   writeRecord(JSON.stringify({ ...ownedRecord, heartbeatAt: clock.iso() }));
                 } catch (error) {
-                  held = false; close(false); log(JSON.stringify({ step: "test_slot.refresh_failed", label, path, error: String(error) }));
+                  held = false; close(); cleanupLog({ step: "test_slot.refresh_failed", label, path, error: String(error) });
                 } finally { finishMutation(refreshMutation); }
               },
               release: () => {
@@ -789,9 +796,9 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                   if (releaseMutation.state !== "acquired") { lastError = new Error("slot mutation pending during release"); continue; }
                   try {
                     if (!stillOwnsRecord()) {
-                      held = false; close(false);
-                      log(JSON.stringify({ step: privateWriter ? "test_slot.release_lost" : "test_slot.release_failed", label, path,
-                        reason: "owner identity no longer matches; replacement preserved" }));
+                      held = false; close();
+                      cleanupLog({ step: privateWriter ? "test_slot.release_lost" : "test_slot.release_failed", label, path,
+                        reason: "owner identity no longer matches; replacement preserved" });
                       return;
                     }
                     // Metadata first: on failure the canonical anchor remains occupied/recoverable.
@@ -799,8 +806,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                     const ours = (h: TestSlotHolder) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce;
                     const result = privateWriter ? reclaimPrivateTestSlot(path, fstatSync(fd), ours, () => {})
                       : reclaimStaleLock(path, { parseHolder: parseTestSlotHolder, isStale: ours, onReclaim: () => {}, onLostReclaim: () => {} });
-                    held = false; close(false);
-                    if (result.outcome !== "reclaimed" && result.outcome !== "missing") log(JSON.stringify({ step: "test_slot.release_lost", label, path }));
+                    held = false; close();
+                    if (result.outcome !== "reclaimed" && result.outcome !== "missing") cleanupLog({ step: "test_slot.release_lost", label, path });
                     return;
                   } catch (error) {
                     // Preserve the latest failure for the bounded terminal cleanup receipt.
@@ -819,9 +826,9 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 }
                 finally {
                   if (terminalMutation.state === "acquired") finishMutation(terminalMutation);
-                  held = false; close(false);
+                  held = false; close();
                 }
-                log(JSON.stringify({ step: "test_slot.cleanup_incomplete", label, path, ownerRecoveryRequired: true, error: String(lastError) }));
+                cleanupLog({ step: "test_slot.cleanup_incomplete", label, path, ownerRecoveryRequired: true, error: String(lastError) });
               },
             };
           } catch (error) {
@@ -831,7 +838,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 try { removeCapacity?.(); }
                 catch (cleanupError) {
                   metadataRemoved = false;
-                  log(JSON.stringify({ step: "test_slot.capacity_rollback_incomplete", label, path, error: String(cleanupError) }));
+                  cleanupLog({ step: "test_slot.capacity_rollback_incomplete", label, path, error: String(cleanupError) });
                 }
                 if (metadataRemoved && privateWriter) {
                   // Exclusive creation + pinned original fd authorizes OUR empty/partial unpublished rollback.
