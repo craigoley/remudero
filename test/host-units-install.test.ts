@@ -1268,7 +1268,7 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: installer
   assert.equal(refused.status, 2);
   assert.match(refused.stderr, /unknown field 'mode'/);
   for (const [pattern, fields] of [
-    [/^        case "\$value" in shadow\|live\|.*$/m, ["mode: invalid"]],
+    [/^        \[ "\$value" = shadow \].*$/m, ["mode: invalid"]],
     [/^        \[ "\$instance_mode_seen" = 0 \].*$/m, ["mode: shadow", "mode: live"]],
   ] as const) {
     const bad = modeInstallerFixture(t), mutated = source.replace(pattern, "        :");

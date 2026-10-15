@@ -1386,7 +1386,7 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: recycler"
   assert.match(refused.stderr, /unknown field 'mode'/);
   assert.deepEqual(refused.calls, []);
   for (const [pattern, fields] of [
-    [/^        case "\$value" in shadow\|live\|.*$/m, ["mode: invalid"]],
+    [/^        \[ "\$value" = shadow \].*$/m, ["mode: invalid"]],
     [/^        \[ "\$instance_mode_seen" = 0 \].*$/m, ["mode: shadow", "mode: live"]],
   ] as const) {
     const mutated = source.replace(pattern, "        :");assert.notEqual(mutated, source);

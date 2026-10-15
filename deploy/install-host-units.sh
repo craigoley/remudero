@@ -215,7 +215,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       mode)
         [ "$instance_mode_seen" = 0 ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
         instance_mode_seen=1
-        case "$value" in shadow|live|\"shadow\"|\"live\") : ;; *) echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2 ;; esac
+        [ "$value" = shadow ] || [ "$value" = live ] || [ "$value" = '"shadow"' ] || [ "$value" = '"live"' ] || { echo "install-host-units: FATAL -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2; }
         ;;
       repo) repo="$value" ;;
       state_dir) state_dir="$value" ;;
