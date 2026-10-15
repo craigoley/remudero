@@ -8,7 +8,7 @@
  * `git_stderr`. decidePlanPrMergeSafety's refresh decision is unchanged.
  */
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -156,7 +156,8 @@ function planFixture(t: TestContext): { repo: GitRepo; main: string; head: strin
 
 function corruptLooseObject(repo: GitRepo, oid: string): void {
   const path = join(repo.dir, ".git", "objects", oid.slice(0, 2), oid.slice(2));
-  chmodSync(path, 0o644);
+  // git writes loose objects read-only; replacing the file (its directory is writable) needs no mode change.
+  rmSync(path);
   writeFileSync(path, "not a zlib stream");
 }
 
