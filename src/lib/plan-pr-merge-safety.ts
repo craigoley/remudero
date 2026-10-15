@@ -45,7 +45,7 @@ export type MergedTreePlan =
   | { state: "conflict" }
   | { state: "quarantined"; ids: string[] }
   | { state: "refused"; detail: string }
-  | { state: "unreadable"; error: string };
+  | { state: "unreadable"; error: string; gitStderr?: string };
 
 /** What {@link decidePlanPrMergeSafety} rules on. An absent path list was unreadable. */
 export interface PlanMergeSafetyReadings {
@@ -101,6 +101,11 @@ function unsafeReason(r: PlanMergeSafetyReadings | undefined): string {
   if (!r.prPlanPaths) return "the PR's plan paths were unreadable";
   if (!r.mainPlanPaths) return "main's plan changes since the merge base were unreadable";
   return "the merged tree was not read";
+}
+
+/** W1-T9670: git's stderr tail behind an unreadable merged tree, for the ledger row's `git_stderr`. */
+export function mergedTreeGitStderr(r: PlanMergeSafetyReadings | undefined): string | undefined {
+  return r?.mergedTree?.state === "unreadable" ? r.mergedTree.gitStderr : undefined;
 }
 
 /** A merged tree git failed to READ (25 of 25 plan_pr_behind refreshes, 10-12..15), not one found unsafe. */
@@ -195,6 +200,18 @@ function comparePlanPaths(compare: unknown, planDir: string): string[] | undefin
 export interface PlanSafetyGitResult {
   status: number | null;
   stdout: string;
+  /** W1-T9670: the signal that ended the child (its timeout's kill); absent or null when it exited. */
+  signal?: string | null;
+  /** W1-T9670: the tail of what git wrote to stderr ({@link STDERR_TAIL_CHARS}). */
+  stderr?: string;
+}
+
+/** W1-T9670: how much of git's stderr a reading keeps — its last lines name the failure. */
+const STDERR_TAIL_CHARS = 800;
+
+function stderrTail(text: string | undefined): string {
+  const t = (text ?? "").trim();
+  return t.length > STDERR_TAIL_CHARS ? `...${t.slice(-STDERR_TAIL_CHARS)}` : t;
 }
 /** One git call in the repo clone; never throws for a non-zero exit. */
 export type PlanSafetyGit = (args: readonly string[], stdin?: string) => PlanSafetyGitResult | Promise<PlanSafetyGitResult>;
@@ -202,7 +219,7 @@ export type PlanSafetyGit = (args: readonly string[], stdin?: string) => PlanSaf
 export function planSafetyGitSync(cwd: string): PlanSafetyGit {
   return (args, stdin) => {
     const res = spawnSync("git", [...args], { cwd, encoding: "utf8", input: stdin, timeout: GIT_CALL_MS, maxBuffer: 1 << 26 });
-    return { status: res.status, stdout: res.stdout ?? "" };
+    return { status: res.status, stdout: res.stdout ?? "", signal: res.signal, stderr: stderrTail(res.stderr) };
   };
 }
 
@@ -211,9 +228,14 @@ export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
     new Promise((resolve) => {
       const command = execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 });
       command.then(
-        ({ stdout }) => resolve({ status: 0, stdout: stdout ?? "" }),
-        (error: { code?: unknown; stdout?: unknown }) =>
-          resolve({ status: typeof error.code === "number" ? error.code : null, stdout: typeof error.stdout === "string" ? error.stdout : "" }),
+        ({ stdout, stderr }) => resolve({ status: 0, stdout: stdout ?? "", signal: null, stderr: stderrTail(stderr) }),
+        (error: { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: string | null }) => {
+          const { code } = error;
+          const stderr = typeof error.stderr === "string" ? error.stderr : "";
+          // a non-numeric code (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) is Node's reason, kept beside git's own words.
+          const said = typeof code === "string" ? `${stderr}\n${code}` : stderr;
+          resolve({ status: typeof code === "number" ? code : null, stdout: typeof error.stdout === "string" ? error.stdout : "", signal: error.signal ?? null, stderr: stderrTail(said) });
+        },
       );
       const child = command.child;
       // a verb that exits before reading stdin must not surface as an EPIPE on the daemon.
@@ -315,28 +337,47 @@ function* mergedTreePlanSteps(
   try {
     for (const c of [main, head]) {
       if ((yield* gitStep(git, ["cat-file", "-e", `${c.sha}^{commit}`])).status === 0) continue;
-      yield* gitStep(git, ["fetch", "--no-tags", "--quiet", "origin", c.ref]);
+      const fetched = yield* gitStep(git, ["fetch", "--no-tags", "--quiet", "origin", c.ref]);
       if ((yield* gitStep(git, ["cat-file", "-e", `${c.sha}^{commit}`])).status !== 0) {
-        return { state: "unreadable", error: `${c.sha} is not in the clone after fetching ${c.ref}` };
+        return fetched.status === 0 ? { state: "unreadable", error: `${c.sha} is not in the clone after fetching ${c.ref}` }
+          : gitStepUnreadable(`git fetch ${c.ref}`, fetched);
       }
     }
     const merged = yield* gitStep(git, ["merge-tree", "--write-tree", "--no-messages", main.sha, head.sha]);
     const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
     if (merged.status === 1) return { state: "conflict" };
-    if (merged.status !== 0 || !/^[0-9a-f]{40,64}$/.test(tree)) {
-      return { state: "unreadable", error: `git merge-tree exited ${merged.status} without a tree` };
-    }
+    if (merged.status !== 0) return gitStepUnreadable("git merge-tree", merged);
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) return { state: "unreadable", error: `git merge-tree exited ${merged.status} without a tree` };
     const listing = yield* gitStep(git, ["ls-tree", "--name-only", tree, `${join(plan.planDir, "tasks.d")}/`]);
-    if (listing.status !== 0) return { state: "unreadable", error: `git ls-tree exited ${listing.status}` };
+    if (listing.status !== 0) return gitStepUnreadable("git ls-tree", listing);
     const paths = [plan.monolith, ...listing.stdout.split("\n").filter((p) => p.endsWith(".yaml")).sort()];
     const batch = yield* gitStep(git, ["cat-file", "--batch"], paths.map((p) => `${tree}:${p}`).join("\n") + "\n");
-    if (batch.status !== 0) return { state: "unreadable", error: `git cat-file --batch exited ${batch.status} (killed or failed mid-read)` };
-    const texts = readBlobsAtRef(() => batch.stdout, tree, paths);
+    if (batch.status !== 0) return gitStepUnreadable("git cat-file --batch", batch);
+    let texts: string[];
+    try {
+      texts = readBlobsAtRef(() => batch.stdout, tree, paths);
+    } catch (e) {
+      // exit 0 with too little stdout: the third case, told apart from a kill and a git failure.
+      const message = String((e as Error)?.message ?? e);
+      const shape = /ended before|unusable size/.test(message) ? "truncated" : "unusable";
+      return withStderr({ state: "unreadable", error: `the batch read was ${shape}: ${message}` }, batch);
+    }
     return mergedPlanState(paths.map((p, i) => ({ label: `merged:${p}`, text: texts[i] })));
   } catch (e) {
     // a git spawn or blob read that fails is unreadable, which refreshes — never "loads".
     return { state: "unreadable", error: String((e as Error)?.message ?? e) };
   }
+}
+
+/** W1-T9670: one failed git step, named with its verb: killed by its bound, or git failed in its own words. */
+function gitStepUnreadable(verb: string, res: PlanSafetyGitResult): MergedTreePlan {
+  const how = res.signal ? `exited null, killed by ${res.signal} (its bound)`
+    : res.status === null ? "exited null (killed or failed mid-read)" : `exited ${res.status}, git failed`;
+  return withStderr({ state: "unreadable", error: `${verb} ${how}` }, res);
+}
+
+function withStderr(reading: { state: "unreadable"; error: string }, res: PlanSafetyGitResult): MergedTreePlan {
+  return res.stderr ? { ...reading, error: `${reading.error}: ${res.stderr}`, gitStderr: res.stderr } : reading;
 }
 
 function* gitStep(git: PlanSafetyGit, args: readonly string[], stdin?: string): Steps<PlanSafetyGitResult> {

@@ -17,7 +17,7 @@
  */
 import { readFileSync } from "node:fs";
 
-import { BLOCKER_SLO_MS } from "./pr-blocker.js";
+import { BLOCKER_SLO_MS, type PrBlocker } from "./pr-blocker.js";
 
 /** BACKSTOP ONLY: the adaptive bound never exceeds this multiple of the base limit. */
 export const WIP_BOUND_BACKSTOP_MULTIPLE = 3;
@@ -26,12 +26,15 @@ export const WIP_HEADROOM_COMFORT_FRACTION = 0.3;
 /** The smallest scale low headroom applies; the dispatch memory guard owns the hard stop. */
 const WIP_HEADROOM_MIN_SCALE = 0.25;
 
-/** Blockers on which no automated lane is moving the PR right now, whatever their age. */
-const PARKED_BLOCKERS = new Set([
-  "strikes-exhausted", "escalated", "operator-hold", "plan-proof-unrunnable", "held-draft", "stale-reviewer-withheld",
-]);
-/** Blockers a lane is working on: stuck only once they outlive the blocker SLO. */
-const AGEING_BLOCKERS = new Set(["own-red", "review-failed", "conflict", "base-red", "other"]);
+/** W1-T9673: every blocker pr-blocker.ts returns, placed on purpose. `parked`: no lane is moving it, stuck at any
+ *  age. `ageing`: a lane is working it, stuck past the blocker SLO. `moving`: never stuck. */
+export const WIP_BLOCKER_CLASS = {
+  "strikes-exhausted": "parked", "escalated": "parked", "operator-hold": "parked",
+  "plan-proof-unrunnable": "parked", "held-draft": "parked", "stale-reviewer-withheld": "parked",
+  "own-red": "ageing", "review-failed": "ageing", "conflict": "ageing", "base-red": "ageing", "other": "ageing",
+  "security-alert-hold": "ageing", "security-unknown-hold": "ageing",
+  "awaiting-ci": "moving", "awaiting-review": "moving", "awaiting-arm": "moving", "armed-idle": "moving",
+} as const satisfies Record<PrBlocker, "parked" | "ageing" | "moving">;
 
 export interface AdaptiveWipInputs {
   baseLimit: number;
@@ -67,8 +70,9 @@ export function deriveStuckOwnedCount(
   let stuck = 0;
   for (const row of latest.values()) {
     const blocker = typeof row.blocker === "string" ? row.blocker : "";
-    if (PARKED_BLOCKERS.has(blocker)) { stuck++; continue; }
-    if (!AGEING_BLOCKERS.has(blocker)) continue;
+    const cls = Object.hasOwn(WIP_BLOCKER_CLASS, blocker) ? WIP_BLOCKER_CLASS[blocker as PrBlocker] : undefined;
+    if (cls === "parked") { stuck++; continue; }
+    if (cls !== "ageing") continue;
     const ts = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
     const ageAtRow = typeof row.blocker_age_ms === "number" ? row.blocker_age_ms : NaN;
     if (!Number.isFinite(ts) || !Number.isFinite(ageAtRow)) continue;

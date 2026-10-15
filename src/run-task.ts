@@ -840,8 +840,11 @@ import {
   type ReservationPolicyCurrency,
   type TaskIdReservationBlock,
   TaskIdReservationError,
+  describeHeldTaskIds,
   describeReservationTakeover,
   firstUnreservedAtOrAbove,
+  parseTaskIdCount,
+  reserveTaskIdsKeepingHeld,
   nextPrefixedTaskIdStart,
   parsePrefixedTaskId,
   parseReservationHolderLine,
@@ -3128,7 +3131,7 @@ import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
-import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
+import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
 
@@ -28376,9 +28379,14 @@ export async function nextTaskIdCommand(
   overlapDeps: OverlapWarningDeps = {},
   deps: NextTaskIdReserveDeps = {},
 ): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files", "--audit-age-days", "--prefix", "--repo", "--branch", "--count"], ["--offline", "--reserve", "--no-reserve", "--audit"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const countArg = parseTaskIdCount(rest);
+  if ("error" in countArg) {
+    console.error(countArg.error + "\n" + USAGE);
     return 2;
   }
   if (rest.includes("--prefix") || rest.includes("--repo")) return prefixedNextTaskIdCommand(rest, deps);
@@ -28545,18 +28553,31 @@ export async function nextTaskIdCommand(
           /* no readable config ⇒ no row, never a crash in a read-only verb */
         }
       };
-      const held = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(mint.n, reserver));
-      console.log(describeMintWithHistory(mintForReservationAttempt(mint, held.id, held.taskId)));
-      for (const line of contested) console.log(line);
-      // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
-      const takeover = held.takenOver ? ` — ${describeReservationTakeover(held.takenOver)}` : "";
-      console.log(`RESERVED ${held.taskId} on origin (${held.ref}) after ${held.attempts} attempt(s)${takeover}`);
-      if (held.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(held, held.takenOver));
-      if (held.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${held.taskId} is the id actually HELD)`);
+      // W1-T9683: N walks from the ONE mint above, each starting above the last id held. Unlike
+      // reserveTaskIdBlockRemote, a failure keeps the ids already held, so only those are printed.
+      const contestedAt: number[] = [];
+      const { held, error } = reserveTaskIdsKeepingHeld(mint.n, countArg.count, (from) => {
+        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver));
+        contestedAt.push(contested.length);
+        return handle;
+      });
+      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      held.forEach((handle, i) => {
+        for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
+        // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
+        const takeover = handle.takenOver ? ` — ${describeReservationTakeover(handle.takenOver)}` : "";
+        console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${takeover}`);
+        if (handle.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(handle, handle.takenOver));
+        if (i === 0 && handle.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${handle.taskId} is the id actually HELD)`);
+      });
+      for (const line of contested.slice(contestedAt[held.length - 1] ?? 0)) console.log(line);
+      const summary = countArg.explicit ? describeHeldTaskIds(held, countArg.count) : undefined;
+      if (summary) console.log(summary.held);
+      if (summary?.partial && error !== undefined) console.error(summary.partial);
+      if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
     } catch (e) {
-      for (const line of contested) console.log(line);
       const err = e as TaskIdReservationError;
       console.error(describeReservationRefusal(err.outcome, err.message));
       return 2;
@@ -54343,7 +54364,7 @@ export async function opsCommand(
  * W1-T8625: its Acceptance block is taught by {@link PR_BODY_ACCEPTANCE_GRAMMAR}, the shared PR-body grammar. The bare
  * "`- <claim> | <proof>` bullets" line it replaced named no dialect, so a worker wrote prose and the reviewer capped it.
  */
-export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
+export function alertFixPrompt(alert: AlertLaneAlert, taskId: string, harnessOwned?: { bodyFile: string }): string {
   return [
     "You are a REMUDERO fix worker dispatched by the alert-fix lane (W1-T90, MASTER-PLAN P20, §5D lane 2).",
     "Fix EXACTLY ONE thing: the alert named below. Do not scope-creep into unrelated changes.",
@@ -54356,6 +54377,17 @@ export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     "This alert was matched by policy (plan/alert-policy.yaml) as safe to auto-fix: severity is",
     "medium or low, AND outside the gate/containment-critical path set. Make the minimal, correct fix.",
     "",
+    ...(harnessOwned ? [
+    `THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: ${harnessOwned.bodyFile}`,
+    "It lives outside your checkout: never copy it in and never commit it. Its `origin:` line and its",
+    `trailer \`Remudero-Task: ${taskId}\` are the dispatcher's; leave them as written.`,
+    `Replace ONLY the line \`${MAIN_REPAIR_PROSE_PLACEHOLDER}\` with your prose, and the line`,
+    `\`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\` with ONE executable bullet per claim, in this grammar:`,
+    ...PR_BODY_ACCEPTANCE_GRAMMAR,
+    "",
+    "Then, from the working directory:",
+    ...harnessOwnedRepairSteps(),
+    ] : [
     "Then, from the working directory:",
     "- git add the changed files && commit;",
     // The commit/PR contracts every other worker prompt carries: this lane's PR failed commitlint
@@ -54372,6 +54404,7 @@ export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
     ...PR_BODY_ACCEPTANCE_GRAMMAR,
     "- End your REPORT with exactly: PR_URL: <the pull request url>",
+    ]),
   ]
     .filter((l): l is string => l !== undefined)
     .join("\n");
@@ -54422,6 +54455,8 @@ export interface AlertFixDispatchDeps {
   fetch?: GhApiFetcher;
   readDiff?: (worktreePath: string) => string | undefined;
   readHeadSubject?: (worktreePath: string) => string;
+  pushBranch?: (worktreePath: string, expectedHeadSha: string) => Promise<unknown>; // W1-T9667: the host push of a harness commit
+  readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9667: `git ls-remote`
 }
 
 /** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
@@ -54489,8 +54524,11 @@ export async function dispatchAlertFixRun(
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
+  const bodyFile = join(config.root, "tmp", `alert-fix-body-${taskId}-${systemClock.now()}.md`);
   try {
     await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    mkdirSync(dirname(bodyFile), { recursive: true });
+    writeFileSync(bodyFile, alertFixBody(alert, taskId));
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -54506,12 +54544,13 @@ export async function dispatchAlertFixRun(
     const fixMount: Mount = deps.resolveMount(mountsTable, "fix", "medium");
 
     log("alert-fix.dispatching", { branch, mount: fixMount.model });
+    // W1-T3616: an alert fix commits and pushes, so it takes the fix lane's own list rather than
+    // a narrower second copy.
+    const toolBound = [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")];
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
-      // W1-T3616: an alert fix commits and pushes, so it takes the fix lane's own list rather than
-      // a narrower second copy.
-      tools: [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")],
+      tools: toolBound,
       settingsFile,
       model: fixMount.model,
       mountProvider: fixMount.provider,
@@ -54519,7 +54558,7 @@ export async function dispatchAlertFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: alertFixPrompt(alert, taskId),
+      prompt: alertFixPrompt(alert, taskId, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound }) ? { bodyFile } : undefined),
     });
     log("alert-fix.dispatched_worker", {
       session_id: worker.sessionId,
@@ -54527,7 +54566,11 @@ export async function dispatchAlertFixRun(
       ...workerLedgerFields(worker),
     });
 
-    const report = parseReport(workerTranscript(worker));
+    const workerReport = parseReport(workerTranscript(worker));
+    const owned = (workerReport?.prUrl ?? "") === "" && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
+    const landed = owned ? await landHarnessCommit("alert-fix", worker, branch, worktreePath, log, deps) : undefined;
+    const report = landed === undefined ? workerReport : { prUrl: await openCheckedRepairPr(owner, repo, "alert-fix", { branch, base: "main", worktreePath,
+      bodyFile, pushedHead: landed, prose: `Fixes ${alert.source} alert #${alert.id} [${alert.severity}]: ${alert.summary}`, fallbackTitle: `fix(alert): ${alert.source} #${alert.id}` }, log, deps) };
     if (report?.prUrl) {
       deps.ensureTaskTrailer(report.prUrl, taskId, log);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
@@ -54565,12 +54608,13 @@ export async function dispatchAlertFixRun(
           log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, check: "inert-proofs", error: String((e as Error)?.message ?? e) });
         }
       }
-    } else {
+    } else if (!owned || landed !== undefined) {
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
   } catch (e) {
     log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
   } finally {
+    rmSync(bodyFile, { force: true });
     try {
       deps.worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -54622,7 +54666,7 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
  *  file at `bodyFile`. With failing test files known, the worker opens the PR with `--body-file` and writes only its
  *  prose; with none, it writes its bullets under {@link PR_BODY_ACCEPTANCE_GRAMMAR} into that file, pushes, and leaves
  *  the open to the dispatcher, which checks those proofs first. */
-export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string): string {
+export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string, harnessOwnsGit = false): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
   const known = request.testFiles.length > 0;
   const merges = mainRepairMergesBrief(request);
@@ -54662,6 +54706,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
         ]),
     "",
     "Then, from the working directory:",
+    ...(harnessOwnsGit ? harnessOwnedRepairSteps() : [
     "- git add the changed files && commit;",
     ...commitMessageContractLines(),
     "- `git push origin HEAD` (NOT -u); never push to main;",
@@ -54677,8 +54722,17 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
           "  commit's subject, so that subject must be a conventional-commit subject of <= 100 characters.",
           ...bodyVsDiffContractLines(),
           "- End your REPORT with a line `PUSHED: <your branch>`, and write no PR_URL line.",
-        ]),
+        ])]),
   ].join("\n");
+}
+
+function harnessOwnedRepairSteps(): string[] { // W1-T9667: a harness-committed repair worker's steps (the implement lane's wording)
+  return [
+    "- save your edits to the files and run NO git or gh command: the harness commits, pushes and opens the PR;",
+    ...commitMessageContractLines(),
+    ...bodyVsDiffContractLines(),
+    "- End your REPORT with a line `COMMIT_MESSAGE: <type>(<scope>): <subject>` (it titles the PR), and write no PR_URL line.",
+  ];
 }
 
 /** W1-T8572 — where the dispatcher writes the fix PR's body: a fresh file under `config.root/tmp`, outside the
@@ -54763,10 +54817,11 @@ export async function dispatchMainRepairFixRun(
     // A red main blocks every merge, so this rides the fix route at the "high" band (blast-radius).
     const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
     log("main-repair.dispatching", { branch, mount: fixMount.model, offending_sha: request.offendingSha, body_file: bodyFile });
+    const toolBound = [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")];
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
-      tools: [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")],
+      tools: toolBound,
       settingsFile,
       model: fixMount.model,
       mountProvider: fixMount.provider,
@@ -54774,11 +54829,16 @@ export async function dispatchMainRepairFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: mainRepairFixPrompt(request, bodyFile),
+      prompt: mainRepairFixPrompt(request, bodyFile, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound })),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
-    if (request.testFiles.length === 0) {
+    const owned = !prUrl && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
+    if (owned) {
+      const landed = await landHarnessCommit("main-repair", worker, branch, worktreePath, log, deps);
+      if (landed === undefined) return undefined;
+      prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps, landed);
+    } else if (request.testFiles.length === 0) {
       // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
       // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
       if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));
@@ -54812,15 +54872,82 @@ async function openCheckedMainRepairPr(
   bodyFile: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: AlertFixDispatchDeps,
+  pushedHead?: string,
 ): Promise<string | undefined> {
-  const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
-  if (diffText === undefined || diffText.trim() === "") {
-    log("main-repair.no_change", { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
+  const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
+  const failing = request.testFiles.join(", ") || request.failingTestTitles.join("; ") || request.failingChecks.join(", ") || "(none named)";
+  return openCheckedRepairPr(owner, repo, "main-repair", { branch, base: request.branch, worktreePath, bodyFile, pushedHead,
+    prose: `Repairs \`${request.branch}\`, red since \`${request.offendingSha}\` (${pr}) on: ${failing}.`,
+    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}` }, log, deps);
+}
+
+export function workerHarnessCommit(worker: WorkerResult): CodexHarnessCommit | undefined { // W1-T9667: off the result, not the mount
+  return (worker as WorkerResult & { harnessCommit?: CodexHarnessCommit }).harnessCommit;
+}
+
+export function repairHarnessOwnsGit(spawn: { provider?: string; tools: readonly string[]; harnessCommit?: CodexHarnessCommit }): boolean { // W1-T9667: both repair lanes
+  return spawn.harnessCommit !== undefined || (spawn.provider === "codex" && codexHarnessCommits({ tools: [...spawn.tools] }));
+}
+
+async function landHarnessCommit( // W1-T9667: host push + ls-remote; the pushed sha, or undefined after a named row
+  lane: "main-repair" | "alert-fix",
+  worker: WorkerResult,
+  branch: string,
+  worktreePath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: AlertFixDispatchDeps,
+): Promise<string | undefined> {
+  const commit = workerHarnessCommit(worker);
+  if (commit?.outcome !== "committed") {
+    if (commit?.outcome === "nothing-to-commit") log(`${lane}.no_change`, { branch, reason: "the harness found nothing to commit", subtype: worker.subtype });
+    else log(`${lane}.harness_commit_refused`, { branch, outcome: commit?.outcome ?? "absent", subtype: worker.subtype, ...(commit?.outcome === "refused" ? { reason: commit.reason } : {}) });
     return undefined;
   }
-  const checked = checkMainRepairWorkerBody(readFileSync(bodyFile, "utf8"), diffText);
+  try {
+    await (deps.pushBranch ?? ((wt: string, sha: string) => gitPushRunBranchAsync(wt, { expectedHeadSha: sha, stdio: "ignore" })))(worktreePath, commit.sha);
+  } catch (error) {
+    log(`${lane}.push_failed`, { branch, head_sha: commit.sha, error: String((error as Error)?.message ?? error).slice(0, 500) });
+    return undefined;
+  }
+  const remote = await readRepairRemoteHead(worktreePath, branch, deps);
+  if (remote.head !== commit.sha) {
+    log(`${lane}.push_unconfirmed`, { branch, head_sha: commit.sha, remote_head_sha: remote.head ?? null, ...(remote.error ? { error: remote.error } : {}) });
+    return undefined;
+  }
+  log(`${lane}.pushed`, { branch, head_sha: commit.sha });
+  return commit.sha;
+}
+
+async function readRepairRemoteHead(worktreePath: string, branch: string, deps: AlertFixDispatchDeps): Promise<{ head?: string; error?: string }> {
+  const read = deps.readRemoteBranchHead ?? (async (wt: string, b: string) => (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${b}`])).split(/\s/)[0] || undefined);
+  return read(worktreePath, branch).then((head) => ({ head }), (error: unknown) => ({ error: String((error as Error)?.message ?? error).slice(0, 500) }));
+}
+
+export function withoutRepairPlaceholders(body: string, prose: string): string { // W1-T9667: no placeholder line is ever opened
+  return body.split("\n").filter((line) => line !== MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER).map((line) => (line === MAIN_REPAIR_PROSE_PLACEHOLDER ? prose : line)).join("\n");
+}
+
+export function alertFixBody(alert: AlertLaneAlert, taskId: string): string { // W1-T9667: the dispatcher's body, `Remudero-Task:` last
+  return [MAIN_REPAIR_PROSE_PLACEHOLDER, "", `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`, "", `origin: alert#${alertOriginId(alert)}`, "", `Remudero-Task: ${taskId}`, ""].join("\n");
+}
+
+async function openCheckedRepairPr(
+  owner: string,
+  repo: string,
+  lane: "main-repair" | "alert-fix",
+  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: AlertFixDispatchDeps,
+): Promise<string | undefined> {
+  const { branch, worktreePath } = pr;
+  const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
+  if (diffText === undefined || diffText.trim() === "") {
+    log(`${lane}.no_change`, { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
+    return undefined;
+  }
+  const checked = checkMainRepairWorkerBody(readFileSync(pr.bodyFile, "utf8"), diffText);
   if ("defect" in checked) {
-    log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, {
+    log(`${lane}.acceptance_defect`, {
       defect: checked.defect,
       count: checked.inert.length,
       inert_proofs: checked.inert,
@@ -54829,15 +54956,22 @@ async function openCheckedMainRepairPr(
     });
   }
   if (!("body" in checked)) return undefined;
+  if (pr.pushedHead === undefined) {
+    const remote = await readRepairRemoteHead(worktreePath, branch, deps);
+    if (remote.head === undefined) {
+      log(`${lane}.unpushed_head`, { branch, reason: remote.error ?? `refs/heads/${branch} is absent on origin`, ...(remote.error ? { error: remote.error } : {}) });
+      return undefined;
+    }
+  }
   try {
     const title = (deps.readHeadSubject ?? ((wt: string) => hostWorktreeGitAtTopLevel(wt, ["log", "-1", "--format=%s", "HEAD"])))(worktreePath).trim();
     const created = (await (deps.fetch ?? ((args: string[]) => ghJsonAsync(args)))(
-      ratifyPrCreateRestArgs(owner, repo, { title: title || `fix(main): repair ${request.offendingSha.slice(0, 12)}`, body: checked.body, head: branch, base: request.branch }),
+      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(checked.body, pr.prose), head: branch, base: pr.base }),
     )) as { html_url?: unknown };
     if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
     return created.html_url;
   } catch (error) {
-    log("main-repair.pr_open_failed", { branch, error: String((error as Error)?.message ?? error) });
+    log(`${lane}.pr_open_failed`, { branch, error: String((error as Error)?.message ?? error) });
     return undefined;
   }
 }
@@ -56692,9 +56826,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "next-task-id",
-    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
+    syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
-    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder.",
+    detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and the audit never pushes or deletes a ref. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
     name: "emissions",
