@@ -8,15 +8,16 @@ import { acquireTestSlot } from "../src/lib/test-slot.js";
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "rmd-slot-file-safety-")), logs: string[] = [];
   const lease = acquireTestSlot("owned safety fixture", { dir: root, slots: 1, memoryHeadroom: () => undefined,
+    ownershipProtocol: "private-capacity-v1",
     load: () => ({ cores: 8, load1: 0 }), log: (line: string) => logs.push(line) });
   assert.equal(lease.outcome, "acquired");
   return { root, logs, lease, path: join(root, "slot-1.json"), cleanup: () => { lease.release(); rmSync(root, { recursive: true, force: true }); } };
 }
-test("a host test slot lease is readable by peer accounts but never group or world writable", () => {
+test("a host test slot keeps ownership bytes private while capacity is projected separately", () => {
   const fx = fixture(); try {
     assert.equal(statSync(fx.path).mode & 0o022, 0);
     assert.equal(statSync(fx.path).mode & 0o600, 0o600);
-    assert.equal(statSync(fx.path).mode & 0o044, 0o044);
+    assert.equal(statSync(fx.path).mode & 0o077, 0);
     fx.lease.refresh(); assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).pid, process.pid);
   } finally { fx.cleanup(); }
 });
@@ -24,16 +25,17 @@ test("a permissive caller umask cannot make an owned test slot group or world wr
   const previous = process.umask(0); let fx: ReturnType<typeof fixture> | undefined;
   try {
     fx = fixture();
-    assert.equal(statSync(fx.path).mode & 0o777, 0o644);
+    assert.equal(statSync(fx.path).mode & 0o777, 0o600);
     fx.lease.refresh(); assert.equal(statSync(fx.path).mode & 0o022, 0);
   } finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
 });
-test("a restrictive caller umask still leaves an owned test slot readable by peer accounts", () => {
+test("a restrictive caller umask keeps private ownership private without hiding its capacity directory", () => {
   const previous = process.umask(0o077); let fx: ReturnType<typeof fixture> | undefined;
   try {
-    fx = fixture();
-    assert.equal(statSync(fx.path).mode & 0o777, 0o644);
-  } finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
+    fx = fixture(); assert.equal(statSync(fx.path).mode & 0o777, 0o600);
+    assert.equal(statSync(join(fx.root, `capacity-${process.getuid?.()}`)).mode & 0o777, 0o755);
+  }
+  finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
 });
 test("a refreshed test slot never follows a replacement symlink or overwrites its owned sentinel", () => {
   const fx = fixture(); try {
