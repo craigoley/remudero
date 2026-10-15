@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — the immutable source baseline of the daemon's freshness assessment
   band_meaning: span
   origin: "operator approval 2026-10-15: verify #12030 adoption and follow #12045 through normal runtime adoption"
-  plan_refs: [W1-T3245, W1-T3694, W1-T3756, W1-T3581, W1-T5282, W1-T5746, W1-T9092, W1-T9637]
+  plan_refs: [W1-T79, W1-T3245, W1-T3694, W1-T3756, W1-T3581, W1-T5282, W1-T5746, W1-T9092, W1-T9637]
   files: [src/lib/self-sync.ts, src/run-task.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts]
   status: queued
   priority: 1
@@ -39,6 +39,8 @@
     - The same async reader answers assessed/behind:null and stale:false/up_to_date. No live checkout or runtime changed.
     Census: main and all 31 open PR heads at 17:04:30Z, advertised 420 branch heads. Existing reviewer-recovery, serve,
     diagnostic-arm and closure-materiality tasks address other decisions; none repairs this daemon baseline.
+    W1-T79 covers the operator CLI's entry-time checkout sync. This task preserves that behavior and repairs the
+    long-lived daemon's loaded-code baseline after another actor has already advanced the checkout.
     Durable raw receipts and reproduction are in task-receipts-20261015-runtime-health/adoption-and-repair-20261015.
   design: |
     1. The daemon's assessment baseline is its immutable loaded-code SHA, captured once from the module checkout at boot.
