@@ -4,7 +4,7 @@ import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type Fi
 export const PR_BLOCKERS = [
   "awaiting-ci", "own-red", "base-red", "awaiting-review", "review-failed", "awaiting-arm",
   "armed-idle", "conflict", "strikes-exhausted", "escalated", "stale-reviewer-withheld",
-  "plan-proof-unrunnable", "held-draft", "operator-hold", "other",
+  "plan-proof-unrunnable", "held-draft", "operator-hold", "security-alert-hold", "security-unknown-hold", "other",
 ] as const;
 export type PrBlocker = typeof PR_BLOCKERS[number];
 
@@ -14,7 +14,8 @@ export const PR_BLOCKER_OWNERS = {
   "armed-idle": "armed-idle-merge", "conflict": "conflict-rebase",
   "strikes-exhausted": "strike-ladder", "escalated": "NONE",
   "stale-reviewer-withheld": "deploy-freshness", "plan-proof-unrunnable": "plan-repair",
-  "held-draft": "ready-draft", "operator-hold": "operator", "other": "NONE",
+  "held-draft": "ready-draft", "operator-hold": "operator",
+  "security-alert-hold": "fix-lane", "security-unknown-hold": "security-policy", "other": "NONE",
 } as const satisfies Record<PrBlocker, string>;
 
 export interface BlockerFacts {
@@ -32,6 +33,41 @@ export interface BlockerFacts {
   /** A fix dispatch the backstop holds at this head after escalating: no lane can move it, so it is
    *  escalated — never the `conflict-rebase` or `fix-lane` owner that is not going to act (#10551). */
   dispatchHeld?: boolean;
+  /** W1-T9633: the security merge policy refused this head's newest arm attempt. */
+  securityArmRefusal?: SecurityArmRefusal;
+}
+
+/** W1-T9633 — `SecurityMergeRefused`'s verdict, read back off the arm row that carried it. */
+export interface SecurityArmRefusal {
+  state: "blocked" | "unknown";
+  reason: string;
+}
+
+const ARM_ATTEMPT_STEPS = new Set(["automerge.armed", "automerge.arm_skipped", "automerge.arm_failed"]);
+const SECURITY_REFUSAL = /^security merge (blocked|unknown): ([^\s]+)/;
+
+/** W1-T9633 — #11936 sat 2+ hours as `awaiting-arm` while each arm row said "security merge unknown".
+ *  The NEWEST arm row for this PR at THIS head decides: a later arm, or another head's refusal, is no hold. */
+export function securityArmRefusalAtHead(
+  lines: readonly Record<string, unknown>[], prNumber: number, headSha: string,
+): SecurityArmRefusal | undefined {
+  const last = lines.findLast(row => ARM_ATTEMPT_STEPS.has(String(row.step)) &&
+    row.pr_number === prNumber && row.head_sha === headSha);
+  const match = last?.step === "automerge.arm_failed" && typeof last.error === "string"
+    ? SECURITY_REFUSAL.exec(last.error) : null;
+  return match ? { state: match[1] as SecurityArmRefusal["state"], reason: match[2]! } : undefined;
+}
+
+/** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head. */
+export function securityHoldReason(refusal: SecurityArmRefusal,
+  alerts?: readonly { alertNumber: number; ruleId: string; path: string; line: number }[]): string {
+  const named = alerts?.length
+    ? ` (${alerts.map(a => `alert #${a.alertNumber} ${a.ruleId} at ${a.path}:${a.line}`).join(", ")})` : "";
+  return refusal.state === "blocked"
+    ? `security hold: the code-scanning merge policy refused the arm at this head on a new high or critical alert` +
+      `${named} (security merge blocked: ${refusal.reason}) — owner fix-lane`
+    : `security hold: the code-scanning merge policy could not classify this head's CodeQL result ` +
+      `(security merge unknown: ${refusal.reason}) — owner security-policy; the policy, not the arm, must change`;
 }
 
 export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlocker {
@@ -43,6 +79,9 @@ export function finalBlocker(ruleBlocker: PrBlocker, facts: BlockerFacts): PrBlo
   if (facts.dispatchHeld) return "escalated";
   if (facts.ownRed) return "own-red";
   if (facts.mergeable && facts.operatorHold) return "operator-hold";
+  if (facts.mergeable && !facts.autoMergeArmed && facts.securityArmRefusal) {
+    return facts.securityArmRefusal.state === "blocked" ? "security-alert-hold" : "security-unknown-hold";
+  }
   if (facts.mergeable) return facts.autoMergeArmed ? "armed-idle" : "awaiting-arm";
   return ruleBlocker;
 }
@@ -69,7 +108,7 @@ export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[
 }
 
 export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefined, now: number,
-  planRepairCapable = false) {
+  planRepairCapable = false, cause?: string) {
   const continues = prior?.blocker === blocker && prior.since !== undefined;
   const since = continues ? prior.since! : fixedClock(now).iso();
   const source = continues ? prior.sinceSource : prior?.since === undefined ? "first-seen" : undefined;
@@ -79,6 +118,7 @@ export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefine
     blocker_since: since,
     blocker_age_ms: Math.max(0, now - Date.parse(since)),
     ...(source ? { blocker_since_source: source } : {}),
+    ...(cause ? { blocker_cause: cause } : {}),
   };
 }
 

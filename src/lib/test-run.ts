@@ -19,6 +19,7 @@ import { testFileEstimates, type PeakStoreOptions } from "./host-memory-learning
 
 import {
   acquireTestSlotAsync,
+  testSlotExecutionAllowed,
   lowPriorityCommand,
   TEST_SLOT_LEASE_MS,
   testRunArgv,
@@ -116,6 +117,11 @@ export async function runBoundedTest(args: readonly string[], opts: BoundedTestR
       ...(opts.testSlot?.perFileBytes === undefined ? { filePeaks: testFileEstimates(selectedTestFiles(args), opts.peakStore) } : {}),
       ...opts.testSlot,
     }));
+  if (!testSlotExecutionAllowed(slot)) {
+    slot.release();
+    log(JSON.stringify({ step: "test_run.not_run", slot: slot.outcome, note: slot.note }));
+    return 75;
+  }
   // A foreign-container holder is aged by its heartbeat: refresh well inside the lease while the run is live.
   const heartbeat = setInterval(() => slot.refresh(), TEST_SLOT_LEASE_MS / 3);
   heartbeat.unref();

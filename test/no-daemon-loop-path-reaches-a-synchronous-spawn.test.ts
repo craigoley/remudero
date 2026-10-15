@@ -7,8 +7,8 @@
  * fixed ONE SITE AT A TIME after it was measured live; test/gh-transport-census asks where `gh` is spawned,
  * not whether the loop can reach it. This census refuses the NEXT reachable site before it ships.
  *
- * Population: every top-level function (declaration or arrow const) whose comment-stripped body calls a
- * synchronous spawn primitive. Reach: the name-based fixed point of test/no-daemon-loop-path-builds-the-
+ * Population: every top-level function (declaration, arrow const or, since W1-T9660, object-literal const) whose
+ * code-only body (strings and comments blanked) calls a synchronous spawn primitive. Reach: the name-based fixed point of test/no-daemon-loop-path-builds-the-
  * unbatched-gateway, seeded from `daemonCommand` (its DaemonDeps literal and the hook builders). Baseline:
  * SYNC_SPAWN_LOOP_BASELINE, {functionName: count} recorded at build time. The census is EXACT, like the
  * hardened-leaf census: a reachable name ABSENT from the table or a count ABOVE its row fails, and so does a
@@ -42,8 +42,10 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   buildRegisteredGarden: 3,
   buildSweepEffects: 5, // Armed-idle direct merge now awaits its transport and security observation.
   buildWipeTestCadenceDaemonHooks: 1,
+  captureImportedModule: 1, // W1-T9660: daemonCommand > runTask > workerBoundaryStack; no conversion filed
   changeView: 1,
   changedShardProofs: 2,
+  checkAlertFixAcceptance: 1, // W1-T9660: mainRepairLaneFor > dispatchMainRepairFixRun > REAL_MAIN_REPAIR_FIX_DEPS > REAL_ALERT_FIX_DISPATCH_DEPS; no conversion filed
   checkCliFreshness: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
@@ -124,6 +126,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   execGhStatusPost: 1,
   execWhitelistedProof: 1,
   executeWorktreeRemoval: 1,
+  executingHarnessRevision: 1, // W1-T9660: daemonCommand > runTask > workerBoundaryStack; no conversion filed
   extractReviewFindings: 1,
   fetchMergedCoverageArtifact: 4,
   fetchNewestPrReview: 1,
@@ -161,12 +164,10 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   handedOffHeadRiskJudge: 1,
   hostWorktreeGit: 1,
   idCitedInSrc: 1,
-  imessageChannel: 1,
   installPinnedChromium: 1,
   isPrMergedNow: 1,
   ladderGardenSpec: 1,
   listRegisteredWorktrees: 1,
-  listRuleSuites: 1,
   loadPlanAtRef: 1,
   localBranchExists: 1,
   localMergeSpawn: 1,
@@ -178,7 +179,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   mergeBaseFor: 1,
   mergeDirectViaRest: 1,
   mergeShaNow: 1,
-  mergedPrsSince: 1,
   mergedTriageSubjects: 1,
   openPrFileScopes: 1,
   openPrMintTexts: 1,
@@ -202,6 +202,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   publishAbandonedFixOwnerAhead: 1,
   readAffectedListings: 1,
   readAffectedSuitesInput: 1,
+  readAlertFixPrBody: 1, // W1-T9660: REAL_ALERT_FIX_DISPATCH_DEPS, through checkAlertFixAcceptance; no conversion filed
   readCheckoutDepth: 2,
   readCiFrictionHandFixes: 2,
   readCiFrictionPlanState: 1,
@@ -215,13 +216,12 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readMutationVerdictZip: 1,
   readOperatorInterventions: 2,
   readOutcomes: 1,
-  readPushedRunBranchesOutput: 1,
   readRequiredStatusCheckContexts: 1,
-  readRunBranchClosedPrsOutput: 1,
   readTaskPrecondition: 1,
   readyDraftViaGh: 1,
   realArmDeps: 7, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over); +1 W1-T9536: the sync own-files compare reader (realArmDepsAsync overrides it)
   realDeployDeps: 1,
+  realGitRemoteDeps: 1, // W1-T9660: daemonCommand > realDeps > composeRealDeps; no conversion filed
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
@@ -252,6 +252,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -339,6 +340,14 @@ function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[] {
   return fns;
 }
 
+let censusWalk: Fn[] | undefined;
+/** W1-T9660: the ONE walk every census test reads — object-literal consts walked, strings and comments blanked
+ *  ({@link codeOnly}) — so the daemon-wide census and W1-T9615's SRE-lane test cannot disagree about reach. */
+function censusFunctions(): Fn[] {
+  censusWalk ??= topLevelFunctions({ objectLiterals: true }).map((f) => ({ ...f, body: codeOnly(f.body) }));
+  return censusWalk.slice();
+}
+
 /** A synchronous spawn or block: the node primitives, the sync gh wrappers (`ghJsonAsync`/`ghExecAsync`
  *  do not match — the `(` must follow the name), the blocking sleep, and `Atomics.wait`. */
 const SYNC_SPAWN_CALL =
@@ -420,7 +429,7 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
 }
 
 test("census: the seed and the population are real, so the walk cannot pass vacuously", () => {
-  const fns = topLevelFunctions();
+  const fns = censusFunctions();
   assert.ok(fns.some((f) => f.name === "daemonCommand"), "the walk must find daemonCommand to seed from");
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
@@ -434,7 +443,7 @@ test("census: the seed and the population are real, so the walk cannot pass vacu
 });
 
 test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — the census names a loop-reachable function that gains a synchronous spawn", () => {
-  const fns = topLevelFunctions();
+  const fns = censusFunctions();
   assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "a new daemon-loop path reaches a synchronous spawn");
 
   // Falsifier, driven on the real source: a loop-reached function with NO row gains execFileSync.
@@ -467,7 +476,7 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
 });
 
 test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower", () => {
-  const fns = topLevelFunctions();
+  const fns = censusFunctions();
   // Exact on the real source: no row holds slack today.
   assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "every row equals its loop-reachable count");
 
@@ -513,7 +522,7 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
   }
 
   // The two loop stalls of 2026-10-10 that spawned through a seam default are counted and reached, never zero.
-  const fns = topLevelFunctions();
+  const fns = censusFunctions();
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
   assert.ok((pop.get("mergeDirectViaRest") ?? 0) > 0 && reach.has("mergeDirectViaRest"), "mergeDirectViaRest hands a sync primitive to its own call and is reached");
@@ -537,14 +546,14 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
 });
 
 test("an emptied population scan fails the positive control", () => {
-  const fns = topLevelFunctions();
+  const fns = censusFunctions();
   const blind = fns.map((f) => ({ ...f, body: f.body.replace(SYNC_SPAWN_CALL, "noop(").replace(SYNC_SPAWN_VALUE, " noop") }));
   assert.ok(!population(blind).has("syncPlanFromOrigin"), "a scan that matches nothing finds no population");
   assert.ok(population(fns).has("syncPlanFromOrigin"), "the real scan finds the positive control");
 });
 
 test("the baseline records only positive counts for real functions", () => {
-  const names = new Set(topLevelFunctions().map((f) => f.name));
+  const names = new Set(censusFunctions().map((f) => f.name));
   for (const [name, count] of Object.entries(SYNC_SPAWN_LOOP_BASELINE)) {
     assert.ok(Number.isInteger(count) && count > 0, `${name} must carry a positive count`);
     assert.ok(names.has(name), `${name} no longer exists — delete its baseline row`);
@@ -574,6 +583,14 @@ function codeOnly(body: string): string {
     } else if (c === "`") inTemplate = true;
     else if (c === "/" && body[i + 1] === "/") {
       while (i + 1 < body.length && body[i + 1] !== "\n") i++;
+    } else if (c === "/" && body[i + 1] === "*") {
+      const close = body.indexOf("*/", i + 2);
+      i = close < 0 ? body.length : close + 1;
+      out += " ";
+    } else if (c === "/" && regexLiteralEnd(body, i, out) > i) {
+      i = regexLiteralEnd(body, i, out);
+      while (/[a-z]/.test(body[i + 1] ?? "")) i++;
+      out += '""';
     } else if (braces.length > 0 && c === "}" && braces[braces.length - 1] === 0) {
       braces.pop();
       inTemplate = true;
@@ -587,12 +604,29 @@ function codeOnly(body: string): string {
   return out;
 }
 
+/** W1-T9660: where the regex literal opening at `body[i]` closes, or -1 for a division. Read as a string, the backtick in
+ *  worker-provider's `/[;&|`$><]/` opened a template that blanked assertOpenWeightToolBoundary's real `execFileSync`. */
+function regexLiteralEnd(body: string, i: number, before: string): number {
+  let k = before.length;
+  while (k > 0 && /\s/.test(before[k - 1]!)) k--;
+  const prev = before.slice(Math.max(0, k - 8), k);
+  if (prev !== "" && !/[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) && !/(?:^|[^\w$])(?:return|typeof|case|void|in|of|throw|yield|await)$/.test(prev)) return -1;
+  let inClass = false;
+  for (let j = i + 1; j < body.length && body[j] !== "\n"; j++) {
+    if (body[j] === "\\") j++;
+    else if (body[j] === "[") inClass = true;
+    else if (body[j] === "]") inClass = false;
+    else if (body[j] === "/" && !inClass) return j;
+  }
+  return -1;
+}
+
 /** The sync landing chain W1-T9615 measured: captureFeedback -> landFeedback -> syncPreflightOf -> planPrPreflightAtCommit,
  *  whose in-tree checks spawnSync in runInTree (lint-plan-precheck, task-id-existence-check, the shard census). */
 const SYNC_PREFLIGHT_CHAIN = ["landFeedback", "syncPreflightOf", "planPrPreflightAtCommit", "runInTree"] as const;
 
 test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR preflight", () => {
-  const fns = topLevelFunctions({ objectLiterals: true }).map((f) => ({ ...f, body: codeOnly(f.body) }));
+  const fns = censusFunctions();
   // Positive controls: this walk sees the whole chain from the inline capture, and the census's own walk cannot see runInTree.
   const fromCapture = loopReachable(fns, "captureFeedback");
   assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => !fromCapture.has(name)), [], "captureFeedback reaches the sync preflight chain");
@@ -606,4 +640,46 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
     const reach = loopReachable(fns, seed);
     assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => reach.has(name)), [], `${seed} reaches the synchronous plan-PR preflight`);
   }
+});
+
+/** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
+const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody", "realGitRemoteDeps"] as const;
+
+test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  const pop = population(fns);
+  assert.ok(reach.has("defaultPreflightChecks"), "the census walk reads plan-pr-emitter's defaultPreflightChecks object literal");
+  for (const name of OBJECT_LITERAL_SPAWNERS) {
+    assert.ok(reach.has(name) && (pop.get(name) ?? 0) > 0, `${name} is a reached sync spawner`);
+    assert.equal(SYNC_SPAWN_LOOP_BASELINE[name], pop.get(name), `${name} holds an exact row`);
+  }
+  // Every path to runInTree passes through an object literal: the function-only walk, strings stripped alike, is blind to it.
+  const functionsOnly = topLevelFunctions().map((f) => ({ ...f, body: codeOnly(f.body) }));
+  assert.ok(!loopReachable(functionsOnly, "daemonCommand").has("runInTree"), "the function-only walk does not reach runInTree");
+  assert.ok(loopReachable(functionsOnly, "daemonCommand").size < reach.size, "the object-literal walk reaches more");
+  const { runInTree: _dropped, ...withoutRow } = SYNC_SPAWN_LOOP_BASELINE;
+  assert.deepEqual(refusals(fns, withoutRow), [
+    "runInTree makes 1 synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead",
+  ]);
+});
+
+/** Rows the loop "reached" only through a word in a string or a comment (drainCommand is named in daemonCommand's comments). */
+const TEXT_ONLY_ROWS = ["imessageChannel", "listRuleSuites", "readPushedRunBranchesOutput", "readRunBranchClosedPrsOutput"] as const;
+
+test("W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  // Positive control: the same walk with text kept reaches drainCommand from daemonCommand; the census walk does not.
+  assert.ok(loopReachable(topLevelFunctions({ objectLiterals: true }), "daemonCommand").has("drainCommand"), "text-keeping walk reaches drainCommand");
+  assert.ok(!reach.has("drainCommand"), "daemonCommand names drainCommand only in comments");
+  for (const name of TEXT_ONLY_ROWS) {
+    assert.ok(!reach.has(name) && !Object.hasOwn(SYNC_SPAWN_LOOP_BASELINE, name), `${name} is unreached and holds no row`);
+    assert.deepEqual(refusals(fns, { ...SYNC_SPAWN_LOOP_BASELINE, [name]: 1 }), [
+      `${name} makes 0 synchronous spawn call(s) on the daemon loop < row 1 — delete the \`${name}\` row from SYNC_SPAWN_LOOP_BASELINE (${BASELINE_FILE}) in this PR`,
+    ]);
+  }
+  // A backtick inside a regex literal opens no template: the code after it, and its spawn, stay visible.
+  assert.equal(codeOnly("x(/[;&|`$]/.test(p)); a / b / c; /* `t */ (e ?? execFileSync)(z);"), 'x("".test(p)); a / b / c;   (e ?? execFileSync)(z);');
+  assert.ok(reach.has("assertOpenWeightToolBoundary") && (population(fns).get("assertOpenWeightToolBoundary") ?? 0) > 0, "runTask's cash-containment default stays a counted, reached spawner");
 });
