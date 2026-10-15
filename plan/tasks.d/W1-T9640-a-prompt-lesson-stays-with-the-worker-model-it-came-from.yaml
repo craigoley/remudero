@@ -1,0 +1,51 @@
+- id: W1-T9640
+  title: "A PROMPT LESSON LEARNED FROM ONE WORKER MODEL CAN BE PROMOTED ONTO EVERY MODEL — fix transcripts carry no model, reflection pools every arm, and `PromotionScope` has no model field, while the fix lane's arms are refused at 62% and 22%; key transcripts, candidates and promotions by worker model"
+  repo: remudero
+  depends_on: [W1-T9639]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19 span: the transcript type, the promotion scope and the W1-T4665 fixture. One concern — a prompt candidate is scoped to the worker model whose rounds taught it
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T4665, W1-T5535, W1-T9639]
+  files: [src/lib/prompt-evolution.ts, src/lib/experiment-promotion.ts, test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts, test/a-prompt-lesson-stays-with-the-worker-model-it-came-from.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    - `FixTranscript` (src/lib/prompt-evolution.ts:54) has `taskId`, `taskShape`, `commitRefusedReason`,
+      `reviewerVerdict` and `excerpt`, and no worker model. `reflectOnTranscripts` (:131) pools every transcript it
+      is given.
+    - `PromotionScope` (src/lib/experiment-promotion.ts:65) scopes a promotion by repo, policy scope, task type and
+      lane, never by model.
+    - The fix lane's arms differ sharply: over 2026-09-26..10-03 the harness refused 62% of codex/gpt-6.1-sol rounds
+      and 22% of claude-sonnet-5 rounds (src/lib/fix-routing-learner.ts:8-9, W1-T5535).
+    - So pooled lessons are dominated by the arm with the most refusals, and the resulting addendum would be promoted
+      onto every arm, including the one whose rounds never needed it.
+    WHY NOW: nothing produces transcripts yet (W1-T9641 is the first producer), so a required model field costs no data
+    migration today and a large one later. Found while reading wshobson/agents, whose agents carry a prompt body
+    written per model tier (docs/agents.md).
+  design: |
+    1. `FixTranscript` gains a required `model: string`, bounded like `taskShape`. `validateFixTranscript` refuses a
+       transcript without it.
+    2. `PromptEvolutionPromotionInput` gains `model: string`. `proposePromptEvolutionPromotion` keeps only that
+       model's transcripts before it proposes and scores, and sets `scope.model` on the promotion.
+    3. `PromotionScope` gains `model?: string`, and `validatePromotionRecord` bounds it. The serialization key,
+       (repo, policyScope), is unchanged: still one promotion in flight per policy scope.
+    4. Update the W1-T4665 test fixture (`recordedCorpus`) with a model per transcript. Keep its titles byte-identical.
+    New tests go in test/a-prompt-lesson-stays-with-the-worker-model-it-came-from.test.ts. The first uses a fixture
+    whose codex rows carry refusal reason A and whose sonnet rows carry reason B: a promotion proposed for the sonnet
+    model must never carry lesson A, and must carry `scope.model` for sonnet.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-prompt-lesson-stays-with-the-worker-model-it-came-from.test.ts"
+    - claim: "a candidate learned from one worker model is never promoted onto another"
+      proof: 'grep: test("W1-T9640: a prompt candidate learned from one worker model is never promoted onto another" in test/a-prompt-lesson-stays-with-the-worker-model-it-came-from.test.ts'
+    - claim: "a fix transcript with no worker model is refused"
+      proof: 'grep: test("W1-T9640: a fix transcript with no worker model is refused" in test/a-prompt-lesson-stays-with-the-worker-model-it-came-from.test.ts'
+  falsifier: |
+    Drop the per-model filter in `proposePromptEvolutionPromotion`. The sonnet promotion then carries the codex lesson,
+    and the first test fails.
