@@ -1400,6 +1400,103 @@ jobs:
     steps:
       - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
+  coverage-ledger:
+    name: coverage-ledger
+    runs-on: ubuntu-latest
+    # 75 - 49 - 20 - 5 = 1 minute, including setup: preserve WAIT_CAP_SECONDS and its margin.
+    timeout-minutes: 1
+    outputs:
+      artifact_id: ${{ steps.finish.outputs.artifact_id }}
+      digest: ${{ steps.resolve.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .nvmrc
+            scripts/
+            src/lib/plan-scope.ts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Resolve one immutable coverage ledger for this run (W1-T9448)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::coverage-ledger: $*" >&2; exit 1; }
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "coverage-ledger: no source coverage collection on this event."
+            exit 0
+          fi
+          git diff --name-only HEAD^1...HEAD > ledger-changed-files.txt || : > ledger-changed-files.txt
+          CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files ledger-changed-files.txt)" || CLASS="SOURCE"
+          case "$CLASS" in PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC) echo "coverage-ledger: class=${CLASS}, no instrumented split."; exit 0 ;; esac
+          CHOICE_NAME="coverage-ledger-choice-${GITHUB_RUN_ID}"
+          INCOMING="${RUNNER_TEMP}/coverage-ledger-choice"
+          mkdir -p "$INCOMING"
+          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" --paginate --slurp \
+            --jq "[.[].artifacts[] | select(.name == \"${CHOICE_NAME}\")] | if length == 0 then empty elif length == 1 then .[0].id else error(\"multiple run ledger choices\") end")" \
+            || die "cannot read this run's published choice; refusing to resolve another ledger"
+          if [ -n "$EXISTING" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXISTING}/zip" > "$INCOMING/choice.zip" \
+              || die "cannot download already-published choice artifact ${EXISTING}"
+            unzip -p "$INCOMING/choice.zip" ledger-choice.json > "$INCOMING/ledger-choice.json" \
+              || die "choice artifact ${EXISTING} has no identity"
+            unzip -p "$INCOMING/choice.zip" ledger-snapshot.manifest > "$INCOMING/ledger-snapshot.manifest" \
+              || die "choice artifact ${EXISTING} has no ledger"
+            node scripts/test-tier-manifest.mjs --verify-resolved-ledger --resolved-ledger "$INCOMING/ledger-choice.json" \
+              --snapshot "$INCOMING/ledger-snapshot.manifest" --github-output "$GITHUB_OUTPUT"
+            echo "existing_artifact_id=${EXISTING}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "${GITHUB_RUN_ATTEMPT:-1}" = "1" ] || die "this rerun's immutable choice is unavailable; start a new run, never replace a lost choice"
+          CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)" \
+            || die "cannot read run creation time"
+          [ -n "$CREATED" ] && [ "$CREATED" != "null" ] || die "run creation time is missing"
+          CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ)" || die "run creation time is invalid"
+          LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" --paginate --slurp \
+            --jq "[.[].artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty")" \
+            || die "cannot enumerate eligible proposals; unreadable is not absence"
+          PUBLISH="${RUNNER_TEMP}/coverage-ledger-publish"
+          mkdir -p "$PUBLISH"
+          FLAGS=(--ledger-source committed)
+          if [ -n "$LEDGER_ID" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${LEDGER_ID}/zip" > "$INCOMING/proposal.zip" \
+              || die "cannot download selected proposal artifact ${LEDGER_ID}"
+            unzip -p "$INCOMING/proposal.zip" test-tier-coverage-manifest.next.json > "$PUBLISH/ledger-snapshot.manifest" \
+              || die "selected proposal artifact ${LEDGER_ID} has no ledger"
+            FLAGS=(--ledger-source snapshot --artifact-id "$LEDGER_ID")
+          else
+            echo "coverage-ledger: successful lookup found no eligible proposal; choosing committed once for every shard."
+            cp scripts/test-tier-coverage-manifest.json "$PUBLISH/ledger-snapshot.manifest"
+          fi
+          node scripts/test-tier-manifest.mjs --write-resolved-ledger "${FLAGS[@]}" \
+            --resolved-ledger "$PUBLISH/ledger-choice.json" --snapshot "$PUBLISH/ledger-snapshot.manifest" --github-output "$GITHUB_OUTPUT"
+      - name: Publish the immutable run ledger choice
+        id: publish
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-ledger-choice-${{ github.run_id }}
+          path: ${{ runner.temp }}/coverage-ledger-publish
+          retention-days: 1
+          # No payload on a reused choice or a non-source lane. finish refuses an absent source choice.
+          if-no-files-found: ignore
+      - name: Require the published choice identity
+        id: finish
+        env:
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+          EXISTING_ID: ${{ steps.resolve.outputs.existing_artifact_id }}
+          PUBLISHED_ID: ${{ steps.publish.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DIGEST" ]; then exit 0; fi
+          ARTIFACT_ID="${EXISTING_ID:-$PUBLISHED_ID}"
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || { echo "::error::coverage-ledger: selected ledger was not published"; exit 1; }
+          echo "artifact_id=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
+
   coverage-ratchet:
     # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down.
     # scripts/coverage-ratchet.mjs compares this run's lcov totals against the recorded floor in
@@ -1413,6 +1510,7 @@ jobs:
     # fails when the diff adds a source line lcov marks instrumented but never hit.
     name: coverage-shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
+    needs: [coverage-ledger]
     strategy:
       fail-fast: false
       matrix:
@@ -1472,6 +1570,35 @@ jobs:
           cat diff-class.log || true
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T2428 fast-lane: this diff classifies as ${CLASS}."
+      - name: Require the run's resolved coverage ledger before setup (W1-T9448)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEDGER_ARTIFACT_ID: ${{ needs.coverage-ledger.outputs.artifact_id }}
+          LEDGER_DIGEST: ${{ needs.coverage-ledger.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] || exit 0
+          die() { echo "::error::coverage-ledger: $*" >&2; exit 1; }
+          [[ "$LEDGER_ARTIFACT_ID" =~ ^[0-9]+$ ]] || die "run supplied no resolved artifact id"
+          [[ "$LEDGER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die "run supplied no resolved content digest"
+          INCOMING="${RUNNER_TEMP}/coverage-ledger-download"
+          mkdir -p "$INCOMING" coverage
+          DOWNLOADED=0
+          for ATTEMPT in 1 2; do
+            if gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${LEDGER_ARTIFACT_ID}/zip" > "$INCOMING/choice.zip"; then
+              DOWNLOADED=1
+              break
+            fi
+            echo "coverage-ledger: artifact ${LEDGER_ARTIFACT_ID} download attempt ${ATTEMPT} failed."
+          done
+          [ "$DOWNLOADED" = "1" ] || die "cannot download resolved artifact ${LEDGER_ARTIFACT_ID}; refusing another ledger before setup"
+          unzip -p "$INCOMING/choice.zip" ledger-choice.json > coverage/ledger-choice.json \
+            || die "resolved artifact ${LEDGER_ARTIFACT_ID} has no choice identity"
+          unzip -p "$INCOMING/choice.zip" ledger-snapshot.manifest > coverage/ledger-snapshot.manifest \
+            || die "resolved artifact ${LEDGER_ARTIFACT_ID} has no ledger"
+          node scripts/test-tier-manifest.mjs --verify-resolved-ledger --resolved-ledger coverage/ledger-choice.json \
+            --snapshot coverage/ledger-snapshot.manifest --github-output "$INCOMING/verified"
+          grep -qxF "digest=${LEDGER_DIGEST}" "$INCOMING/verified" || die "resolved artifact ${LEDGER_ARTIFACT_ID} differs from the run's advertised digest"
       - name: Validate the coverage test-tier manifest before spending a shard (W1-T2904)
         # A missing manifest row is a deterministic precondition failure, not a coverage result.
         # Check it immediately after classification so a newly added test cannot consume the
@@ -1518,25 +1645,6 @@ jobs:
             exit 0
           fi
           npx playwright install chromium
-      - name: Resolve the CI ledger snapshot the coverage split weighs (W1-T4071)
-        # The newest proposal uploaded 10+ min before this run was created: one artifact for all eight shards.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p coverage "${RUNNER_TEMP}/coverage-ledger"
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] \
-            && CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at 2>/dev/null)" \
-            && CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-            && LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" \
-              --jq "[.artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty" 2>/dev/null)" \
-            && [ -n "$LEDGER_ID" ] \
-            && gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${LEDGER_ID}/zip" > "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" 2>/dev/null \
-            && unzip -p "${RUNNER_TEMP}/coverage-ledger/snapshot.zip" test-tier-coverage-manifest.next.json > coverage/ledger-snapshot.manifest 2>/dev/null; then
-            echo "W1-T4071: weighing the coverage split on CI ledger artifact ${LEDGER_ID} (uploaded before ${CUTOFF})."
-          else
-            rm -f coverage/ledger-snapshot.manifest
-            echo "W1-T4071: no CI ledger snapshot resolved; the committed instrumented ledger is weighed."
-          fi
       - name: Fetch the newest nightly test impact map for the shadow selector (W1-T6107)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1650,7 +1758,7 @@ jobs:
           # W1-T5923: weigh the split on this lane's own instrumented durations.
           if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
             --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
-            --workers 3 --selection-output coverage/selected-files.json \
+            --workers 3 --selection-output coverage/selected-files.json --resolved-ledger coverage/ledger-choice.json \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
             cat coverage-shard-selection.log || true
             echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
@@ -1762,7 +1870,7 @@ jobs:
   coverage-ratchet-required:
     name: coverage-ratchet
     runs-on: ubuntu-latest
-    needs: [coverage-ratchet]
+    needs: [coverage-ratchet, coverage-ledger]
     if: ${{ always() }}
     # PR #8080's eight shards passed, but merging their compact V8 reports ran past this job's
     # former 10m cap and GitHub cancelled the required check. A prior merge took 7m; 20m bounds
@@ -1914,7 +2022,7 @@ jobs:
             if [ -s "coverage-shards/coverage-shard-${SHARD}/selected-files.json" ]; then SELECTIONS+=("coverage-shards/coverage-shard-${SHARD}/selected-files.json"); fi
           done
           if [ "${#SELECTIONS[@]}" -eq 8 ]; then
-            node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}"
+            node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}" --resolved-digest '${{ needs.coverage-ledger.outputs.digest }}'
           else
             echo "W1-T4071: ${#SELECTIONS[@]} of 8 shards recorded a full split; no partition (every file once, one ledger) to check."
           fi
