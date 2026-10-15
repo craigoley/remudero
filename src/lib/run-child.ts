@@ -707,9 +707,9 @@ export async function abortRunChild(dir: string, ports: AbortRunChildPorts = {})
     pid = classified.status.identity.pid;
   }
   const live = (): boolean => (ports.knownPid ? ports.knownPid() !== undefined : classifyRunDir(dir, ports.probe).kind === "live");
-  const startedAt = clock();
   const budgetMs = ports.teardownMs?.();
   kill(pid, "SIGTERM");
+  const startedAt = clock(); // the teardown allowance runs from the signal, never from before it
   ports.log?.(RUN_CHILD_ABORT_STEP, { run_id: basename(dir), child_pid: pid, signal: "SIGTERM", teardown_ms: budgetMs ?? null });
   let killed = false;
   for (;;) {
