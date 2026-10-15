@@ -628,6 +628,7 @@ import {
 import {
   buildMainHealthRung,
   mainCeilingLogReducer,
+  mainRepairMergesBrief,
   withMainHealthOnLightPass,
   type MainCeilingLogVerdict,
   type MainRatchetRecordOutcome,
@@ -1777,6 +1778,7 @@ import {
   runSweep,
   runSweepLightPass,
   runLightPassReadyRefresh,
+  runLightPassRefreshAdmission,
   withFullSweepRepairAdmission,
   redQualityGateNames,
   stillRedRequiredNames,
@@ -2861,7 +2863,8 @@ export function buildSweepEffects(
     },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
-    pushFixRoundImpl: pushFixRound,
+    pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -3159,7 +3162,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
 import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
-import { memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
+import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
@@ -18341,7 +18344,7 @@ async function runTask(
     // W1-T7807: the quiet-worker watchdog rides every REAL dispatch spawn (an injected spawn has no process tree to read).
     const watchedSpawn = watchDispatchSpawn(rawSpawn, {
       enabled: !opts.spawn, taskId, runId, ledgerPath, fallbackBoundMs: workerStallFallbackMs, spawnArgs: effectiveSpawnArgs, task, log,
-      provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle,
+      provider: () => selectionAssignment?.selected.provider, recyclePending: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
       restartPending: restartLatchDetail(opts.restartAtWorkerBoundary, () => ({ waitingOn: restartPhase.current, runId })),
     });
     return recordBenchmarkWorkerAttempt(() => watchedSpawn({
@@ -20636,7 +20639,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const freshness = opts.restartAtWorkerBoundary
         ? opts.restartAtWorkerBoundary({ waitingOn: restartPhase.current, runId })
         : await opts.externalWaitFreshness?.();
-      const recycle = freshness ? undefined : opts.externalWaitRecycle?.();
+      const recycle = freshness ? undefined : (opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)))();
       if (!freshness && !recycle) return undefined;
       let undeclared: readonly string[] = [];
       try {
@@ -39121,10 +39124,12 @@ export function orphanSweepRunActive(
   ownRunId: string,
   inflightDir: string,
   isPidAlive?: (pid: number) => boolean,
+  adoptedRunIds: ReadonlySet<string> = new Set(),
 ): (runId: string) => boolean {
   return (runId) =>
     runId === ownRunId ||
     liveWorkerRunIds.has(runId) ||
+    adoptedRunIds.has(runId) ||
     liveInflightRuns(inflightDir, isPidAlive).some((r) => r.runId === runId || r.runId.startsWith(`${runId}:fix-claim:`));
 }
 
@@ -39178,7 +39183,7 @@ export interface RunInChildInput {
 export async function runInChildWhenOn(
   input: RunInChildInput,
   seams: { readMode?: () => RunChildMode; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
-): Promise<{ settled: Promise<RunResult> } | undefined> {
+): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode);
   const fallback = (reason: string): undefined => {
     input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
@@ -39196,7 +39201,7 @@ export async function runInChildWhenOn(
     abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
     ...seams.ports,
   });
-  return launched.started ? { settled: launched.settled } : undefined;
+  return launched.started ? launched : undefined;
 }
 
 export async function daemonCommand(
@@ -39222,6 +39227,7 @@ export async function daemonCommand(
      *  passes this. */
     runDaemon?: typeof runDaemon;
     runTask?: typeof runTask;
+    readRunChildMode?: () => RunChildMode;
     /** Command seams for the selected-repository PR-action wiring test. Production keeps the
      * established fix/review implementations; tests inject terminal fakes without touching GitHub. */
     fixCommand?: typeof fixCommand;
@@ -39752,6 +39758,8 @@ export async function daemonCommand(
     repair: mainRepairLaneFor(target.owner, target.repo, config, ledgerPath, runId),
     // A red that is only a ratified ceiling is read from the failing shard's own log, then recorded.
     readCeilingVerdict: (check) => readMainCeilingVerdictAsync(target.owner, target.repo, check),
+    // W1-T9665: which failing tests each merge since green reaches, over this checkout's import graph.
+    readAffectedInput: (changed) => readAffectedSuitesInputAsync(targetCheckoutRoot, changed),
   });
   // W1-T2568 — THE GITHUB-EVENT WAKE'S ENTIRE DAEMON-SIDE WIRING. `wireSweepWakeToDaemon`
   // (lib/github-event-wake.ts) consumes any boot-pending marker, arms an `fs.watch` on the
@@ -39787,12 +39795,25 @@ export async function daemonCommand(
     // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
     headroom_enabled: opts.headroomEnabled,
   });
-  // W1-T9070: the positive control for ADR 0007's run children. No spawn site writes a run directory yet, so this
-  // reads all zeros; the adoption task builds on it. A failed read is ledgered, never read as zeros.
+  // The contract census precedes adoption and boot sweeps; an unreadable corpus is reported, never counted as empty.
   try {
     log("run_child.boot_census", { ...censusRunDirs(join(config.root, "state")) });
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
+  }
+  const childMode = runChildModeIsOn(deps.readRunChildMode).on;
+  const adoptedRunIds = new Set<string>();
+  const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
+    step: ["run_child.settled"], refuseIncomplete: true,
+  }) : undefined;
+  if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
+  const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
+    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log,
+    settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
+  }) : [];
+  for (const child of adoptedChildren) {
+    adoptedRunIds.add(child.runId);
+    void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
@@ -39817,7 +39838,7 @@ export async function daemonCommand(
       expectedScope: orphanWorkerScope,
       listCandidates: defaultListCandidates,
       readMarkers: defaultReadMarkers,
-      isRunActive: orphanSweepRunActive(runId, inflightDir),
+      isRunActive: orphanSweepRunActive(runId, inflightDir, undefined, adoptedRunIds),
       kill: (pid) => killProcessGroup(pid),
       ledger: orphanWorkerKillLedger(ledgerPath),
     });
@@ -40229,13 +40250,17 @@ export async function daemonCommand(
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
+        ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
-          });
-          if (inChild) return inChild.settled;
+          }, { readMode: deps.readRunChildMode });
+          if (inChild) {
+            runOptions?.onChild?.(inChild);
+            return inChild.settled;
+          }
           // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
@@ -48861,7 +48886,9 @@ export function buildSweepLightHook(
           inFlightTaskIds: new Set(inFlightTaskIdsFrom(join(config.root, "state", "inflight"))),
         }, DEFAULT_SWEEP_POLICY);
       }
-      const passPrs = readyRefreshed === undefined ? openPrs : openPrs.filter((pr) => pr.prNumber !== readyRefreshed);
+      // W1-T9595: a held head main has fixed is refreshed only through this one admission, never the fan-out below.
+      const admitted = reviewOnly ? [] : await runLightPassRefreshAdmission(openPrs, { ...effects, ledgerPath, runId });
+      const passPrs = openPrs.filter((pr) => pr.prNumber !== readyRefreshed && !admitted.includes(pr.prNumber));
       const requeueOnlyPrs = reviewOnly ? [] : passPrs.filter((pr) => blockedFixableIsRequeueOnly(pr));
       const requeueOnlyPrNumbers = new Set(requeueOnlyPrs.map((pr) => pr.prNumber));
       const restPrs = requeueOnlyPrNumbers.size === 0 ? passPrs : passPrs.filter((pr) => !requeueOnlyPrNumbers.has(pr.prNumber));
@@ -54589,11 +54616,14 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
 export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
   const known = request.testFiles.length > 0;
+  const merges = mainRepairMergesBrief(request);
   return [
     "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
     `The default branch \`${request.branch}\` is RED at \`${request.headSha}\`. Every open PR's CI fails until it is green.`,
     `The first red merge is \`${request.offendingSha}\` (${pr}). Its diff stat:`,
     request.diffStat,
+    "",
+    ...merges.lines,
     "",
     `Failing check(s): ${request.failingChecks.join(", ") || "(none named)"}`,
     `Failing test title(s): ${request.failingTestTitles.join("; ") || "(none parsed from the log)"}`,
@@ -54604,7 +54634,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     request.logExcerpt || "(no log was read)",
     "```",
     "",
-    "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+    merges.fixLine,
     "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
     "Reproduce the failing test file(s) above first, then make the minimal correct change.",
     "",
@@ -57288,8 +57318,8 @@ import { isTaskShardName } from "./lib/task-shard-name.js";
 import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
 import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
 import {
-  RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
-  type SpawnRunChildPorts,
+  RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
+  type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import type { RunChildMode } from "./lib/policy.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
