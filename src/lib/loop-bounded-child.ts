@@ -155,8 +155,3 @@ export function execFileLoopBounded(
   settled.child = command.child;
   return settled;
 }
-
-/** True for a {@link LoopBoundedChildTimeout} (or anything shaped like one across a module copy). */
-export function isLoopBoundedChildTimeout(error: unknown): error is LoopBoundedChildTimeout {
-  return error instanceof LoopBoundedChildTimeout || (error as { name?: unknown } | null)?.name === "LoopBoundedChildTimeout";
-}
