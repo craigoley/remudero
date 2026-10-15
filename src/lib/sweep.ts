@@ -81,6 +81,7 @@ import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, work
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
@@ -10768,54 +10769,12 @@ export interface ArmedStalledPr {
   matchingBaseFiles?: readonly string[];
 }
 
-/** W1-T5696 — the files `main` changed since a PR head, from the same compare call that measures the
- *  distance. `truncated` when GitHub capped the list (300), so absence of a path proves nothing. */
-export interface BaseChangedFiles {
-  files: readonly string[];
-  truncated: boolean;
-}
-
-/** W1-T5696 — main-side paths that move a PR's verdict without touching any of the PR's own files:
- *  recorded baselines, the two CI workflows, and the dependency/compiler manifests. `*` matches within
- *  one path segment. */
-export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
-  "scripts/*-baseline.json",
-  ".github/workflows/ci.yml",
-  ".github/workflows/ci-gate.yml",
-  "package.json",
-  "package-lock.json",
-  "tsconfig*.json",
-];
-
 /** W1-T5696 — a distance past this many commits refreshes whatever the file facts say. BACKSTOP: the
  *  primary control is the main-side file intersection; this only catches a PR so far behind that
  *  an unrelated-looking base is no longer trusted. */
 export const DEFAULT_REVIEW_WAITING_BRANCH_REFRESH_CEILING = 60;
 
-/** `*` is the only glob character; every other character in a path glob is literal. */
-function refreshPathMatches(glob: string, path: string): boolean {
-  const parts = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
-  return new RegExp(`^${parts.join("[^/]*")}$`).test(path);
-}
-
-/** W1-T5696 — does `main` carry a change this PR must re-run against, and which files say so? A
- *  missing map entry, unknown PR file list or truncated base list is `distance-unknown`: today's
- *  refresh is kept. */
-export function distanceRefreshCause(
-  behindBy: number,
-  prFiles: readonly string[] | undefined,
-  base: BaseChangedFiles | undefined,
-  ceiling: number,
-): { reason: "distance-overlap" | "distance-baseline" | "distance-ceiling" | "distance-unknown" | undefined; files: string[] } {
-  if (base === undefined || prFiles === undefined || base.truncated) return { reason: "distance-unknown", files: [] };
-  const own = new Set(prFiles);
-  const overlap = base.files.filter((f) => own.has(f));
-  if (overlap.length > 0) return { reason: "distance-overlap", files: overlap };
-  const relevant = base.files.filter((f) => REFRESH_RELEVANT_BASE_PATHS.some((glob) => refreshPathMatches(glob, f)));
-  if (relevant.length > 0) return { reason: "distance-baseline", files: relevant };
-  if (behindBy > ceiling) return { reason: "distance-ceiling", files: [] };
-  return { reason: undefined, files: [] };
-}
+export { distanceRefreshCause, REFRESH_RELEVANT_BASE_PATHS, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 
 /** P22's "required contexts green, review success": the `mergeable` disposition row's own match. */
 /** W1-T6595 — the `mergeable` row's reason for a plan PR, which is merged directly, never armed. */

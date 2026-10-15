@@ -112,10 +112,20 @@ function stateVolume(): string {
   return vol;
 }
 
-function runRung(mode: string, vol: string, args: string[] = ["--reclaim-only"], extraEnv: NodeJS.ProcessEnv = {}): Run {
+/** Extra executables for the stub PATH, by name: a shim here shadows the host's own binary. */
+type ExtraStubs = Record<string, string>;
+
+function runRung(
+  mode: string,
+  vol: string,
+  args: string[] = ["--reclaim-only"],
+  extraEnv: NodeJS.ProcessEnv = {},
+  extraStubs: ExtraStubs = {},
+): Run {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}snapshot-stub-`));
   const rec = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}snapshot-rec-`));
   writeStubs(dir);
+  for (const [name, body] of Object.entries(extraStubs)) writeFileSync(join(dir, name), body, { mode: 0o755 });
   // A real git reclaim target, so section 4a's all-miss refusal cannot redden a run for a reason
   // these tests are not about.
   const gitTarget = gitRepo({ kind: "snapshot-reclaim-target" });
@@ -216,6 +226,43 @@ test("with no RMD_STATE_BACKUP_KEEP the nightly rung keeps the newest 2 snapshot
   assert.equal(after.length, 2, `the default keeps exactly two: ${after.join(", ")}`);
   assert.ok(after.includes(seeded[3]), "the newest seeded snapshot is kept beside tonight's");
   assert.ok(seeded.slice(0, 3).every((s) => !after.includes(s)), "the three older ones are expired");
+});
+
+// W1-T9560: section 3a fed `printf | head -n <excess> | while read` under `set -euo pipefail`. When
+// head exits before printf has written every name, printf dies of SIGPIPE, pipefail makes 141 the
+// pipeline's status, and set -e ends the rung before the docker reclaim and the off-host copy
+// (#11702's test-slow-shard red, 141 !== 0). On a real host that is a scheduling race. This test
+// makes it certain: the shim below stops reading after ONE line, and the list it is fed is longer
+// than a 64 KiB pipe buffer (about 38 bytes a name), so printf is still blocked writing when the
+// shim exits. FALSIFIER: restore the `printf ... | head -n ... | while` pipeline and this reads 141.
+const HEAD_THAT_STOPS_EARLY = ["#!/usr/bin/env bash", 'IFS= read -r line && printf "%s\\n" "${line}"', "exit 0", ""].join("\n");
+
+test("W1-T9560: the snapshot expiry survives a head that stops reading after one line", () => {
+  const vol = stateVolume();
+  const backups = join(vol, "state-backups");
+  const total = 2_400;
+  mkdirSync(backups, { recursive: true });
+  const base = Date.UTC(2020, 0, 1);
+  const seeded: string[] = [];
+  for (let i = 0; i < total; i++) {
+    const name = `state-backup.${new Date(base + i * 60_000).toISOString().replace(/[:.]/g, "-")}`;
+    mkdirSync(join(backups, name));
+    seeded.push(name);
+  }
+  assert.ok(seeded.length * (seeded[0].length + 1) > 64 * 1024, "control: the name list overflows a 64 KiB pipe buffer");
+  // Tonight's snapshot makes total + 1; keeping total - 1 leaves an excess of 2, so the expiry
+  // must read past the shim's one line to do its job.
+  const keep = total - 1;
+  const run = runRung("good", vol, ["--reclaim-only"], { RMD_STATE_BACKUP_KEEP: String(keep) }, { head: HEAD_THAT_STOPS_EARLY });
+  assert.notEqual(run.status, 141, `the expiry pipeline died of SIGPIPE:\n${run.stderr}`);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, new RegExp(`expired ${seeded[0]} \\(keeping the newest ${keep}\\)`), "the oldest snapshot is expired");
+  assert.match(run.stdout, new RegExp(`expired ${seeded[1]} \\(keeping the newest ${keep}\\)`), "the second oldest too");
+  const after = snapshotsIn(backups);
+  assert.equal(after.length, keep, "exactly the keep count remains");
+  assert.ok(!after.includes(seeded[0]) && !after.includes(seeded[1]), "the two oldest are gone");
+  assert.ok(after.includes(seeded[total - 1]), "the newest seeded snapshot survives");
+  assert.ok(after.some((n) => !seeded.includes(n)), "tonight's snapshot survives");
 });
 
 test("--dry-run --reclaim-only names the snapshot and takes none", () => {

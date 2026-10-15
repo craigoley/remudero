@@ -3839,7 +3839,7 @@ test("a rejected detached ticker is logged after shutdown instead of becoming an
   });
 });
 
-test("W1-T2584: the daemon sweep bound closes the continuation gate handed to the still-settling sweep", async () => {
+test("W1-T9563 (inverts W1-T2584): the daemon sweep bound leaves the continuation gate open for the still-settling sweep", async () => {
   const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let continuation: (() => boolean) | undefined;
   let releaseSweep: () => void = () => {};
@@ -3869,7 +3869,7 @@ test("W1-T2584: the daemon sweep bound closes the continuation gate handed to th
 
   assert.equal(summary.stopReason, "stale");
   assert.ok(continuation, "runGatedSweep supplies the continuation gate to the real sweep dependency");
-  assert.equal(continuation!(), false, "the same timer that abandons the await closes later review admissions");
+  assert.equal(continuation!(), true, "abandoning the await no longer closes the healthy-slow pass's review admissions");
   releaseSweep();
 });
 
