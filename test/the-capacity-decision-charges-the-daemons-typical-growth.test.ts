@@ -68,7 +68,9 @@ function reading(): HostMemoryReading {
   };
 }
 
-function ports(at: number, rows: LedgerLine[], memAvailableMib: number, footprintMib: readonly number[]): Partial<ShadowMemoryPorts> {
+function ports(
+  at: number, rows: LedgerLine[], memAvailableMib: number, footprintMib: readonly number[], pid: number | null = 111,
+): Partial<ShadowMemoryPorts> {
   const files: Record<string, string> = {
     "/proc/meminfo": `MemTotal: 16371712 kB\nMemAvailable: ${memAvailableMib * 1024} kB\n`,
     "/proc/vmstat": "pswpin 100\n",
@@ -97,7 +99,7 @@ function ports(at: number, rows: LedgerLine[], memAvailableMib: number, footprin
     writeFile: () => undefined,
     stderr: () => undefined,
     instance: () => "here",
-    daemonPid: () => 111,
+    daemonPid: () => pid ?? undefined,
     listStateDir: () => [],
     estimate: (cls) => (cls === "garden" ? 820 : 1024),
     typical: (cls) => (cls === "garden" ? 90 : 295),
@@ -106,11 +108,11 @@ function ports(at: number, rows: LedgerLine[], memAvailableMib: number, footprin
 }
 
 /** Records `count` verdicts a minute apart; returns every ledger row they wrote. */
-function record(count: number, memAvailableMib: number, footprintMib: readonly number[]): LedgerLine[] {
+function record(count: number, memAvailableMib: number, footprintMib: readonly number[], pid?: number | null): LedgerLine[] {
   const rows: LedgerLine[] = [];
   for (let i = 0; i < count; i += 1) {
     const outcome = recordShadowMemoryVerdict({ workerClass: "garden", reservationId: "start", root: ROOT },
-      ports(NOW + i * MIN, rows, memAvailableMib, footprintMib));
+      ports(NOW + i * MIN, rows, memAvailableMib, footprintMib, pid));
     assert.equal(outcome.kind, "recorded", JSON.stringify(outcome));
   }
   return rows;
@@ -154,7 +156,7 @@ test("W1-T9557: a sustained typical shortfall still raises one decision naming i
     const text = capacityDecisionText(decision);
     assert.equal(text.summary, "host memory cannot fit zero workers in scenario serve-steady", "the dedup title is stable");
     assert.match(text.detail, /charges 342 MiB of daemon growth \(here: median of 7 footprint sample\(s\)\)/);
-    assert.match(text.detail, /lifetime-peak growth, 5200 MiB, is not charged/);
+    assert.match(text.detail, /not their 5200 MiB growth back to their lifetime peak/);
   } finally {
     fresh();
   }
@@ -172,6 +174,24 @@ test("W1-T9557: too few footprint samples charge the whole growth and say so", (
     assert.equal(row.daemonGrowthBasis, "here: all typical: 2 daemon footprint sample(s) in the last hour");
     assert.match(capacityDecisionText(takeCapacityDecisions()[0]!).detail,
       /charges 5200 MiB of daemon growth \(here: all typical: 2 daemon footprint sample\(s\) in the last hour\)/);
+  } finally {
+    fresh();
+  }
+});
+
+test("W1-T9557: with no daemon pid the basis names the footprint series, or that no growth was measured", () => {
+  fresh();
+  try {
+    // No /proc status: the footprint itself measures the growth (500 MiB back to its hour's peak) and its median split.
+    const series = record(SUSTAINED, 1200, FOOTPRINT_MIB, null).find((r) => r.step === DECISION)!;
+    assert.equal(series.daemonGrowthBasis, "here: median of 7 samples from the daemon footprint");
+    assert.equal(series.daemonGrowthChargedMib, 342);
+    assert.equal(series.daemonGrowthPeakMib, 500);
+    fresh();
+    // Too few samples and no pid: nothing is charged as growth (the verdict widens its margin instead), and it says so.
+    const none = record(SUSTAINED, 1200, FOOTPRINT_MIB.slice(-2), null).find((r) => r.step === DECISION)!;
+    assert.equal(none.daemonGrowthBasis, "no daemon growth measured");
+    assert.equal(none.daemonGrowthChargedMib, 0);
   } finally {
     fresh();
   }

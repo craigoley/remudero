@@ -485,7 +485,7 @@ export interface ShortfallTracker {
 }
 
 export function createShortfallTracker(): ShortfallTracker {
-  const streak = new Map<string, { samples: number; worstMib: number; worst?: ZeroWorkerSample }>();
+  const streak = new Map<string, { samples: number; worstMib: number; worst: ZeroWorkerSample }>();
   const raised = new Set<string>();
   return {
     observe(sample, policy) {
@@ -494,23 +494,22 @@ export function createShortfallTracker(): ShortfallTracker {
         streak.delete(sample.scenario);
         return undefined;
       }
-      const s = streak.get(sample.scenario) ?? { samples: 0, worstMib: 0 };
+      const s = streak.get(sample.scenario) ?? { samples: 0, worstMib: 0, worst: sample };
       s.samples += 1;
       if (shortfall >= s.worstMib) s.worst = sample;
       s.worstMib = Math.max(s.worstMib, shortfall);
       streak.set(sample.scenario, s);
       if (s.samples < policy.zeroWorkerShortfallSamples || raised.has(sample.scenario)) return undefined;
       raised.add(sample.scenario);
-      const worst = s.worst ?? sample;
       return {
         scenario: sample.scenario,
         shortfallMib: s.worstMib,
         shortfallGb: Math.round((s.worstMib / 1024) * 10) / 10,
         samples: s.samples,
         levers: SHORTFALL_LEVERS,
-        daemonGrowthBasis: worst.daemonGrowthBasis,
-        daemonGrowthChargedMib: worst.daemonGrowthChargedMib,
-        daemonGrowthPeakMib: worst.daemonGrowthPeakMib,
+        daemonGrowthBasis: s.worst.daemonGrowthBasis,
+        daemonGrowthChargedMib: s.worst.daemonGrowthChargedMib,
+        daemonGrowthPeakMib: s.worst.daemonGrowthPeakMib,
       };
     },
   };
@@ -540,8 +539,8 @@ export function capacityDecisionText(d: CapacityDecision): {
 /** W1-T9557: which daemon growth the shortfall charged, beside the lifetime-peak growth it did not. */
 function growthChargeText(d: CapacityDecision): string {
   if (d.daemonGrowthChargedMib === undefined) return "";
-  const peak = d.daemonGrowthPeakMib === undefined ? "" : `; their lifetime-peak growth, ${Math.round(d.daemonGrowthPeakMib)} MiB, is not charged`;
-  return ` It charges ${Math.round(d.daemonGrowthChargedMib)} MiB of daemon growth (${d.daemonGrowthBasis ?? "basis unrecorded"})${peak}.`;
+  return ` It charges ${Math.round(d.daemonGrowthChargedMib)} MiB of daemon growth (${d.daemonGrowthBasis}), not their ` +
+    `${Math.round(d.daemonGrowthPeakMib ?? d.daemonGrowthChargedMib)} MiB growth back to their lifetime peak.`;
 }
 
 const pendingDecisions: CapacityDecision[] = [];

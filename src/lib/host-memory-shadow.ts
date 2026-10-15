@@ -1598,8 +1598,9 @@ function reviewPriorityOf(
 function daemonGrowthBasisOf(growth: ShadowInputs["daemonGrowth"]): string {
   const measured = growth.filter((g) => g.growthMib !== undefined);
   if (measured.length === 0) return "no daemon growth measured";
-  return measured.map((g) => `${g.instance}: ${g.typicalBasis ?? (g.typicalMib === undefined
-    ? `all typical: no typical split of ${g.basis ?? "its growth"}` : `median of ${g.samples} ${g.basis ?? "sample(s)"}`)}`).join("; ");
+  const split = (g: (typeof measured)[number]): string => g.typicalBasis ??
+    (g.typicalMib === undefined ? "all typical: no median split" : `median of ${g.samples} samples from the ${g.basis}`);
+  return measured.map((g) => `${g.instance}: ${split(g)}`).join("; ");
 }
 
 /**
