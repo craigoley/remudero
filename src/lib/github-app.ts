@@ -23,6 +23,7 @@
 
 import { readFileSync } from "node:fs";
 import { sign as cryptoSign } from "node:crypto";
+import { clockFromMillisFn, fixedClock, type Clock } from "./clock.js";
 
 /** Env var names, not values — mirrors `GH_TOKEN`'s own shape. `GH_APP_PRIVATE_KEY_PATH_ENV`
  *  names a path to the mounted key file, never the key material itself. */
@@ -187,12 +188,12 @@ const STALLED_TIMER_LATENESS_MS = EXCHANGE_TIMEOUT_MS / 20;
 // Aborts after EXCHANGE_TIMEOUT_MS of LOOP-AVAILABLE time: timers run before I/O when a stalled loop
 // resumes, so on 2026-10-15 a plain timer aborted 17 delivered exchanges while serve and the socket
 // thread minted at once. A timer that fires late (a stall, not a spent budget) re-arms instead.
-function exchangeDeadline(controller: AbortController, now: () => number, reason: string): () => void {
+function exchangeDeadline(controller: AbortController, clock: Clock, reason: string): () => void {
   let timer: ReturnType<typeof setTimeout>;
   const arm = (ms: number): void => {
-    const dueAt = now() + ms;
+    const dueAt = clock.now() + ms;
     timer = setTimeout(() => {
-      const late = now() - dueAt;
+      const late = clock.now() - dueAt;
       if (late >= STALLED_TIMER_LATENESS_MS) arm(Math.min(late, EXCHANGE_TIMEOUT_MS));
       else controller.abort(new Error(reason));
     }, ms);
@@ -244,7 +245,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // is armed before the fetch is issued; only how the catch below names a failure changed here.
   let res: Response;
   const timeoutController = new AbortController();
-  const cancelDeadline = exchangeDeadline(timeoutController, now, "token exchange timed out");
+  const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "token exchange timed out");
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
       method: "POST",
@@ -361,7 +362,7 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
   const body = { repositories: [name], permissions: { contents: "write", pull_requests: "write" } };
 
   const timeoutController = new AbortController();
-  const cancelDeadline = exchangeDeadline(timeoutController, now, "scoped token exchange timed out");
+  const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "scoped token exchange timed out");
   let res: Response;
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
@@ -495,7 +496,7 @@ export function startInstallationTokenRefresh(opts: {
     if (step === undefined || warned.has(`${step}:${lastSuccessfulExpiresAtMs}`)) return;
     warned.add(`${step}:${lastSuccessfulExpiresAtMs}`);
     opts.log?.(step, {
-      expires_at: new Date(lastSuccessfulExpiresAtMs).toISOString(), remaining_ms: remaining, failed_attempts: failures,
+      expires_at: fixedClock(lastSuccessfulExpiresAtMs).iso(), remaining_ms: remaining, failed_attempts: failures,
       refresh_lead_ms: Math.round(lead), attempt_cycle_ms: Math.max(0, ...cycles), last_reason: reason,
     });
   };
