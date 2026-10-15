@@ -25,6 +25,7 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { killAfterGrace } from "./git-fetch-retry.js";
+import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
@@ -3199,12 +3200,11 @@ function outputText(value: string | Buffer | null | undefined): string {
 export const PROOF_FAILURE_EXCERPT_LINES = 40;
 export const PROOF_FAILURE_EXCERPT_CHARS = 3000;
 
-/** The last {@link PROOF_FAILURE_EXCERPT_LINES} non-blank lines of stdout then stderr, capped at
- *  {@link PROOF_FAILURE_EXCERPT_CHARS} characters; `""` when the run printed nothing. */
+/** The redacted last {@link PROOF_FAILURE_EXCERPT_LINES} non-blank lines of stdout then stderr, capped at
+ *  {@link PROOF_FAILURE_EXCERPT_CHARS} characters and led by an omitted-lines note when it cut; `""` when
+ *  the run printed nothing. */
 export function proofFailureTail(stdout: string, stderr = ""): string {
-  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
-  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
-  return tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+  return formatTail(stdout, stderr, PROOF_FAILURE_EXCERPT_LINES, PROOF_FAILURE_EXCERPT_CHARS);
 }
 
 /** Record a graded-`"fail"` run's own output on the proof: the full excerpt as `failureOutput` and the bare output
