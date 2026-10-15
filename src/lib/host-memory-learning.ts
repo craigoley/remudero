@@ -77,6 +77,8 @@ export interface PeakSample {
   entryKind?: "bundle" | "tsx";
   /** Absent historical rows are legacy HWM evidence, never upgraded to concurrent RSS. */
   measurementBasis?: "legacy-hwm" | "concurrent-rss" | "process-hwm" | "unknown";
+  /** Simultaneously observed legacy HWM sum: existing admission continues learning its original metric. */
+  legacyPeakMib?: number;
 }
 
 export interface LearnedEstimate {
@@ -145,6 +147,7 @@ export const PEAK_COMPACT_BYTES = 1024 * 1024;
 export const ESTIMATE_CACHE_MS = 60_000;
 
 export interface PeakStoreOptions {
+  legacyPeakMib?: number;
   measurementBasis?: PeakSample["measurementBasis"];
   entryKind?: "bundle" | "tsx";
   location?: () => { dir: string; scope?: "host" | "local" };
@@ -205,11 +208,12 @@ function parseSamples(text: string): PeakSample[] {
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown; basis?: unknown };
+      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown; basis?: unknown; legacy_p?: unknown };
       const at = typeof row.at === "string" ? Date.parse(row.at) : NaN;
       if (!WORKER_CLASSES.includes(row.c as WorkerClass) || typeof row.p !== "number" || !Number.isFinite(at)) continue;
       if (row.f !== undefined && (row.c !== "test" || typeof row.f !== "string" || !row.f)) continue;
       out.push({ workerClass: row.c as WorkerClass, peakMib: row.p, at,
+        ...(typeof row.legacy_p === "number" && Number.isFinite(row.legacy_p) && row.legacy_p > 0 ? { legacyPeakMib: row.legacy_p } : {}),
         measurementBasis: row.basis === undefined || row.basis === "legacy-hwm" ? "legacy-hwm"
           : row.basis === "concurrent-rss" || row.basis === "process-hwm" ? row.basis : "unknown",
         ...(typeof row.f === "string" ? { testFile: testFileKey(row.f) } : {}),
@@ -237,6 +241,7 @@ export function compactSamples(samples: readonly PeakSample[], keep: number): Pe
 const lineOf = (s: PeakSample): string =>
   `${JSON.stringify({ c: s.workerClass, p: Math.round(s.peakMib), at: fixedClock(s.at).iso(),
     basis: s.measurementBasis ?? "legacy-hwm",
+    ...(s.legacyPeakMib !== undefined ? { legacy_p: s.legacyPeakMib } : {}),
     ...(s.testFile ? { f: s.testFile } : {}),
     ...(s.entryKind ? { entry_kind: s.entryKind } : {}) })}\n`;
 
@@ -252,6 +257,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
     });
     append(path, lineOf({ workerClass, peakMib, at,
       measurementBasis: opts.measurementBasis ?? "legacy-hwm",
+      ...(opts.legacyPeakMib !== undefined ? { legacyPeakMib: opts.legacyPeakMib } : {}),
       ...(testFile ? { testFile: testFileKey(testFile) } : {}),
       ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) }));
     cachedEstimates.delete(workerClass);
@@ -330,7 +336,9 @@ function learnedClass(workerClass: WorkerClass, opts: PeakStoreOptions): { estim
   const now = (opts.clock ?? systemClock).now();
   const cached = cachedEstimates.get(workerClass);
   if (cached && now - cached.at < ESTIMATE_CACHE_MS) return cached;
-  const samples = readPeakSamples(workerClass, opts);
+  const samples = readPeakSamples(workerClass, opts).flatMap(s => s.measurementBasis === "concurrent-rss"
+    ? s.legacyPeakMib === undefined ? [] : [{ ...s, peakMib: s.legacyPeakMib }]
+    : s.measurementBasis === "unknown" ? [] : [s]);
   const prior = DEFAULT_ESTIMATE_MIB[workerClass];
   const learned = {
     estimate: learnEstimate(samples, prior, now),
@@ -373,7 +381,7 @@ export interface TreeSamplerPorts {
 /** A test run the sampler found inside a tracked tree, ended once the runner's whole tree has exited. */
 export interface NestedTestRun {
   /** The runner tree's peak in MiB, or undefined when it was never observed. Called once. */
-  finish(peakMib: number | undefined): void;
+  finish(peakMib: number | undefined, legacyPeakMib?: number): void;
 }
 
 export interface TrackHooks {
@@ -383,6 +391,7 @@ export interface TrackHooks {
 }
 
 interface Tracked {
+  legacyPeakMib?: number;
   roots: Array<{ pid: number; start: string }>;
   peakMib: number;
   observed: boolean;
@@ -419,6 +428,7 @@ export function treeMembers(roots: readonly { pid: number; start: string }[], li
 }
 
 export interface TreePeakSampler {
+  finishMeasurement?(id: string): { peakMib?: number; legacyPeakMib?: number };
   track(id: string, pid: number, hooks?: TrackHooks): void;
   /** Stop tracking `id` after one final sample; the peak in MiB, or undefined when the tree was never observed. */
   finish(id: string): number | undefined;
@@ -466,6 +476,8 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
   const peakOf = (members: readonly number[], skip: ReadonlySet<number>, entry: Tracked,
     rows: ReadonlyMap<number, ProcessListing["rows"][number]>): number | undefined => {
     let kb = 0;
+    let legacyKb = 0;
+    let legacyComplete = true;
     let complete = true;
     for (const pid of members) {
       if (skip.has(pid)) continue;
@@ -475,6 +487,8 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if (rss === undefined) complete = false;
         else kb += Number(rss);
         const hwm = Number(/^VmHWM:\s+(\d+)/m.exec(status)?.[1] ?? 0);
+        legacyKb += hwm;
+        if (hwm === 0) legacyComplete = false;
         if (hwm > 0 && entry.hooks?.onTestFilePeak) {
           const row = rows.get(pid)!;
           const parent = rows.get(row.parent);
@@ -492,6 +506,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") complete = false;
       }
     }
+    if (complete && legacyComplete && legacyKb > 0) entry.legacyPeakMib = Math.max(entry.legacyPeakMib ?? 0, legacyKb / 1024);
     return complete ? kb / 1024 : undefined;
   };
 
@@ -554,7 +569,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
   const sampleNow = (): void => {
     if (tracked.size === 0 || sampling) return;
     sampling = true;
-    const ended: Array<{ run: NestedTestRun; peakMib: number | undefined }> = [];
+    const ended: Array<{ run: NestedTestRun; peakMib: number | undefined; legacyPeakMib?: number }> = [];
     try {
       let listing: ProcessListing;
       try {
@@ -585,15 +600,15 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         // (3) A nested run ends once its runner's whole tree has exited.
         if (entry.nested && own.length === 0) {
           tracked.delete(id);
-          ended.push({ run: entry.nested, peakMib: entry.observed ? entry.peakMib : undefined });
+          ended.push({ run: entry.nested, peakMib: entry.observed ? entry.peakMib : undefined, legacyPeakMib: entry.legacyPeakMib });
         }
       }
     } finally {
       sampling = false;
     }
-    for (const { run, peakMib } of ended) {
+    for (const { run, peakMib, legacyPeakMib } of ended) {
       try {
-        run.finish(peakMib);
+        run.finish(peakMib, legacyPeakMib);
       } catch (error) {
         void error; // A failed release is the ledger's to report; the sampler carries on.
       }
@@ -601,6 +616,14 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     stopIfIdle();
   };
 
+  const finishMeasurement = (id: string): { peakMib?: number; legacyPeakMib?: number } => {
+    sampleNow();
+    const entry = tracked.get(id);
+    tracked.delete(id);
+    if (entry) flushFiles(entry, new Set());
+    stopIfIdle();
+    return entry?.observed ? { peakMib: entry.peakMib, legacyPeakMib: entry.legacyPeakMib } : {};
+  };
   return {
     track(id, pid, hooks) {
       try {
@@ -620,14 +643,8 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         void error; // No /proc (or the root already exited): this tree is never observed and records nothing.
       }
     },
-    finish(id) {
-      sampleNow(); // Never throws: an unreadable listing or member is skipped inside it.
-      const entry = tracked.get(id);
-      tracked.delete(id);
-      if (entry) flushFiles(entry, new Set());
-      stopIfIdle();
-      return entry?.observed ? entry.peakMib : undefined;
-    },
+    finish: id => finishMeasurement(id).peakMib,
+    finishMeasurement,
     sampleNow,
     size: () => tracked.size,
   };
@@ -672,8 +689,8 @@ function openNestedTestRun(
   }, context.ledger);
   handle.bindRoot(pid);
   return {
-    finish(peakMib) {
-      if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss" });
+    finish(peakMib, legacyPeakMib) {
+      if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss", legacyPeakMib });
       handle.releaseOccupancy();
     },
   };
@@ -743,8 +760,10 @@ function learnedHandle(
       if (!finished) {
         finished = true;
         try {
-          const peak = sampler.finish(key);
-          if (peak !== undefined) recordPeak(workerClass, peak, { ...store, measurementBasis: "concurrent-rss" });
+          const measured = sampler.finishMeasurement?.(key);
+          const peak = measured ? measured.peakMib : sampler.finish(key);
+          if (peak !== undefined) recordPeak(workerClass, peak, { ...store,
+            measurementBasis: measured ? "concurrent-rss" : "legacy-hwm", legacyPeakMib: measured?.legacyPeakMib });
         } catch (error) {
           recordError(store, "finish", error);
         }

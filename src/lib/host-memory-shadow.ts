@@ -79,7 +79,11 @@ import {
   type ReviewDemandReading,
   type YieldDecision,
 } from "./host-memory-priority.js";
-import { classEstimate, classTypical } from "./host-memory-learning.js";
+import { classEstimate, classTypical, readPeakSamples, type PeakSample } from "./host-memory-learning.js";
+import {
+  JOINT_MODEL, calibrationReport, installCalibrationSink, jointMemoryClaim, kernelMemoryObservation,
+  publishMemoryForecast, readCalibrationState, type JointEstimate, type MemoryForecast,
+} from "./host-memory-calibration.js";
 import { readHostServeEvidence, type HostServeReading } from "./host-serve-evidence.js";
 import { readDaemonFootprint, type FootprintSample } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -104,6 +108,10 @@ export type ShadowMode = (typeof SHADOW_MODES)[number];
 export const HOST_MEMORY_BUDGET_ORIGIN = "proposal";
 
 export interface HostMemoryBudgetPolicy {
+  claimModel?: "legacy-one-tail" | typeof JOINT_MODEL;
+  jointQuantile?: number;
+  maxBacktestMissRate?: number;
+  calibrationStateDir?: string;
   mode: ShadowMode;
   classModes?: Partial<Record<WorkerClass, ShadowMode>>;
   /** MemAvailable the host must keep after every projected claim. */
@@ -160,6 +168,21 @@ export function parseHostMemoryBudgetPolicy(raw: unknown): HostMemoryBudgetPolic
     );
   }
   const out: Partial<HostMemoryBudgetPolicy> = { mode: modeRow.value as ShadowMode };
+  if (block.claimModel !== undefined) {
+    const row = mapping(`${base}.claimModel`, block.claimModel); proposalOrigin(`${base}.claimModel`, row);
+    if (row.value !== "legacy-one-tail" && row.value !== JOINT_MODEL) throw new Error("unknown memory claim model");
+    out.claimModel = row.value;
+  }
+  for (const key of ["jointQuantile", "maxBacktestMissRate"] as const) if (block[key] !== undefined) {
+    const row = mapping(`${base}.${key}`, block[key]); proposalOrigin(`${base}.${key}`, row);
+    if (typeof row.value !== "number" || !Number.isFinite(row.value) || row.value < (key === "jointQuantile" ? 0.5 : 0) || row.value >= 1) throw new Error(`invalid ${key}`);
+    out[key] = row.value;
+  }
+  if (block.calibrationStateDir !== undefined) {
+    const row = mapping(`${base}.calibrationStateDir`, block.calibrationStateDir); proposalOrigin(`${base}.calibrationStateDir`, row);
+    if (typeof row.value !== "string" || !row.value.startsWith("/")) throw new Error("calibrationStateDir must be absolute");
+    out.calibrationStateDir = row.value;
+  }
   if (block.classModes !== undefined) out.classModes = parseClassModes(`${base}.classModes`, mapping(`${base}.classModes`, block.classModes));
   for (const key of NUMERIC_KEYS) {
     const path = `${base}.${key}`;
@@ -195,15 +218,22 @@ export function hostMemoryBudgetModeFor(policy: Pick<HostMemoryBudgetPolicy, "mo
   return policy.classModes?.[workerClass] ?? policy.mode;
 }
 
-let cachedPolicy: HostMemoryBudgetPolicy | undefined;
+const cachedPolicies = new Map<string, HostMemoryBudgetPolicy>();
 
 /** The shipped `sweep.hostMemoryBudget`, read once per process. Throws on an invalid block; the recorder catches it. */
-export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath()): HostMemoryBudgetPolicy {
-  if (!cachedPolicy) {
+export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath(), clock: Clock = systemClock): HostMemoryBudgetPolicy {
+  let policy = cachedPolicies.get(path);
+  if (!policy) {
     const doc = mapping("policy.yaml", parseYaml(readFileSync(path, "utf8")));
-    cachedPolicy = parseHostMemoryBudgetPolicy(mapping("sweep", doc.sweep).hostMemoryBudget);
+    policy = parseHostMemoryBudgetPolicy(mapping("sweep", doc.sweep).hostMemoryBudget);
+    cachedPolicies.set(path, policy);
   }
-  return cachedPolicy;
+  if (policy.claimModel === JOINT_MODEL && (policy.mode === "enforce" || Object.values(policy.classModes ?? {}).includes("enforce"))) {
+    if (!policy.calibrationStateDir) throw new Error("joint enforce refused: calibrationStateDir is missing");
+    const report = calibrationReport(readCalibrationState(policy.calibrationStateDir), clock.now(), policy.jointQuantile, policy.maxBacktestMissRate);
+    if (!report.qualified) throw new Error(`joint enforce refused: ${report.reasons.join("; ")}; evidence ${policy.calibrationStateDir}`);
+  }
+  return policy;
 }
 
 // ── the verdict (pure) ────────────────────────────────────────────────────────────────────────────────────────────
@@ -228,7 +258,7 @@ export interface ShadowEntryInput {
   status: ReadingStatus;
   walkComplete: boolean | null;
   /** The tree's current rss+swap, or why it could not be read (then the full estimate counts). */
-  resident: { mib: number; complete: boolean; reason?: string } | { unread: string };
+  resident: { mib: number; rssMib?: number; complete: boolean; reason?: string } | { unread: string };
   /** Since the reservation opened. W1-T7095 reads it to tell a review started since its demand row was published. */
   ageMs?: number;
   /** Its work has ended: what its tree still holds is resident, and it can claim nothing more. */
@@ -238,6 +268,7 @@ export interface ShadowEntryInput {
 }
 
 export interface ShadowInputs {
+  jointClaim?: Extract<JointEstimate, { kind: "joint" }>;
   memAvailable: { mib: number } | { unread: string };
   swapIn: { pagesPerSec: number } | { unmeasured: string };
   psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | { unread: string };
@@ -497,9 +528,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       `${growth.instance}: ${growth.reason ?? `${growth.samples} sample(s)`}`);
   }
   const containerTail = Math.max(tailOwn, ownDaemonTail);
-  const containerClaim = typicalOwn + containerTail;
+  const containerClaim = inputs.jointClaim ? inputs.jointClaim.ownMib + ownDaemonTail : typicalOwn + containerTail;
   const hostTail = Math.max(tailAll, daemonTail);
-  const hostClaim = typicalAll + hostTail;
+  const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + hostTail;
 
   const scenario = inputs.serve.scenario;
   const coldStartReserve = scenario === "serve-cold-start" ? policy.serveColdStartReserveMib : 0;
@@ -577,12 +608,12 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       memAvailableMib: memAvailable,
       unrealizedMib: unrealized,
       hostClaimMib: hostClaim,
-      hostTypicalMib: typicalAll,
-      hostTailMib: hostTail,
+      hostTypicalMib: inputs.jointClaim ? inputs.jointClaim.hostMib : typicalAll,
+      hostTailMib: inputs.jointClaim ? daemonTail : hostTail,
       unrealizedOwnContainerMib: unrealizedOwn,
       containerClaimMib: containerClaim,
-      containerTypicalMib: typicalOwn,
-      containerTailMib: containerTail,
+      containerTypicalMib: inputs.jointClaim ? inputs.jointClaim.ownMib : typicalOwn,
+      containerTailMib: inputs.jointClaim ? ownDaemonTail : containerTail,
       daemonGrowthMib: daemonGrowth,
       daemonGrowthTypicalMib: daemonTypical,
       daemonGrowthTailMib: daemonTail,
@@ -821,6 +852,9 @@ export interface ShadowStart {
 }
 
 export interface ShadowMemoryPorts {
+  calibrationSamples?: () => PeakSample[];
+  publishCalibration?: (stateDir: string, forecast: MemoryForecast) => void;
+  calibrationObservation?: (at: number) => ReturnType<typeof kernelMemoryObservation>;
   clock: Clock;
   nowNs: () => bigint;
   readFile: (path: string) => string;
@@ -862,6 +896,9 @@ let shortfalls = createShortfallTracker();
 /** run-task.ts installs the ledger appender once per process; a process without one computes nothing. */
 export function installShadowMemorySink(sink: ShadowMemoryPorts["write"]): void {
   installedSink = sink;
+  installCalibrationSink(sink ? (stateDir, at, report) => sink(join(stateDir, LEDGER_FILENAME), {
+    run_id: "memory-calibration", task_id: "MEMORY-BUDGET", step: "memory_budget.backtest", observed_at_ms: at, ...report,
+  }) : undefined);
 }
 
 export function resetShadowMemoryStateForTests(): void {
@@ -925,6 +962,12 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     listStateDir: (dir) => readdirSync(dir),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
     typical: (workerClass) => classTypical(workerClass).estimateMib,
+    calibrationSamples: () => WORKER_CLASSES.flatMap(workerClass => readPeakSamples(workerClass)),
+    publishCalibration: (stateDir, forecast) => {
+      if (!existsSync(stateDir)) throw Object.assign(new Error("calibration state directory unavailable"), { code: "ENOENT" });
+      publishMemoryForecast(stateDir, forecast);
+    },
+    calibrationObservation: at => kernelMemoryObservation(at),
     // Never creates the state directory: a root without one (a test's, a fresh checkout's) stores nothing.
     writeFile: (path, content) => {
       if (!existsSync(dirname(path))) throw Object.assign(new Error(`ENOENT: ${dirname(path)}`), { code: "ENOENT" });
@@ -1232,6 +1275,8 @@ function treeResident(
   budget: { left: number },
 ): ShadowEntryInput["resident"] {
   let kb = 0;
+  let rssKb = 0;
+  let rssComplete = true;
   for (const identity of tree) {
     if (budget.left <= 0) return { mib: kb / 1024, complete: false, reason: `process cap ${MAX_TREE_PROCESSES}` };
     budget.left -= 1;
@@ -1239,12 +1284,16 @@ function treeResident(
       const stat = parseProcStat(read(`/proc/${identity.pid}/stat`));
       if (!stat || stat.zombie || (identity.start !== "unknown" && stat.start !== identity.start)) continue;
       const status = read(`/proc/${identity.pid}/status`);
+      const rss = /^VmRSS:\s+(\d+)/m.exec(status)?.[1];
+      if (rss === undefined) rssComplete = false;
+      else rssKb += Number(rss);
       kb += Number(/^VmRSS:\s+(\d+)/m.exec(status)?.[1] ?? 0) + Number(/^VmSwap:\s+(\d+)/m.exec(status)?.[1] ?? 0);
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") rssComplete = false;
       void error; // Gone between the listing and the read: it holds nothing now.
     }
   }
-  return { mib: kb / 1024, complete: true };
+  return { mib: kb / 1024, complete: true, ...(rssComplete ? { rssMib: rssKb / 1024 } : {}) };
 }
 
 interface TailRow { step: string; at: number; bytes?: number; pid?: number }
@@ -1421,7 +1470,23 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
-  return { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
+  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
+  if (policy.claimModel !== JOINT_MODEL) return gathered;
+  const candidate = jointClaimFor(gathered, ports, policy);
+  if (candidate.kind !== "joint") throw new Error(`joint enforce unavailable: ${candidate.reason}`);
+  return { ...gathered, jointClaim: candidate, containerLift: { unlearned: "joint model is not the legacy pressure cohort" } };
+}
+
+export function jointClaimFor(inputs: ShadowInputs, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy): JointEstimate {
+  if (inputs.ledger.state !== "present") return { kind: "fallback", reason: "reservation ledger unavailable" };
+  if (inputs.entries.some(e => e.status === "uncertain" || e.walkComplete === false || "unread" in e.resident ||
+      !e.resident.complete || e.resident.rssMib === undefined)) return { kind: "fallback", reason: "incomplete resident RSS evidence" };
+  const members = inputs.entries.map(e => ({ workerClass: e.workerClass, residentRssMib: "mib" in e.resident ? e.resident.rssMib! : NaN,
+    own: e.status === "owned", released: e.occupancyReleased }));
+  if (!inputs.start.reservationId || !inputs.entries.some(e => e.id === inputs.start.reservationId)) {
+    members.push({ workerClass: inputs.start.workerClass, residentRssMib: 0, own: true, released: false });
+  }
+  return jointMemoryClaim(members, ports.calibrationSamples?.() ?? [], ports.clock.now(), policy.jointQuantile);
 }
 
 /** A shared host store is the authority; one that establishes nothing is UNKNOWN, never local silence as stopped. */
@@ -1653,6 +1718,8 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
   const ledgerPath = join(start.root ?? ".", "state", LEDGER_FILENAME);
   try {
     ports = { ...defaultShadowMemoryPorts(), ...overrides };
+    // The new observer follows the SAME read seam as its caller; a partial fixture cannot hit host /proc.
+    ports.calibrationObservation = overrides.calibrationObservation ?? (at => kernelMemoryObservation(at, ports!.readFile));
     if (!ports.write) return { kind: "no-sink" };
     const startedNs = ports.nowNs();
     const policy = ports.policy();
@@ -1664,6 +1731,31 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     const waitKey = `${instance}\u0000${start.workerClass}`;
     const waitingSinceMs = wouldWaitSince.get(waitKey) ?? now;
     let verdict = evaluateShadowMemory(inputs, policy);
+    let calibration: { model: string; kind: string; reason?: string; quantile?: number } = { model: JOINT_MODEL, kind: "not-measured" };
+    let calibrationForecast: MemoryForecast | undefined;
+    try {
+      const candidate = inputs.jointClaim ?? jointClaimFor(inputs, ports, policy);
+      calibration = { ...candidate, model: JOINT_MODEL };
+      const candidateVerdict = candidate.kind === "joint" ? evaluateShadowMemory({ ...inputs, jointClaim: candidate,
+        containerLift: { unlearned: "joint model is not the legacy pressure cohort" } }, policy) : verdict;
+      if (candidate.kind === "joint" && mode === "shadow") verdict = candidateVerdict;
+      const observation = ports.calibrationObservation?.(now);
+      if (observation?.mib !== null && observation?.mib !== undefined && candidateVerdict.numbers.containerProjectedMib !== null) {
+        // Charge compared to charge: working-set prediction gains back the same sampled reclaimable amount.
+        const chargePrediction = observation.mib + candidateVerdict.numbers.containerProjectedMib -
+          (candidateVerdict.numbers.containerWorkingSetMib ?? candidateVerdict.numbers.containerCurrentMib ?? 0);
+        calibrationForecast = { id: start.reservationId ?? `${instance}:${start.workerClass}:${now}`,
+          at: now, generation: observation.generation, scenario: verdict.scenario, model: candidate.kind === "joint" ? JOINT_MODEL : "legacy-one-tail-fallback",
+          quantile: policy.jointQuantile ?? 0.95, projectedMib: chargePrediction, initialMib: observation.mib, basis: "cgroup-current-mib" };
+        ports.publishCalibration?.(join(start.root, "state"), calibrationForecast);
+      } else {
+        // Keep an explicitly unknown forecast instead of selecting only starts with readable evidence.
+        calibrationForecast = { id: start.reservationId ?? `${instance}:${start.workerClass}:${now}`, at: now,
+          generation: observation?.generation ?? "unreadable", scenario: "unknown", model: "unavailable",
+          quantile: policy.jointQuantile ?? 0.95, projectedMib: 0, initialMib: observation?.mib ?? 0, basis: "cgroup-current-mib" };
+        ports.publishCalibration?.(join(start.root, "state"), calibrationForecast);
+      }
+    } catch (error) { calibration = { model: JOINT_MODEL, kind: "unavailable", reason: reasonOf(error) }; }
     const priority = reviewPriorityOf(start, inputs, policy, ports, waitingSinceMs, now, ledgerPath);
     if (priority.yield) {
       verdict = { ...verdict, wouldAdmit: false, reasons: [...verdict.reasons, WOULD_YIELD_TO_REVIEW] };
@@ -1691,6 +1783,8 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
         uncertainty: verdict.uncertainty,
         numbers: verdict.numbers,
         claims: verdict.claims,
+        calibration,
+        calibration_forecast: calibrationForecast ?? null,
         ledger_state: inputs.ledger.state,
         reservations: inputs.entries.length,
         daemon_growth: inputs.daemonGrowth,

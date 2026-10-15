@@ -1,8 +1,177 @@
 import assert from "node:assert/strict";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { createTreePeakSampler, readPeakSamples, recordPeak } from "../src/lib/host-memory-learning.js";
+import { classEstimate, createTreePeakSampler, readPeakSamples, recordPeak, resetLearnedEstimateCacheForTests } from "../src/lib/host-memory-learning.js";
+import {
+  BACKTEST_WINDOW_MS, CALIBRATION_DAY_MS, JOINT_MODEL, calibrationReport, collectMemoryCalibration,
+  calibrationStatePath, gradeMemoryForecast, jointMemoryClaim, kernelMemoryObservation, publishMemoryForecast, readCalibrationState,
+  type CalibrationIo, type CalibrationState, type MemoryForecast,
+} from "../src/lib/host-memory-calibration.js";
+import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
+import { installShadowMemorySink, loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+import { gitRepo } from "./helpers/git-repo.js";
+
+const NOW = Date.parse("2026-10-15T00:00:00Z");
+const forecast = (at = NOW): MemoryForecast => ({ id: "fixture", at, generation: "g1", scenario: "serve-steady",
+  model: JOINT_MODEL, quantile: 0.95, projectedMib: 4400, initialMib: 1000, basis: "cgroup-current-mib" });
+const observations = (at = NOW, peak = 3000) => Array.from({ length: 11 }, (_, i) => ({ at: at + i * 3 * 60_000, mib: peak, peakMib: peak, generation: "g1" }));
+
+test("W1-T8879: the memory budget claims a calibrated joint quantile", () => {
+  const samples = Array.from({ length: 100 }, (_, i) => ({ workerClass: "implement" as const,
+    peakMib: i % 5 === 0 ? 1200 : 400, at: NOW - i * 1000, measurementBasis: "concurrent-rss" as const }));
+  const members = Array.from({ length: 5 }, () => ({ workerClass: "implement" as const, residentRssMib: 0, own: true }));
+  const joint = jointMemoryClaim(members, samples, NOW);
+  assert.equal(joint.kind, "joint");
+  if (joint.kind !== "joint") throw new Error("fixture joint model unavailable");
+  assert.equal(joint.hostMib, 4400, "not the6000MiB sum of class p90s and not an unqualified one-tail safety claim");
+  assert.equal(joint.ownMib, 4400);
+  assert.equal(jointMemoryClaim(members, samples.slice(0, 2), NOW).kind, "fallback");
+  assert.equal(jointMemoryClaim(members, samples.map(s => ({ ...s, measurementBasis: "legacy-hwm" as const })), NOW).kind, "fallback");
+  assert.equal(jointMemoryClaim(members, samples.map(s => ({ ...s, at: NOW + 1 })), NOW).kind, "fallback", "no training on future evidence");
+  assert.equal(jointMemoryClaim(members, samples.map(s => ({ ...s, at: NOW - 2 * CALIBRATION_DAY_MS })), NOW).kind, "fallback");
+  assert.equal(jointMemoryClaim(members, samples, NOW, 1).kind, "fallback");
+  const zero = jointMemoryClaim(members.map(m => ({ ...m, released: true })), [], NOW);
+  assert.equal(zero.kind === "joint" && zero.hostMib, 0, "released occupancy adds no future claim");
+});
+
+test("W1-T8879: the real config loader refuses unsupported joint enforcement and rechecks changing evidence", () => {
+  const repo = gitRepo({ kind: "memory-calibration" });
+  const stateDir = join(repo.dir, "state"); mkdirSync(join(stateDir, "memory-calibration"), { recursive: true });
+  const now = NOW + 2 * CALIBRATION_DAY_MS;
+  const state: CalibrationState = { version: 1, startedAt: NOW, coveredSince: NOW, lastAt: now, generation: "g1",
+    observations: [{ at: now, mib: 1000, generation: "g1" }], issues: [],
+    outcomes: Array.from({ length: 100 }, (_, i) => ({ ...forecast(now - BACKTEST_WINDOW_MS - i * 60_000), id: String(i),
+      closedAt: now, observedMaxMib: i < 42 ? 6000 : 3000, complete: true, miss: i < 42 })) };
+  const doc = parseYaml(readFileSync(new URL("../plan/policy.yaml", import.meta.url), "utf8"));
+  const policy = doc.sweep.hostMemoryBudget;
+  const legacyPath = join(repo.dir, "legacy.yaml");
+  writeFileSync(legacyPath, stringifyYaml(doc));
+  assert.equal(loadHostMemoryBudgetPolicy(legacyPath, fixedClock(now)).claimModel, undefined, "the existing garden-only legacy policy is unchanged");
+  policy.claimModel = { value: JOINT_MODEL, origin: "proposal" };
+  policy.mode.value = "enforce";
+  policy.calibrationStateDir = { value: stateDir, origin: "proposal" };
+  const path = join(repo.dir, "joint.yaml"); writeFileSync(path, stringifyYaml(doc));
+  writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now)), /joint enforce refused/);
+  state.outcomes = state.outcomes.map(o => ({ ...o, miss: false, observedMaxMib: 3000 }));
+  writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
+  assert.equal(loadHostMemoryBudgetPolicy(path, fixedClock(now)).claimModel, JOINT_MODEL);
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now + CALIBRATION_DAY_MS)), /joint enforce refused/, "qualification is not cached into permanent permission");
+  writeFileSync(calibrationStatePath(stateDir), "{}");
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now)), /invalid calibration state/);
+  repo.cleanup();
+});
+
+test("W1-T8879: the existing heartbeat invokes the real bounded collector without a new timer", () => {
+  const repo = gitRepo({ kind: "memory-heartbeat" }), stateDir = join(repo.dir, "state");
+  mkdirSync(stateDir);
+  const rows: Array<Record<string, unknown>> = [];
+  installShadowMemorySink((_path, row) => { rows.push(row); });
+  try {
+    assert.deepEqual(createDaemonFootprint(daemonFootprintPath(stateDir)).record({ at: NOW, bytes: 1234, pid: 1 }), { persisted: true });
+    assert.equal(readCalibrationState(stateDir).startedAt, NOW);
+    assert.equal(rows.at(-1)?.step, "memory_budget.backtest");
+    assert.equal(rows.at(-1)?.qualified, false);
+    const a = kernelMemoryObservation(NOW, path => path.endsWith("memory.current") || path.endsWith("memory.peak") ? "1048576" : path.endsWith("/stat") ? `1 (init) S 0 ${"0 ".repeat(17)}5 0 0` : "fixture");
+    const b = kernelMemoryObservation(NOW + 1, path => path.endsWith("memory.current") || path.endsWith("memory.peak") ? "2097152" : path.endsWith("/stat") ? `1 (init) S 0 ${"1 ".repeat(17)}5 0 0` : "fixture");
+    assert.equal(a.mib, 1); assert.equal(b.mib, 2); assert.equal(a.generation, b.generation, "CPU counters do not change cgroup generation identity");
+  } finally { installShadowMemorySink(undefined); repo.cleanup(); }
+});
+
+test("W1-T8879: frozen predictions grade later starts, correlated tails and incomplete windows honestly", () => {
+  assert.equal(gradeMemoryForecast(forecast(), observations(), NOW + BACKTEST_WINDOW_MS - 1), undefined);
+  const ordinary = gradeMemoryForecast(forecast(), observations(), NOW + BACKTEST_WINDOW_MS)!;
+  assert.equal(ordinary.complete, true); assert.equal(ordinary.miss, false);
+  const later = observations(); later[7]!.mib = 6000;
+  for (const row of later.slice(7)) row.peakMib = 6000;
+  const tail = gradeMemoryForecast(forecast(), later, NOW + BACKTEST_WINDOW_MS)!;
+  assert.equal(tail.miss, true, "a later start or correlated peak is never censored from the outcome");
+  assert.equal(gradeMemoryForecast(forecast(), observations().filter((_, i) => i !== 5), NOW + BACKTEST_WINDOW_MS)!.complete, false);
+  assert.equal(gradeMemoryForecast(forecast(), observations().map((o, i) => i === 5 ? { ...o, generation: "g2" } : o), NOW + BACKTEST_WINDOW_MS)!.complete, false);
+  assert.equal(gradeMemoryForecast(forecast(), observations().slice(0, 9), NOW + BACKTEST_WINDOW_MS)!.complete, false);
+  assert.equal(gradeMemoryForecast(forecast(), observations().map(o => ({ ...o, peakMib: null })), NOW + BACKTEST_WINDOW_MS)!.complete, false, "periodic samples alone cannot qualify an unseen peak");
+  const reset = observations(); reset[8]!.peakMib = 2000;
+  assert.equal(gradeMemoryForecast(forecast(), reset, NOW + BACKTEST_WINDOW_MS)!.complete, false, "a reset high-water mark cannot certify the whole interval");
+});
+
+test("W1-T8879: qualification rejects42percent misses, sparse/reset/stale stores and correlated-tail models", () => {
+  const now = NOW + 2 * CALIBRATION_DAY_MS;
+  const state: CalibrationState = { version: 1, startedAt: NOW, coveredSince: NOW, lastAt: now, generation: "g1",
+    observations: [{ at: now, mib: 3000, generation: "g1" }], issues: [],
+    outcomes: Array.from({ length: 100 }, (_, i) => ({ ...forecast(now - BACKTEST_WINDOW_MS - i * 60_000),
+      id: String(i), closedAt: now, observedMaxMib: i < 42 ? 6000 : 3000, complete: true, miss: i < 42 })) };
+  assert.equal(calibrationReport(state, now).qualified, false);
+  assert.equal(calibrationReport(state, now).scenarios["serve-steady"]!.missRate, 0.42);
+  const good = { ...state, outcomes: state.outcomes.map(o => ({ ...o, miss: false, observedMaxMib: 3000 })) };
+  assert.equal(calibrationReport(good, now).qualified, true, "a positive control prevents an always-refuse gate");
+  assert.equal(calibrationReport({ ...good, startedAt: now }, now).qualified, false);
+  assert.equal(calibrationReport({ ...good, lastAt: NOW }, now).qualified, false);
+  assert.equal(calibrationReport({ ...good, outcomes: [] }, now).qualified, false);
+  assert.equal(calibrationReport({ ...good, outcomes: good.outcomes.map(o => ({ ...o, complete: false })) }, now).qualified, false);
+});
+
+test("W1-T8879: a real collector persists before consuming immutable forecasts and recovers without duplicate credit", () => {
+  const files = new Map<string, string>(); let removeFails = true;
+  const missing = () => Object.assign(new Error("missing"), { code: "ENOENT" });
+  const io: CalibrationIo = { read: path => { const v = files.get(path); if (v === undefined) throw missing(); return v; },
+    write: (p, s) => { files.set(p, s); }, publish: (p, s) => { if (files.has(p)) throw Object.assign(new Error("exists"), { code: "EEXIST" }); files.set(p, s); },
+    list: p => [...files.keys()].filter(k => k.startsWith(p + "/")).map(k => k.slice(p.length + 1)),
+    remove: p => { if (removeFails) throw new Error("interrupted cleanup"); files.delete(p); } };
+  publishMemoryForecast("/fixture", forecast(), io); publishMemoryForecast("/fixture", forecast(), io);
+  for (const o of observations()) collectMemoryCalibration("/fixture", o, io);
+  const first = collectMemoryCalibration("/fixture", { at: NOW + BACKTEST_WINDOW_MS + 1000, mib: 3000, generation: "g1" }, io);
+  assert.equal(first.scenarios["serve-steady"]!.forecasts, 1);
+  removeFails = false;
+  const again = collectMemoryCalibration("/fixture", { at: NOW + BACKTEST_WINDOW_MS + 2000, mib: 3000, generation: "g1" }, io);
+  assert.equal(again.scenarios["serve-steady"]!.forecasts, 1, "replayed receipt is deduplicated, not a second success");
+  assert.equal(again.qualified, false, "a short fixture is not24hour live qualification");
+});
+
+test("W1-T8879: default filesystem receipts, bad populations and publisher failures never manufacture qualification", () => {
+  const repo = gitRepo({ kind: "memory-calibration-files" });
+  const stateDir = join(repo.dir, "state");
+  try {
+    publishMemoryForecast(stateDir, forecast()); publishMemoryForecast(stateDir, forecast());
+    for (const row of observations()) collectMemoryCalibration(stateDir, row);
+    const state = readCalibrationState(stateDir);
+    assert.equal(state.outcomes.length, 1);
+    assert.equal(state.outcomes[0]!.observedMaxMib, 3000);
+    assert.equal(statSync(calibrationStatePath(stateDir)).mode & 0o777, 0o600);
+    assert.throws(() => publishMemoryForecast(stateDir, { ...forecast(), quantile: 1 }), /invalid forecast/);
+    assert.equal(calibrationReport(readCalibrationState(stateDir), NOW + BACKTEST_WINDOW_MS).qualified, false);
+    state.outcomes[0]!.miss = true;
+    writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
+    assert.throws(() => readCalibrationState(stateDir), /invalid calibration population/, "stored miss flags must agree with the measured outcome");
+    writeFileSync(calibrationStatePath(stateDir), " ".repeat(8 * 1024 * 1024 + 1));
+    assert.throws(() => readCalibrationState(stateDir), /too large/);
+    const recovered = collectMemoryCalibration(stateDir, { at: NOW + BACKTEST_WINDOW_MS, mib: null, peakMib: null, generation: "g2" });
+    assert.equal(recovered.qualified, false); assert.equal(recovered.coveredSince, NOW + BACKTEST_WINDOW_MS);
+    const footprint = createDaemonFootprint(daemonFootprintPath(stateDir), {
+      readFile: () => "{}", writeFile: () => undefined, observeCalibration: () => { throw new Error("collector refused"); },
+    });
+    assert.deepEqual(footprint.record({ at: NOW, bytes: 12, pid: 1 }), { persisted: true, reason: "calibration:collector refused" });
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T8879: paired legacy peaks keep existing admission estimates on their original basis", () => {
+  let text = "";
+  const options = { location: () => ({ dir: "/fixture" }), instance: () => ({ name: "fixture" }),
+    clock: fixedClock(NOW), list: () => ["fixture.ndjson"], readTail: () => text,
+    append: (_p: string, line: string) => { text += line; }, size: () => text.length };
+  try {
+    for (let i = 0; i < 40; i++) recordPeak("garden", 1800, options);
+    resetLearnedEstimateCacheForTests(); const before = classEstimate("garden", options);
+    text = "";
+    for (let i = 0; i < 40; i++) recordPeak("garden", 300, { ...options, measurementBasis: "concurrent-rss", legacyPeakMib: 1800 });
+    resetLearnedEstimateCacheForTests(); assert.deepEqual(classEstimate("garden", options), before);
+    assert.equal(readPeakSamples("garden", options)[0]!.peakMib, 300, "the new candidate still receives actual concurrent RSS");
+    assert.equal(readPeakSamples("garden", options)[0]!.legacyPeakMib, 1800);
+  } finally { resetLearnedEstimateCacheForTests(); }
+});
 
 test("W1-T8879: tree peaks measure concurrent RSS rather than unrelated historical highs", () => {
   let phase = 0;
