@@ -11,7 +11,6 @@ import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { FLAKE_INCIDENT_MAIN_INHERITED_STEP } from "./flake-incident-gardener.js";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
@@ -1150,6 +1149,11 @@ interface RepairContext {
   readonly red: MainRedSignature;
   readonly evidence?: RepairEvidence;
 }
+
+/** The flake-incident gardener's FLAKE_INCIDENT_MAIN_INHERITED_STEP, spelled here so this module (imported by
+ *  sweep.ts) never loads the gardener's filing graph; a test pins the two equal. */
+export const MAIN_INHERITED_HINT_SOURCE_STEP = "flake_incident.main_inherited";
+const FLAKE_INCIDENT_MAIN_INHERITED_STEP = MAIN_INHERITED_HINT_SOURCE_STEP;
 
 /** W1-T9551: a `flake_incident.main_inherited` row — a red no retry recovered — that this rung has not answered. */
 export interface MainInheritedHint {

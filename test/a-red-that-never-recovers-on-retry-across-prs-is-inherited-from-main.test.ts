@@ -9,9 +9,13 @@ import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
-import { flakeIncidentOrigin, runFlakeIncidentGardener, type FlakeIncidentSources } from "../src/lib/flake-incident-gardener.js";
+import {
+  FLAKE_INCIDENT_MAIN_INHERITED_STEP as GARDENER_STEP, flakeIncidentOrigin, runFlakeIncidentGardener, type FlakeIncidentSources,
+} from "../src/lib/flake-incident-gardener.js";
 import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
-import { buildMainHealthRung, mainInheritedHintReader, type MainHealthRungDeps } from "../src/lib/main-health-rung.js";
+import {
+  buildMainHealthRung, MAIN_INHERITED_HINT_SOURCE_STEP, mainInheritedHintReader, type MainHealthRungDeps,
+} from "../src/lib/main-health-rung.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -19,7 +23,7 @@ const TEST_FILE = "test/the-core-fleet-fills-the-child-entry-store.test.ts";
 const TITLE = "the store-fill fixture carries every child entry";
 const NOW = Date.parse("2026-10-14T20:54:00Z");
 const W1_T9532_PRS = [11705, 11735, 11769];
-// Literal step names, so the file runs (and fails by assertion) against a source that predates them.
+// Literal step names: the test pins what each module spells, not only that the two agree.
 const FLAKE_INCIDENT_MAIN_INHERITED_STEP = "flake_incident.main_inherited";
 const MAIN_INHERITED_HINT_STEPS = {
   covered: "main.health.inherited_hint_covered",
@@ -148,6 +152,8 @@ test("W1-T9551: the rung's hint reader reads appended bytes only, counts a torn 
     ts: new Date(NOW).toISOString(), step: FLAKE_INCIDENT_MAIN_INHERITED_STEP, origin: flakeIncidentOrigin(TEST_FILE, title),
     file: TEST_FILE, title, prs: W1_T9532_PRS.slice(0, prsCount), prs_count: prsCount,
   }) + "\n";
+  assert.deepEqual([GARDENER_STEP, MAIN_INHERITED_HINT_SOURCE_STEP], [FLAKE_INCIDENT_MAIN_INHERITED_STEP, FLAKE_INCIDENT_MAIN_INHERITED_STEP],
+    "the gardener writes the step the rung reads");
   const read = mainInheritedHintReader(h.ledger);
   assert.deepEqual(read(), { pending: [], torn: 0 }, "an absent ledger has no hints");
   writeFileSync(h.ledger, hint(TITLE, 2));
