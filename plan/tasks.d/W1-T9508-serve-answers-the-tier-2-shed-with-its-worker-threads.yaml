@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: serve deferred its handoff 75 times today for container_headroom; tier 2 never answered"
   plan_refs: [W1-T8873, W1-T8311, W1-T8378, W1-T9504]
   files: [src/run-task.ts, src/lib/serve.ts, test/serve-answers-the-tier-2-shed-with-its-worker-threads.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

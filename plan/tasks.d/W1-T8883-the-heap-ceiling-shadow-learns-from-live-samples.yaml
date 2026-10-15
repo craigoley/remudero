@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-12: right-size what we have (heap limits change only with operator approval)"
   plan_refs: []
   files: [src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-heap-ceiling-shadow-learns-from-live-samples.test.ts]
-  status: queued
+  status: merged
   priority: 1.5 # operator-2026-10-13: ADR 0007 applies the learned ceiling once a restart costs only a boot (lever A)
   attempts: 0
   rationale: |
