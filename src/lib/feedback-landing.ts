@@ -1111,6 +1111,7 @@ function tipAuthor(git: GitExec, sha: string | undefined): string | undefined {
   try {
     return git(["log", "-1", "--format=%an <%ae> %cI %s", sha]).trim();
   } catch {
+    // An unreadable tip still records the move itself; only who made it stays unknown.
     return undefined;
   }
 }

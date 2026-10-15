@@ -4486,6 +4486,7 @@ export function sharesHarnessCheckout(cwd: string, harnessCheckout: string): boo
     try {
       return realpathSync(path);
     } catch {
+      // A path that does not exist yet still compares by its resolved form.
       return resolve(path);
     }
   };
@@ -4502,6 +4503,7 @@ export function unwireCredentialHelperSocket(
   try {
     helpers = git(["--get-all", "credential.helper"]).replace(/\n$/, "").split("\n");
   } catch {
+    // No worktree-scope helper (git exits 1) or an unpinnable checkout: either way there is no wiring to undo.
     return [];
   }
   if (!helpers.some((h) => h.includes("git-credential-socket-helper.mjs"))) return [];
