@@ -8745,6 +8745,8 @@ components:
         summary: {type: string}
         plain:
           $ref: "#/components/schemas/PlainInboxMessage"
+        recommendation:
+          $ref: "#/components/schemas/InboxRecommendation"
         stampLine: {type: string}
         draftedTasks:
           type: array
@@ -10478,6 +10480,43 @@ components:
         detail:
           type: string
 
+    InboxRecommendation:
+      type: object
+      description: >
+        W1-T8950: the decision the fleet recommends on an operator inbox item (src/lib/inbox-recommendation.ts's
+        `ServedRecommendation`). Served only while current for the item's summary, lane and task record; fleet items
+        never carry it. `route` is attached at serve time with the option mapping (approve only on a ready item; keep
+        carries none).
+      required: [action, why, evidence, obsolete, generatedAt, source]
+      properties:
+        action:
+          type: string
+          enum: [approve, decline, reframe, reply, keep]
+        text:
+          type: string
+          description: The exact reason, feedback or reply text the action posts as its input.
+        why:
+          type: string
+          description: One plain sentence.
+        evidence:
+          type: array
+          description: Merged PR numbers ("#11199"), shas on main, task ids, or file paths.
+          items: {type: string}
+        obsolete:
+          type: boolean
+          description: True only with evidence of a merged change on main that resolves the subject.
+        group:
+          type: string
+          description: The shared root cause, when several items are one cause.
+        generatedAt:
+          type: string
+          description: When the recommendation was written (ISO 8601).
+        source:
+          type: string
+          enum: [writer, operator-session-seed]
+        route:
+          $ref: "#/components/schemas/PlainOptionAction"
+
     InboxReadyItem:
       type: object
       description: >
@@ -10511,6 +10550,8 @@ components:
           description: The raw proposal summary (the console's Details).
         plain:
           $ref: "#/components/schemas/PlainInboxMessage"
+        recommendation:
+          $ref: "#/components/schemas/InboxRecommendation"
         stampLine:
           type: string
           description: The drafted fragment's stamp line, when the draft carries one.
@@ -10551,6 +10592,8 @@ components:
           type: string
         plain:
           $ref: "#/components/schemas/PlainInboxMessage"
+        recommendation:
+          $ref: "#/components/schemas/InboxRecommendation"
         spawnedAt:
           type: string
           description: When the drafting worker was spawned; an empty string when unrecorded.
@@ -10587,6 +10630,8 @@ components:
           type: string
         plain:
           $ref: "#/components/schemas/PlainInboxMessage"
+        recommendation:
+          $ref: "#/components/schemas/InboxRecommendation"
         reasons:
           type: array
           items:
@@ -10646,6 +10691,8 @@ components:
           type: string
         plain:
           $ref: "#/components/schemas/PlainInboxMessage"
+        recommendation:
+          $ref: "#/components/schemas/InboxRecommendation"
         reason:
           type: string
           description: The latest `panel.proposal_declined` row's reason, verbatim.
