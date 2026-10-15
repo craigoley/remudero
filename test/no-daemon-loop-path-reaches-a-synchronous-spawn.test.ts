@@ -252,7 +252,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks. W1-T9695 awaited the boot sweep and the daemon's landContent and CI-learning landings; still sync: captureFeedback's inline landFeedback (W1-T9696), recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the `planPrPreflight` option and the `sweepFeedbackLanding` dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
