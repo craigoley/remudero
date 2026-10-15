@@ -209,8 +209,7 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-/** W1-T5672: a network call the landing generator hands its driver. The sync driver runs `run` on the
- *  thread; the async driver awaits `runAsync`, so the loop turns while the child process lives. */
+/** W1-T5672: a network ask; the sync driver runs `run`, the async one awaits `runAsync` so the loop turns meanwhile. */
 type NetAsk = { run: () => string; runAsync: () => Promise<string> };
 type LandingAsk = PlanPrPreflightAsk | NetAsk;
 type AskReply = PlanPrPreflightResult | string;
@@ -1304,8 +1303,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts)));
 }
 
-/** The daemon's feedback-landing rungs (W1-T5620): both await the preflight, the boot pass since W1-T9695.
- *  Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts. */
+/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). */
 export function feedbackLandingSweepRungs(
   root: string,
   opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
@@ -1534,7 +1532,6 @@ function* landContentSteps(
   }
 }
 
-/** The measurement cadence's plan-status landing (W1-T3970); W1-T9695: awaited, so its plan-PR preflight runs off the loop. */
 export function landPlanReconcileShardsAsync(
   root: string,
   inputs: readonly LandContentInput[],
