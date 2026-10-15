@@ -3191,6 +3191,7 @@ import {
   type ReviewerCodeFreshness,
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
+import { withTouchedDeclarations } from "./lib/advance-declarations.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -7825,7 +7826,10 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 /** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
-  const read = (): Promise<DaemonFreshness> => checkServiceFreshnessAsync(repoDir, env, deps).then(daemonFreshnessFromService);
+  // An entry-module change is weighed by the declarations it touched, read by the same local git (advance-declarations.ts).
+  const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
+  const read = (): Promise<DaemonFreshness> =>
+    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit)).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
