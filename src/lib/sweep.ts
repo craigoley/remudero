@@ -11144,6 +11144,11 @@ export async function buildRefreshValueGate(
   nowMs: number,
   appendLine: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void,
 ): Promise<RefreshValueGate> {
+  // A caller that never wired the strictness reader (a fixture, a pre-W1-T7735 entrypoint) keeps the
+  // pre-W1-T7735 refresh byte-for-byte: no value test and no row. A paced request is the exception.
+  // It still writes its row, because that row is what consumes the request. Production always wires
+  // the reader ({@link buildSweepEffects}).
+  const inert = deps.readBranchProtectionStrict === undefined;
   let strict: boolean | undefined;
   try {
     const read = await deps.readBranchProtectionStrict?.();
@@ -11168,6 +11173,7 @@ export async function buildRefreshValueGate(
   };
   return {
     admit: (c, view, path = "general") => {
+      if (inert) return true;
       const { facts, ciInFlight, value } = valueOf(c, view, path, memo.get(`${view.prNumber}@${view.headSha}`));
       if (value.decision !== "skip") return true;
       const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
@@ -11180,6 +11186,7 @@ export async function buildRefreshValueGate(
       return false;
     },
     settle: async (c, view, path, requestId) => {
+      if (inert && requestId === undefined) return true;
       const key = `${view.prNumber}@${view.headSha}`;
       let judge: RefreshJudgeVerdict | undefined = memo.get(key);
       let judgeError: string | undefined;
