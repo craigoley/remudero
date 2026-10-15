@@ -14,22 +14,11 @@
 // Why: docs/forensics/github-app.md#module-header
 
 // ── W1-T2311 DECISION RECORD: THE BOOT ENV CARRIED THE PAT, NOT THIS MODULE ─────────────────────
-//
-// A container's boot env used to carry a personal token under GH_TOKEN, which this module's
-// refresh (a per-process `process.env` write) could never reach or displace — the root cause was
-// one layer out, in how a recycle captured and forwarded that env. See the forensics page for the
-// measurement.
-//
-// REMEDY (a) TAKEN: the boot env now carries no GH_TOKEN at all (deploy/recycle-container.sh); an
-// operator reads a container's live token with `docker exec` instead of the fleet holding one on
-// their behalf. REMEDY (b) — refusing on a failed exchange instead of degrading — was NOT taken:
-// this module never introduced the personal token to refuse around, and refusing would break the
-// retry loop's own degrade-never-refuse contract (W1-T1068, REFRESH_MARGIN_MS below). A timed-out
-// exchange still leaves the previous value untouched.
-//
-// UNINVESTIGATED: why roughly one exchange in three used to time out when the same container
-// reached GitHub's API in milliseconds unauthenticated. See the forensics page; closing W1-T2311
-// does not explain it.
+// A recycle forwarded a personal GH_TOKEN this per-process refresh could never displace (forensics).
+// REMEDY (a) TAKEN: the boot env carries no GH_TOKEN (deploy/recycle-container.sh). REMEDY (b),
+// refusing on a failed exchange, was NOT taken: it would break W1-T1068's degrade-never-refuse loop.
+// A timed-out exchange still leaves the previous value untouched. The one-in-three timeouts, long
+// UNINVESTIGATED, were the daemon's own stalled loop (2026-10-15); see exchangeDeadline.
 // Why: docs/forensics/github-app.md#the-w1-t2311-decision-record
 
 import { readFileSync } from "node:fs";
@@ -60,12 +49,8 @@ const REFRESH_FAILURE_RETRY_GUARD_MS = 1000;
 const JWT_BACKDATE_SEC = 60;
 const JWT_TTL_SEC = 9 * 60;
 
-/** Node's `fetch` has no default timeout; W1-T2896 leaves this App-JWT exchange outside CLI transport, so a hung connection would await forever and — since
- *  {@link startInstallationTokenRefresh}'s loop only arms its next timer after this promise
- *  settles — permanently kill the refresh loop. 20s is a generous multiple of a normal exchange's
- *  cost and a reasoned bound rather than a fitted measurement (see the forensics page). Failed
- *  scheduled refreshes keep enough retained-token life for another full bounded exchange. Exported
- *  so a test can advance a mocked clock by exactly this amount. */
+/** `fetch` has no default timeout, so a hung exchange would stall the refresh loop forever; 20 s of
+ *  loop-available time (exchangeDeadline) is a reasoned bound, not a fit (forensics). Exported for tests. */
 // Why: docs/forensics/github-app.md#exchange_timeout_ms
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
@@ -197,6 +182,25 @@ function describeExchangeCatch(err: unknown, timeoutController: AbortController)
   return "exchange request failed: unknown";
 }
 
+const STALLED_TIMER_LATENESS_MS = EXCHANGE_TIMEOUT_MS / 20;
+
+// Aborts after EXCHANGE_TIMEOUT_MS of LOOP-AVAILABLE time: timers run before I/O when a stalled loop
+// resumes, so on 2026-10-15 a plain timer aborted 17 delivered exchanges while serve and the socket
+// thread minted at once. A timer that fires late (a stall, not a spent budget) re-arms instead.
+function exchangeDeadline(controller: AbortController, now: () => number, reason: string): () => void {
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = (ms: number): void => {
+    const dueAt = now() + ms;
+    timer = setTimeout(() => {
+      const late = now() - dueAt;
+      if (late >= STALLED_TIMER_LATENESS_MS) arm(Math.min(late, EXCHANGE_TIMEOUT_MS));
+      else controller.abort(new Error(reason));
+    }, ms);
+  };
+  arm(EXCHANGE_TIMEOUT_MS);
+  return () => clearTimeout(timer);
+}
+
 /**
  * Mints a fresh installation token and, on success, writes it to `opts.env.GH_TOKEN` (see the
  * file header). On any failure — missing config, an unreadable key, a signing failure, a network
@@ -240,10 +244,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // is armed before the fetch is issued; only how the catch below names a failure changed here.
   let res: Response;
   const timeoutController = new AbortController();
-  const timeoutTimer = setTimeout(
-    () => timeoutController.abort(new Error("token exchange timed out")),
-    EXCHANGE_TIMEOUT_MS,
-  );
+  const cancelDeadline = exchangeDeadline(timeoutController, now, "token exchange timed out");
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
       method: "POST",
@@ -262,7 +263,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     log(TOKEN_REFRESH_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
-    clearTimeout(timeoutTimer);
+    cancelDeadline();
   }
 
   if (!res.ok) {
@@ -360,10 +361,7 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
   const body = { repositories: [name], permissions: { contents: "write", pull_requests: "write" } };
 
   const timeoutController = new AbortController();
-  const timeoutTimer = setTimeout(
-    () => timeoutController.abort(new Error("scoped token exchange timed out")),
-    EXCHANGE_TIMEOUT_MS,
-  );
+  const cancelDeadline = exchangeDeadline(timeoutController, now, "scoped token exchange timed out");
   let res: Response;
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
@@ -382,7 +380,7 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
-    clearTimeout(timeoutTimer);
+    cancelDeadline();
   }
 
   if (!res.ok) {
@@ -415,8 +413,20 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
  * never at or past its expiry. Clamped at zero so a stale `expiresAtMs` (e.g. a clock jump)
  * schedules an immediate retry rather than a negative delay.
  */
-export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()): number {
-  return Math.max(0, expiresAtMs - REFRESH_MARGIN_MS - now);
+export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now(), leadMs: number = REFRESH_MARGIN_MS): number {
+  return Math.max(0, expiresAtMs - leadMs - now);
+}
+
+/** Once per retained token: a failed refresh has spent half its lead, and the token has expired. */
+export const TOKEN_EXPIRING_STEP = "github_app.token_expiring";
+export const TOKEN_EXPIRED_STEP = "github_app.token_expired";
+const ATTEMPT_CYCLE_SAMPLES = 8;
+
+/** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
+export function refreshLeadMs(attemptCycleMs: readonly number[]): number {
+  const attempts = REFRESH_MARGIN_MS / (EXCHANGE_TIMEOUT_MS + REFRESH_FAILURE_RETRY_MS);
+  const worst = attemptCycleMs.length > 0 ? Math.max(...attemptCycleMs) : 0;
+  return Math.min(INSTALLATION_TOKEN_LIFETIME_MS / 2, Math.max(REFRESH_MARGIN_MS, attempts * (worst + REFRESH_FAILURE_RETRY_MS)));
 }
 
 function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number): number {
@@ -459,25 +469,51 @@ export function startInstallationTokenRefresh(opts: {
   let lastSuccessfulExpiresAtMs: number | undefined;
   let stopped = false;
   let timer: { unref?: () => void } | undefined;
+  let dueAt = now();
+  const cycles: number[] = [];
+  let failures = 0;
+  const warned = new Set<string>();
   // Arming the next timer must never depend on anything that can itself throw — `setTimer`
   // returning is the only thing this loop's survival rides on.
   const rearm = (delay: number): void => {
     if (stopped) return;
+    dueAt = now() + delay;
     timer = setTimer(tick, delay);
     timer.unref?.();
+  };
+  const settled = (): void => {
+    cycles.push(Math.max(0, now() - dueAt));
+    if (cycles.length > ATTEMPT_CYCLE_SAMPLES) cycles.shift();
+  };
+  // A dead token fails every consumer with a 401 that names no cause; these rows name it.
+  const warnIfNearExpiry = (reason: string | undefined): void => {
+    failures += 1;
+    if (lastSuccessfulExpiresAtMs === undefined) return;
+    const remaining = lastSuccessfulExpiresAtMs - now();
+    const lead = refreshLeadMs(cycles);
+    const step = remaining <= 0 ? TOKEN_EXPIRED_STEP : remaining < lead / 2 ? TOKEN_EXPIRING_STEP : undefined;
+    if (step === undefined || warned.has(`${step}:${lastSuccessfulExpiresAtMs}`)) return;
+    warned.add(`${step}:${lastSuccessfulExpiresAtMs}`);
+    opts.log?.(step, {
+      expires_at: new Date(lastSuccessfulExpiresAtMs).toISOString(), remaining_ms: remaining, failed_attempts: failures,
+      refresh_lead_ms: Math.round(lead), attempt_cycle_ms: Math.max(0, ...cycles), last_reason: reason,
+    });
   };
   // The mint-and-rearm body, factored out of `tick` so its promise can be returned to the first
   // caller via `ready`, while every later tick stays fire-and-forget as before.
   const runOnce = (): Promise<RefreshResult> =>
     Promise.resolve().then(() => refresh({ log: opts.log, env })).then(
       (result) => {
+        settled();
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
-          rearm(nextRefreshDelayMs(result.expiresAtMs, now()));
+          failures = 0;
+          rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
           return result;
         }
         // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        warnIfNearExpiry(result.reason);
         return result;
       },
       (err) => {
@@ -486,11 +522,13 @@ export function startInstallationTokenRefresh(opts: {
         // the next timer is armed FIRST, before explaining why — the loop's survival must never
         // depend on a second write to the filesystem that just failed. The explanatory write
         // below is best-effort and guarded: if it throws too, that is swallowed.
+        settled();
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
         try {
           opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
           });
+          warnIfNearExpiry("refresh threw");
         } catch {
           // Swallowed on purpose — see comment above.
         }
