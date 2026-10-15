@@ -115,7 +115,8 @@ test("the lag clock is keyed to the daemon tree's HEAD: a tree that moved starts
   writeFileSync(f.mark, `${nowS() - 3 * 3600} ${"9".repeat(40)}\n`);
   const r = f.tick();
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /pressure 0 < 36/);
+  // W1-T9645: the 3 h the tree took to move is a measured clear, so it is now the bound.
+  assert.match(r.stderr, /pressure 0 < 54; the daemon.s own freshness restart has it \(bound: the longest lag one has cleared in, 108\d\ds\)/);
   assert.equal(read(f.recycled), "");
   assert.equal(read(f.mark).trim().split(" ")[1], DAEMON_HEAD);
 });
