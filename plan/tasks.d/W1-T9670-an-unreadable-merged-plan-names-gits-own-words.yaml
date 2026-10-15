@@ -1,0 +1,60 @@
+- id: W1-T9670
+  title: "AN UNREADABLE MERGED PLAN REFUSES DIRECT MERGES WITHOUT SAYING WHY — 40 plan_merge_unsafe 'the merged tree was unreadable' rows since 2026-10-14 (14 PRs, #11995 at 13:39Z and 14:00Z), and since #11961 each reads only 'git cat-file --batch exited null/128' because planSafetyGitAsync drops git's stderr and the kill signal; the reading names both, and an exit 128 is diagnosed from them"
+  repo: remudero
+  depends_on: [W1-T9651]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — what an unreadable merged-plan reading carries and how its cause is told apart; the merge-safety verdicts are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: #11995's direct merge was refused twice on an unreadable merged tree"
+  plan_refs: [W1-T5748, W1-T5780, W1-T9536, W1-T9651, W1-T6136]
+  files: [src/lib/plan-pr-merge-safety.ts, src/lib/arm-auto-merge.ts, test/an-unreadable-merged-plan-names-gits-own-words.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: each refusal turns a mergeable plan PR into an update-branch and a fresh CI round
+  attempts: 0
+  rationale: |
+    MEASURED on the core host 2026-10-15 (read-only: the four newest archives plus the live ledger, streamed to the Mac):
+    - 40 rows carry plan_merge_unsafe "the merged tree was unreadable: ...". They are automerge.arm_skipped,
+      automerge.direct_merge_preflight_refused and automerge.direct_merge_updated, for 14 PRs (#11587 through #12005).
+    - Before 10-15 ~11:00Z the text was a parser error from src/lib/plan.ts readBlobsAtRef: "git cat-file --batch
+      output ended before <tree>:plan/tasks.d/<shard>" or "gave an unusable size". That is a truncated read
+      reported as a parse error.
+    - From 12:01Z it is "git cat-file --batch exited null (killed or failed mid-read)" (11 refusals) or "exited 128"
+      (4). #11995: direct_merge_preflight_refused at 13:39:29Z (null), then direct_merge_updated at 14:00:18Z (128).
+    READ at origin/main cd482d436:
+    - The message comes from src/lib/plan-pr-merge-safety.ts mergedTreePlanSteps:
+      `if (batch.status !== 0) return { state: "unreadable", error: \`git cat-file --batch exited ${batch.status} (killed or failed mid-read)\` }`.
+      #11961 (f22af2cb7, 10:54Z) added it, which is why the wording changed at noon.
+    - The git runner is planSafetyGitAsync: execFile with `timeout: GIT_CALL_MS` (60 s) and `maxBuffer: 1 << 26`.
+      It resolves `{ status: code-or-null, stdout }`: a kill (status null) loses its signal and every failure loses
+      stderr. The batch reads every shard of the merged tree: 3,818 plan files, about 24 MB, in config.root/repos/remudero.
+    - W1-T9651 (filed, #12021) names planSafetyGitAsync among the 23 sites whose execFile `timeout` kills a child a
+      held loop delayed. That is the likely source of the `null` rows. Nothing names the cause of an exit 128, and the
+      reading cannot: git's stderr never reaches it.
+  design: |
+    1. The plan-safety git runners (planSafetyGitAsync and planSafetyGitSync) return the kill signal and a bounded
+       tail of stderr next to the status. W1-T9651 owns how the child is bounded; this task only stops dropping what
+       the child said.
+    2. An unreadable merged-tree reading names the failed verb, its status or signal, and git's stderr tail, for
+       every git step in mergedTreePlanSteps, not only the batch. The ledger rows that carry plan_merge_unsafe
+       (arm_skipped, direct_merge_preflight_refused, direct_merge_updated) gain a `git_stderr` field.
+    3. The reading tells three cases apart, each with its own reason:
+       - killed by its bound: the signal is set; W1-T9651's loop-available budget, once it lands.
+       - git failed: exit 128 with stderr, e.g. a missing object or a repository error.
+       - the reading was truncated: stdout ended before the last requested blob.
+       decidePlanPrMergeSafety's refresh decision is unchanged for all three.
+    4. Test: a fake runner returning each of the three shapes gets three distinct reasons; a real `git cat-file --batch`
+       on a fixture tree whose blob was deleted after merge-tree reports git's own stderr.
+  acceptance:
+    - claim: "an unreadable merged plan reading names git's stderr and the signal that ended it"
+      proof: 'unit test: test/an-unreadable-merged-plan-names-gits-own-words.test.ts'
+    - claim: "a signalled batch, a failed batch and a truncated batch read as three different reasons"
+      proof: 'grep: test("W1-T9670: a signalled, a failed and a truncated batch read are told apart" in test/an-unreadable-merged-plan-names-gits-own-words.test.ts'
+    - claim: "a real git failure in the batch surfaces git's own stderr in the reading"
+      proof: 'grep: test("W1-T9670: a real cat-file failure surfaces gits stderr in the unreadable reading" in test/an-unreadable-merged-plan-names-gits-own-words.test.ts'
+  falsifier: |
+    At origin/main, a planSafetyGitAsync child that exits 128 writing "fatal: bad object" to stderr makes
+    mergedTreePlanSteps return "git cat-file --batch exited 128 (killed or failed mid-read)" with no stderr, so the
+    third test fails.
