@@ -1,0 +1,28 @@
+id: incident-d13c1c08db5fbab3
+ts: 2026-10-15T05:06:01.050Z
+raw: >-
+  Incident d13c1c08db5f: flow stranded-task
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task=W1-T9047 since=2026-10-13T21:46:13.536Z causes=lifetime_infra_only:4,yield:5 breaker=clear passed_over=0 stranded_minutes=1807.46 stranded_bound=346.53948333333335 pass_over_bound=35 — no worker failure, interrupted only by the harness, beyond the fleet's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d13c1c08db5fbab384ac633f6710aca84df09ac2ffb390d135f00c7bb47ba368
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

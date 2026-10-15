@@ -1,0 +1,28 @@
+id: incident-bde0af9cc891edf8
+ts: 2026-10-15T07:33:29.330Z
+raw: >-
+  Incident bde0af9cc891: flow idle-capacity:phase_bound
+
+  First seen: 2026-10-15T07:33:15.566Z
+
+  Last seen: 2026-10-15T07:33:15.566Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=phase_bound:unnamed setter=unrecorded since=2026-10-15T07:13:10.688Z since=2026-10-15T07:13:10.688Z slot_minutes=20.08 dispatchable=3 cause=phase_bound reason="phase_bound:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#bde0af9cc891edf8aa4faf8d4629c57b0f7aca981889c20019b8299c028891d6
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

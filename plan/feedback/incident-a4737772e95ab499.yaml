@@ -1,0 +1,29 @@
+id: incident-a4737772e95ab499
+ts: 2026-10-15T04:10:56.271Z
+raw: >-
+  Incident a4737772e95a: intervention
+  hand-pause:maintenance-supervised-serve-restoration
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 5, burn: 5.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=fleet.pause target=core actor=unknown cause=hand-pause:maintenance-supervised-serve-restoration — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a4737772e95ab4992687db6532c4e78f6193742c6b5d921efee51ff50671cbf2
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

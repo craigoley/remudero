@@ -234,6 +234,7 @@ import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
 import { inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { createThreadEventSync, realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
+import { gitRecommendationEvidence, realRecommendationWriter, RECOMMENDATION_SEED_PATH } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
@@ -3107,6 +3108,8 @@ import {
   WorkerAbandonedError,
   SubscriptionOnlyRefusedError,
   deliverOperatorAnswerToRunningWorker,
+  sharesHarnessCheckout,
+  unwireCredentialHelperSocket,
 } from "./lib/worker.js";
 import {
   QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
@@ -17912,17 +17915,37 @@ export function dispatchFallbackObserver(
   };
 }
 
+export function unwireOwnCheckoutCredentialHelper(
+  checkout: string,
+  log: (step: string, extra?: Record<string, unknown>) => unknown,
+  unwire: (cwd: string) => string[] = unwireCredentialHelperSocket,
+): string[] {
+  try {
+    const removed = unwire(checkout);
+    if (removed.length > 0) log("daemon.own_checkout_credential_unwired", { checkout, removed });
+    return removed;
+  } catch (e) {
+    log("daemon.own_checkout_credential_unwired", { checkout, error: String((e as Error)?.message ?? e) });
+    return [];
+  }
+}
+
 /** W1-T5115: `args` carrying the daemon's git credential socket as a GIT-ONLY handle — a model half the caller already
  *  set is kept, and with none the worker's model env stays exactly as `buildWorkerEnv` built it. */
-function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string): SpawnWorkerArgs {
+function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harnessCheckout: string = repoRoot): SpawnWorkerArgs {
+  if (sharesHarnessCheckout(args.cwd, harnessCheckout)) return args;
   return { ...args, secretBoundary: { ...args.secretBoundary, credentialHelperSocketPath: socketPath } };
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
  *  daemon's git credential socket on every fix worker it starts. */
-export function gitCredentialFixSpawn(socketPath: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
+export function gitCredentialFixSpawn(
+  socketPath: string,
+  raw: typeof spawnWorker = spawnWorker,
+  harnessCheckout: string = repoRoot,
+): typeof spawnWorker {
   const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
-  return (args) => spawnFix(withGitCredentialSocket(args, socketPath));
+  return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
 async function runTask(
@@ -37755,6 +37778,27 @@ export function inboxThreadDecider(
   }
 }
 
+export function inboxRecommendationWriter(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): SummarizeDeps["summarize"] | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "inbox-recommendation-settings.json"),
+    });
+    return realRecommendationWriter({
+      mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
+      cwd: config.root,
+      settingsFile,
+    });
+  } catch (e) {
+    log("inbox.recommendation_writer_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 export function plainInboxWriter(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -39672,6 +39716,7 @@ export async function daemonCommand(
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
   if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
   if (bootHold) {
@@ -40264,6 +40309,16 @@ export async function daemonCommand(
           stateDir: join(config.root, "state"),
           readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
           summarize: plainInboxWriter(config, log),
+        },
+        recommendationBackfill: {
+          stateDir: join(config.root, "state"),
+          readProposals: () => parseProposalRegistry(readFileIfExists(join(config.root, "state", "inbox-proposals.json"))),
+          evidence: gitRecommendationEvidence((args) => hostWorktreeGitAsync(repoRoot, args, { maxBuffer: 1 << 26 }), {
+            planDir: relative(repoRoot, resolveRepoLayout(repoRoot).planDir),
+            planMonolith: relative(repoRoot, resolveRepoLayout(repoRoot).planMonolith),
+          }),
+          summarize: inboxRecommendationWriter(config, log),
+          readSeed: () => readFileIfExists(join(repoRoot, RECOMMENDATION_SEED_PATH)),
         },
         fleetLane: {
           stateDir: join(config.root, "state"),

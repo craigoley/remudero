@@ -1,0 +1,57 @@
+- id: W1-T9615
+  title: "THE SRE LANE'S INCIDENT FILING HOLDS THE DAEMON LOOP ~110 S A TIME — runSreLanePass files through captureFeedback, whose landFeedback drives the SYNC driveLanding/planPrPreflightAtCommit path (plan-pr-emitter runInTree spawnSync: lint-plan-precheck ~28 s, task-id-existence-check ~22 s, shard census), so from the lane's first start at 03:43Z on 2026-10-15 the core loop was held 60-190 s every ~2 min, 17 App token refreshes timed out and the daemon ran 27 min on a dead token"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — where a daemon-loop feedback capture lands its record; the landing's checks are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: the core App token refresh outage (04:22-05:07Z) and #11901's 3h42m landing"
+  plan_refs: [W1-T5460, W1-T5521, W1-T5620, W1-T5689, W1-T5965, W1-T8232, W1-T9500]
+  files: [src/lib/sre-lane.ts, src/lib/feedback.ts, test/the-sre-lane-files-incidents-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: a ~110 s loop hold every ~2 min starves every timer-bounded daemon read (App token, merged-tree reads, credential pushes)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger union, read-only):
+    - sre_lane.started at 03:43:14Z (instance core, the first start: every earlier boot logged sre_lane.disabled).
+      sre_lane.filed then came 27 times in hour 04, 15 in 05, 36 in 06 and 9 in 07.
+    - daemon.loop_lag in the pulse phase, 04:08-05:29Z: 15 rows with lag 60-183 s and sync_spawn_ms 108-189 s.
+      Each row has last_step_before_block wipetest.cadence.skipped and sync_spawn_top spawnSync node
+      scripts/task-id-existence-check.mjs (20-31 s), scripts/lint-plan-precheck.mjs (28.6 s) or git -C (22 s),
+      all at runInTree (src/lib/plan-pr-emitter.ts). The 05:03:47Z daemon.loop_stall_profile names
+      runSreLanePass (src/lib/sre-lane.ts) and spawnSync.
+    - The rows line up: sre_lane.filed 04:22:54.054Z, then github_app.token_refresh_failed 04:22:54.058Z.
+    READ at origin/main:
+    - runSreLanePass calls captureFeedback(deps.root, {raw, origin, id}) with no land options.
+    - captureFeedback calls landFeedback(root, ...), which runs driveLanding with syncPreflightOf, i.e. the
+      synchronous planPrPreflightAtCommit.
+    - W1-T5620 and W1-T5965 moved the sweep and ci-learning landings to driveLandingAsync, and W1-T5460's queue
+      (queueFeedbackLanding under state/feedback-landing-pending) lands records through the per-poll async sweep.
+      This capture path was left on the sync driver.
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts holds no runInTree row, so its name-based reach
+      never sees this path.
+    EFFECT: Node runs due timers before I/O when a held loop resumes, so every timer-bounded read in the daemon
+    loses its race. 17 consecutive token exchanges were aborted as "exchange timed out" while serve refreshed
+    (04:37:46Z) and the credential socket's own thread minted 42 scoped tokens with no failure.
+  design: |
+    1. A capture made from the daemon loop never lands inline. runSreLanePass, and every other daemon-loop
+       caller of captureFeedback found by the builder's caller sweep, stages the record through W1-T5460's queue
+       (queueFeedbackLanding / queueFeedbackRecord under the daemon's state root). The per-poll
+       sweepFeedbackLandingAsync then lands it with the async preflight. The CLI capture keeps its inline path.
+    2. The record is readable at once: the queue's overlay (overlayQueuedFeedbackEntries) already shows a queued
+       record, so openIncidentFeedbackOrigins and the lane's dedup see this pass's filing on the next pass.
+    3. The sync-spawn census reaches this path. Extend its seed or its value-passing rule so that runInTree
+       through syncPreflightOf is reachable from the daemon's SRE lane input. The same PR then removes the path,
+       so the census table gains no row.
+    4. The landing's checks and verdicts do not change; only where they run moves.
+  acceptance:
+    - claim: "an SRE lane pass that files an incident stages the record for the async landing sweep and never calls the synchronous plan-PR preflight"
+      proof: 'grep: test("W1-T9615: an SRE lane filing never reaches the synchronous plan-PR preflight" in test/the-sre-lane-files-incidents-off-the-daemon-loop.test.ts'
+    - claim: "a staged incident record is seen by the next pass's dedup, so the lane does not file it twice"
+      proof: 'grep: test("W1-T9615: a staged incident is not filed again by the next pass" in test/the-sre-lane-files-incidents-off-the-daemon-loop.test.ts'
+  falsifier: |
+    At origin/main, inject a sync preflight seam that records calls and run one SRE lane pass that files: the seam
+    is called (captureFeedback, then landFeedback, then syncPreflightOf). The first test fails.

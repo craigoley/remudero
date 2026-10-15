@@ -5,7 +5,9 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=616dd04b5e7f9c5f
   attempts: 0
   design: |
     Read-only research. For each of #10578, #10628 and #10671, read the failing check logs and the repair diffs (fix rounds, merge-from-main commits, hand fixes). The task record named #10671 twice, so first establish whether the third PR was meant to be a different number. Write the findings to the file below, one section per PR, each naming the failing check, the commit that repaired it, and the remedy that actually worked.
