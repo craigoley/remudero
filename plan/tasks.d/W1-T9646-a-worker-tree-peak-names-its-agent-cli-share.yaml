@@ -1,0 +1,57 @@
+- id: W1-T9646
+  title: "NO MEASUREMENT SAYS HOW MUCH OF A WORKER'S MEMORY IS THE AGENT CLI ITSELF — a tree's peak sums every member's VmHWM and separates only `node --test` runners, so the share a hosted agent loop would take off this host is unknown; record the agent CLI process's own peak beside each tree total"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: low  # Rule 19: one concern — one more measured number per tree; no estimate or reservation changes
+  band_meaning: blast-radius
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T9080, W1-T9102, W1-T8879]
+  files: [src/lib/host-memory-learning.ts, test/a-worker-tree-peak-names-its-agent-cli-share.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    WHAT IS MEASURED: src/lib/host-memory-learning.ts samples each reservation's tree on a timer and records the
+    largest sum of its members' VmHWM as the tree's peak (header (1), :9-12). A `node --test` runner found inside the
+    tree gets its own reservation and its members are left out of the enclosing peak (header (4), :20-23). Nothing
+    separates the agent CLI: the file never names `claude` (git grep: 0; control: `isTestRunnerArgv` matches twice).
+    The worker spawns the native executable the SDK resolves (`pathToClaudeCodeExecutable`, src/lib/worker.ts:3082).
+    WHY THE NUMBER MATTERS:
+      - #11519 (open, needs the operator): in scenario serve-steady the measured service baselines leave the host 1 GB
+        short of its reserve with zero workers; the operator must choose a lever (a smaller baseline, less
+        concurrency, or more RAM).
+      - anthropics/claude-quickstarts' managed-agents self-hosted environment runs the agent loop on Anthropic's
+        servers while tool calls run in a sandbox the host provides (self-hosted-sandboxes/openshell/README.md).
+        Moving workers there would take only the CLI's own share off this host; tsc and the tests would stay.
+      - That share has never been measured, so no one can say whether a hosted loop would relieve #11519. This task
+        measures it; it does not adopt hosted agents (MASTER-PLAN §4G parks that, with its billing question).
+  design: |
+    1. The sampler marks a member as the agent CLI when its argv[0] basename is `claude`, read once per (pid, start)
+       through the same memo the test-runner check uses.
+    2. Each tracked tree keeps a second peak: the largest summed VmHWM of its CLI members (`cliPeakMib`). A tree with no
+       CLI member observed records none, never zero.
+    3. `PeakSample` gains `cliPeakMib?`, written by `recordPeak` beside `peakMib`. The class estimate still learns
+       from the tree total only.
+    4. No reservation, budget or estimate changes.
+    New tests go in test/a-worker-tree-peak-names-its-agent-cli-share.test.ts, driving `createTreePeakSampler` with
+    fake process listings and /proc reads, with `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-worker-tree-peak-names-its-agent-cli-share.test.ts"
+    - claim: "a worker tree peak records the peak of its agent CLI process beside the tree total"
+      proof: 'grep: test("W1-T9646: a worker tree peak records the peak of its agent CLI process beside the tree total" in test/a-worker-tree-peak-names-its-agent-cli-share.test.ts'
+    - claim: "a tree with no CLI member records no CLI peak, never zero"
+      proof: 'grep: test("W1-T9646: a tree with no CLI member records no CLI peak, never zero" in test/a-worker-tree-peak-names-its-agent-cli-share.test.ts'
+    - claim: "the class estimate still learns from the tree total"
+      proof: 'grep: test("W1-T9646: the class estimate still learns from the tree total" in test/a-worker-tree-peak-names-its-agent-cli-share.test.ts'
+  falsifier: |
+    Stop marking CLI members. The first test then finds no `cliPeakMib` on a tree whose listing holds a `claude`
+    process.
+  note: |
+    READ-OUT: after a week, the median `cliPeakMib / peakMib` per worker class answers how much a hosted agent loop
+    could free. It is the input to the #11519 lever and to any hosted-agents task, not a decision in itself.
