@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const scriptPath = fileURLToPath(new URL("../.github/scripts/leak-grep.sh", import.meta.url));
 const fixtureEnv: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
@@ -27,15 +28,13 @@ const formats = [
 ];
 
 function fixture(contents = "ordinary tracked text\n") {
-  const root = mkdtempSync(join(tmpdir(), "rmd-secret-tripwire-"));
+  const repo = gitRepo({ kind: "secret-tripwire", seedCommit: false }), root = repo.dir;
   const script = join(root, ".github/scripts/leak-grep.sh");
   mkdirSync(dirname(script), { recursive: true });
   writeFileSync(script, readFileSync(scriptPath));
   writeFileSync(join(root, "tracked.txt"), contents);
-  const git = (...args: string[]) => execFileSync(realGit, args, { cwd: root, env: fixtureEnv, stdio: "pipe", timeout: 30_000 });
-  git("init", "--quiet");
-  git("add", ".");
-  return { root, script, git, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  repo.git("add", ".");
+  return { root, script, git: repo.git, cleanup: repo.cleanup };
 }
 
 function scan(fx: ReturnType<typeof fixture>, env: NodeJS.ProcessEnv = fixtureEnv, cwd = fx.root) {
