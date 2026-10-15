@@ -1135,6 +1135,8 @@ export function escalationFor(observation: MainHealthObservation, branch: string
 interface RepairEvidence {
   readonly runHistory?: readonly MainHealthRunHistoryEntry[];
   readonly required: ReadonlySet<string>;
+  /** W1-T9678: the workflows learned to carry the required checks, as the first-red boundary reads them. */
+  readonly requiredWorkflows?: ReadonlySet<string>;
 }
 
 /** One red observation, as the repair lane acts on it. */
@@ -1538,9 +1540,9 @@ export function buildMainHealthRung(
   const spanCache = new Map<string, readonly string[] | null>();
   /** The unattributed commits between the first red's last green and it, newest first; undefined when
    *  main's first-parent chain could not be read between them (named in the log, never guessed). */
-  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[]): Promise<readonly string[] | undefined> => {
+  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[], verdictKey: string): Promise<readonly string[] | undefined> => {
     if (first.span) return first.span;
-    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}`;
+    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}:${verdictKey}`;
     const cached = spanCache.get(key);
     if (cached !== undefined) return cached ?? undefined;
     try {
@@ -1586,7 +1588,10 @@ export function buildMainHealthRung(
       fields: {},
       probeVerdicts: new Map<string, MainProbeVerdict>(),
     };
-    const span = await spanOf(first, history);
+    // W1-T9678: only a run of a workflow carrying the required checks is a verdict; with that set unknown, none is.
+    const workflows = ctx.evidence?.requiredWorkflows;
+    const verdictRuns = workflows ? history.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName)) : [];
+    const span = await spanOf(first, verdictRuns, workflows ? [...workflows].sort().join(",") : "unknown");
     if (span === undefined || span.length === 0) return asFirstRed;
     const probes = lane.probes ?? (restProbes ??= restMainProbes(owner, repo, deps.fetch));
     const state = mainBisectionFromLedger(lines, first.headSha);
@@ -2151,7 +2156,11 @@ export function buildMainHealthRung(
         metPrCache = { sha: decidedBySha, lookup };
       }
       const metLookup = observation.state === "red" ? metPrCache?.lookup : undefined;
-      repairEvidence = { ...(runHistory ? { runHistory } : {}), required };
+      repairEvidence = {
+        ...(runHistory ? { runHistory } : {}),
+        required,
+        ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+      };
       deps.log("main.health.observed", {
         branch,
         sha,
