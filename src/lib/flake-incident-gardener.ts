@@ -25,7 +25,7 @@
  * rung reads.
  */
 import { dirname, join, normalize } from "node:path/posix";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -430,7 +430,7 @@ export interface FlakeRepairRecord {
 export function flakeJudgeEvidencePort(o: {
   stateDir: string;
   log: GardenerDeps["log"];
-  clock: { now: () => number };
+  clock: Clock;
   mainFailures: SelectorShadowMainFailures;
   repairs: () => readonly FlakeRepairRecord[];
 }): FlakeJudgeEvidencePort {
