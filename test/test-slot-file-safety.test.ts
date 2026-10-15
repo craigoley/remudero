@@ -62,6 +62,9 @@ test("a missing canonical lease path closes only the owned descriptor and report
     const orphan = join(fx.root, "owned-orphan"), before = readFileSync(fx.path, "utf8");
     renameSync(fx.path, orphan); fx.lease.refresh(); fx.lease.release();
     assert.equal(readFileSync(orphan, "utf8"), before);
-    assert(fx.logs.some(x => JSON.parse(x).step === "test_slot.refresh_failed"));
+    assert(fx.logs.some(x => {
+      const log = JSON.parse(x);
+      return log.step === "test_slot.refresh_failed" && String(log.error).includes("ENOENT");
+    }), "the missing-path control must exercise native ENOENT, not a swallowed programming error");
   } finally { fx.cleanup(); }
 });
