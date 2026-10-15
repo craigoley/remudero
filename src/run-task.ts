@@ -43975,7 +43975,8 @@ function* openPrViewSteps(
   // `raw` list, so a healthy sweep pays nothing extra. "main" is this repo's one merge target,
   // the same literal `ghPrCreateFillCommand`'s own `--base` argv already hardcodes.
   const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
-  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch);
+  const mergeConflictGaps = new Map<number, string>();
+  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch, undefined, mergeConflictGaps);
 
     // WORKFLOW RUNS (W1-T2340 — the producer `OpenPrView.workflowRuns` has lacked since it was
     // declared): a THIRD bounded follow-up fetch, scoped the same way the conflict-evidence one
@@ -44368,6 +44369,7 @@ function* openPrViewSteps(
       // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
+      mergeConflictGap: mergeConflictGaps.get(pr.number),
       // W1-T3920: the normalized mergeState intentionally maps raw `blocked` to `clean`; retain
       // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,
