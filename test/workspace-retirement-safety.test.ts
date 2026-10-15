@@ -156,10 +156,15 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     git(operator, "add", "tracked-gitlink"); git(operator, "commit", "-m", "tracked nested source"); age(tracked, 7);
     const orphan = join(roots[2], "broken"); mkdirSync(orphan);
     writeFileSync(join(orphan, ".git"), "gitdir: /missing/.git/worktrees/only-work\n"); age(orphan, 7);
-    const unknown = join(roots[2], "data"); mkdirSync(unknown); writeFileSync(join(unknown, "important"), "keep"); age(unknown, 7);
+    // Inactive unmarked scratch is now eligible; important unversioned data can opt out explicitly.
+    const unknown = join(roots[2], "data"); mkdirSync(unknown); writeFileSync(join(unknown, "important"), "keep");
+    writeFileSync(join(unknown, ".rmd-janitor-keep"), "important data"); age(unknown, 7);
+    const disposable = join(roots[2], "disposable-data"); mkdirSync(disposable);
+    writeFileSync(join(disposable, "payload.bin"), "scratch"); age(disposable, 7);
     const r = mac(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
     for (const wt of removed) assert.equal(existsSync(wt), false, r.stdout);
+    assert.equal(existsSync(disposable), false, r.stdout);
     for (const wt of [privateWt, dirty, young, nestedRecent, held, orphan, unknown, operator, tracked]) assert.equal(existsSync(wt), true, r.stdout);
     assert.match(r.stdout, /protected tracked-nested-source/);
     assert.match(r.stdout, /not-proven-published/);

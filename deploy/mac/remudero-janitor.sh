@@ -17,7 +17,7 @@
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
 # follows an artifact symlink, and never touches protected, dirty, or open
 # trees. Worktree deletion uses Git; branch refs are retained. A standalone
-# clone's object store and unknown non-repository data stay protected.
+# clone's object store, marked data and unversioned source/reports stay protected.
 #
 # Why this exists: src/lib/tmp.ts's sweepStaleTempDirs() roots at os.tmpdir()
 # (/var/folders/... on macOS) and so structurally cannot see the disposable
