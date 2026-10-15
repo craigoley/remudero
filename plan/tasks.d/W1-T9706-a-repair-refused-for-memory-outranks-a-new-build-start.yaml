@@ -1,0 +1,91 @@
+- id: W1-T9706
+  title: "A REPAIR REFUSED FOR HOST MEMORY OUTRANKS A NEW BUILD START — on 2026-10-15 from 15:53:51Z to 19:05:14Z the fix lane dispatched one fix worker while 93 sweep.disposed rows over 27 PRs read 'live host capacity exhausted'; meanwhile 3 builds started together at 17:06Z on 5,898 MiB available because the build gate charges a new build nothing above the 3,072 MiB floor, while a repair needs the floor plus its learned peak plus every planned review's"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — whether a NEW build start yields host memory to a repair the sweep refused for memory; the fix controller's arithmetic (W1-T9679) and the review side are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 (fix-lane stand-down 16:39-18:36Z, PR #12058): the operator asked for fix rounds to outrank new builds when host memory is the limit, as a priority and not a cap"
+  plan_refs: [W1-T9498, W1-T9582, W1-T9679, W1-T7095, W1-T5347, W1-T2931, W1-T100]
+  files:
+    - src/lib/repair-memory-demand.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: two hours of zero fix admissions means a red PR goes green only by hand
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15, the core ledger (archive ledger.2026-10-15T17-18-26-253Z plus the live ledger.ndjson), streamed
+    read-only from the Azure host:
+    - fix.dispatch rows: 15:53:51Z (PR #11978), then only 18:10:56Z (PR #12099), then 19:05:14Z. From 16:39 to 18:36Z,
+      93 sweep.disposed rows read "NOT DISPATCHED this pass: live host capacity exhausted" over 27 PRs (#12058: 9 of them).
+    - Same window: 41 sweep.review_started, 6 run.start (builds W1-T9639, W1-T7699 and W1-T9395 at 17:06:12-13Z,
+      W1-T9087 at 17:39Z, plus triage), 511 garden.pass, and 539 memory_budget.enforce_defer rows for garden children from 16:30 to 18:40Z.
+    - The build gate: dispatch_memory_observed at 17:05:47Z read observed_available_mib 5,898 against
+      memory_floor_mib 3,072, tier "fits", and three builds started 25 s later. checkMemoryGovernor (src/lib/sweep.ts)
+      admits a new build when MemAvailable is at or above policy.memoryFloorMib and charges the build nothing.
+      plan/policy.yaml keeps hostMemoryBudget mode "shadow" for every class but garden, so implement starts are not
+      gated by the budget. The shadow verdicts for those three starts (17:08:37-17:10:47Z) all read would_admit false
+      for unrealized-reservations, with unrealizedMib 2,789-8,259 and projectedAvailableMib -278 to 1,401.
+    - The repair gate: createSweepFixAdmissionController (W1-T9498) admits a fix only while MemAvailable minus the same
+      3,072 floor covers every planned review at its learned p90 (1,199-1,234 MiB each) plus one fix at its learned p90
+      (3,196 MiB until 18:12Z, then 2,048; the fix median is 478). Headroom read 1,788-3,962 MiB over the window.
+    - So the gate with the lowest bar admits the lowest-priority work, and nothing tells it that a repair is waiting for
+      memory. HOST_MEMORY_PRIORITY_PROPOSAL.classWeight already ranks fix (2) above implement (1), but only the
+      counterfactual review yield (wouldYieldToReview, src/lib/host-memory-priority.ts) reads it, and only in shadow.
+    - W1-T9679 (#12110, open) adds typical-peak rungs to the repair controller. Replaying its rule on the 93
+      refusals admits 49 (no review charged, and what is left covers the 478 MiB median). The other 44 stay refused:
+      36 with 1-4 planned reviews charged, 8 container-short. Builds are not ordered against those repairs.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the plan/ diffs of the 82 origin heads updated since
+    2026-10-14 for outrank, yield, fix admission, fix_capacity, repair demand and checkMemoryGovernor. W1-T9679 is
+    the repair arithmetic, W1-T9582 orders repairs against reviews, W1-T7095 is the shadow-only review yield, and
+    W1-T5347 wired the floor. W1-T100 (lint names it for the same two files) routes blocked_ci to the ci-log fix path
+    and does not touch admission. None makes a build start yield to a waiting repair.
+  design: |
+    One priority rule, adaptive, with no new fixed number (operator ruling: no hard thresholds):
+    1. DEMAND. When createSweepFixAdmissionController refuses a claim on a readable pressure reading (the MiB arithmetic,
+       not the stand-in and not an unreadable reading), it records that repair as waiting for host memory in a new
+       in-process module, src/lib/repair-memory-demand.ts: the PR, when its blocker began waiting (waitSinceMs on the full
+       pass, else the refusal time), the MiB it was short, and the refusal time. An admission for that PR, or a pass
+       that no longer derives it, clears it. The sweep and the build dispatch run in the same daemon process (actor_pid
+       120 wrote sweep.fix_capacity, dispatch_memory_observed and run.start after the 17:32Z boot), so no file is needed.
+       A refusal stays fresh for HOST_MEMORY_PRIORITY_PROPOSAL.demandRefreshBoundMs, the existing proposal that
+       review demand already uses. Every light pass re-derives a waiting repair, so live demand stays fresh.
+    2. YIELD. memoryGovernorGateFor (src/run-task.ts), which every new implement dispatch consults, asks the module
+       after checkMemoryGovernor admits. A new build yields (deferred, tier "yield-to-repair") only when all of these
+       hold:
+       (a) a fresh repair is waiting for memory;
+       (b) live work in this container can still free memory (ownContainerWorkLive, the same test the container tier
+           uses). With nothing live, holding a build cannot make a repair fit, so the build is admitted and named;
+       (c) the repair outranks the build under rankDemand/priorityScore with HOST_MEMORY_PRIORITY_PROPOSAL. The build's
+           wait starts at its first yield in the current streak, so a build held long enough outranks the repair and
+           is never overtaken indefinitely.
+    3. ROWS. dispatch_memory_observed carries the yield decision: yielded, the repair PR it yielded to, that repair's wait
+       and shortfall, both scores, and why it did not yield when it did not. An analyst can then count the build-minutes
+       spent on repairs.
+    4. BOUNDARIES. This adds no fixed threshold and no new policy value. It changes no budget mode (plan/policy.yaml
+       hostMemoryBudget stays as it is), no memory limit, no floor, and none of the fix or review arithmetic. A
+       review start is not affected.
+  acceptance:
+    - claim: "a new build yields to a repair the sweep refused for host memory while live work can still free memory"
+      proof: 'unit test: test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts'
+    - claim: "the 17:06Z shape (5,898 MiB available, 3,072 floor, a repair refused 2 min earlier, builds live) defers the build as yield-to-repair"
+      proof: 'grep: test("W1-T9706: a build start yields to a repair refused for host memory" in test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts'
+    - claim: "with no live work in the container the build is admitted, because waiting cannot make the repair fit"
+      proof: 'grep: test("W1-T9706: a build is admitted when nothing live can free memory for the repair" in test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts'
+    - claim: "a build held long enough outranks the waiting repair by aged priority and starts"
+      proof: 'grep: test("W1-T9706: an aged build outranks a waiting repair and starts" in test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts'
+    - claim: "a stale repair refusal holds no build"
+      proof: 'grep: test("W1-T9706: a stale repair refusal holds no build" in test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts'
+    - claim: "the build gate consults the repair demand"
+      proof: 'grep: buildYieldsToRepair( in src/run-task.ts'
+    - claim: "the fix admission controller records a memory refusal as repair demand"
+      proof: 'grep: noteRepairMemoryRefusal( in src/lib/sweep.ts'
+  falsifier: |
+    At origin/main, memoryGovernorGateFor on a 5,898 MiB reading with a 3,072 MiB floor returns undefined (admitted),
+    even when the sweep refused a repair for host memory two minutes earlier and builds are live in the container. So
+    the second test fails.
