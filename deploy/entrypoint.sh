@@ -140,30 +140,16 @@ resolve_target() {
   return 1
 }
 
-# ── W1-T1054: clear an untracked file only when it is provably redundant ──────────────────────
-# Trap: the daemon writes `plan/feedback/**` into this same tree and later lands identical content
-# upstream without deleting the local copy, so the next checkout can add a path that already exists
-# here byte-for-byte — the tracked-only dirty guard does not see it, and `checkout_target` fails.
-# Invariant: a path is cleared only if the incoming target adds that exact path AND the local bytes
-# equal the incoming blob (`git hash-object`, byte comparison — never a shell string, which mangles
-# binary data). An unreadable incoming blob (`git cat-file -e` fails) is treated as NOT safe, fail-
-# closed like the dirty guard itself. Every cleared path is logged by name before removal.
-# Falsifier: test/entrypoint-boot.test.ts's "entrypoint:" cases for this predicate, and its "W1-T9623:" cases.
-# Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
-
-# ── W1-T9623: a DIFFERING untracked file is MOVED ASIDE, never left to block every boot ──────────
-# MEASURED 2026-10-15: 45 untracked `plan/feedback/incident-*.yaml` files in the core checkout each
-# differed from the copy #11901/#11946 had landed (the SRE lane re-captured a recurring incident
-# after its landed copy was acknowledged away, with a new `ts` and Count). Leaving them made
-# `git checkout` refuse at 08:22:44 and on every one of the ~150 boots after it, each dying in
-# about a second, until a hand move at 10:28:42 — 2 h 6 m with no daemon. The bytes are kept
-# under `$RECOVERED_UNTRACKED_ROOT/<stamp>/<path>`, named in the log and the ledger, so nothing is
-# discarded and the boot proceeds onto the incoming commit. A failed move leaves the file in place
-# and the checkout below refuses exactly as before.
+# ── W1-T1054 / W1-T9623: an untracked file at a path the incoming commit ADDS ─────────────────
+# The daemon writes `plan/feedback/**` into this tree and lands it upstream, so the checkout can add
+# a path that is untracked here. Identical bytes (`git hash-object` vs the incoming blob) are cleared;
+# DIFFERENT bytes are moved to state/recovered-untracked/<stamp>/<path> and ledgered, never left to
+# refuse every boot (2026-10-15: 45 such files, 2 h 6 m down). An unreadable blob or a failed move is
+# left in place, and the checkout refuses as before. Falsifier: test/entrypoint-boot.test.ts's
+# "entrypoint:" and "W1-T9623:" cases. Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
 RECOVERED_UNTRACKED_ROOT="$CONFIG_ROOT/state/recovered-untracked"
 MOVED_ASIDE_DIR=""
 
-# One JSON string body, for the ledger lines below: backslash, quote and newline escaped.
 json_escape() {
   local s="${1//\\/\\\\}"
   s="${s//\"/\\\"}"
@@ -181,7 +167,6 @@ move_untracked_aside() {
     return 0
   fi
   log "  moved untracked '$path' aside to $dest: the incoming commit adds this path with DIFFERENT bytes, which would refuse every checkout; the local bytes are kept there"
-  # A missing state dir fails the redirection in the shell itself, so it is checked, not redirected into.
   [ -d "$(dirname -- "$LEDGER_FILE")" ] || return 0
   printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.untracked_moved_aside","lane":"daemon","path":"%s","moved_to":"%s","local_blob":"%s","incoming_blob":"%s","reason":"the incoming commit adds this untracked path with different bytes, so git checkout would refuse every boot"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(json_escape "$path")" "$(json_escape "$dest")" "$local_sha" "$blob" \
