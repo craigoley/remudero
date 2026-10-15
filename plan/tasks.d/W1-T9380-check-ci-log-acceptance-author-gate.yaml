@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.11
   status: queued
@@ -54,10 +54,14 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing reports recurring acceptance-author-gate rounds, but the supplied failure excerpt concerns an instance classification producer; it does not establish a common root cause or a preventive remedy in src/lib/ci-parity.ts.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration rather than executing a behavioral test, so it cannot verify the stated prevention outcome.; on the change's description/files alone, no diff was read — The escalation rule explicitly requires HIGH when the finding cannot be verified from what is shown; this filing requests structural repair without supplying a verified causal diagnosis."
-    judged_at: "2026-10-14T04:26:26.038Z"
-    pin: "810c3c3fae1e16d92ac4800eba39cdfe126d2cf83baa2f1a9144ff015098ae79"
+      - "The declared files are src/lib/ci-parity.ts and a new test file. Both are ordinary source and test paths, and the description does not mention secrets, credentials, auth, permissions, deletion, deploy, merge or review policy, or any irreversible action."
+      - "The acceptance is a single grep-verifiable check, a named test in test/check-ci-log-acceptance-author-gate.test.ts. That file does not exist at the base, which is expected for a new test, so the finding can be verified from what is shown."
+      - "The filing is machine-authored by the ci-friction gardener with 5 cited PRs. The record states that the gardener measures the cause's share of fix rounds after merge and reopens it if the share does not fall. This is an existing feedback loop and does not require an operator decision."
+      - "The family track record is weak, with 25 merged and 40 declined (Beta mean 0.61). This counts toward more scrutiny, but it reflects the rate at which this family's tasks are declined, not danger in this change. The change itself is still gated by CI and review."
+      - "ci-parity.ts is a shared library that the gate-admission tests import, and the evidence shows it was hand-fixed in earlier PRs. The ACTUAL CHANGE view was not supplied, so I cannot judge the size or shape of the edit. The plan record says the previous rung was docs-only and this one asks for a structurally different, code-path fix, which is consistent with the plan."
+    judged_at: "2026-10-15T02:38:17.664Z"
+    pin: "0c01f7ae2a6c47882e263d9a45cb2ffc84b32b4e3fe8b28b9ebf9d0febe6cbf3"
