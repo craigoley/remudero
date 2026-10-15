@@ -93,6 +93,8 @@ test("W1-T6107: the nightly map is uploaded as test-impact-map for at least seve
 
 test("W1-T6107: an install or builder failure never fails the nightly and leaves no map", () => {
   const body = step(NIGHTLY, BUILD).run!;
+  const bound = /\btimeout (\d+m) node --import tsx scripts\/coverage-merge-ratchet\.mjs/.exec(body);
+  assert.ok(bound, "the fixture drives the workflow's actual bounded builder");
   const writesMap = 'for a in "$@"; do if [ "$prev" = "--impact-map" ]; then printf "{}" > "$a"; fi; prev="$a"; done';
   for (const [label, npm, node, built] of [
     ["builder succeeds", 0, 0, true],
@@ -100,14 +102,22 @@ test("W1-T6107: an install or builder failure never fails the nightly and leaves
     ["install fails", 1, 0, false],
   ] as const) {
     const cwd = mkdtempSync(join(tmpdir(), "rmd-t6107-nightly-"));
-    const bin = stubs({ npm: { code: npm }, node: { code: node, body: node === 0 ? writesMap : "printf '{}' > test-impact-map.json" } });
+    const bin = stubs({ npm: { code: npm }, node: { code: node, body: node === 0 ? writesMap : "printf '{}' > test-impact-map.json" },
+      timeout: { code: 0, body: 'shift; exec "$@"' } });
     try {
       const summary = join(cwd, "summary.md");
       const r = bash(body, { cwd, path: [bin.dir], env: { GITHUB_SHA: "abc1234", GITHUB_STEP_SUMMARY: summary } });
       assert.equal(r.status, 0, `${label}: the step never fails the job (${r.stderr})`);
       assert.equal(existsSync(join(cwd, "test-impact-map.json")), built, `${label}: a map exists only after a successful build`);
       assert.match(readFileSync(summary, "utf8"), built ? /built the test impact map for abc1234/ : /impact-map build FAILED/);
-      if (npm !== 0) assert.equal(bin.log("node"), "", "no build runs without an install");
+      if (npm !== 0) {
+        assert.equal(bin.log("timeout"), "", "no bounded build starts without an install");
+        assert.equal(bin.log("node"), "", "no build runs without an install");
+      } else {
+        assert.match(bin.log("timeout"), new RegExp(`^${bound[1]} node --import tsx scripts/coverage-merge-ratchet\\.mjs --impact-map test-impact-map\\.json`),
+          "the builder is reached through the workflow's unchanged timeout argv on every host");
+        assert.match(bin.log("node"), /^--import tsx scripts\/coverage-merge-ratchet\.mjs --impact-map test-impact-map\.json/);
+      }
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(bin.dir, { recursive: true, force: true });
