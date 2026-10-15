@@ -5,7 +5,9 @@
   type: recon
   verify: auto
   risk: low
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=17f6fb7117c1f44f
   attempts: 0
   files:
     - MASTER-PLAN.md
