@@ -1,0 +1,92 @@
+- id: W1-T9560
+  title: "THE NIGHTLY SNAPSHOT EXPIRY CAN DIE OF SIGPIPE — deploy/host-update.sh feeds `printf | head -n <excess> | while read` under `set -euo pipefail`, bash writes that list one line per write(), and when head exits before printf's last lines the rung exits 141 (#11702 test-slow-shard, 2026-10-14)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # one concern, the snapshot-expiry pipeline; high for blast radius: the nightly rung that deletes state backups on the production host
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: #11702 (W1-T9000) red on test-slow-shard (1/2), 'with no RMD_STATE_BACKUP_KEEP the nightly rung keeps the newest 2 snapshots', 141 !== 0"
+  plan_refs: [W1-T3677, W1-T5545, W1-T6406]
+  files:
+    - deploy/host-update.sh
+    - test/the-state-snapshot-actually-runs-on-this-host.test.ts
+  status: queued
+  priority: 1.2  # a nondeterministic red on an unrelated PR's required check; the same race can abort the production nightly before its reclaim and off-host copy
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14: #11702 (W1-T9000, a learnings task, head 65e884d2e) went red on `test-slow-shard (1/2)`.
+    The fix.dispatch row's excerpt reads "not ok 2936 - with no RMD_STATE_BACKUP_KEEP the nightly rung keeps the
+    newest 2 snapshots ... Expected values to be strictly equal: 141 !== 0". That is the exit status of
+    deploy/host-update.sh, which the test runs for real with docker stubbed on PATH. The sweep's
+    `sweep.base_reproduction` rows at 20:48:40Z, 20:58:26Z and 21:03:44Z record the same file passing at main
+    (verdict clear), and it passes locally. The PR's diff (learnings/ci.yaml, learnings/index.json, a golden-verdict
+    fixture and test/golden-verdicts.test.ts) touches neither the script nor the test.
+    THE MECHANISM, read on origin/main 47bf1df1e (symbols, not lines). In deploy/host-update.sh's `RECLAIM_ONLY`
+    snapshot section (3a), after a verified new snapshot:
+        snap_all="$(list_snapshots "${snap_backups}")"
+        ...
+        printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do ... done
+    The script runs under `set -euo pipefail` (top of file). `head -n N` exits as soon as it has printed N lines.
+    Every line printf writes after that gets EPIPE, and the forked printf dies of SIGPIPE (status 141). pipefail
+    makes 141 the pipeline's status, and `set -e` then ends the whole rung with 141. In the failing case 4 snapshots
+    were seeded and the rung wrote a fifth, so `snap_excess` was 3 and 2 lines were still unwritten when head could exit.
+    WHY IT IS A RACE, MEASURED: on the Azure host, with bash 5.2.21 as on the ubuntu runner, one
+    `strace -f -e trace=write` of `bash -c 'printf "%s\n" "$1" | head -n 3'` over five snapshot names shows FIVE
+    separate 38-byte write(1, ...) calls from the printf child. bash line-buffers its stdout, so a list is never
+    one atomic write. head reads three lines, and if it is scheduled between printf's third and fourth write,
+    printf is killed. 2,000 local runs on the Mac (bash 3.2) never hit it, and the positive control
+    `yes | head -n 1` returned 141. So the failure needs a loaded runner. That matches one red on a shard
+    that runs the file beside hundreds of others.
+    SAME CLASS, NOT ON THIS PATH'S EXIT: the off-host expiry (section 3b, `offhost_disk_snapshot` retention) reads
+    `done <<<"$(printf '%s\n' "${all}" | head -n "${excess}")"`. A command substitution in a here-string discards its
+    status, so it cannot end the rung, but its printf can still die of SIGPIPE. The `find ... | head -1` in the
+    published-archive check sits in `$(...)` inside `[ -z ]`, so its status is discarded too.
+    PRODUCTION EXPOSURE: the host crontab runs `deploy/host-update.sh --reclaim-only` at 04:17 daily from
+    /home/craigoleyagent/rmd-state2/remudero with RMD_STATE_OFFHOST set. Its reclaim.log shows one expiry per root
+    per night (`expired state-backup.2026-10-12T04-20-05-508Z (keeping the newest 2)`), so excess is 1 with 2 lines
+    unread. That is the same race, and a 141 there would end the rung before the docker reclaim and the off-host
+    copy. No 141 appears in the last 2 MB of reclaim.log.
+    NOT A BAKED PATH: deploy/host-update.sh is in neither `BAKED_PATHS` (src/lib/image-drift.ts) nor acr-build.yml's
+    `paths:` filter. deploy/Dockerfile only cites it by REQ number. The host runs it from the state2 managed checkout
+    through cron. So per doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md it ships when that checkout
+    fast-forwards, not through an image rebuild and recycle. Confirm on the host that the checkout's
+    `git log -1 -- deploy/host-update.sh` carries the fix before calling it shipped.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main for SIGPIPE, "exit 141", pipefail and snap_excess, and
+    found none. W1-T3677 and W1-T5545 (merged) built this rung and its tests. W1-T6406's flake-incident gardener
+    files flakes from `test.flake_retry` rows, and the host ledger holds 155 of those rows for 2026-10-13..14 and
+    none for this file. Swept the added lines of 49 open PR heads that touch plan/tasks.d, deploy/host-update.sh or
+    src/lib/fix-outcome.ts, and found nothing on this subject (control: the same sweep read 493 added lines on
+    plan-file-1792012587813). Related but different: W1-T9450 (ci-learning companions), W1-T9533 (base-red flow
+    blocker), W1-T9250 (operator plan PR waiting on a red main).
+  design: |
+    Remove the early-exit reader from the snapshot expiry so no producer can outlive its consumer. Do not swallow 141.
+    1. In section 3a's retention, iterate `snap_all` with no pipe. Read it with a here-string loop that counts up to
+       `snap_excess` (`i=0; while IFS= read -r old_snap; do i=$((i+1)); [ "${i}" -le "${snap_excess}" ] || break;
+       ...; done <<<"${snap_all}"`), or use any reader that consumes its whole input. Keep the existing guards:
+       never the snapshot just written, never a non-snapshot directory, and the `expired ... (keeping the newest N)`
+       line.
+    2. Give the off-host expiry in 3b the same shape, so its printf can never be killed mid-list. Its status is
+       already discarded, so this is consistency, not a behaviour change.
+    3. Do not add `|| true`, `set +o pipefail` or a 141 exemption. Each of those hides the next real failure of the
+       same pipeline.
+    TEST, in test/the-state-snapshot-actually-runs-on-this-host.test.ts (it already stubs docker on PATH and runs the
+    real script). Make the race deterministic with a `head` shim on the stub PATH that prints its first input line
+    and exits without reading further. Seed at least 2,000 snapshot directories, so the list (about 38 bytes a name)
+    exceeds a 64 KiB pipe buffer: the producer is then still blocked writing when the shim exits, so at base the rung
+    exits 141 every time. MEASURED before filing: the same pipeline in a synthetic bash script with that shim and
+    2,000 names exited 141 in 10 of 10 runs, and the here-string loop exited 0 in 10 of 10. Assert the rung exits 0
+    and the newest snapshots survive. Plain `mkdirSync` directories
+    with valid `state-backup.<ISO>` names are enough for `list_snapshots`. The existing 13 tests must stay green.
+  acceptance:
+    - claim: "the nightly rung's snapshot expiry survives a reader that stops early, exiting 0 rather than 141"
+      proof: "unit test: W1-T9560: the snapshot expiry survives a head that stops reading after one line"
+    - claim: "the expiry test exists under its own title in the state-snapshot suite"
+      proof: 'grep: W1-T9560: the snapshot expiry survives a head that stops reading after one line in test/the-state-snapshot-actually-runs-on-this-host.test.ts'
+  falsifier: |
+    Restore `printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while ...` from origin/main. The new test's head
+    shim exits after one line while printf is still blocked on a full pipe, so printf takes SIGPIPE, pipefail returns
+    141, set -e ends the rung, and the test reads status 141. Dropping the shim, or seeding fewer names than a pipe
+    buffer holds, turns the test back into the race it replaces. Keep both.

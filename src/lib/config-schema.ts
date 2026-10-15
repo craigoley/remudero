@@ -394,6 +394,7 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
+  envEntry("RMD_DEPENDENCY_SEED_ROOT", "Account-owned dependency generation store on the checkout filesystem. Existing installs are preserved and reference-aware reclamation has a six-hour minimum.", ["src/lib/dependency-seeds.ts"]),
   envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
   envEntry("RMD_HEAVY_READY_DEADLINE_SERVICE", "Default OFF. Exact 1 separately enables the independent READY deadline worker at natural startup, with an explicit private READY directory. Unavailable service refuses only NEW builds; no eval dispatch or runtime activation authority.", ["src/lib/heavy-ready-startup.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
@@ -432,6 +433,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts"]),
   envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),

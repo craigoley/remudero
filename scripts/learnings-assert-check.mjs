@@ -29,8 +29,9 @@
 // the persisted `lifecycle` field, so prompt rendering stays a pure, fast, non-shelling lookup.
 // This script is the ONLY place a learnings entry's shell command runs.
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { learningsSourceFiles } from "./lib/learnings-files.mjs";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -146,12 +147,10 @@ export function restoreEntryInText(text, id) {
  * use; a fixture dir in tests).
  */
 export function planMutations(dir, assertionCwd) {
-  const filenames = readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml"))
-    .sort();
+  const sources = learningsSourceFiles(dir);
   const results = [];
   const mutations = [];
-  for (const filename of filenames) {
+  for (const { filename } of sources) {
     const path = join(dir, filename);
     const entries = loadShardEntries(path);
     for (const entry of entries) {

@@ -1,0 +1,70 @@
+- id: W1-T9544
+  title: "THE CI JUDGE'S FLOOR READS ITS AFFECTED SUITES OFF THE DAEMON LOOP — productionCiJudgePorts' default `floor` calls the synchronous readAffectedSuitesInput, whose diff-class listing is a spawnSync node child, so every PR the judge reads freezes core's loop: 122.7 s attributed in 6 h on 2026-10-14, one block 27.9 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the transport of the CI judge's floor and suite-id reads; they run on the daemon loop for every judged PR
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, loop-block follow-up to W1-T9527); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T7744, W1-T5689, W1-T7745, W1-T9361, W1-T9545, W1-T9549, W1-T9550, W1-T9552, W1-T9554, W1-T9556]
+  files: [src/lib/ci-escalation-judge.ts, test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
+  status: queued
+  priority: 1  # P1: the largest attributed synchronous caller on core's loop in the measured window, and the longest single block
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; the 48 `daemon.alive` rows of
+    13:46-21:14Z streamed to ~/Remudero-notes/sync-spawn-filing/alive.ndjson, census in census.txt there). Over the 38
+    rows of 15:14-21:14Z (five daemon pids), `loop_delay_max_ms` was 20 s or more in 33 rows and 60 s or more in 6
+    (max 69.4 s), while `loop_delay_p99_ms` had a median of 153 ms. `sync_spawn_ms` summed 2,846 s; the top-3
+    `sync_spawn_top` entries per row name 449 s of it. By caller, the largest is
+    `listing (src/lib/affected-suites.ts:756)`, a spawnSync of node: 8 entries, 122.7 s, worst 27.9 s (the 21:14:26Z
+    row of pid 1306071 holds 27.9 s and 8.6 s of it, in an interval whose `sync_spawn_ms` is 276,660).
+    WHO CALLS IT, READ on origin/main c5e0bb4fc (symbols, not lines):
+      - `listing` is the closure in `readAffectedListings` (src/lib/affected-suites.ts). Its only caller is the
+        synchronous `readAffectedSuitesInput`, which also lists tracked files through the sync `hostWorktreeGit`.
+      - In the daemon process the one caller of `readAffectedSuitesInput` is `productionCiJudgePorts`
+        (src/lib/ci-escalation-judge.ts): `floor` defaults to
+        `affectedSelectionOrFull(changed, () => readAffectedSuitesInput(opts.repoRoot, changed))`, and `suiteIds`
+        defaults to a sync `hostWorktreeGit(... ls-files -- test)`. `judgeCiEscalation` is async and calls
+        `ports.floor(changed)` and `ports.suiteIds()` once per due PR. The daemon wires it in `daemonCommand`
+        (src/run-task.ts) as `singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({...})))`.
+        The other callers are a garden child (selector-shadow), the CLI preflight and coverage modes, none of them on
+        the daemon loop.
+      - Correlated live: the core ledger's `ci_judge.judged` rows for PRs 11796, 11797 and 11798 at 21:11:51-21:12:58Z
+        fall in the interval whose row carries the 27.9 s and 8.6 s listings.
+      - The awaited siblings exist and are unused here: `readAffectedSuitesInputAsync` and
+        `affectedSelectionOrFullAsync` (W1-T7744), and `hostWorktreeGitAsync`.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main c5e0bb4fc and all 397 origin heads (2026-10-14 21:35Z) for
+    readAffectedSuitesInput, readAffectedListings, "affected-suites listing", productionCiJudgePorts and "ci judge
+    floor". Control: main reads 4 shards (W1-T6136, W1-T7744, W1-T7809 merged; W1-T9483 queued, the push coverage
+    precheck); no head reads more than main. W1-T7744 converted the build lane's read only. W1-T9085 and W1-T9114 move
+    runs and reviews into children, not the CI judge.
+  design: |
+    No new bound: the same children, the same listing, the same FULL-run answer on a failed read.
+    1. `CiJudgePorts.floor` returns `AffectedSelection | Promise<AffectedSelection>` and `suiteIds` returns
+       `readonly string[] | Promise<readonly string[]>`; `judgeCiEscalation` awaits both.
+    2. `productionCiJudgePorts`' defaults await: `floor` is
+       `affectedSelectionOrFullAsync(changed, () => readAffectedSuitesInputAsync(opts.repoRoot, changed))`, and
+       `suiteIds` reads `ls-files -- test` through `hostWorktreeGitAsync`. A rejected read is the same named FULL run
+       the sync form returns today.
+    3. The `productionCiJudgePorts` row of SYNC_SPAWN_LOOP_BASELINE
+       (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) is lowered or deleted to match its new count in
+       the same PR, as the census requires.
+    Tests go in test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts, with `test(` titles verbatim as in the
+    proofs below, over a temp git repo and the `syncBuiltinESMExports` trap `startReadPlaneTelemetry` uses.
+  acceptance:
+    - claim: "the CI judge's default floor and suite-id reads make no synchronous spawn"
+      proof: 'grep: test("W1-T9544: the CI judge default floor and suite ids make no synchronous spawn" in test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts'
+    - claim: "a slow floor read does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9544: a slow floor read does not delay a concurrent timer" in test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts'
+    - claim: "a failed floor read is still a FULL run that names its cause"
+      proof: 'grep: test("W1-T9544: a failed floor read is a FULL run naming its cause" in test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts'
+    - claim: "the daemon's CI judge ports default to the awaited affected-suites reader"
+      proof: 'grep: readAffectedSuitesInputAsync in src/lib/ci-escalation-judge.ts'
+  falsifier: |
+    Keep the sync default: with execFileSync, spawnSync and execSync trapped to throw, the first test's floor comes back
+    a FULL run naming the trap. Back the floor with a real child that sleeps about a second and call it synchronously:
+    the second test's concurrent setInterval records no tick until the read returns.

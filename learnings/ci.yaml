@@ -172,6 +172,29 @@
   src: "ci-learning:9979:ci-shard (7/8)"
   cited: "2026-10-09"
 
+- id: proof-discrimination-refusal-repair-lane
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", "test/**", src/lib/proof-grammar.ts]
+  error_signatures: ["proof-discrimination", executed_stale]
+  fact: >-
+    When proof-discrimination refuses a PR, inspect its gate output and make each proof fail at the
+    merge base while passing on the changed head; a test added by the PR may also be copied into the
+    base proof worktree, so prove the changed behavior with a test of the modified surface. For
+    dispatcher or task-authoring changes, update the prompt or criteria writer in the lane that
+    produced the inert or stale proof, then verify with the gate's base comparison before pushing.
+  evidence: >-
+    The proof-discrimination gate refused PR #11139 and the recorded repair changed its broad diff,
+    which does not establish one shared cause. PR #11201's W1-T8921 record documents two
+    executed_stale proofs: the base proof worktree copied the added test, making both proofs pass at
+    base; the repair repointed them at changed behavior that differed between head and base.
+    Separate main-repair and alert-fix records W1-T8572 and W1-T8625 trace inert prose proofs to
+    dispatcher prompts that omitted the required proof dialect. Use the refusal's observed failure
+    and repair the proof-producing lane; the PR list alone does not establish that all refusals had
+    the same cause.
+  src: "ci-learning:11139:proof-discrimination"
+  cited: "2026-10-14"
+
 - id: test-slow-shard-single-suite-at-a-time
   subsystem: ci
   lifecycle: active

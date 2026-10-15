@@ -42,6 +42,10 @@ import { reapableTmpPrefix } from "./reapable-prefix.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
 
+// Fixtures must not populate the operator's durable dependency store because their HOME is real.
+// Explicit fixture roots remain supported; tests can set their own override after setup.
+process.env.RMD_DEPENDENCY_SEED_ROOT ??= "";
+
 if (isMainThread && runsTestFilesInThisProcess()) {
   const missing: string[] = [];
   if (process.env.GH_TOKEN !== LIVE_WRITE_SENTINEL_TOKEN) missing.push("GH_TOKEN sentinel");
@@ -126,7 +130,7 @@ if (isMainThread) {
 
 // W1-T6084: record the non-code files this test file reads, when main's full run asks for it
 // (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.
-installReadMapFromEnv();
+await installReadMapFromEnv();
 
 // Coverage runs execute each test file in a separate instrumented process. Those fixture reads
 // never leave the test harness, so making every child wait on the production cross-process gap

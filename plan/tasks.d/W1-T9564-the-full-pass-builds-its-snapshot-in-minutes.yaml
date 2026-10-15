@@ -1,0 +1,84 @@
+- id: W1-T9564
+  title: "THE FULL PASS BUILDS ITS SNAPSHOT IN MINUTES, NOT TWENTY, AND DATES A PENDING AGE BY THE CLOCK AT THE ACT — on 2026-10-14 a board-wide pass spent 20.8-23.1 min between its start and its `runSweep` walk, which took 3.0-10.6 min, so its rows read `snapshot_age_ms` up to 1,423,877 and a re-read head read `checks pending -15m`"
+  repo: remudero
+  depends_on: [W1-T7734, W1-T4054]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — how long the full pass takes to read the board before it acts, and which clock dates its ages
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: review-throughput diagnosis (\"figure out why reviews aren't posting efficiently\"); operator approved this filing 2026-10-14. Standing rulings: no hard fixed thresholds, measure before tuning"
+  plan_refs: [W1-T100, W1-T7734, W1-T4054, W1-T5761, W1-T5762, W1-T7747, W1-T9552, W1-T9544, W1-T9554, W1-T9085, W1-T9114, W1-T9390, W1-T9558, W1-T9563]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/the-full-pass-builds-its-snapshot-in-minutes.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 from the core ledger (archive ledger.2026-10-14T22-02-56-381Z and the live file, read only,
+    niced, streamed to the Mac). Pass A is core pid 1306071's retrigger at 21:14:26Z; pass B is its retrigger at 21:40:24Z.
+    - Pass A, by the rows that mark each stage (no row marks every boundary, so each span is a bound):
+      21:14:26.351 `tick_read.stale_refused` (consumer full_sweep, generation 5, age 727,722 ms against 300,000), so the
+      pass took its own read, stamped with its request time (`servedTickRead`, src/run-task.ts).
+      21:14:26 to 21:27:08, 12.7 min: that own read, escalation-triage evidence refresh and the main-health rung. The next
+      marker is the first `escalation_answer.ignored` row carrying this pass's `pass_id`.
+      21:27:08 to 21:28:55, 1.8 min: `readEscalationAnswers`, then `sweep.post_fix_reverification.summary` (total 26).
+      21:28:57 to 21:28:58: three `sweep.merge_probe` rows.
+      21:28:58 to 21:35:12, 6.2 min: the stale-gate, behind-main and credit-candidate reads, then `runSweep`'s own
+      preamble up to its `sweep.pass` row (enumerated 26).
+      21:35:12 to 21:38:10, 3.0 min: the per-PR walk and `sweep.summary`.
+    - Pass B: retriggered 21:40:24Z, `sweep.pass` (enumerated 30) at 22:03:30Z after 23.1 min, `sweep.summary` at 22:14:06Z
+      after a 10.6 min walk.
+    - Not a loop freeze: pid 1306071 wrote no `daemon.loop_lag` row from 21:14:29 to 21:36:49, but 79 light-pass
+      `sweep.pass` rows and 38 `github.wake.check_settled` rows in that span. W1-T9554 records that lag rows under-report,
+      so this is a lower bound on blocking, and the first build step is to time each stage.
+    - `snapshot_age_ms` on pass A's 26 `sweep.disposed` rows ran from 1,247,159 to 1,423,877 (the own read's request
+      time is the base). Only re-read heads were fresh (6 ms, 95,943 ms).
+    - Negative pending ages: 6 `sweep.disposed` rows in the live file (22:02-23:05Z) and 1 in the 19:38Z archive read
+      `checks pending -6m` to `-15m`. All 6 in the live file are `rederived: true` with `snapshot_age_ms` 5-16. Example:
+      #11795 at 22:14:03Z, `checks pending -15m (< 60m ceiling)`. `pendingAgeMinutes` (src/lib/sweep.ts) subtracts from
+      the `now` that `runSweep` took when it was entered, but a W1-T7734 re-read brings a `checksPendingSince` stamped
+      after that `now`, when the walk reaches it minutes later.
+    - Effect: the full-pass interval p50 went from 7.7 min (10-13 00-12Z) to 26.6 min (10-14 12-24Z). Each disposition the
+      light pass defers to the full pass waits that long: blocked-fixable, conflicted, discriminate-only, dep-review and
+      refused-escalate.
+    RELATED, NOT OVERLAPPING:
+    - W1-T7747 moves the sweep effects' `gh` calls off the loop, and W1-T9552 moves readFleetState's git and gh off it.
+      W1-T9544 to W1-T9556 (#11818) remove other synchronous spawns. None of them times or shortens the pre-walk stages.
+      If the stage timers show readFleetState's 29.9 s inside `runSweep`'s preamble, W1-T9552 owns that part.
+    - W1-T9085 and W1-T9114 move build runs, reviews and detached actions into run children. They do not touch the read.
+    - W1-T9563 learns the full pass's wall-clock bound from settled passes. A shorter build shortens what it learns.
+    - W1-T100 also declares src/lib/sweep.ts and src/run-task.ts as the sweep's home. This task changes only how the full
+      pass reads the board before its walk and which clock dates a re-read PR's ages.
+  design: |
+    1. Time every stage first. One `sweep.full_prelude` row per full pass names each stage's `elapsed_ms`: the tick read
+       (with `source: served|own_read`), escalation-triage evidence, main health, escalation answers, post-fix
+       reverification, stale-gate workflows, behind-main, merge probes, credit candidates, and `runSweep`'s preamble up to
+       `sweep.pass`. Deploy it and read it before choosing the cut.
+    2. Cut the largest measured stages, in this order of preference:
+       (a) run the independent stages concurrently: the own read beside triage evidence, main health and escalation
+           answers;
+       (b) read per-PR facts in parallel under the existing `GhCallPacer`, never past it;
+       (c) incremental snapshot: re-read only PRs whose `updated_at` or head moved since the last full pass, and reuse the
+           warm board gateway's rows and the light pass's fresh per-PR observations for the rest. Never serve a whole
+           generation older than `TICK_READ_MAX_AGE_MS` (W1-T5761/W1-T5762), which disposed merged PRs.
+       No new fixed bound: any wait added here is learned from the stage timers.
+    3. Date ages by the clock at the act. `pendingAgeMinutes` and every age `runSweep` derives for a PR re-read in the
+       pass use the pass clock at that PR's disposition (`passClockMs`), or the re-read's own time, never the pass-entry
+       `now`. A pending age can never be negative.
+    4. Acceptance reads the effect. After deploy, the median full pass's start-to-`sweep.pass` span is a small fraction of
+       today's 20.8-23.1 min, and no `sweep.disposed` row reads a negative pending age.
+  acceptance:
+    - claim: "a full pass writes one sweep.full_prelude row with each stage's elapsed_ms, independent prelude stages run concurrently, and a head re-read in the pass dates its pending age by the clock at its disposition, never negative"
+      proof: "unit test: test/the-full-pass-builds-its-snapshot-in-minutes.test.ts"
+    - claim: "the suite names the non-negative pending age in a test title"
+      proof: "grep: W1-T9564: a head re-read in the pass dates its pending age by the clock at the act in test/the-full-pass-builds-its-snapshot-in-minutes.test.ts"
+    - claim: "the suite names the stage timer in a test title"
+      proof: "grep: W1-T9564: a full pass names how long each stage before its walk took in test/the-full-pass-builds-its-snapshot-in-minutes.test.ts"
+    - claim: "the full pass writes its stage timings"
+      proof: "grep: sweep\\.full_prelude in src/run-task.ts"
+  falsifier: |
+    Give `runSweep` a PR whose head moved under the pass, injected so the re-read reports `checksPendingSince` 15 min after
+    the pass-entry `now`, and advance the pass clock 16 min before its disposition. At origin/main the row reads
+    `checks pending -15m`. With the change it reads `checks pending 1m`. A full pass whose prelude stages each take a
+    fixed injected time writes no `sweep.full_prelude` at origin/main and one row naming every stage with the change.

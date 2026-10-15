@@ -148,7 +148,7 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
   ];
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
@@ -175,7 +175,7 @@ test("W1-T7212: the prompt-render suite is selected for each recorded miss edge"
   ];
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
@@ -197,7 +197,7 @@ test("W1-T7475: the red-branch strike suite is selected for each recorded miss e
   const edges = ["src/lib/sweep.ts", "test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts"];
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
@@ -220,7 +220,7 @@ test("W1-T4894: the wall-clock bound suite is selected for each recorded miss ed
   ];
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
@@ -241,7 +241,7 @@ test("W1-T7763: the refusal-amendment suite is selected for each recorded miss e
   ];
   const files = new Map([...Object.entries(TREE), [suite, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
@@ -262,7 +262,7 @@ test("W1-T6751: the precheck census is selected for each recorded miss edge", ()
   ];
   const files = new Map([...Object.entries(TREE), [census, ""]]);
   const readMap: ReadMapInput = {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   };
   for (const changed of edges) {
