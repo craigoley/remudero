@@ -11,6 +11,7 @@
 // real git. A child the loop waits on synchronously is never acknowledged — the timer cannot run until it has exited.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -242,4 +243,21 @@ test("W1-T9638: a checkout outside any repository still lands, through the await
   assert.deepEqual(f.landedFiles(), EXPECTED_FILES, "the unscoped landing branch carries every record");
   assert.equal(syncResult.landed, true, JSON.stringify(syncResult));
   assert.equal(syncResult.pushed, false, "the second pass finds its tree already on the branch");
+});
+
+test("W1-T9638: a content landing that loses its push lease re-derives its tree through the yielded rebuild", () => {
+  const f = fixture("content-lease");
+  let pushes = 0;
+  const git = (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string => {
+    if (args[0] === "push" && ++pushes === 1) throw new Error(`! [rejected] refs/heads/${LANDING_BRANCH} (stale info)`);
+    return execFileSync("git", ["-C", f.clone.dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: opts?.env ?? process.env });
+  };
+  const result = withLiveWritesAllowed(() =>
+    landFeedbackStatusContent(f.clone.dir, `${FB}/fb-flip.yaml`, "id: fb-flip\nstatus: new\nraw: flip\n", { gh: f.gh, git, planPrPreflight: () => GREEN }),
+  );
+  assert.equal(pushes, 2, "the lost lease was retried once");
+  assert.equal(result.landed, true, JSON.stringify(result));
+  assert.deepEqual(result.files, [`${FB}/fb-flip.yaml`]);
+  assert.ok(result.leaseMoved, "the retry names the lease it lost");
+  assert.ok(f.landedFiles().includes(`${FB}/fb-flip.yaml`) && f.landedFiles().includes(`${FB}/fb-pend-0.yaml`), "the rebuilt tree carries the branch's records too");
 });
