@@ -338,3 +338,61 @@ test("W1-T8915: reservation CLI never reports held after local anchor failure", 
   assert.ok(id, `the healthy run reports a held id:\n${held.out}\n${held.err}`);
   assert.match(origin.git("rev-parse", `refs/rmd-id/${id}`), /^[0-9a-f]{40}$/, "and origin really holds it");
 });
+
+// ── W1-T9683: --count N, through the command — ONE open-PR read for the whole block ─────────────
+
+async function countRun(rest: string[], reserver: RemoteRefReserver): Promise<{ code: number; out: string; err: string; openPrReads: number }> {
+  let openPrReads = 0;
+  const cap = capture();
+  let code: number;
+  try {
+    code = await nextTaskIdCommand(rest, {}, { reserver, holderOf: () => "fleet", openPrTexts: () => (openPrReads++, []) });
+  } finally {
+    cap.restore();
+  }
+  return { code, out: cap.out.join("\n"), err: cap.err.join("\n"), openPrReads };
+}
+
+test("W1-T9683: next-task-id --count 3 reserves three ids with one open-PR read", async () => {
+  const first = /RESERVED (W1-T\d+)/.exec((await countRun([], stubReserver(new Set()))).out)?.[1] ?? "";
+  assert.ok(first, "control: an uncontested single mint names the first id");
+  const n = Number(first.slice("W1-T".length));
+  const contested = `W1-T${n + 1}`;
+  const reserver = stubReserver(new Set([contested]));
+  const r = await countRun(["--count", "3", "--branch", "plan-file-w9683"], reserver);
+  assert.equal(r.code, 0, r.err);
+  const ids = [...r.out.matchAll(/^RESERVED (W1-T\d+) on origin/gm)].map((m) => m[1]);
+  assert.deepEqual(ids, [first, `W1-T${n + 2}`, `W1-T${n + 3}`], "three ids held, the contested one skipped");
+  assert.equal(r.openPrReads, 1, "ONE open-PR read for all three");
+  assert.deepEqual(reserver.tried, [first, contested, `W1-T${n + 2}`, `W1-T${n + 3}`], "one push per candidate");
+  assert.match(r.out, new RegExp(`^\\(${contested}: HELD BY ANOTHER CALLER`, "m"), "the contested id is reported");
+  assert.ok(r.out.indexOf(contested) < r.out.indexOf(`RESERVED W1-T${n + 2}`), "beside the id it displaced");
+  assert.match(r.out, new RegExp(`^HELD 3 of 3: ${ids.join(" ")}$`, "m"), "the final line lists every id held");
+  // POSITIVE CONTROL: without --count, exactly one id and no HELD line — today's output.
+  const one = await countRun([], stubReserver(new Set()));
+  assert.equal([...one.out.matchAll(/^RESERVED /gm)].length, 1);
+  assert.doesNotMatch(one.out, /^HELD /m);
+});
+
+test("W1-T9683: next-task-id --count is refused beside --offline, --no-reserve, --audit and --prefix", async () => {
+  for (const flags of [["--offline"], ["--no-reserve"], ["--audit"], ["--prefix", "CONSOLE", "--repo", "o/r"], ["0"]]) {
+    const reserver = stubReserver(new Set());
+    const r = await countRun(flags[0] === "0" ? ["--count", "0"] : ["--count", "2", ...flags], reserver);
+    assert.equal(r.code, 2, `refused: ${flags.join(" ")}`);
+    assert.match(r.err, flags[0] === "0" ? /--count needs a positive whole number/ : new RegExp(`--count and ${flags[0]} are contradictory`));
+    assert.deepEqual(reserver.tried, [], "and nothing was pushed");
+  }
+});
+
+test("W1-T9683: a partial next-task-id --count prints only the ids it holds and exits 2", async () => {
+  let pushes = 0;
+  const reserver = stubReserver(new Set(), () => ++pushes === 3);
+  const r = await countRun(["--count", "3"], reserver);
+  assert.equal(r.code, 2, "a short block exits non-zero");
+  const ids = [...r.out.matchAll(/^RESERVED (W1-T\d+) on origin/gm)].map((m) => m[1]);
+  assert.equal(ids.length, 2, r.out);
+  assert.equal(r.out.includes(reserver.tried[2]), false, "the unheld id never reaches stdout");
+  assert.match(r.out, new RegExp(`^HELD 2 of 3: ${ids.join(" ")}$`, "m"));
+  assert.match(r.err, /PARTIAL — holds 2 of 3; could not reserve the other 1/);
+  assert.match(r.err, /REFUSED — origin is unreachable/, "fail-closed on the id it could not reach");
+});
