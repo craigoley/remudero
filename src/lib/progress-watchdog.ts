@@ -15,6 +15,8 @@ import { fixedClock } from "./clock.js";
 
 export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
+/** W1-T9702: where the open-PR count came from. A light pass writes one `sweep.pass` per PR, so only a full one counts. */
+export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_window";
 
 /** The steps that count as progress. `daemon.*` / `runtime.*` are deliberately absent. */
 export const PROGRESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "review.posted", "verdict.merged"]);
@@ -42,6 +44,7 @@ export interface ProgressWatchdogVerdict {
   /** W1-T6598: the boot that started the current generation, when it is newer than every progress row. */
   generationBootMs?: number | null;
   failedBoots15m: number;
+  openPrCountSource?: OpenPrCountSource;
   reason: string;
 }
 
@@ -50,6 +53,7 @@ export interface ProgressWatchdogInput {
   nowMs: number;
   /** The open-PR count (the newest `sweep.pass` row's `enumerated`), or undefined when unknown. */
   openPrCount: number | undefined;
+  openPrCountSource?: OpenPrCountSource;
 }
 
 function rowMs(row: Record<string, unknown>): number | undefined {
@@ -58,18 +62,30 @@ function rowMs(row: Record<string, unknown>): number | undefined {
   return Number.isNaN(ms) ? undefined : ms;
 }
 
-/** The newest `sweep.pass` row's `enumerated`, or undefined when there is none or it is not a count. */
-export function openPrCountFromRows(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
-  let newestMs = -Infinity;
-  let count: number | undefined;
+/**
+ * W1-T9702: the newest FULL pass's `enumerated`, raised by any newer pass that saw more. With no full row
+ * read (rows written before the surface field), the largest `enumerated` among the rows read.
+ */
+export function openPrCountReadingFromRows(rows: ReadonlyArray<Record<string, unknown>>):
+  { count: number | undefined; source: OpenPrCountSource | undefined } {
+  const passes: Array<{ ms: number; count: number; full: boolean }> = [];
   for (const row of rows) {
-    if (row.step !== "sweep.pass") continue;
-    const ms = rowMs(row);
-    if (ms === undefined || ms < newestMs) continue;
-    newestMs = ms;
-    count = typeof row.enumerated === "number" && Number.isFinite(row.enumerated) && row.enumerated >= 0 ? row.enumerated : undefined;
+    const ms = row.step === "sweep.pass" ? rowMs(row) : undefined;
+    const count = row.enumerated;
+    if (ms === undefined || typeof count !== "number" || !Number.isFinite(count) || count < 0) continue;
+    passes.push({ ms, count, full: row.surface === "full" });
   }
-  return count;
+  if (passes.length === 0) return { count: undefined, source: undefined };
+  const full = passes.filter((pass) => pass.full).reduce<(typeof passes)[number] | undefined>(
+    (newest, pass) => (newest === undefined || pass.ms >= newest.ms ? pass : newest), undefined);
+  if (full === undefined) return { count: Math.max(...passes.map((pass) => pass.count)), source: "max_over_window" };
+  const newer = Math.max(...passes.filter((pass) => pass.ms > full.ms).map((pass) => pass.count));
+  return newer > full.count ? { count: newer, source: "full_pass_raised" } : { count: full.count, source: "full_pass" };
+}
+
+/** The open-PR count {@link openPrCountReadingFromRows} reads, or undefined when unknown. */
+export function openPrCountFromRows(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  return openPrCountReadingFromRows(rows).count;
 }
 
 /** `daemon.paths` boots with no `daemon.boot` under the same run_id: superseded by a later `daemon.paths`, or older than the grace. */
@@ -121,7 +137,7 @@ export function generationBootMsFromRows(
 }
 
 export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWatchdogVerdict {
-  const { rows, nowMs, openPrCount } = input;
+  const { rows, nowMs, openPrCount, openPrCountSource } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
   let newestProgressMs: number | undefined;
   for (const row of rows) {
@@ -133,29 +149,30 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   // A generation's stall is aged from its OWN boot, never from the dead generation's last progress row.
   const generationBootMs = generationBootMsFromRows(rows, nowMs, newestProgressMs);
   const verdict = (state: ProgressWatchdogState, action: ProgressWatchdogAction, reason: string): ProgressWatchdogVerdict =>
-    ({ state, action, progressAgeMs, generationBootMs, failedBoots15m, reason });
+    ({ state, action, progressAgeMs, generationBootMs, failedBoots15m, ...(openPrCountSource ? { openPrCountSource } : {}), reason });
 
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
     return verdict("CRASH_LOOP", "hold-revive", `${failedBoots15m} boots in 15 min logged daemon.paths and never reached daemon.boot`);
   }
   if (rows.length === 0) return verdict("UNKNOWN", "none", "no ledger rows were read");
   if (openPrCount === undefined) return verdict("UNKNOWN", "none", "the open-PR count is unknown (no sweep.pass row with an enumerated count)");
-  if (openPrCount === 0) return verdict("IDLE", "none", "no open PRs, so no progress is owed");
+  const counted = openPrCountSource ? ` (count: ${openPrCountSource})` : "";
+  if (openPrCount === 0) return verdict("IDLE", "none", `no open PRs${counted}, so no progress is owed`);
   if (generationBootMs !== null) {
     // Bounded startup allowance: the existing STALL_* bounds, run from this generation's own boot.
     const bootAgeMs = Math.max(0, nowMs - generationBootMs);
     const said = `this generation booted ${Math.floor(bootAgeMs / 60_000)} min ago and has written no progress row`;
-    if (bootAgeMs > STALL_RECYCLE_AFTER_MS) return verdict("STALLED", "recycle", `${said}, with ${openPrCount} open PR(s)`);
-    if (bootAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said}, with ${openPrCount} open PR(s)`);
+    if (bootAgeMs > STALL_RECYCLE_AFTER_MS) return verdict("STALLED", "recycle", `${said}, with ${openPrCount} open PR(s)${counted}`);
+    if (bootAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said}, with ${openPrCount} open PR(s)${counted}`);
     return verdict("PROGRESSING", "none", `${said} yet; its first pass is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after boot`);
   }
   if (progressAgeMs === null) return verdict("UNKNOWN", "none", "no sweep.pass, review.posted or verdict.merged row was read");
   const minutes = Math.floor(progressAgeMs / 60_000);
   if (progressAgeMs > STALL_RECYCLE_AFTER_MS) {
-    return verdict("STALLED", "recycle", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s); daemon.* rows are not progress`);
+    return verdict("STALLED", "recycle", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
   }
   if (progressAgeMs > STALL_DIAGNOSE_AFTER_MS) {
-    return verdict("STALLED", "capture-diagnostics", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s); daemon.* rows are not progress`);
+    return verdict("STALLED", "capture-diagnostics", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
   }
   return verdict("PROGRESSING", "none", `newest progress row is ${minutes} min old`);
 }
