@@ -1718,6 +1718,7 @@ import {
   projectMergedTaskCandidates,
   actionableGateFailuresFromReasons,
   armOutcomeArmed,
+  dispatchFixSpent,
   checkCostGovernor,
   checkMemoryGovernor,
   installedSlackReclaim,
@@ -48971,6 +48972,13 @@ export interface FixDeps {
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
+function fixDispatchResult(result: Awaited<ReturnType<FixDeps["dispatchFix"]>>, reason: string): { outcome: FixOutcome; reason: string } {
+  if (dispatchFixSpent(result)) return { outcome: "fixed", reason };
+  return { outcome: "refused", reason: typeof result === "object"
+    ? `fix dispatch declined at the checkout claim (${result.ownerRecoveryReason})`
+    : "fix dispatch was not accepted; no worker dispatched" };
+}
+
 /**
  * The PURE decision core of `rmd fix <pr-number>` (W1-T95) — injectable so the
  * routing is a unit fixture, independent of any live `gh`/spawn call. Given the
@@ -49046,7 +49054,7 @@ export async function routeFix(
     // `blocked-fixable` row (sweep.ts) already required to route a gate failure here at all
     // (see that row's own W1-T923 doc) — so the dispatch actually carries the remedy the
     // disposition named, instead of discarding it at this exact boundary.
-    await deps.dispatchFix(
+    const dispatch = await deps.dispatchFix(
       pr,
       { ...(progressDecision ? { progressDecision, progressJudge: deps.fixProgressJudge,
           progressApproach: progressDecision.verdict === "change-approach" ? progressDecision.approach : undefined } : {}),
@@ -49059,15 +49067,15 @@ export async function routeFix(
             instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
           }) },
     );
-    return { outcome: "fixed", reason };
+    return fixDispatchResult(dispatch, reason);
   }
   if (disposition === "conflicted") {
     // DISPOSITION_RULES admitted only an rmd-shaped run branch with captured
     // evidence. The production dispatch implementation repeats the stricter
     // task-specific head check before it writes; this routing seam carries the
     // evidence to that bounded worker and never attempts a textual side-take.
-    await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
-    return { outcome: "fixed", reason };
+    const dispatch = await deps.dispatchFix(pr, { unmetCriteria: [], mergeConflict: pr.mergeConflict });
+    return fixDispatchResult(dispatch, reason);
   }
   if (disposition === "refused-escalate") {
     // Same transport as the full sweep, but never through dispatchFix: a valid worker refusal is
