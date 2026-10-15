@@ -9,7 +9,7 @@ import type { GhAsyncExecutor } from "../src/lib/github-transport.js";
 import { ledgerPathFor } from "../src/lib/ledger-path.js";
 import { mapBoardPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
 import { ShippedReadPending } from "../src/lib/retro.js";
-import { retroShippedGithubGateway, retroShippedGithubGatewayAsync } from "../src/run-task.js";
+import { retroShippedGithubGateway, retroShippedGithubGatewayAsync } from "./helpers/retro-shipped-gateway-seam.js";
 
 const OWNER_REPO = { owner: "retro-fixture", repo: "snapshot" };
 const url = (number: number): string => `https://github.com/retro-fixture/snapshot/pull/${number}`;
