@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
-import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, constants, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { writeAtomic } from "./fs-race-safe.js";
 import type { PeakSample } from "./host-memory-learning.js";
@@ -134,12 +134,29 @@ export interface CalibrationIo {
 
 const defaultIo: CalibrationIo = {
   read: path => {
-    const fd = openSync(path, "r");
-    try { const size = fstatSync(fd).size; if (size > STATE_BYTES_MAX) throw new Error("calibration state too large"); return readFileSync(fd, "utf8"); }
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > STATE_BYTES_MAX) throw new Error("calibration state too large or not regular");
+      const bytes = Buffer.alloc(stat.size + 1); let used = 0;
+      for (;;) { const n = readSync(fd, bytes, used, bytes.length - used, used); if (n === 0) break; used += n; if (used === bytes.length) break; }
+      if (used !== stat.size || fstatSync(fd).size !== stat.size) throw new Error("calibration file changed during read");
+      return bytes.subarray(0, used).toString("utf8");
+    }
     finally { closeSync(fd); }
   },
   write: (path, text) => { mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 }); writeAtomic(path, text, { mode: 0o600, tmpTag: "calibration" }); },
-  publish: (path, text) => { mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 }); writeFileSync(path, text, { flag: "wx", mode: 0o600 }); },
+  publish: (path, text) => {
+    const staging = join(dirname(dirname(path)), "staging");
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); mkdirSync(staging, { recursive: true, mode: 0o700 });
+    const stage = join(staging, randomUUID() + ".json");
+    try {
+      writeFileSync(stage, text, { flag: "wx", mode: 0o600, flush: true });
+      linkSync(stage, path); // Atomic create-only publication: the collector never sees a half-written forecast.
+    } finally {
+      try { unlinkSync(stage); } catch { /* Only this private stage; an interrupted cleanup cannot erase a published forecast. */ }
+    }
+  },
   list: path => readdirSync(path), remove: path => unlinkSync(path),
 };
 
