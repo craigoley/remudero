@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { components } from "../packages/api-client/src/schema.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
@@ -23,6 +24,7 @@ import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, daemonCommand, gardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { declaredBody, SPEC, violations } from "./helpers/openapi-strict.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
@@ -144,6 +146,31 @@ test("gardener memory deferral is not a cancelled or completed process", async (
   assert.equal(row.extra?.passId, entry.passId);
   assert.equal(row.extra?.reason, "memory-budget-shortfall");
   assert.equal(row.extra?.executionMs, null);
+});
+
+test("gardener admission deferral conforms to the published generated service contract", async (t) => {
+  const { createGardenerRuntimeWriter } = await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferral-contract-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const now = Date.now();
+  const clock = clockFromMillisFn(() => now);
+  const reason: components["schemas"]["GardenerRuntimeEntry"]["reason"] = "memory-budget-shortfall";
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "contract-fixture", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  const event = { name: "plan", observedAt: clock.iso(), passId: "held-before-spawn", nextDueAt: clock.iso(),
+    queueMs: null, executionMs: null, exit: null };
+  writer.record({ ...event, phase: "queued", reason: null });
+  writer.record({ ...event, phase: "idle", reason });
+  await writer.flush();
+  const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock }));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.gardens[0].reason, reason);
+  assert.deepEqual(violations(result.body, declaredBody("/v1/gardeners", "get", 200)), [],
+    "the actual gardener route must declare its no-process deferral receipt");
+  assert.ok(violations({ ...result.body.gardens[0], reason: "not-a-runtime-reason" },
+    SPEC.components.schemas.GardenerRuntimeEntry!).some(problem => problem.includes("not in enum")),
+    "adding one known reason must not accept arbitrary reason strings");
 });
 
 test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
