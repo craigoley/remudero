@@ -1,8 +1,13 @@
 import { execFile, execFileSync, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { systemClock, type Clock } from "./clock.js";
+import { loadConfig, type Config } from "./config.js";
+import { auditThisReuse, dropPushGatePass, gateVerdictsDir, harnessRecipe, pushGateKeyDigest, recordPushGatePass, reusablePushGatePass, type PushGateKey } from "./gate-verdict-record.js";
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
 import { daemonOwnedProcess, openLearnedReservation } from "./host-memory-learning.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -595,17 +600,122 @@ function pushFailure(err: unknown): PushFailedError {
 
 const GATE_MAX_BUFFER = 64 * 1024 * 1024;
 
+export const PUSH_GATE_RAN_STEP = "push_gate.ran";
+export const PUSH_GATE_REUSED_STEP = "push_gate.reused";
+export const PUSH_GATE_AUDITED_STEP = "push_gate.audited";
+export const PUSH_GATE_UNRECORDED_STEP = "push_gate.unrecorded";
+
+export type PushGateLog = (step: string, extra: Record<string, unknown>) => void;
+
+export interface PushGateVerdicts {
+  dir: string;
+  log: PushGateLog;
+  recipe: () => string | undefined;
+  audit?: () => boolean;
+  clock?: Clock;
+}
+
+export function defaultPushGateVerdicts(
+  { daemon = daemonOwnedProcess(), config: readConfig = loadConfig }: { daemon?: boolean; config?: () => Pick<Config, "root"> } = {},
+): PushGateVerdicts | undefined {
+  if (!daemon) return undefined;
+  try {
+    const config = readConfig();
+    const ledger = ledgerPathFor(config as Config);
+    return {
+      dir: gateVerdictsDir(join(config.root, "state")),
+      log: (step, extra) => {
+        try {
+          appendLedger(ledger, { run_id: `PUSH-GATE-${process.pid}`, task_id: "HARNESS", step, lane: "harness", ...extra });
+        } catch (error) {
+          process.stderr.write(`push gate: could not ledger ${step}: ${String((error as Error)?.message ?? error).slice(0, 120)}\n`);
+        }
+      },
+      recipe: () => harnessRecipe(dirname(harnessHooksDir())),
+    };
+  } catch (error) {
+    process.stderr.write(`push gate: no verdict store (${String((error as Error)?.message ?? error).slice(0, 120)}); the gate runs\n`);
+    return undefined;
+  }
+}
+
+type PushGateKeyRead = { key: PushGateKey } | { unkeyed: string };
+
+function* pushGateKeySteps(gate: PrePushGate, read: (args: string[]) => string | Promise<string>, recipe: string | undefined): Steps<PushGateKeyRead> {
+  if (recipe === undefined) return { unkeyed: "the harness recipe is unreadable" };
+  const [localRef = "", localSha = "", remoteRef = "", remoteSha = ""] = gate.input.trim().split(" ");
+  try {
+    if (String(yield* step(() => read(["status", "--porcelain", "--untracked-files=all"]))).trim() !== "") return { unkeyed: "the worktree is dirty" };
+    const [tree = "", head = "", base = ""] = String(yield* step(() => read(["rev-parse", "HEAD^{tree}", "HEAD", "origin/main"]))).trim().split("\n");
+    return { key: { tree, head, base, localRef, localSha, remoteRef, remoteSha, recipe } };
+  } catch (error) {
+    return { unkeyed: `the key is unreadable: ${String((error as Error)?.message ?? error).split("\n")[0]!.slice(0, 120)}` };
+  }
+}
+
+function* liveTreesSteps(read: (args: string[]) => string | Promise<string>): Steps<Set<string> | undefined> {
+  try {
+    const heads = String(yield* step(() => read(["worktree", "list", "--porcelain"]))).split("\n")
+      .filter((l) => l.startsWith("HEAD ")).map((l) => `${l.slice(5).trim()}^{tree}`);
+    if (heads.length === 0) return undefined;
+    return new Set(String(yield* step(() => read(["rev-parse", ...heads]))).trim().split("\n"));
+  } catch {
+    return undefined; // an unreadable list drops nothing this time
+  }
+}
+
+type HookOutcome = { refused: false; out: { stdout?: unknown; stderr?: unknown } } | { refused: true; err: unknown };
+
+const keyFields = (key: PushGateKey) => ({ tree: key.tree, head: key.head, base: key.base, recipe: key.recipe, remote_sha: key.remoteSha });
+
+function* pushGateSteps(
+  worktreePath: string, gate: PrePushGate, read: (args: string[]) => string | Promise<string>,
+  runHook: () => HookOutcome | Promise<HookOutcome>, verdicts: PushGateVerdicts | undefined, observedBy: string,
+): Steps<HookOutcome | undefined> {
+  if (verdicts === undefined) return yield* step(runHook);
+  const clock = verdicts.clock ?? systemClock;
+  const keyed = yield* pushGateKeySteps(gate, read, verdicts.recipe());
+  const key = "key" in keyed ? keyed.key : undefined;
+  const fields = { worktree: basename(worktreePath), ...(key ? keyFields(key) : { unkeyed: (keyed as { unkeyed: string }).unkeyed }) };
+  const record = key ? reusablePushGatePass(verdicts.dir, key, worktreePath) : undefined;
+  const audited = record !== undefined && (verdicts.audit ?? (() => auditThisReuse()))();
+  if (record !== undefined && !audited) {
+    verdicts.log(PUSH_GATE_REUSED_STEP, { ...fields, saved_ms: record.duration_ms, record_ts: record.ts, observed_by: record.observed_by, record_digest: pushGateKeyDigest(key!) });
+    return undefined;
+  }
+  const started = clock.now();
+  const outcome = yield* step(runHook);
+  const durationMs = clock.now() - started;
+  verdicts.log(PUSH_GATE_RAN_STEP, { ...fields, result: outcome.refused ? "refused" : "pass", duration_ms: durationMs, observed_by: observedBy });
+  if (audited) {
+    verdicts.log(PUSH_GATE_AUDITED_STEP, { ...fields, agreement: outcome.refused ? "disagree" : "agree", record_ts: record!.ts, duration_ms: durationMs });
+    if (outcome.refused) dropPushGatePass(verdicts.dir, key!);
+  }
+  if (outcome.refused || key === undefined) return outcome;
+  const liveTrees = yield* liveTreesSteps(read);
+  try {
+    recordPushGatePass(verdicts.dir, key, worktreePath, { durationMs, observedBy, liveTrees, ts: clock.iso() });
+  } catch (error) {
+    verdicts.log(PUSH_GATE_UNRECORDED_STEP, { ...fields, reason: String((error as Error)?.message ?? error).slice(0, 160) });
+  }
+  return outcome;
+}
+
 /** The default exec for a run-branch push: the harness's gate, then the push through the leaf. */
-export function worktreePushExec(worktreePath: string): PushExec {
+export function worktreePushExec(worktreePath: string, { verdicts = defaultPushGateVerdicts() }: { verdicts?: PushGateVerdicts } = {}): PushExec {
   return (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
-    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGit(worktreePath, a), pinnedConfigValue));
+    const read = (a: string[]) => hostWorktreeGit(worktreePath, a);
+    const gate = runStepsSync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValue));
     if (gate) {
-      const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
-        cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
-      }));
-      if (opts.stdio !== "ignore") writeThrough(res); // on a pass too: a skipped check says so on stderr
-      if (gateHookRefused(res)) throw gateRefusal(worktreePath, pushArgs, res);
+      const outcome = runStepsSync(pushGateSteps(worktreePath, gate, read, (): HookOutcome => {
+        const res = withGateHome(gate, (env) => spawnSync(gate.hook, gate.args, {
+          cwd: worktreePath, input: gate.input, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER,
+        }));
+        return gateHookRefused(res) ? { refused: true, err: res } : { refused: false, out: res };
+      }, verdicts, "worktreePushExec"));
+      if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out); // on a pass too: a skipped check says so on stderr
+      if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
     try {
       hostWorktreeGit(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
@@ -616,26 +726,29 @@ export function worktreePushExec(worktreePath: string): PushExec {
   };
 }
 
+function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutcome> {
+  return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
+    const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
+      (err, stdout, stderr) => resolveGate(err ? { refused: true, err: Object.assign(err, { stdout, stderr }) } : { refused: false, out: { stdout, stderr } }));
+    child.stdin?.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") resolveGate({ refused: true, err }); });
+    child.stdin?.end(gate.input);
+  }));
+}
+
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
-export function worktreePushExecAsync(worktreePath: string, { prGates = true }: { prGates?: boolean } = {}): PushExecAsync {
+export function worktreePushExecAsync(
+  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts() }: { prGates?: boolean; verdicts?: PushGateVerdicts } = {},
+): PushExecAsync {
   return async (_file, args, opts) => {
     const pushArgs = leafArgs(worktreePath, args);
+    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a);
     const gate = prGates
-      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, (a) => hostWorktreeGitAsync(worktreePath, a), pinnedConfigValueAsync))
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
       : undefined;
     if (gate) {
-      try {
-        const out = await withGateHome(gate, (env) => new Promise<{ stdout: string; stderr: string }>((resolveGate, reject) => {
-          const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
-            (err, stdout, stderr) => (err ? reject(Object.assign(err, { stdout, stderr })) : resolveGate({ stdout, stderr })));
-          child.stdin?.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") reject(err); });
-          child.stdin?.end(gate.input);
-        }));
-        if (opts.stdio !== "ignore") writeThrough(out);
-      } catch (err) {
-        if (opts.stdio !== "ignore") writeThrough(err);
-        throw gateRefusal(worktreePath, pushArgs, err);
-      }
+      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => runHookAsync(worktreePath, gate), verdicts, "worktreePushExecAsync"));
+      if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
+      if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
     try {
       await hostWorktreeGitAsync(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout" });
@@ -644,6 +757,32 @@ export function worktreePushExecAsync(worktreePath: string, { prGates = true }: 
       throw pushFailure(err);
     }
   };
+}
+
+export type PushGateKeyFields = { tree: string; head: string; base: string; recipe: string };
+
+export type PushGateOutcome =
+  | { kind: "pass"; reused: boolean; key?: PushGateKeyFields }
+  | { kind: "refused"; detail: string; key?: PushGateKeyFields }
+  | { kind: "skipped"; reason: string; key?: PushGateKeyFields };
+
+export async function runPushGate(worktreePath: string, { verdicts = defaultPushGateVerdicts() }: { verdicts?: PushGateVerdicts } = {}): Promise<PushGateOutcome> {
+  if (verdicts === undefined) return { kind: "skipped", reason: "no verdict store outside the daemon" };
+  const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a);
+  try {
+    const gate = await runStepsAsync(prePushGateSteps(worktreePath, ["push", "origin", "HEAD"], read, pinnedConfigValueAsync));
+    if (gate === undefined) return { kind: "skipped", reason: "this push runs no gate (hooks off, or the remote already has the head)" };
+    const keyed = await runStepsAsync(pushGateKeySteps(gate, read, verdicts.recipe()));
+    if ("unkeyed" in keyed) return { kind: "skipped", reason: keyed.unkeyed };
+    const key = { tree: keyed.key.tree, head: keyed.key.head, base: keyed.key.base, recipe: keyed.key.recipe };
+    const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => runHookAsync(worktreePath, gate), verdicts, "runPushGate"));
+    if (outcome === undefined) return { kind: "pass", reused: true, key };
+    if (!outcome.refused) return { kind: "pass", reused: false, key };
+    const err = outcome.err as { stderr?: unknown } | null;
+    return { kind: "refused", detail: `${gateFailureDetail(outcome.err)}: ${String(err?.stderr ?? "").trim().split("\n").slice(-20).join("\n")}`.slice(0, 4000), key };
+  } catch (error) { // an unpinnable worktree or unreadable config: skipped here, and the push still runs its own gate
+    return { kind: "skipped", reason: `the push gate could not be asked: ${String((error as Error)?.message ?? error).split("\n")[0]!.slice(0, 160)}` };
+  }
 }
 
 /** Captures stdout from a git plumbing read/write. Injected by tests so the argv and the
