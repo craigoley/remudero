@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { nextTaskIdCommand as runNextTaskIdCommand, nextTaskIdCount } from "../src/run-task.js";
+import { nextTaskIdCommand as runNextTaskIdCommand } from "../src/run-task.js";
 import {
   formatReservationAnchorMessage,
   parseReservationHolderLine,
@@ -101,9 +101,13 @@ test("W1-T9683: --count is refused beside the flags that do not reserve here, an
     assert.equal(r.code, 2, `--count ${bad} is refused`);
     assert.match(r.err, /--count needs a positive whole number/);
   }
-  assert.match(String((nextTaskIdCount(["--count"]) as { error: string }).error), /got nothing/);
-  assert.deepEqual(nextTaskIdCount([]), { count: 1, explicit: false });
-  assert.deepEqual(nextTaskIdCount(["--count", "4", "--reserve"]), { count: 4, explicit: true });
+  const missing = await nextTaskId(["--count"], { reserver: stubReserver(() => "created") });
+  assert.equal(missing.code, 2);
+  assert.match(missing.err, /--count needs a positive whole number, got nothing/);
+  // POSITIVE CONTROL: an explicit --reserve beside --count is accepted.
+  const reserving = await nextTaskId(["--count", "2", "--reserve"], { reserver: stubReserver(() => "created") });
+  assert.equal(reserving.code, 0, reserving.err);
+  assert.equal(reservedIds(reserving.out).length, 2);
 });
 
 test("W1-T9683: a partial --count prints only the ids it holds and exits non-zero", async () => {
