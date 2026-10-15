@@ -98,13 +98,31 @@ for (const privateOwner of [false, true]) {
         ownershipProtocol: privateOwner ? "private-capacity-v1" : undefined, log: () => {} });
       try {
         assert.equal(owner.outcome, "acquired"); assert(owner.childEnvironment);
-        const code = `import {acquireTestSlot} from './src/lib/test-slot.ts'; const l=acquireTestSlot('protected descendant',{dir:${JSON.stringify(root)},slots:1,waitBoundMs:0,ownershipProtocol:'private-capacity-v1',privateParentPolicy:'require-entry-protection'}); console.log(JSON.stringify({outcome:l.outcome,allowed:l.executionAllowed,note:l.note})); l.refresh(); l.release();`;
+        const code = `import {acquireTestSlot} from './src/lib/test-slot.ts';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          const l=acquireTestSlot('protected descendant',{dir:${JSON.stringify(root)},slots:1,waitBoundMs:0,ownershipProtocol:'private-capacity-v1',privateParentPolicy:'require-entry-protection'});
+          const completionRefused=[];
+          if (${privateOwner}) {
+            const path=${JSON.stringify(join(root, "slot-1.json"))}, original=readFileSync(path,'utf8');
+            try {
+              const downgraded=JSON.parse(original); delete downgraded.ownershipProtocol;
+              writeFileSync(path,JSON.stringify(downgraded));
+              for(const method of ['refresh','release']) {
+                let refused=false; try {l[method]();} catch(error) {refused=/inherited parent test slot lost/.test(error.message);}
+                completionRefused.push(refused);
+              }
+            } finally {writeFileSync(path,original);}
+          }
+          l.refresh(); l.release(); console.log(JSON.stringify({outcome:l.outcome,allowed:l.executionAllowed,note:l.note,completionRefused}));`;
         const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
           cwd: process.cwd(), encoding: "utf8", timeout: 10_000,
           env: { ...process.env, ...owner.childEnvironment, TSX_DISABLE_CACHE: "1", NODE_TEST_CONTEXT: undefined },
         });
         assert.equal(child.status, 0, child.stderr); const result = JSON.parse(child.stdout);
-        if (privateOwner) { assert.equal(result.outcome, "acquired"); assert.match(result.note, /inherited live parent/); }
+        if (privateOwner) {
+          assert.equal(result.outcome, "acquired"); assert.match(result.note, /inherited live parent/);
+          assert.deepEqual(result.completionRefused, [true, true], "protocol downgrade must refuse both nested completion paths");
+        }
         else { assert.notEqual(result.outcome, "acquired"); assert.equal(result.allowed, false); assert.match(child.stderr, /private-protocol-required/); }
         assert.equal(lstatSync(root).mode & 0o7777, 0o1777); owner.refresh();
       } finally { owner.release(); }

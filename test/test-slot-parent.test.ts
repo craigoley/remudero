@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,7 +10,12 @@ type Lookup = NonNullable<TestSlotParentDeps["lstat"]>;
 
 function fixture(run: (root: string) => void): void {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "rmd-slot-parent-"));
-  try { run(root); }
+  try {
+    // A private TMPDIR may inherit wheel/root's group. POSIX can clear setgid on chmod
+    // when that group is not ours; own the fixture's group rather than skipping mode controls.
+    chownSync(root, lstatSync(root).uid, process.getgid!());
+    run(root);
+  }
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
