@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -182,7 +182,7 @@ test("nested TSX discovery retains active, Git-owned, seed, linked and unrecogni
     const outside = join(fx.base, "outside"); mkdirSync(outside); writeFileSync(join(outside, hash), "external");
     symlinkSync(outside, join(fx.root, "tsx-999"));
     for (const cache of caches) age(dirname(cache), HOURS_AGO(8));
-    writeFileSync(fx.open, join(caches[0]!, hash) + "\n");
+    writeFileSync(fx.open, realpathSync(join(caches[0]!, hash)) + "\n");
     const { out } = reclaim(fx, 40);
     for (const cache of caches) assert.ok(existsSync(join(cache, hash)), cache + out);
     assert.equal(readFileSync(join(caches[3]!, "reservation.json"), "utf8"), "keep budget state");
@@ -203,6 +203,22 @@ test("real kernel ctime protects backdated TSX cache files on scheduled discover
     assert.ok(existsSync(file), out);
     assert.doesNotMatch(out, /pruned tsx cache files=/);
   } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("real lsof preserves a held nested cache while an idle historical cache is pruned", () => {
+  const fx = fixture(); let fd: number | undefined;
+  try {
+    const files = ["held", "idle"].map(name => {
+      const job = join(fx.root, name); const cache = join(job, "tsx-501");
+      mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
+      const file = join(cache, `17920-${"e".repeat(40)}`); writeFileSync(file, "compiled cache"); age(job, HOURS_AGO(8)); return file;
+    });
+    const lsof = sh(fx.base, "sh", "-c", "command -v lsof").trim();
+    fd = openSync(files[0]!, "r");
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: lsof });
+    assert.ok(existsSync(files[0]!), out); assert.equal(existsSync(files[1]!), false, out);
+    assert.match(out, /open file or lsof scan uncertain/); assert.match(out, /pruned tsx cache files=1.*idle/);
+  } finally { if (fd !== undefined) closeSync(fd); rmSync(fx.base, { recursive: true, force: true }); }
 });
 
 test("owner is checked before recursive age scans, and stale safe symlink scratch is reclaimable", () => {
