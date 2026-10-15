@@ -11,6 +11,10 @@
  * whether the retry recovered or ALSO failed. This gardener only reads that union; it reads nothing new
  * from GitHub except the changed-file list of a PR that already looks like part of an incident.
  *
+ * W1-T9589: a fix round that rerouted a red its PR's diff cannot reach (W1-T9561) writes a `source:
+ * "fix-round"` row too, with no CI run, shard or base sha. Its clear verdict is the `fix.scope_rerouted`
+ * row of the same round, joined on task and head, so it never spends a changed-path read.
+ *
  * A test counts toward an incident on a PR only when that PR's diff touches neither the test file nor a
  * source module the test itself imports — a PR that edits the test is a candidate cause, not evidence of
  * a flake. A PR whose file list cannot be read counts as touching, so it is never counted.
@@ -28,11 +32,14 @@ export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 /** The ledger step the evidence rows carry (selectorShadowFlakeLedger writes them). */
 export const FLAKE_RETRY_STEP = "test.flake_retry";
 
-/** Every step a pass reads: the evidence and the gardener's own prior answers. */
-export const FLAKE_INCIDENT_EVIDENCE_STEPS: readonly string[] = [FLAKE_RETRY_STEP, "flake_incident.filed", "flake_incident.skipped", "flake_incident.watch"];
+/** The step a rerouted fix round writes before its `fix-round` flake rows: the round's own clear verdict (W1-T9589). */
+export const FIX_SCOPE_REROUTED_STEP = "fix.scope_rerouted";
+
+/** Every step a pass reads: the evidence, the reroutes that clear a fix-round row, and the gardener's own prior answers. */
+export const FLAKE_INCIDENT_EVIDENCE_STEPS: readonly string[] = [FLAKE_RETRY_STEP, FIX_SCOPE_REROUTED_STEP, "flake_incident.filed", "flake_incident.skipped", "flake_incident.watch"];
 
 /** Bump whenever {@link FLAKE_INCIDENT_EVIDENCE_STEPS} changes: it keys the durable per-rotation digests. */
-export const FLAKE_INCIDENT_DIGEST_VERSION = "1";
+export const FLAKE_INCIDENT_DIGEST_VERSION = "2";
 
 /**
  * The tiered response, as policy values with this one home. One PR is noise; `watchPrs` distinct
@@ -76,11 +83,17 @@ interface FlakeObservation {
   file: string;
   title: string;
   prs: number[];
-  runId: number;
-  shard: number;
+  source: "selector-shadow" | "fix-round";
+  /** The CI run and shard a coverage-shard log names. A fix-round observation has neither. */
+  runId?: number;
+  shard?: number;
   outcome: RetryOutcome;
   headSha?: string;
   baseSha?: string;
+  /** The fix round's task, for the join to its own `fix.scope_rerouted` row. */
+  taskId?: string;
+  /** A fix-round observation of a retry a coverage shard also logged: it still names its PR, but adds no retry. */
+  duplicate?: true;
   tsMs: number;
 }
 
@@ -90,25 +103,59 @@ const isCount = (v: unknown): v is number => typeof v === "number" && Number.isS
 function observationsOf(rows: readonly Record<string, unknown>[]): FlakeObservation[] {
   const seen = new Set<string>();
   const out: FlakeObservation[] = [];
-  for (const row of rows) {
-    if (row.source !== "selector-shadow" || typeof row.file !== "string") continue;
+  const common = (row: Record<string, unknown>) => {
     const outcome = row.retry_outcome;
-    if ((outcome !== "recovered" && outcome !== "also_failed") || !isCount(row.ci_run_id) || !isCount(row.shard)) continue;
+    if (typeof row.file !== "string" || (outcome !== "recovered" && outcome !== "also_failed")) return undefined;
     const prs = Array.isArray(row.pr_numbers) ? row.pr_numbers.filter(isCount) : [];
-    if (prs.length === 0) continue;
+    if (prs.length === 0) return undefined;
     const tsMs = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
-    if (!Number.isFinite(tsMs)) continue;
+    if (!Number.isFinite(tsMs)) return undefined;
+    return { file: row.file, outcome: outcome as RetryOutcome, prs, tsMs };
+  };
+  for (const row of rows) {
+    if (row.source !== "selector-shadow" || !isCount(row.ci_run_id) || !isCount(row.shard)) continue;
+    const base = common(row);
+    if (base === undefined) continue;
     const titles = Array.isArray(row.titles) ? row.titles.filter((t): t is string => typeof t === "string" && t !== "") : [];
     for (const title of titles.length > 0 ? titles : [""]) {
-      const key = `${row.ci_run_id}|${row.shard}|${row.file}|${outcome}|${title}`;
+      const key = `${row.ci_run_id}|${row.shard}|${base.file}|${base.outcome}|${title}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({
-        file: row.file, title, prs, runId: row.ci_run_id, shard: row.shard, outcome, tsMs,
+        ...base, title, source: "selector-shadow", runId: row.ci_run_id, shard: row.shard,
         ...(typeof row.head_sha === "string" ? { headSha: row.head_sha } : {}),
         ...(typeof row.base_sha === "string" ? { baseSha: row.base_sha } : {}),
       });
     }
+  }
+  // One retry seen by a coverage shard and by the fix round that rerouted it is one retry: the fix-round
+  // observation keeps its PR (a set) and its own clear verdict, but adds nothing to the retry counts.
+  const shardSaw = (file: string, head: string, prs: readonly number[]) =>
+    out.some((o) => o.source === "selector-shadow" && o.file === file && o.headSha === head && o.prs.some((pr) => prs.includes(pr)));
+  for (const row of rows) {
+    if (row.source !== "fix-round" || typeof row.head_sha !== "string") continue;
+    const base = common(row);
+    if (base === undefined) continue;
+    const key = `fix-round|${base.prs.join(",")}|${row.head_sha}|${base.file}|${base.outcome}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      ...base, title: "", source: "fix-round", headSha: row.head_sha,
+      ...(typeof row.task_id === "string" ? { taskId: row.task_id } : {}),
+      ...(shardSaw(base.file, row.head_sha, base.prs) ? { duplicate: true as const } : {}),
+    });
+  }
+  return out;
+}
+
+/** The fix rounds whose reroute found the PR's diff cannot reach a failing file, keyed by task, head and
+ *  file. Only these clear a fix-round observation; with no such row it is not clear (W1-T9589). */
+function unreachableByReroute(rows: readonly Record<string, unknown>[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row.attribution !== "diff-cannot-reach" || typeof row.task_id !== "string" || typeof row.head_sha !== "string") continue;
+    if (!Array.isArray(row.failing_test_files)) continue;
+    for (const file of row.failing_test_files) if (typeof file === "string") out.add(JSON.stringify([row.task_id, row.head_sha, file]));
   }
   return out;
 }
@@ -151,6 +198,9 @@ interface Evidence {
   runs: Set<number>;
   recovered: number;
   alsoFailed: number;
+  /** Counted observations per source: coverage-shard logs and fix-round reroutes. */
+  coverageShard: number;
+  fixRound: number;
 }
 
 /** One pass. Never throws on a single group's trouble: an unreadable PR is simply not counted. */
@@ -169,6 +219,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   });
   const byStep = (step: string) => rows.filter((r) => r.step === step);
   const observations = observationsOf(byStep(FLAKE_RETRY_STEP));
+  const rerouted = unreachableByReroute(byStep(FIX_SCOPE_REROUTED_STEP));
 
   const groups = new Map<string, FlakeObservation[]>();
   for (const o of observations) groups.set(JSON.stringify([o.file, o.title]), [...(groups.get(JSON.stringify([o.file, o.title])) ?? []), o]);
@@ -211,7 +262,9 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     const verdict = new Map<number, boolean>();
     for (const o of group) {
       let clear = false;
-      if (o.baseSha !== undefined && o.headSha !== undefined) {
+      if (o.source === "fix-round") {
+        clear = o.taskId !== undefined && o.headSha !== undefined && rerouted.has(JSON.stringify([o.taskId, o.headSha, o.file]));
+      } else if (o.baseSha !== undefined && o.headSha !== undefined) {
         const paths = await changedPaths(o.baseSha, o.headSha);
         clear = paths !== undefined && ![...own].some((p) => paths.has(p));
       }
@@ -219,12 +272,15 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     }
     const counted = group.filter((o) => o.prs.some((pr) => verdict.get(pr) === true));
     const prs = [...new Set(counted.flatMap((o) => o.prs.filter((pr) => verdict.get(pr) === true)))].sort((a, b) => a - b);
+    const retries = counted.filter((o) => o.duplicate !== true);
     const latestMs = new Map<number, number>();
     for (const o of counted) for (const pr of o.prs) if (verdict.get(pr) === true) latestMs.set(pr, Math.max(latestMs.get(pr) ?? 0, o.tsMs));
     return {
-      prs, latestMs, runs: new Set(counted.map((o) => o.runId)),
-      recovered: counted.filter((o) => o.outcome === "recovered").length,
-      alsoFailed: counted.filter((o) => o.outcome === "also_failed").length,
+      prs, latestMs, runs: new Set(counted.flatMap((o) => (o.runId === undefined ? [] : [o.runId]))),
+      recovered: retries.filter((o) => o.outcome === "recovered").length,
+      alsoFailed: retries.filter((o) => o.outcome === "also_failed").length,
+      coverageShard: retries.filter((o) => o.source === "selector-shadow").length,
+      fixRound: retries.filter((o) => o.source === "fix-round").length,
     };
   };
 
@@ -322,9 +378,9 @@ async function fileIncident(
       rationale: [
         `Test: ${subject}`,
         `Failed CI on ${prs.length} distinct pull requests whose changed files include neither the test file nor a module it imports: ${prs.map((n) => `#${n}`).join(", ")}.`,
-        `CI runs: ${runs.join(", ")}.`,
+        runs.length > 0 ? `CI runs: ${runs.join(", ")}.` : "CI runs: none; every observation came from a fix round that rerouted the red.",
         `Retry outcomes: ${evidence.recovered} recovered on retry, ${evidence.alsoFailed} also failed on retry${evidence.alsoFailed > 0 ? " (the case that reds a PR)" : ""}.`,
-        "Evidence: test.flake_retry ledger rows read from the PR coverage-shard logs.",
+        `Evidence: test.flake_retry ledger rows, ${evidence.coverageShard} read from the PR coverage-shard logs and ${evidence.fixRound} from fix-round reroutes the PR's diff cannot reach.`,
       ],
     });
     if (rendered.refused !== undefined) throw new Error(`flake-incident: task failed lint: ${rendered.refused}`);
