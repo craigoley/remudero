@@ -88,37 +88,70 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
   };
 }
 
-async function latch(h: ReturnType<typeof phase>) {
+/** W1-T9069: the measurements a freed lane's refill needs under a latch: the src class's median span (16 min), a yield
+ *  cost (62 min) and an implementing phase that finishes in 25 min, so a holdout there is cheaper to wait for. */
+function latchHistory(): string[] {
+  const now = Date.now();
+  const row = (age: number, fields: Record<string, unknown>) => JSON.stringify({
+    ts: new Date(now - age * minute).toISOString(), ...fields,
+  });
+  return [
+    row(300, { step: "run.start", task_class: "src", run_id: "span" }),
+    row(284, { step: "verdict", run_id: "span", verdict: "merged" }),
+    row(200, { step: "verdict", task_id: "yielded", run_id: "yielded", reason: "freshness_yield" }),
+    row(138, { step: "run.start", task_id: "yielded", run_id: "resumed" }),
+    row(100, { step: "run.phase", waiting_on: "implementing", run_id: "completed" }),
+    row(75, { step: "pr.opened", run_id: "completed" }),
+  ];
+}
+/** A change that is neither self-scoped nor an install input, so a measured run may hold the restart open. */
+const material = { ...stale, changes: [{ sha: stale.newSha, subject: "fix: update worker", files: ["src/lib/worker.ts"] }],
+  staleSinceMs: Date.now() - 120 * minute };
+function materialPhase(history = true, startingMinute = 0) {
+  let visible = false;
+  const h = phase(history, { readRestartHistory: latchHistory,
+    checkFreshness: () => visible ? material : { stale: false } } as Partial<DaemonDeps>, startingMinute);
+  return Object.assign(h, { show: () => { visible = true; } });
+}
+
+async function latch(h: ReturnType<typeof phase> & { show?: () => void }) {
   await flush();
+  h.show?.();
   await h.tick(5, true);
   assert.equal(h.rows.some(({ step, extra }) => step === "daemon.freshness_decision" && extra?.action === "restart"), true);
 }
 
 test("W1-T7806: a freed lane refills while a young lane has no yield boundary since the latch", async () => {
-  const h = phase(true, {}, 3);
+  const h = materialPhase(true, 3);
   try {
     await latch(h);
     assert.equal(h.rows.find(({ step }) => step === "dispatch.refill_bound")?.extra?.bound_ms, 16 * minute);
     await h.settle("B", 6);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "no restart time is known while A has no estimate");
+    assert.equal(h.rows.findLast(({ step }) => step === "dispatch.lane_parked")?.extra?.reason, "restart time unknown");
+    assert.equal(h.boundary("A", "implementing"), undefined, "A holds, and its estimate wakes the parked lane");
+    await flush();
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"], "C has no estimate either");
     await h.settle("C", 8);
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E"]);
     assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").map(({ extra }) => extra?.waiting_on),
-      [["A", "C"], ["A"]]);
+      [["A"], ["A"]]);
     await h.tick(10);
     const lanes = h.rows.findLast(({ step }) => step === "daemon.freshness_restart_waiting")?.extra?.lanes;
     assert.deepEqual(lanes, [
       { task: "A", age_ms: 7 * minute, holdout: true, admitted_under_latch: false },
-      { task: "D", age_ms: 4 * minute, holdout: false, admitted_under_latch: true },
+      { task: "D", age_ms: 2 * minute, holdout: false, admitted_under_latch: true },
       { task: "E", age_ms: 2 * minute, holdout: false, admitted_under_latch: true },
     ]);
   } finally { await h.cleanup(); }
 });
 
 test("W1-T7806: refill stays open under a latch with no run history", async () => {
-  const h = phase(false, {}, 3);
+  const h = materialPhase(false, 3);
   try {
     await latch(h);
     assert.equal(h.rows.find(({ step }) => step === "dispatch.refill_bound")?.extra?.source, "no_history_fallback");
+    assert.equal(h.boundary("A", "implementing"), undefined);
     await h.settle("B", 6);
     await h.settle("C", 8);
     assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "E"]);
@@ -213,10 +246,17 @@ async function boundaryRun(t: TestContext, restartAtWorkerBoundary: BoundaryOpti
 }
 
 test("W1-T7806: a refill admitted under the latch yields at its first boundary", async (t) => {
-  const h = phase(true, {}, 3);
+  const h = materialPhase(true, 3);
   try {
     await latch(h);
+    assert.equal(h.boundary("A", "implementing"), undefined);
+    assert.equal(h.boundary("C", "implementing"), undefined);
     await h.settle("B", 6);
+    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D"]);
+    assert.equal(h.boundary("C", "recon"), material);
+    // Past A's estimate no holdout remains, so the refill's first boundary is the restart's.
+    await h.tick(50);
+    assert.equal(h.boundary("A", "implementing"), material);
     const latchRead = h.boundaries.get("D")?.restartAtWorkerBoundary;
     assert.equal(typeof latchRead, "function");
     // The run's own read reports fresh: only the daemon's latch can yield this boundary.
@@ -227,10 +267,10 @@ test("W1-T7806: a refill admitted under the latch yields at its first boundary",
     assert.equal(gates, 0, "the first worker boundary yields before the preopen gate");
     assert.equal(rows.find(({ step }) => step === "run.freshness_handoff")?.new_sha, stale.newSha);
     assert.equal(rows.find(({ step }) => step === "verdict")?.reason, "freshness_yield");
-    assert.equal(h.boundary("A"), stale);
-    assert.equal(h.boundary("C"), stale);
+    assert.equal(h.boundary("A"), material);
+    assert.equal(h.boundary("C"), material);
     const count = h.started.length;
-    await h.settle("D", 7);
+    await h.settle("D", 51);
     assert.equal(h.started.length, count, "the refill cannot renew the hold");
   } finally { await h.cleanup(); }
 });
@@ -250,18 +290,20 @@ test("W1-T8198: a clear daemon latch continues past the worker boundary without 
 });
 
 test("W1-T7806: refill closes as stale code once every holdout can yield", async () => {
-  const h = phase();
+  const h = materialPhase(true);
   try {
     await flush();
     assert.equal(h.boundary("A"), undefined, "a boundary before the latch does not release a future holdout");
     await latch(h);
+    assert.equal(h.boundary("A", "implementing"), undefined);
     await h.settle("B", 6);
     await h.settle("C", 8);
-    assert.equal(h.boundary("D"), stale, "a refill reads the latch without joining the holdouts");
+    assert.equal(h.boundary("D", "implementing"), undefined, "a refill ahead of the restart runs on and does not join the holdouts");
+    assert.equal(h.rows.some(({ step, extra }) => step === "daemon.restart_holdout" && extra?.task_id === "D"), false);
     await h.settle("D", 9);
-    assert.equal(h.started.at(-1)?.id, "F", "A still has no post-latch boundary");
-    assert.equal(h.boundary("A"), stale);
-    assert.equal(h.boundary("A"), stale, "repeated boundaries do not renew the hold");
+    assert.equal(h.started.at(-1)?.id, "F", "A still holds the restart open");
+    assert.equal(h.boundary("A", "recon"), material);
+    assert.equal(h.boundary("A"), material, "repeated boundaries do not renew the hold");
     const count = h.started.length;
     await h.settle("E", 10);
     await h.settle("F", 11);
@@ -273,9 +315,10 @@ test("W1-T7806: refill closes as stale code once every holdout can yield", async
 });
 
 test("W1-T7806: a holdout that settles stops holding refill", async () => {
-  const h = phase();
+  const h = materialPhase(true);
   try {
     await latch(h);
+    assert.equal(h.boundary("A", "implementing"), undefined);
     await h.settle("B", 6);
     await h.settle("C", 8);
     await h.settle("A", 9);
@@ -313,7 +356,7 @@ test("a refill read finishing after the last holdout's boundary starts no run", 
 });
 
 test("a restart wakes phase-bound parked lanes while a young holdout still runs", async () => {
-  const h = phase();
+  const h = materialPhase(true);
   try {
     await flush();
     await h.settle("A", 2);
@@ -322,11 +365,15 @@ test("a restart wakes phase-bound parked lanes while a young holdout still runs"
     await h.settle("D", 17);
     await h.settle("E", 18);
     assert.equal(h.rows.filter(({ step }) => step === "dispatch.lane_parked").length, 2);
+    h.show();
     await h.tick(20, true);
+    assert.deepEqual(h.started.slice(6).map(({ id }) => id), [], "the young holdout has no estimate, so both lanes park");
+    assert.equal(h.boundary("F", "implementing"), undefined);
+    await flush();
     assert.deepEqual(h.started.slice(6).map(({ id }) => id), ["G", "H"]);
     assert.deepEqual(h.rows.filter(({ step }) => step === "dispatch.lane_refilled").slice(-2)
       .map(({ extra }) => extra?.waiting_on), [["F"], ["F"]]);
-    assert.equal(h.boundary("F"), stale);
+    assert.equal(h.boundary("F", "recon"), material);
     const count = h.started.length;
     await h.settle("G", 21);
     await h.settle("H", 22);
