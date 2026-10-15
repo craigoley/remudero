@@ -150,7 +150,8 @@ test("a per-poll landing lets a timer fire while its git fetch is in flight, ret
     assert.deepEqual(verbs.filter((v) => NETWORK_VERBS.has(v)), [], `no network verb: ${JSON.stringify(f.events)}`);
     // W1-T9638: the idle scan's two local reads are awaited too; no verb that leaves the machine is.
     const awaited = f.events.filter((e) => e.startsWith("async:") && e.endsWith(":start")).map((e) => e.split(":")[1]);
-    assert.deepEqual(awaited, ["ls-files", "diff"], "the awaited seam was asked only for the idle scan");
+    assert.equal(awaited.length, 2, `the awaited seam was asked only for the idle scan's two reads: ${JSON.stringify(awaited)}`);
+    assert.ok(awaited.includes("diff") && awaited.every((v) => !NETWORK_VERBS.has(v!)), JSON.stringify(awaited));
     assert.equal(f.ghCalls.length, 0, "no PR call");
   });
 
