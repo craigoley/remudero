@@ -73,7 +73,7 @@ const ENTRY = [
   "",
 ].join("\n");
 
-function entryRepo() {
+function seedEntryModule() {
   const origin = gitRepo();
   mkdirSync(join(origin.dir, "src"), { recursive: true });
   writeFileSync(join(origin.dir, "src/run-task.ts"), ENTRY);
@@ -94,7 +94,7 @@ function entryRepo() {
 }
 
 test("entry-declarations: real git names each hunk's enclosing declaration and every header a hunk adds", async () => {
-  const { origin, commit } = entryRepo();
+  const { origin, commit } = seedEntryModule();
   const base = origin.git("rev-parse", "HEAD");
   const approve = commit("fix(approve): x", (text) => text.replace("return rest.length;", "return rest.length + 1;"));
   const daemon = commit("feat: lanes", (text) => text.replace("const lanes = 3;", "const lanes = 4;"));
@@ -138,7 +138,7 @@ test("entry-declarations: the annotation reads git only for an entry-module adva
 });
 
 test("entry-declarations: the daemon's freshness read defers a non-daemon run-task.ts advance and restarts for daemonCommand", async () => {
-  const { origin, commit } = entryRepo();
+  const { origin, commit } = seedEntryModule();
   const clone = gitRepo({ cloneFrom: origin.dir });
   commit("fix(approve): x", (text) => text.replace("return rest.length;", "return rest.length + 1;"), "README.md");
   const { checkFreshness } = daemonFreshnessReads(clone.dir, {}, { ignoreReentrancyGuard: true });

@@ -66,13 +66,14 @@ export function parseTouchedDeclarations(text: string): Map<string, string[]> {
  * and a commit without `declarations` keeps full weight: an unread advance fails toward restarting.
  */
 export async function withTouchedDeclarations(svc: ServiceFreshness, git: AsyncGitRunner): Promise<ServiceFreshness> {
-  if (svc.status !== "assessed" || !svc.behind?.changes) return svc;
+  if (svc.status !== "assessed" || svc.behind === null || svc.behind.changes === undefined) return svc;
   const { oldSha, newSha, changes } = svc.behind;
   if (!changes.some((change) => change.files.includes(DECLARATION_WEIGHED_PATH))) return svc;
   let touched: Map<string, string[]>;
   try {
     touched = parseTouchedDeclarations(await git(["log", "--format=%x1e%H", "-U0", "--no-color", "--no-ext-diff", `${oldSha}..${newSha}`, "--", DECLARATION_WEIGHED_PATH]));
   } catch {
+    // An unreadable log leaves every commit unannotated, which deploy-judge weighs as full: it fails toward restarting.
     return svc;
   }
   const annotated = changes.map((change) => {
