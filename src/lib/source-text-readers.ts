@@ -229,17 +229,19 @@ export const SOURCE_TEXT_READER_PROBE_ARGV: readonly string[] = [
   "test/*.test.ts",
 ];
 
-export interface SourceTextReaderDeps {
-  readonly git?: (args: readonly string[]) => string;
-  readonly readFile?: (path: string) => string;
+/** The default `git` for {@link discoverSourceTextReaders}: a read of the checkout it is given. */
+function checkoutGit(repoRoot: string): (args: readonly string[]) => string {
+  return (args) => execFileSync("git", [...args], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
 /** The impure edge: every test suite that reads tracked text, with what it reads. A suite that
  *  reads only temp fixtures resolves no walk and is dropped unless it carries a marker, which the
  *  meta-census then holds to resolving. */
-export function discoverSourceTextReaders(repoRoot: string, deps: SourceTextReaderDeps = {}): SourceTextReader[] {
-  const git = deps.git ?? ((args) => execFileSync("git", [...args], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
-  const readFile = deps.readFile ?? ((path) => readFileSync(join(repoRoot, path), "utf8"));
+export function discoverSourceTextReaders(
+  repoRoot: string,
+  git: (args: readonly string[]) => string = checkoutGit(repoRoot),
+  readFile: (path: string) => string = (path) => readFileSync(join(repoRoot, path), "utf8"),
+): SourceTextReader[] {
   const roots = new Set(
     git(["ls-files", "--cached", "--others", "--exclude-standard"])
       .split("\n")

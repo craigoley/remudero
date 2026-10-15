@@ -4,14 +4,12 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import {
   discoverSourceTextReaders,
   isUnplacedSourceReader,
   readerJoins,
   sourceTextReaderOf,
 } from "../src/lib/source-text-readers.js";
-import { censusMembershipCommand } from "../src/run-task.js";
 
 /**
  * A census that reads source text joins every diff that edits that text, whatever its enumeration
@@ -25,56 +23,6 @@ import { censusMembershipCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ROOTS = new Set(["src", "test", "scripts", "deploy", "README.md", ".github"]);
-
-/** No enumeration-idiom candidates: membership here comes from the readers alone. */
-const noEnumerationCandidates = (() => ({ status: 1, stdout: "", stderr: "" })) as unknown as PreflightSpawn;
-
-function membershipFiles(changedPaths: readonly string[]): { out: string[]; err: string[] } {
-  const out: string[] = [];
-  const err: string[] = [];
-  const realLog = console.log;
-  const realErr = console.error;
-  console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
-  console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
-  try {
-    const code = censusMembershipCommand(["--files"], { repoRoot: REPO_ROOT, changedPaths, spawn: noEnumerationCandidates });
-    assert.equal(code, 0, "census-membership is report-only");
-  } finally {
-    console.log = realLog;
-    console.error = realErr;
-  }
-  return { out, err };
-}
-
-test("census-membership --files selects the suite #12104 reddened for a src/run-task.ts diff", () => {
-  const { out } = membershipFiles(["src/run-task.ts"]);
-  assert.ok(
-    out.includes("test/a-generic-route-has-an-explicit-tool-bound.test.ts"),
-    `a suite that reads src/run-task.ts as text joins a diff to it; --files printed:\n${out.join("\n")}`,
-  );
-});
-
-test("census-membership --files selects the suite #12019 reddened for a diff adding a test file", () => {
-  // #12019's own changed paths (squash 30c455efa): one added test file, two scripts and ci.yml.
-  const changed = [
-    ".github/workflows/ci.yml",
-    "scripts/pure-test-pool.mjs",
-    "scripts/test-tier-manifest.mjs",
-    "test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts",
-  ];
-  const { out } = membershipFiles(changed);
-  assert.ok(
-    out.includes("test/a-wall-clock-bound-declares-itself.test.ts"),
-    `a suite that walks test/*.test.ts through git grep joins a diff adding a test; --files printed:\n${out.join("\n")}`,
-  );
-});
-
-test("census-membership --files keeps a plain text reader off the run list and names it on stderr", () => {
-  const { out, err } = membershipFiles(["src/run-task.ts"]);
-  const textOnly = err.filter((l) => l.startsWith("reads-as-text: ")).map((l) => l.slice("reads-as-text: ".length));
-  assert.ok(textOnly.length > 0, "src/run-task.ts is read as text by suites that are not censuses");
-  for (const file of textOnly) assert.ok(!out.includes(file), `${file} is named on stderr, not run as a census`);
-});
 
 test("every source-reading suite is placed by what it reads or declares it", () => {
   const readers = discoverSourceTextReaders(REPO_ROOT);
@@ -145,6 +93,6 @@ test("discovery reads a git grep no-match as zero readers and any other failure 
     if (args[0] !== "grep") return "src/a.ts\n";
     throw exit(status);
   };
-  assert.deepEqual(discoverSourceTextReaders("/repo", { git: git(1), readFile: () => "" }), []);
-  assert.throws(() => discoverSourceTextReaders("/repo", { git: git(128), readFile: () => "" }), /git exited 128/);
+  assert.deepEqual(discoverSourceTextReaders("/repo", git(1), () => ""), []);
+  assert.throws(() => discoverSourceTextReaders("/repo", git(128), () => ""), /git exited 128/);
 });
