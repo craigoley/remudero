@@ -628,9 +628,7 @@ import {
 import {
   buildMainHealthRung,
   mainCeilingLogReducer,
-  mainRepairMergeName,
-  mainRepairReachingMerges,
-  renderMainRepairMergesSinceGreen,
+  mainRepairMergesBrief,
   withMainHealthOnLightPass,
   type MainCeilingLogVerdict,
   type MainRatchetRecordOutcome,
@@ -54565,20 +54563,14 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
 export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
   const known = request.testFiles.length > 0;
-  // W1-T9665: the merges whose files reach the failing tests are the ones to repair, two of them a collision.
-  const reaching = mainRepairReachingMerges(request.mergesSinceGreen);
-  const reachingNames = reaching.map(mainRepairMergeName).join(", ");
-  const locatedMisses = request.mergesSinceGreen?.merges.find((merge) => merge.sha === request.offendingSha)?.reachesFailingTests === false;
+  const merges = mainRepairMergesBrief(request);
   return [
     "You are a REMUDERO red-main fix worker dispatched by the main-health rung (W1-T6403).",
     `The default branch \`${request.branch}\` is RED at \`${request.headSha}\`. Every open PR's CI fails until it is green.`,
     `The first red merge is \`${request.offendingSha}\` (${pr}). Its diff stat:`,
     request.diffStat,
     "",
-    renderMainRepairMergesSinceGreen(request.mergesSinceGreen),
-    ...(reaching.length >= 2
-      ? [`The red may be a COLLISION of ${reachingNames}: each was green on its own base, and they fail only together. Repair their INTERACTION.`]
-      : []),
+    ...merges.lines,
     "",
     `Failing check(s): ${request.failingChecks.join(", ") || "(none named)"}`,
     `Failing test title(s): ${request.failingTestTitles.join("; ") || "(none parsed from the log)"}`,
@@ -54589,9 +54581,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
     request.logExcerpt || "(no log was read)",
     "```",
     "",
-    locatedMisses && reaching.length > 0
-      ? `Fix EXACTLY ONE thing: make main green again by REPAIRING the defect that ${reachingNames} introduced: they reach the failing tests, and the located merge reaches none of them.`
-      : "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+    merges.fixLine,
     "Do NOT revert that merge — a revert PR is this lane's separate, later step. Do not scope-creep.",
     "Reproduce the failing test file(s) above first, then make the minimal correct change.",
     "",

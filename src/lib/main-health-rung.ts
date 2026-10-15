@@ -300,17 +300,29 @@ export interface MainRepairMergesSinceGreen {
   readonly afterGreenSha?: string;
   /** Oldest first. */
   readonly merges: readonly MainRepairMerge[];
-  readonly unread?: string;
+  readonly unreadable?: string;
 }
 
 const short = (sha: string): string => sha.slice(0, 12);
 
-/** W1-T9665 — a merge as the brief names it: its short sha and PR. */
-export const mainRepairMergeName = (merge: MainRepairMerge): string => `\`${short(merge.sha)}\`${merge.pr !== undefined ? ` (#${merge.pr})` : ""}`;
+const mainRepairMergeName = (merge: MainRepairMerge): string => `\`${short(merge.sha)}\`${merge.pr !== undefined ? ` (#${merge.pr})` : ""}`;
 
-/** W1-T9665 — the merges a fix brief names as the ones to repair: those reaching the failing tests. */
-export function mainRepairReachingMerges(since: MainRepairMergesSinceGreen | undefined): MainRepairMerge[] {
-  return (since?.merges ?? []).filter((merge) => merge.reachesFailingTests === true);
+/** W1-T9665 — the fix brief's merges-since-green lines and its "Fix EXACTLY ONE thing" line: the merges
+ *  reaching the failing tests are the ones to repair, and two of them are a collision. */
+export function mainRepairMergesBrief(request: Pick<MainRepairFixRequest, "offendingSha" | "mergesSinceGreen">): { lines: string[]; fixLine: string } {
+  const reaching = (request.mergesSinceGreen?.merges ?? []).filter((merge) => merge.reachesFailingTests === true);
+  const names = reaching.map(mainRepairMergeName).join(", ");
+  const locatedMisses = request.mergesSinceGreen?.merges.find((merge) => merge.sha === request.offendingSha)?.reachesFailingTests === false;
+  return {
+    lines: [
+      renderMainRepairMergesSinceGreen(request.mergesSinceGreen),
+      ...(reaching.length >= 2 ? [`The red may be a COLLISION of ${names}: each was green on its own base, and they fail only together. Repair their INTERACTION.`] : []),
+    ],
+    fixLine:
+      locatedMisses && reaching.length > 0
+        ? `Fix EXACTLY ONE thing: make main green again by REPAIRING the defect that ${names} introduced: they reach the failing tests, and the located merge reaches none of them.`
+        : "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+  };
 }
 
 /** Lines of `text` from its head that fit `chars`, then how many were cut. */
@@ -333,7 +345,7 @@ function headWithOmission(text: string, chars: number): string {
 export function renderMainRepairMergesSinceGreen(since: MainRepairMergesSinceGreen | undefined, budget = MAIN_REPAIR_LOG_EXCERPT_CHARS): string {
   if (!since) return "Merges since the last green main: not read for this brief.";
   const title = `Merges since the last green main${since.afterGreenSha ? ` \`${short(since.afterGreenSha)}\`` : ""}:`;
-  if (since.unread !== undefined) return `${title} unread (${since.unread}). Nothing here says the merge above is the only candidate.`;
+  if (since.unreadable !== undefined) return `${title} unread (${since.unreadable}). Nothing here says the merge above is the only candidate.`;
   const rank = (merge: MainRepairMerge) => (merge.reachesFailingTests === true ? 0 : merge.reachesFailingTests === undefined ? 1 : 2);
   const ordered = [...since.merges].sort((a, b) => rank(a) - rank(b));
   const head = (merge: MainRepairMerge): string => {
@@ -1354,7 +1366,7 @@ export function buildMainHealthRung(
   };
   /** W1-T9665 — every first-parent merge after the last green main up to `headSha`, oldest first. */
   const mergesSinceGreenOf = async (first: MainHealthFirstRedCommit | undefined, headSha: string, testFiles: readonly string[]): Promise<MainRepairMergesSinceGreen> => {
-    if (!first) return { merges: [], unread: "this observation read no last green main" };
+    if (!first) return { merges: [], unreadable: "this observation read no last green main" };
     const read: Array<{ sha: string; commit: RestCommitRead }> = [];
     try {
       for (let at = headSha; at !== first.afterGreenSha; ) {
@@ -1366,7 +1378,7 @@ export function buildMainHealthRung(
         at = parent;
       }
     } catch (error) {
-      return { afterGreenSha: first.afterGreenSha, merges: [], unread: String((error as Error)?.message ?? error) };
+      return { afterGreenSha: first.afterGreenSha, merges: [], unreadable: String((error as Error)?.message ?? error) };
     }
     const merges: MainRepairMerge[] = [];
     for (const { sha, commit } of read) {

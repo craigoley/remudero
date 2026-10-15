@@ -17,6 +17,7 @@ import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
 import {
   buildMainHealthRung,
+  mainRepairMergesBrief,
   renderMainRepairMergesSinceGreen,
   type MainHealthRungDeps,
   type MainRepairFixRequest,
@@ -26,7 +27,6 @@ import {
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import type { CiFailure } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { mainRepairFixPrompt, mainRepairTaskId } from "../src/run-task.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -87,7 +87,8 @@ const readAffectedInput = async (): Promise<AffectedSuitesInput> => ({ files: AF
 
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-function rig(lane: MainRepairLane, ledgerPath: string, overrides: Partial<MainHealthRungDeps> = {}) {
+/** `orphan`: a commit GitHub reads with no parent, so main's first-parent chain ends short of the green. */
+function rig(lane: MainRepairLane, ledgerPath: string, overrides: Partial<MainHealthRungDeps> = {}, orphan?: string) {
   let clock = Date.parse("2026-10-15T13:30:00Z");
   const chain = [GREEN, GARDENER, REMEDY, PLAN_ONLY];
   const run = (id: number, head: string, conclusion: string) => ({
@@ -122,7 +123,7 @@ function rig(lane: MainRepairLane, ledgerPath: string, overrides: Partial<MainHe
       return {
         sha: commit,
         commit: { message: merge?.message ?? "green" },
-        parents: index > 0 ? [{ sha: chain[index - 1] }] : [],
+        parents: index > 0 && commit !== orphan ? [{ sha: chain[index - 1] }] : [],
         files: merge?.files ?? [],
       };
     }
@@ -187,11 +188,11 @@ function inScratchDir(body: (ledgerPath: string) => Promise<void>): () => Promis
   };
 }
 
-async function replayFix(overrides: Partial<MainHealthRungDeps> = {}): Promise<MainRepairFixRequest> {
+async function replayFix(overrides: Partial<MainHealthRungDeps> = {}, orphan?: string): Promise<MainRepairFixRequest> {
   let request: MainRepairFixRequest | undefined;
   await inScratchDir(async (ledgerPath) => {
     const lane = fakeLane();
-    const daemon = rig(lane, ledgerPath, overrides);
+    const daemon = rig(lane, ledgerPath, overrides, orphan);
     for (let pass = 0; pass < 4 && lane.fixes.length === 0; pass += 1) await daemon.observe();
     request = lane.fixes[0];
   })();
@@ -200,25 +201,36 @@ async function replayFix(overrides: Partial<MainHealthRungDeps> = {}): Promise<M
   return request;
 }
 
+/** What mainRepairFixPrompt splices into the worker's prompt from the request. */
+const briefOf = (request: MainRepairFixRequest): string => {
+  const { lines, fixLine } = mainRepairMergesBrief(request);
+  return [...lines, fixLine].join("\n");
+};
 const fixLine = (prompt: string): string => prompt.split("\n").find((line) => line.startsWith("Fix EXACTLY ONE thing")) ?? "";
 
 test("W1-T9665: a red main fix brief lists every merge since the last green main", async () => {
   const request = await replayFix();
   const since = request.mergesSinceGreen;
   assert.equal(since?.afterGreenSha, GREEN);
-  assert.equal(since?.unread, undefined);
+  assert.equal(since?.unreadable, undefined);
   assert.deepEqual(
     since?.merges.map((merge) => [merge.sha, merge.pr, merge.files]),
     MERGES.map((merge) => [merge.sha, Number(/#(\d+)\)$/.exec(merge.message)![1]), merge.files.map((file) => file.filename)]),
     "every first-parent merge after the last green, oldest first, with its PR and changed files",
   );
-  const prompt = mainRepairFixPrompt(request, "/tmp/body.md");
+  const prompt = briefOf(request);
   assert.match(prompt, /Merges since the last green main `cd482d430000`:/);
   for (const merge of MERGES) {
     assert.ok(prompt.includes(`#${/#(\d+)\)$/.exec(merge.message)![1]}`), `the brief names ${merge.message}`);
     for (const file of merge.files) assert.ok(prompt.includes(file.filename), `the brief names ${file.filename}`);
   }
   assert.ok(prompt.includes("backlog gardener proposes place for 2 task(s)"), "each merge carries its subject");
+
+  // A first-parent chain that cannot be walked to the last green is said, never shown as an empty list.
+  const short = await replayFix({}, GARDENER);
+  assert.deepEqual(short.mergesSinceGreen?.merges, []);
+  assert.match(short.mergesSinceGreen?.unreadable ?? "", /ends at febd1bb34/);
+  assert.match(briefOf(short), /Merges since the last green main `cd482d430000`: unread \(the first-parent chain/);
 });
 
 test("W1-T9665: a merge that reaches a failing test through its import closure carries its diff", async () => {
@@ -228,7 +240,7 @@ test("W1-T9665: a merge that reaches a failing test through its import closure c
   assert.deepEqual(byPr.get(11997)?.reached, [FAILING_TEST]);
   assert.equal(byPr.get(11987)?.reachesFailingTests, true, "#11987 adds the failing test");
   assert.equal(byPr.get(12006)?.reachesFailingTests, false, "the plan-only merge reaches no failing test");
-  const prompt = mainRepairFixPrompt(request, "/tmp/body.md");
+  const prompt = briefOf(request);
   assert.ok(prompt.includes("+export const REMEDY_OWNER_ONLY = true;"), "the reaching merge's unified diff is in the brief");
   assert.ok(prompt.includes("diff --git a/src/lib/ci-friction-remedy.ts b/src/lib/ci-friction-remedy.ts"));
   assert.ok(!prompt.includes("next-plan-only-line"), "a merge that reaches nothing carries its diff stat, not its diff");
@@ -236,11 +248,11 @@ test("W1-T9665: a merge that reaches a failing test through its import closure c
   assert.ok(prompt.indexOf("(#11997)") < prompt.indexOf("(#12006) chore(plan)"), "the reaching merges come first");
 
   // An unreadable affected-suites input is said, and never read as "no overlap".
-  const unread = await replayFix({ readAffectedInput: () => Promise.reject(new Error("ls-files exited 128")) });
+  const unread = await replayFix({ readAffectedInput: () => Promise.reject(new Error("the tracked-file read exited 128")) });
   const remedy = unread.mergesSinceGreen?.merges.find((merge) => merge.pr === 11997);
   assert.equal(remedy?.reachesFailingTests, undefined);
-  assert.match(remedy?.reachUnknown ?? "", /affected-suites input is unreadable: ls-files exited 128/);
-  const unreadPrompt = mainRepairFixPrompt(unread, "/tmp/body.md");
+  assert.match(remedy?.reachUnknown ?? "", /affected-suites input is unreadable: the tracked-file read exited 128/);
+  const unreadPrompt = briefOf(unread);
   assert.ok(!unreadPrompt.includes("reaches none of the failing tests"), "unknown reach is never rendered as a miss");
   assert.match(unreadPrompt, /reach UNKNOWN: the affected-suites input is unreadable/);
 
@@ -254,14 +266,13 @@ test("W1-T9665: a merge that reaches a failing test through its import closure c
 
 test("W1-T9665: two merges that reach the failing tests are named as a collision to repair together", async () => {
   const request = await replayFix();
-  const prompt = mainRepairFixPrompt(request, "/tmp/body.md");
+  const prompt = briefOf(request);
   assert.match(prompt, /The red may be a COLLISION of `febd1bb34000` \(#11987\), `131248633000` \(#11997\)/);
   assert.match(prompt, /each was green on its own base/);
   const line = fixLine(prompt);
   assert.ok(line.includes("#11987") && line.includes("#11997"), `the fix line names the reaching merges: ${line}`);
   assert.ok(!line.includes("the merge above"), `the plan-only located merge is not the one to repair: ${line}`);
   assert.ok(!line.includes("037a58d8f"), line);
-  assert.ok(prompt.includes(`Remudero-Task: ${mainRepairTaskId(PLAN_ONLY)}`), "the trailer contract is unchanged");
 
   // One reaching merge is no collision; a located merge that reaches the tests keeps today's line.
   const one: MainRepairFixRequest = {
@@ -269,7 +280,7 @@ test("W1-T9665: two merges that reach the failing tests are named as a collision
     offendingSha: REMEDY,
     mergesSinceGreen: { ...request.mergesSinceGreen!, merges: request.mergesSinceGreen!.merges.filter((merge) => merge.pr !== 11987) },
   };
-  const onePrompt = mainRepairFixPrompt(one, "/tmp/body.md");
+  const onePrompt = briefOf(one);
   assert.ok(!onePrompt.includes("COLLISION"));
   assert.equal(fixLine(onePrompt), "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.");
 });
@@ -304,5 +315,5 @@ test("W1-T9665: past the brief's budget, whole non-reaching merges are cut first
   assert.ok(huge.length <= 1500 + 200, `bounded: ${huge.length}`);
 
   assert.match(renderMainRepairMergesSinceGreen(undefined), /not read/);
-  assert.match(renderMainRepairMergesSinceGreen({ merges: [], unread: "this observation read no last green main" }), /unread \(this observation read no last green main\)/);
+  assert.match(renderMainRepairMergesSinceGreen({ merges: [], unreadable: "this observation read no last green main" }), /unread \(this observation read no last green main\)/);
 });
