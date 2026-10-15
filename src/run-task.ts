@@ -12393,13 +12393,10 @@ export async function runFixRung(opts: {
     const readRemoteBranchHead = deps.readRemoteBranchHead ?? (receipt ? lsRemoteBranchHead : undefined);
     if (!readRemoteBranchHead) return { landed: true }; // a push double that names no head never reached a remote to read
     const headSha = receipt?.fixRoundPushedHead ?? committed;
-    let remoteHead: string | undefined;
-    let unreadable: string | undefined;
-    try {
-      remoteHead = await readRemoteBranchHead(opts.worktreePath, opts.branch);
-    } catch (error) {
-      unreadable = String((error as Error)?.message ?? error).slice(0, 500);
-    }
+    const read = await Promise.resolve().then(() => readRemoteBranchHead(opts.worktreePath, opts.branch)).then(
+      (head) => ({ head, unreadable: undefined }), (error: unknown) => ({ head: undefined, unreadable: String((error as Error)?.message ?? error).slice(0, 500) }));
+    const remoteHead = read.head;
+    const unreadable = read.unreadable;
     const seen = remoteHead === undefined ? {} : { remoteHead };
     if (headSha !== undefined && remoteHead === headSha) return { landed: true, remoteHead };
     if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable };
