@@ -9,7 +9,7 @@ import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-r
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
@@ -1201,29 +1201,29 @@ export function mainInheritedHintReader(ledgerPath: string): () => { pending: Ma
     }
   };
   return () => {
-    const size = existsSync(ledgerPath) ? statSync(ledgerPath).size : 0;
-    if (size < offset) {
-      offset = 0;
-      decoder = new StringDecoder("utf8");
-      carry = "";
-      latest.clear();
-      answered.clear();
-    }
-    if (size > offset) {
-      const fd = openSync(ledgerPath, "r");
-      const chunk = Buffer.alloc(1 << 20);
-      try {
-        while (offset < size) {
-          const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
-          if (n <= 0) break;
-          offset += n;
-          const lines = (carry + decoder.write(chunk.subarray(0, n))).split("\n");
-          carry = lines.pop() ?? "";
-          for (const line of lines) take(line);
-        }
-      } finally {
-        closeSync(fd);
+    // Size the descriptor it reads, never the path (CodeQL js/file-system-race): the ledger rotates under the daemon.
+    let fd: number | undefined;
+    try { fd = openSync(ledgerPath, "r"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      const size = fd === undefined ? 0 : fstatSync(fd).size;
+      if (size < offset) {
+        offset = 0;
+        decoder = new StringDecoder("utf8");
+        carry = "";
+        latest.clear();
+        answered.clear();
       }
+      const chunk = Buffer.alloc(fd !== undefined && size > offset ? 1 << 20 : 0);
+      while (fd !== undefined && offset < size) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
+        if (n <= 0) break;
+        offset += n;
+        const lines = (carry + decoder.write(chunk.subarray(0, n))).split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) take(line);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
     return { pending: [...latest.values()].filter((h) => (answered.get(h.origin) ?? -1) < h.prsCount), torn };
   };
