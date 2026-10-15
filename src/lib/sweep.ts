@@ -14451,6 +14451,7 @@ export interface SweepFixCapacitySnapshot {
 
 /** W1-T9498: the worker classes a fix admission charges against its memory reading. */
 export type FixAdmissionClass = "fix" | "review";
+export interface FixAdmissionWaiter { prNumber: number; sinceMs: number } // W1-T9582: a PR and when it began waiting.
 
 /** W1-T9498: the rss+swap (MiB) of each live, started worker tree of a class in this container; undefined when the
  *  residency cannot be read, and then every reservation is charged its whole estimate. */
@@ -14547,11 +14548,19 @@ export function createSweepFixAdmissionController(input: {
   readActiveWorkers?: () => number;
   readPressure?: () => FixHostPressure;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  reviewQueue?: readonly FixAdmissionWaiter[]; // W1-T9582: the planned reviews, each with when its PR began waiting.
+  waitSinceMs?: (pr: OpenPrView) => number; // W1-T9582: when a claiming PR began waiting.
 }): {
   claim: NonNullable<SweepDeps["claimFixAdmission"]>;
   snapshot: () => SweepFixCapacitySnapshot;
+  overtaken: () => ReadonlySet<number>;
 } {
   let reservations = 0;
+  const queue = [...(input.reviewQueue ?? [])].sort((a, b) => a.sinceMs - b.sinceMs); // W1-T9582: stable, so ties keep pool order.
+  const overtaken = new Set<number>();
+  const kept = (): FixAdmissionWaiter[] => queue.filter((review) => !overtaken.has(review.prNumber));
+  let ahead: FixAdmissionWaiter[] | undefined; // W1-T9582: the reviews charged ahead of the claim being judged.
+  const charged = (): number => ahead === undefined ? reviewReservations : Math.min(reviewReservations, ahead.length);
   const standIn = input.readActiveWorkers === undefined && input.readPressure === undefined;
   let activeWorkers = input.activeWorkers;
   let reviewReservations = input.reviewReservations;
@@ -14574,7 +14583,7 @@ export function createSweepFixAdmissionController(input: {
   const compute = () => {
     charge = undefined;
     if (!pressure) {
-      available = Math.max(0, Math.max(0, input.hostWorkerBudget - activeWorkers) - reviewReservations - reservations);
+      available = Math.max(0, Math.max(0, input.hostWorkerBudget - activeWorkers) - charged() - reservations);
       return;
     }
     if (pressure.reason !== undefined) {
@@ -14585,7 +14594,7 @@ export function createSweepFixAdmissionController(input: {
     const review = estimate("review");
     charge = {
       headroomMib: Math.max(0, pressure.availableMib - pressure.floorMib),
-      reviewChargeMib: fixAdmissionChargeMib(reviewReservations, review.estimateMib, residents?.review),
+      reviewChargeMib: fixAdmissionChargeMib(charged(), review.estimateMib, residents?.review),
       fixChargeMib: fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix),
       fixEstimateMib: fix.estimateMib,
       fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
@@ -14594,7 +14603,19 @@ export function createSweepFixAdmissionController(input: {
     const left = charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib;
     const fits = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib));
     // Nothing to wait for: one is admitted, never wedged, while nothing else is outstanding (pressureWorkers' rule).
-    available = pressure.tier === "nothing-to-wait-for" && reviewReservations + reservations === 0 ? Math.max(1, fits) : fits;
+    available = pressure.tier === "nothing-to-wait-for" && charged() + reservations === 0 ? Math.max(1, fits) : fits;
+  };
+  const reviewsFit = (count: number): boolean => !pressure
+    ? Math.max(0, input.hostWorkerBudget - activeWorkers) - reservations - count >= 0
+    : charge !== undefined &&
+      charge.headroomMib - charge.fixChargeMib - fixAdmissionChargeMib(count, charge.reviewEstimateMib, residents?.review) >= 0;
+  const overtake = (since: number): void => { // W1-T9582: a later-queued review the admitted repair left no room for.
+    const later = kept().filter((review) => review.sinceMs > since);
+    let fit = kept().length - later.length;
+    for (const review of later) {
+      if (reviewsFit(fit + 1)) fit++;
+      else overtaken.add(review.prNumber);
+    }
   };
   const refresh = () => {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
@@ -14620,7 +14641,7 @@ export function createSweepFixAdmissionController(input: {
     pressure,
     ...(charge ? { charge } : {}),
   });
-  const emit = (): void => {
+  const emit = (order?: Record<string, unknown>): void => {
     const state = snapshot();
     input.log?.("sweep.fix_capacity", {
       surface: state.surface,
@@ -14645,34 +14666,46 @@ export function createSweepFixAdmissionController(input: {
       fix_estimate_mib: state.charge?.fixEstimateMib,
       fix_estimate_source: state.charge?.fixEstimateSource,
       review_estimate_mib: state.charge?.reviewEstimateMib,
+      ...order,
     });
   };
   // The parenthetical a refusal names: the MiB it refused on with a reading, the worker count without one.
   const refusalArithmetic = (): string => charge
-    ? `(headroom ${charge.headroomMib} MiB over the floor; charged ${charge.reviewChargeMib} MiB for ${reviewReservations} ` +
+    ? `(headroom ${charge.headroomMib} MiB over the floor; charged ${charge.reviewChargeMib} MiB for ${charged()} ` +
       `reviews at ${charge.reviewEstimateMib} and ${charge.fixChargeMib} MiB for ${reservations} admitted fixes; ` +
       `a fix needs ${charge.fixEstimateMib} MiB (${charge.fixEstimateSource}); ${activeWorkers} active, ${fixesAdmitted} fixes admitted)`
-    : `(${activeWorkers} active, ${reviewReservations} reserved for review, ${fixesAdmitted} fixes admitted)`;
+    : `(${activeWorkers} active, ${charged()} reserved for review, ${fixesAdmitted} fixes admitted)`;
   emit();
   return {
     snapshot,
-    claim: () => {
+    overtaken: () => overtaken,
+    claim: (pr) => {
+      const since = input.reviewQueue && input.waitSinceMs ? input.waitSinceMs(pr) : undefined;
+      ahead = since === undefined ? undefined : kept().filter((review) => review.sinceMs <= since);
+      const order = (): Record<string, unknown> | undefined => since === undefined ? undefined : {
+        pr_number: pr.prNumber, blocker_since: clockFromMillisFn(() => since).iso(),
+        ordered_ahead: ahead!.map((review) => review.prNumber), overtaken_reviews: [...overtaken],
+      };
       refresh();
       if (available <= 0) {
         fixesRefused++;
-        emit();
+        emit(order());
+        const arithmetic = refusalArithmetic();
+        ahead = undefined;
         return {
           admitted: false,
           reason:
             `${standIn ? `host worker budget ${input.hostWorkerBudget}` : "live host capacity"} exhausted for this ${input.surface} pass ` +
-            refusalArithmetic() +
+            arithmetic +
             " — repair remains queued and will be re-derived next pass",
         };
       }
       reservations++;
       fixesAdmitted++;
       compute();
-      emit();
+      if (since !== undefined) overtake(since);
+      emit(order());
+      ahead = undefined;
       let released = false;
       return { admitted: true, release: standIn ? undefined : () => {
         if (released) return;
@@ -15395,13 +15428,14 @@ export async function runSweep(
     deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
       ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
       : undefined;
-  const fullReviewQueueDepth = deps.repairAdmissionSurface === "full"
-    ? reviewAdmissionQueueDepth(openPrs, policy, now, {
+  const fullReviewCandidates = deps.repairAdmissionSurface === "full"
+    ? reviewAdmissionCandidates(openPrs, policy, now, {
         delivered: prior.reviewDelivered,
         refused: prior.reviewRefused,
         retryableThrows: prior.reviewRetryableThrows,
       })
     : undefined;
+  const fullReviewQueueDepth = fullReviewCandidates?.length;
   if (fullReviewQueueDepth !== undefined) noteIdleReviewDemand(fullReviewQueueDepth, openPrs.length, now);
   const fullReviewLanes = fullReviewQueueDepth === undefined
     ? undefined
@@ -15409,6 +15443,14 @@ export async function runSweep(
   // W1-T9498: this full pass's review reservations, read live: its planned reviews while its pool can still start
   // them, less those settled. Its pool counts each start and settle below.
   const fullReviews = { planned: Math.min(fullReviewQueueDepth ?? 0, fullReviewLanes ?? 0), started: 0, settled: 0, pulling: true };
+  const waitSinceMs = (pr: OpenPrView, review: boolean): number => { // W1-T9582: the current blocker's since, else last activity.
+    const priorBlocker = priorBlockerByPr.get(pr.prNumber);
+    const at = priorBlocker?.since !== undefined && (priorBlocker.blocker === "awaiting-review") === review
+      ? Date.parse(priorBlocker.since) : Date.parse(pr.lastActivityAt);
+    return Number.isNaN(at) ? now : at;
+  };
+  const fullReviewQueue = orderPendingReviews((fullReviewCandidates ?? []).map((candidate) => ({ pr: candidate })))
+    .slice(0, fullReviews.planned).map(({ pr }) => ({ prNumber: pr.prNumber, sinceMs: waitSinceMs(pr, true) }));
   const fullRepairAdmission =
     fullRepairActiveWorkers === undefined || fullReviewQueueDepth === undefined || fullReviewLanes === undefined
       ? undefined
@@ -15424,6 +15466,8 @@ export async function runSweep(
             (fullReviews.pulling ? Math.max(fullReviews.planned, fullReviews.started) : fullReviews.started) - fullReviews.settled,
           ...productionFixAdmissionReaders(deps),
           log,
+          reviewQueue: fullReviewQueue,
+          waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
   const fixCapacityReleases = new Map<number, () => void>();
   const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
@@ -19093,8 +19137,12 @@ export async function runSweep(
   // the two ceilings ADD with nothing naming their sum. Floored at 1. A CEILING, NOT A TARGET.
   // W1-T1218/W1-T2584: ORDER BEFORE THE PULL — GitHub answers newest-first, so slicing by position
   // deferred the same oldest tail every pass.
-  const orderedReviews = orderPendingReviews(pendingReviews);
-  const reviewLanes = fullReviewLanes ?? effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines);
+  const overtakenReviews = fullRepairAdmission?.overtaken() ?? new Set<number>(); // W1-T9582
+  const overtakenJobs = pendingReviews.filter((job) => overtakenReviews.has(job.pr.prNumber));
+  const orderedReviews = orderPendingReviews(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)));
+  fullReviews.planned = Math.max(0, fullReviews.planned - overtakenReviews.size);
+  const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, orderedReviews.length, now, ledgerLines)) -
+    overtakenReviews.size);
   const postReview = deps.postReview;
   let nextReviewIndex = 0;
   let admissionStopReason: string | undefined;
@@ -19317,6 +19365,11 @@ export async function runSweep(
   // Only a named admission stop can leave an unstarted tail. W1-T2771: these jobs were discovered
   // but never pulled, so they own NO mutex key — do not `delete` theirs here, since a concurrent
   // pass may own it for a real active review. Ledger `acted:false` with no outcome key.
+  for (const job of overtakenJobs) {
+    await finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, false, false, undefined,
+      "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
+      undefined, undefined, undefined);
+  }
   const unstartedReviews = orderedReviews.slice(nextReviewIndex);
   for (const job of unstartedReviews) {
     await finalizeDisposition(
@@ -19328,7 +19381,9 @@ export async function runSweep(
       false,
       false,
       undefined,
-      admissionStopReason ?? widthStopReason ?? "review admissions stopped — re-derived next pass",
+      admissionStopReason ?? widthStopReason ?? (overtakenJobs.length > 0
+        ? "review lanes taken by repairs queued before their reviews — re-derived next pass"
+        : "review admissions stopped — re-derived next pass"),
       undefined,
       undefined,
       undefined,
@@ -20253,11 +20308,16 @@ function reviewAdmissionQueueDepth(
   now: number,
   outcomes: ReviewAdmissionOutcomes,
 ): number {
+  return reviewAdmissionCandidates(openPrs, policy, now, outcomes).length;
+}
+
+function reviewAdmissionCandidates(openPrs: readonly OpenPrView[], policy: SweepPolicy, now: number,
+  outcomes: ReviewAdmissionOutcomes): OpenPrView[] { // W1-T9582: the spawning review candidates themselves.
   return openPrs.filter((pr) =>
     pr.isPlanFiling !== true &&
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)
-  ).length;
+  );
 }
 
 /** W1-T2426 — THE ADMISSION KEY, AND WHY IT IS NOT {@link OpenPrView.lastActivityAt}.
