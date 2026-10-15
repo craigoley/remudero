@@ -1,0 +1,53 @@
+- id: W1-T9648
+  title: "A SKILL-EVAL PASS CARRIES NO MEASURE OF CHANCE — `skillEvalVerdict` passes any positive mean gain with no task regressed, and 6 of 6 against 3 of 6 passes although its exact one-sided p is about 0.09; name the exact p-value and the tasks improved on every result row, leaving the verdict unchanged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low  # Rule 19: one concern — the result row reports its own uncertainty; no verdict changes
+  band_meaning: blast-radius
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T4669]
+  files: [src/lib/skill-eval.ts, test/a-skill-eval-result-names-its-exact-p-value.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    - `skillEvalVerdict` (src/lib/skill-eval.ts:195) passes a draft when every held-out task is measurable, the mean
+      with-skill minus without-skill pass rate is above 0, and no task regressed. The operator ruled on 2026-10-13:
+      K = 3 held-out tasks and R = 2 trials per arm.
+    - At that size, 6 of 6 with the skill against 3 of 6 without passes. The exact one-sided p of those pooled counts
+      (hypergeometric: C(9,6)·C(3,0)/C(12,6) = 84/924) is about 0.091. The best possible result, 6 of 6 against 0 of 6,
+      is 1/924, about 0.0011.
+    - Two trials of one task are not independent, so the pooled p is optimistic. At the task level, three tasks can
+      never go below 1/8 on a sign test.
+    - The `skill_eval.result` row (SKILL_EVAL_STEPS, :133) reports the delta and nothing about chance, and it is what
+      the operator reads before approving a draft.
+    Found while reading anthropics/claude-quickstarts (managed-agents knowledge-wiki notebook): identical configurations
+    move by several points run to run, so a single-run gain is noise until it repeats.
+    THE 2026-10-13 RULING STANDS: this adds numbers to the row and changes no verdict.
+  design: |
+    1. src/lib/skill-eval.ts gains a small exact one-sided Fisher (hypergeometric) test over two pass counts, built
+       on a log-factorial table as src/lib/benchmark-aa.ts already does (`lnFactorials`, :313). It stays inside
+       skill-eval.ts so this task touches one module.
+    2. `SkillEvalVerdict` and the `skill_eval.result` row gain `pValueOneSided` (pooled with-skill passes against
+       pooled without-skill passes), `tasksImproved` and `tasksMeasured`. A result with no measurable task carries no
+       p-value.
+    3. The verdict logic is unchanged.
+    New tests go in test/a-skill-eval-result-names-its-exact-p-value.test.ts, with `test(` titles exactly as in the
+    proofs below. The first pins 84/924 for 6-of-6 against 3-of-6, and 1/924 for 6-of-6 against 0-of-6.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-skill-eval-result-names-its-exact-p-value.test.ts"
+    - claim: "a skill eval result names the exact one-sided p-value of its pooled pass counts"
+      proof: 'grep: test("W1-T9648: a skill eval result names the exact one-sided p-value of its pooled pass counts" in test/a-skill-eval-result-names-its-exact-p-value.test.ts'
+    - claim: "the p-value never changes the verdict"
+      proof: 'grep: test("W1-T9648: the p-value never changes the verdict" in test/a-skill-eval-result-names-its-exact-p-value.test.ts'
+  falsifier: |
+    Drop `pValueOneSided` from the result. The first test then finds no p-value on the row.
+  note: |
+    CONTENTION: an unfiled branch (run-unfiled-1791918060000, last pushed 2026-10-13, "pin kernel descriptors") also
+    edits src/lib/skill-eval.ts, on a different subject.

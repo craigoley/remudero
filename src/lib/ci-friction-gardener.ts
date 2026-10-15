@@ -975,6 +975,11 @@ export function workflowJobCheckNames(name: string, matrix: unknown): string[] |
   return names.size > 0 ? [...names] : "matrix expands to no combination";
 }
 
+/** A test file is evidence, never an owner — under a test/ directory or named *.test.*. */
+export function isCiFrictionTestFile(file: string): boolean {
+  return /(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file);
+}
+
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
  *  Missing paths are absence and failed git reads refuse the pass; a workflow shape it cannot name, or two
  *  owners it cannot tell apart, is a gap for that check alone ({@link OwnerSearch.workflowGaps}). */
@@ -1087,8 +1092,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
         if (!m) return [];
         const file = m[1]!;
         if (/^src\/lib\/ci-friction-[^/]+\.ts$/.test(file)) return [];
-        // A test file is evidence, never an owner — under a test/ directory or named *.test.*.
-        if (/(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file)) return [];
+        if (isCiFrictionTestFile(file)) return [];
         return [{ file, hits: Number(m[2]) }];
       });
     },
@@ -1389,7 +1393,9 @@ export function ciFrictionLadder(input: {
       continue;
     }
     const details = remedyRounds.filter((r) => r.causeKey === key && r.detail).map((r) => r.detail!);
-    const owner = locateCiFrictionOwner(key, details, input.ownerSearch);
+    const located = locateCiFrictionOwner(key, details, input.ownerSearch);
+    const owner = located && !located.files.every(isCiFrictionTestFile) ? located : undefined;
+    const testAlone = located && !owner ? `; the failing test ${located.failingTest ?? located.files[0]} imports no src/ or scripts/ module` : "";
     const evidence = input.ownerSearch.evidence?.(key, details, owner);
     let reconsideration: CiFrictionOwnershipReconsideration | undefined;
     if (held) {
@@ -1405,7 +1411,7 @@ export function ciFrictionLadder(input: {
     next = owner
       ? { price, origin, rung: s.rung, decision: { kind: "draft", owner, prior: s.prior, ...(reconsideration ? { reconsideration } : {}) } }
       : { price, origin, rung: s.rung, decision: { kind: "escalate", why: legacyRefusal + (input.ownerSearch.workflowOwner ? "; no declared workflow job resolves it" : "")
-        + (workflowGap(input.ownerSearch, key, details) ?? ""), prior: s.prior, holdReason: "no-owner", evidence } };
+        + (workflowGap(input.ownerSearch, key, details) ?? "") + testAlone, prior: s.prior, holdReason: "no-owner", evidence } };
     if (!owner) line.state = "escalate";
   }
   return { next, ladder };
@@ -1561,12 +1567,12 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         taskId,
         action.priced,
       );
-      const verdict = ciFrictionRecordVerdict(contents, `ci-friction:${taskId}`);
-      if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);
       const stem = ciFrictionShardStem(ciFrictionCauseKey(action.price.cause));
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
       const relPath = relative(ws.root, shardPath);
+      const verdict = ciFrictionRecordVerdict(contents, relPath);
+      if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);
       // lint-plan's verdict before the draft reaches disk (#10446); the spec's `landingRefusal` re-reads the landing.
       const refused = machineShardFilingRefusal(contents, relPath, {
         pathExists: (path) => existsSync(join(ws.root, path)), pathExistsAtBase: sources.ownerSearch.fileExists,
