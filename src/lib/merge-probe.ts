@@ -8,7 +8,7 @@ import { readLedgerLines } from "./status.js";
 import {
   canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
 } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync, readMemoryHeadroom, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -215,6 +215,7 @@ function harnessTypecheck(
     const slot = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion)
       ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
     try {
+      if (slot && !testSlotExecutionAllowed(slot)) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
       return await new Promise<TypecheckRun>((resolveRun) => {
         let output = "";
         let timedOut = false;
