@@ -12,7 +12,7 @@
   origin: "operator instruction 2026-10-15: advance all recommended public compatibility and qualification work through normal ownership and gates; shadow-only, owner override, no schedules or live cutover"
   plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T4265, W1-T4198, W1-T9500, W1-T7727]
   files: [deploy/install-host-units.sh, deploy/recycle-container.sh, test/host-units-install.test.ts, test/recycle-container.test.ts, test/recycle-container-bash3-portability.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ actual main f59f4a2a1406b64124d64759c797f4866b68bfa9 after the normal

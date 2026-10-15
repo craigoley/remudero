@@ -1,0 +1,110 @@
+- id: W1-T9703
+  title: "THE GARDEN MINT'S RESERVATION CHILD IS BOUNDED BY LOOP-AVAILABLE TIME, AND THE WALL-CLOCK CENSUS SEES AN ABORTCONTROLLER KILL — `ciLearningTaskIdMinter(...).async` races its reservation child against a hand-rolled setTimeout that calls `controller.abort()`, then re-checks `performance.now()` after a SUCCESS, so a held loop turns a finished mint into a GardenMintTimedOutError and strands the id it already reserved; W1-T9651's census cannot see an abort-based kill"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what bounds the garden mint's reservation child on the daemon loop; the mint, its budget learner and its refusal shapes are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 after #12058 (W1-T9651, 1902d67a4): 'fix root causes'; a site the W1-T9651 sweep missed because its kill is an abort, not child.kill()"
+  plan_refs: [W1-T9651, W1-T7742, W1-T9615, W1-T5689]
+  files:
+    - src/run-task.ts
+    - test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts
+    - test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts
+    - test/a-garden-mint-is-bounded-by-loop-available-time.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: the same false-timeout class W1-T9651 closed everywhere else
+  attempts: 0
+  rationale: |
+    READ at origin/main 1902d67a4 (2026-10-15, after #12058 merged), src/run-task.ts `ciLearningTaskIdMinter`, its
+    returned `async: (filingBranch)` member, which every daemon gardener mints through (gardenPass specs at the
+    scout/gate/flow/selector-shadow/host-resource call sites, `mintTaskIdAsync: mintTaskId.async`,
+    flake-incident-gardener.ts `sources.mintTaskId.async`):
+    - It builds `const controller = new AbortController()` and an `expired` promise whose `expire` callback is a
+      `setTimeout`. `expire` re-arms only while `bound - (now() - started) > 0`, where `now` is
+      `performance.now()`: WALL-CLOCK time, which counts a held loop. Once it is not positive it rejects with
+      GardenMintTimedOutError and calls `controller.abort()`; that signal is passed to the reservation child
+      (`executeAsync(process.execPath, [... "--eval", ...], { ..., signal: controller.signal })`).
+    - `Promise.race([executeAsync(...), expired])`: when a held loop resumes, Node runs the due timer before the
+      child's pending exit and stdout are processed (W1-T9651's mechanism), so `expired` wins against a child that
+      has ALREADY reserved its id, and the abort kills or orphans the read of its result.
+    - After a child that DID resolve, two more wall-clock checks throw anyway:
+      `if (now() - started >= bound) throw new GardenMintTimedOutError(...)` (twice in the minter: once in the
+      async member and once in mintSync, which runs inside the child and is out of scope). A success observed late
+      only because the loop was held is reported as a timeout.
+    - The cost is not cosmetic: the reservation ref is already on origin (`held` is never set for it, so no
+      releaseAsync can free it), the garden pass writes garden.mint_timed_out and files nothing, and the next pass
+      mints a NEW id. A held loop (W1-T9615: 60-190 s every ~2 min on 2026-10-15) strands one reservation per
+      false timeout.
+    - The default `executeAsync` already routes through `execFileLoopBounded` with `timeout: Math.ceil(bound)`
+      (W1-T9651), so the loop-available bound is ALREADY armed underneath; the hand-rolled race on top of it is the
+      wall-clock bound that defeats it.
+    WHY THE CENSUS MISSED IT. test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts `wallClockChildArms`
+    counts a timer only when the body also calls `.kill(` (`const kills = /\.kill\(/.test(body) ? ... : 0`). This
+    body kills through `controller.abort()` and a `signal:` option, so the kill count is 0. Its child call is a seam
+    (`executeAsync`) whose default is an ARROW wrapping execFileLoopBounded, which `seamsOver` does not treat as a
+    child (it matches only `= execFile`-style defaults and `typeof` annotations), and `withoutSyncOrBoundedCalls`
+    strips the execFileLoopBounded call itself. So the census reads 0 for this function at origin/main.
+    W1-T7742 (which made this mint async) wrote the current race and its tests deliberately; its test
+    "W1-T7742: a late successful mint files nothing and preserves its held reservation" encodes the wall-clock
+    post-check as intended behaviour, and "W1-T7742: an early mint deadline callback waits for the remaining bound
+    before aborting" pins the hand-rolled re-arm. Both encode the defect.
+  design: |
+    1. THE MINT. Delete the `expired` promise, its `setTimeout`/`expire` re-arm, the `AbortController`, and the
+       `Promise.race`. Await the reservation child alone. Its bound is the loop-available budget the default
+       executeAsync already arms (execFileLoopBounded with `timeout: Math.ceil(bound)`, src/lib/loop-bounded-child.ts);
+       a child stopped at that budget rejects with LoopBoundedChildTimeout, which this function maps to
+       GardenMintTimedOutError (extend the existing `code === "ETIMEDOUT" || killed` arm to recognise it by
+       instanceof, keeping both old arms for an injected seam). The seam's type loses `signal`.
+    2. NO POST-HOC WALL-CLOCK CHECK. Remove `if (now() - started >= bound) throw new GardenMintTimedOutError` from
+       the async member. A child that returned an id reserved it: record it in `held` and return it, so a refused
+       filing can still release it. The child's own `{ timedOut: true }` report stays a GardenMintTimedOutError (that
+       is the child's own bound, on its own loop). mintSync, which runs inside the child, is out of scope.
+    3. THE LEARNER. `mintBudget.observe` keeps observing the elapsed time of a successful mint; a mint that ran past
+       its learned bound only because the loop was held is now observed rather than discarded. Read the loop-available
+       elapsed (the time `loopAvailableDeadline` would count) if GardenMintBudget can take it without a second clock;
+       otherwise observe wall-clock elapsed and say why in the PR body. No new fixed threshold (operator rule).
+    4. AMEND W1-T7742's TESTS in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts: the "late
+       successful mint" test becomes "a late successful mint is filed" (inverted expectation, same fixture); the
+       "early mint deadline callback" test is deleted (its timer no longer exists), with the reason in the PR body.
+       The real-child tests ("an expired reservation child is killed while the loop stays responsive", "transport
+       and child timeout reports stay distinct") keep passing unchanged.
+    5. A HELD-LOOP TEST in a NEW file test/a-garden-mint-is-bounded-by-loop-available-time.test.ts, on the real
+       default executeAsync with a real child (the fixture shape of test/a-loop-bounded-child-is-stopped-never-truncated.test.ts):
+       a reservation child that prints its id and exits at once while a busy-wait holds the loop past the mint's
+       bound resolves with that id and records it as held. At origin/main the same test rejects with
+       GardenMintTimedOutError.
+    6. THE CENSUS. Extend `wallClockChildArms` so a body that arms `setTimeout`/`AbortSignal.timeout` and calls
+       `.abort(` on a controller whose `.signal` is passed to an async child call, OR to a seam call, counts as a
+       wall-clock kill. A seam includes a parameter whose DEFAULT is an arrow or function calling a child primitive or
+       execFileLoopBounded/boundChildByLoopTime (the executeAsync shape), not only `= execFile` and `typeof` forms.
+       Keep the table EXACT and EMPTY after the fix. Add positive controls: the pre-fix ciLearningTaskIdMinter shape
+       (seam default wrapping execFileLoopBounded, a re-arming setTimeout, controller.abort(), signal: controller.signal)
+       planted in a reached function is named; an AbortController whose signal reaches only a fetch, a ledger stream
+       or an in-process function (read-model-slow-lane.ts refreshAnalytics, review.ts recoverPromisedFollowUpReports,
+       worker-provider.ts's open-weight HTTP deadlines) is NOT counted. If the extended census names another real
+       daemon-reachable site, route it through src/lib/loop-bounded-child.ts in this PR and list it in the body; do
+       not add a baseline row.
+    Unchanged: the mint's budget value and learner, the reservation protocol (task-id-reservation.ts), the CLI
+    minter, every gardener's handling of GardenMintTimedOutError.
+  acceptance:
+    - claim: "a reservation child that exits at once while a held loop runs past the mint's bound resolves with its id and holds it"
+      proof: 'grep: test("W1-T9703: a held loop never turns a finished garden mint into a timeout" in test/a-garden-mint-is-bounded-by-loop-available-time.test.ts'
+    - claim: "a reservation child stopped at its loop-available budget still rejects as GardenMintTimedOutError and holds nothing"
+      proof: 'grep: test("W1-T9703: a garden mint stopped at its loop-available budget is a GardenMintTimedOutError" in test/a-garden-mint-is-bounded-by-loop-available-time.test.ts'
+    - claim: "the wall-clock census names a daemon-reachable child stopped through an AbortController a timer aborts, through a seam whose default wraps a child"
+      proof: 'grep: test("W1-T9703: the census names an AbortController-plus-timer kill of a daemon-reachable child" in test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts'
+    - claim: "W1-T7742's late-success test now expects the mint to be filed"
+      proof: 'grep: test("W1-T9703: a late successful mint is filed" in test/a-garden-filing-mints-its-task-id-off-the-daemon-loop.test.ts'
+  falsifier: |
+    At origin/main, run ciLearningTaskIdMinter(root).async(branch) with the real default executeAsync and a child
+    that prints {"id":"W1-T9001",...} and exits immediately, while a busy-wait holds the loop for twice the bound:
+    the call rejects with GardenMintTimedOutError and heldSha("W1-T9001") is undefined, though the child reserved it.
+    Plant the pre-fix body shape into a reached function at origin/main: the census counts 0.
+  note: |
+    EFFECT, measured after merge from the core ledger: garden.mint_timed_out rows whose elapsed_ms exceeds bound_ms
+    only by a daemon.loop_lag hold in the same minute go to zero; rmd-id reservation refs with no filed shard and no
+    open PR stop accruing from garden lanes.

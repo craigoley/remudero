@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15 after the 08:22-10:29Z core outage: #11918 (W1-T8950) fix round 1 forensics"
   plan_refs: [W1-T8833, W1-T4693, W1-T5528, W1-T7096, W1-T2610, W1-T8950]
   files: [src/run-task.ts, src/lib/fix-progress-judge.ts, src/lib/fix-routing-learner.ts, test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

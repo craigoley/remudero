@@ -36,6 +36,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
+import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
@@ -47,7 +48,7 @@ import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -463,7 +464,7 @@ import {
   daemonExitCodeForSummary,
   resolveFleetControlHold,
   runDaemon,
-  RESTART_HISTORY_WINDOW_MS,
+  readRestartHistoryLines,
   restartWorkHistory,
   type CrashLoopVerdict,
   type DaemonFreshness,
@@ -483,6 +484,7 @@ import {
   pendingWorkerBoundaryHandoffs,
   v8HeapStatistics,
 } from "./lib/daemon.js";
+export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
 import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { sweepReclaimableArtifacts } from "./lib/disk-artifact-reclaim.js";
@@ -1594,7 +1596,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -1875,7 +1877,7 @@ import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-tele
 import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
-import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -3129,7 +3131,7 @@ import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
-import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
+import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
 
@@ -3311,7 +3313,7 @@ import {
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -4771,20 +4773,15 @@ export function planSyncGitRunnerAsync(
   const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 1 << 26 }, (err, stdout) => {
-        clearTimeout(timer);
-        if (timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
+        bound.cancel();
+        if (bound.timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
         return err ? reject(err) : resolve(stdout);
       });
       // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(stdin ?? "");
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
 
@@ -9229,7 +9226,7 @@ async function runReview(args: {
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
-    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
+    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld, unknown_reservations: unknownReservationReads(verdict.taskIdOwnership) });
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -18984,14 +18981,16 @@ export async function checkFixCensusSnapshotAsync(
  *  or never started), `signal` the killing signal, `error` a spawn failure or the bound's kill. */
 export function spawnCensusChild(file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding): Promise<CensusChildResult> {
   return new Promise((resolveChild) => {
-    execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", timeout: options.timeout, maxBuffer: options.maxBuffer },
+    const child = execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", maxBuffer: options.maxBuffer },
       (error, stdout, stderr) => {
-        const failed = error as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
+        bound?.cancel();
+        const failed = (bound?.timedOut ? bound.timeoutError(file, { stdout, stderr }) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
         const status = failed === null ? 0 : typeof failed.code === "number" ? failed.code : null;
         const signal = failed?.signal ?? null;
         resolveChild({ status, signal, stdout: String(stdout), stderr: String(stderr),
           ...(failed !== null && status === null && signal === null ? { error: failed } : {}) } as CensusChildResult);
       });
+    const bound = options.timeout ? boundChildByLoopTime(child, options.timeout) : undefined;
   });
 }
 
@@ -19135,10 +19134,8 @@ const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
 const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
 const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
-  new Promise((resolve) => {
-    execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
-      resolve(error ? String(stderr).trim().split("\n")[0] || error.message : undefined));
-  });
+  execFileLoopBounded(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+    () => undefined, (error: { stderr?: unknown; message: string }) => String(error.stderr ?? "").trim().split("\n")[0] || error.message);
 const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
   const status = proofSandboxStatus();
   if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
@@ -19168,11 +19165,11 @@ export const spawnCoverageChild = (file: string, args: string[], wt: string, env
     let timedOut = false;
     let spawnError: string | undefined;
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
+    let bound: LoopBound | undefined;
     const finish = (status: number | null) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      bound?.cancel();
       const decode = (chunks: Buffer[]) => {
         const decoder = new StringDecoder("utf8");
         return decoder.write(Buffer.concat(chunks)) + (outputLimitExceeded ? "" : decoder.end());
@@ -19197,18 +19194,14 @@ export const spawnCoverageChild = (file: string, args: string[], wt: string, env
       if (chunk.byteLength > remaining) {
         outputLimitExceeded = true;
         spawnError = "maxBuffer exceeded (ENOBUFS)";
-        if (timer) clearTimeout(timer);
+        bound?.cancel();
         child.kill();
         killAfterGrace(child);
       }
     };
     child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
     child.stderr?.on("data", (c: Buffer) => collect(c, "err"));
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-      killAfterGrace(child);
-    }, timeoutMs);
+    bound = boundChildByLoopTime(child, timeoutMs, { onExpire: () => void (timedOut = true), escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
     child.on("error", (e) => {
       spawnError ??= e.message;
       finish(null);
@@ -26930,7 +26923,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
  *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
@@ -31014,13 +31007,19 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
 export function retroShippedGithubGateway(
-  opts: { ownerRepo?: { owner: string; repo: string }; exec?: (args: string[]) => string; commitCwd?: string } = {},
+  opts: {
+    ownerRepo?: { owner: string; repo: string };
+    exec?: (args: string[]) => string;
+    commitCwd?: string;
+    snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache;
+  } = {},
 ): ShippedGithub {
   const { owner, repo } = opts.ownerRepo ?? resolveOwnerRepo();
   // `opts` is a test seam: production passes none, so `exec` is the gateway's own `gh` and the commit index reads
   // the process cwd, exactly as the bare construction did.
   const commitTrailerIndex = buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: opts.commitCwd });
-  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex });
+  const snapshotCache = retroShippedSnapshot(owner, repo, opts.snapshotFor);
+  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex, snapshotCache });
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
@@ -31037,6 +31036,18 @@ export function retroShippedGithubGateway(
           maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** Capture once; the board gateway remains the durable snapshot's only writer. */
+function retroShippedSnapshot(owner: string, repo: string, snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache): BoardSnapshotCache {
+  const seed = (snapshotFor ? snapshotFor(owner, repo) : createBoardSnapshotCache(loadConfig().root, owner, repo)).closedSeed();
+  return {
+    closedSeed: () => seed,
+    issueSeed: () => undefined,
+    commitClosed: () => false,
+    commitIssues: () => false,
+    commitOpen: () => false,
   };
 }
 
@@ -31063,9 +31074,15 @@ export async function retroShippedGithubGatewayAsync(
     pageTimeoutMs?: number;
     commitCwd?: string;
     commitTimeoutMs?: number;
+    snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache;
+    log?: (step: string, fields: Record<string, unknown>) => void;
   } = {},
 ): Promise<ShippedGithub> {
   const { owner, repo } = opts.ownerRepo ?? (await resolveOwnerRepoAtAsync(repoRoot));
+  const snapshotCache = retroShippedSnapshot(owner, repo, opts.snapshotFor);
+  const seed = snapshotCache.closedSeed();
+  const log = opts.log ?? ((step: string, fields: Record<string, unknown>) =>
+    appendLedger(ledgerPathFor(loadConfig()), { run_id: "RETRO-SHIPPED", task_id: "retro", step, ...fields }));
   const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
   const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
   const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
@@ -31105,7 +31122,9 @@ export async function retroShippedGithubGatewayAsync(
     try {
       if (miss.tool === "gh") {
         const half = miss.args[1]?.includes("state=open&") ? "open" : "closed";
-        await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), undefined, half);
+        const known = half === "closed" ? seed : undefined;
+        const fetched = await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), known, half);
+        log("retro_trigger.shipped_read", { half: fetched.half, mode: fetched.mode, calls: fetched.calls, seeded: known?.size ?? 0 });
       } else {
         answers.set(keyOf("git", miss.args), { out: await boundGitCall(boundedGit, miss.args, commitTimeoutMs) });
       }
@@ -31123,6 +31142,7 @@ export async function retroShippedGithubGatewayAsync(
       exec: (args) => replay("gh", args),
       commitTrailerIndex: buildCommitTrailerIndex({ slug: `${owner}/${repo}`, exec: (args) => replay("git", args) }),
       pacer: REPLAY_PACER,
+      snapshotCache,
     });
     const answer = query(replayed);
     const miss = missed;
@@ -35995,7 +36015,7 @@ export function readPushedRunBranchesOutput(
 /** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
  *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction. */
 export async function readPushedRunBranchesOutputAsync(
-  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFilePromise as never,
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFileLoopBounded,
   timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
 ): Promise<string> {
   const opts = { encoding: "utf8", cwd: repoRoot, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
@@ -48423,28 +48443,41 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = await tickReadFor?.();
+    const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
-    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
-    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
-    try {
-      await mainHealthRung?.();
-    } catch (e) {
-      log("main.health.error", { error: String((e as Error)?.message ?? e) });
-    }
-    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
-    // so a reply steers this same tick. Contained like `mainHealthRung` above.
-    if (escalationAnswerGateway) {
-      try {
-        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
-          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
-        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
-      } catch (e) {
-        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
-      }
-    }
+    const [tickRead] = await Promise.all([
+      prelude.time("tick_read", () => tickReadFor?.()),
+      // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+      prelude.time("triage_evidence", async () => {
+        if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
+      }),
+      prelude.time("main_health", async () => {
+        try {
+          await mainHealthRung?.();
+        } catch (e) {
+          log("main.health.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+      // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
+      // so a reply steers this same tick. Contained like `mainHealthRung` above.
+      prelude.time("escalation_answers", async () => {
+        if (!escalationAnswerGateway) return;
+        try {
+          const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+            { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
+          if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+        } catch (e) {
+          log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+    ]);
+    prelude.note({
+      tick_read_source: tickRead === undefined ? "none"
+        : (tickRead.servedPublishedAtMs ?? prelude.startedAtMs) < prelude.startedAtMs ? "served" : "own_read",
+      ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshot_published_at_ms: tickRead.servedPublishedAtMs } : {}),
+    });
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
@@ -48454,20 +48487,21 @@ export function buildSweepHook(
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
-      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-        pacer,
-        planFilingFileCache,
-        onPlanFilingClassification: reportPlanFilingClassification,
-        isMerged,
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
+        buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          pacer,
+          planFilingFileCache,
+          onPlanFilingClassification: reportPlanFilingClassification,
+          isMerged,
           readMainPlan: resolvedReadMainPlan,
-      });
+        }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log,
-        tickRead ? tickReadReverificationDeps(tickRead) : {});
+      const reverifySummary = await prelude.time("post_fix_reverification", () => sweepPostFixReverification(owner, repo,
+        openPrs, ledgerPath, runId, log, tickRead ? tickReadReverificationDeps(tickRead) : {}));
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
@@ -48494,20 +48528,23 @@ export function buildSweepHook(
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
-      const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
-      const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      const staleGateWorkflowsByPr = await prelude.time("stale_gate_workflows", () =>
+        tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung));
+      const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
-      const behindMainByPr = tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
+      const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
-      await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
+      await prelude.time("merge_probes", () =>
+        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr }));
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = await prelude.time("credit_candidates", () =>
+        tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub));
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -48520,6 +48557,7 @@ export function buildSweepHook(
               readMainPlan: resolvedReadMainPlan },
           }),
           ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
+          markPrelude: prelude.mark,
           ledgerPath,
           runId,
           log,
@@ -48596,6 +48634,7 @@ export function buildSweepHook(
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
+    prelude.write(false);
     // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
@@ -53059,17 +53098,6 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
-/** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail. */
-export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
-  const read = readLedgerUnionRecordsSync(stateDir, {
-    refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
-    rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
-    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause"],
-  });
-  if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
-  return read.rows.map((row) => JSON.stringify(row));
-}
-
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
@@ -54337,7 +54365,7 @@ export async function opsCommand(
  * W1-T8625: its Acceptance block is taught by {@link PR_BODY_ACCEPTANCE_GRAMMAR}, the shared PR-body grammar. The bare
  * "`- <claim> | <proof>` bullets" line it replaced named no dialect, so a worker wrote prose and the reviewer capped it.
  */
-export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
+export function alertFixPrompt(alert: AlertLaneAlert, taskId: string, harnessOwned?: { bodyFile: string }): string {
   return [
     "You are a REMUDERO fix worker dispatched by the alert-fix lane (W1-T90, MASTER-PLAN P20, §5D lane 2).",
     "Fix EXACTLY ONE thing: the alert named below. Do not scope-creep into unrelated changes.",
@@ -54350,6 +54378,17 @@ export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     "This alert was matched by policy (plan/alert-policy.yaml) as safe to auto-fix: severity is",
     "medium or low, AND outside the gate/containment-critical path set. Make the minimal, correct fix.",
     "",
+    ...(harnessOwned ? [
+    `THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: ${harnessOwned.bodyFile}`,
+    "It lives outside your checkout: never copy it in and never commit it. Its `origin:` line and its",
+    `trailer \`Remudero-Task: ${taskId}\` are the dispatcher's; leave them as written.`,
+    `Replace ONLY the line \`${MAIN_REPAIR_PROSE_PLACEHOLDER}\` with your prose, and the line`,
+    `\`${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}\` with ONE executable bullet per claim, in this grammar:`,
+    ...PR_BODY_ACCEPTANCE_GRAMMAR,
+    "",
+    "Then, from the working directory:",
+    ...harnessOwnedRepairSteps(),
+    ] : [
     "Then, from the working directory:",
     "- git add the changed files && commit;",
     // The commit/PR contracts every other worker prompt carries: this lane's PR failed commitlint
@@ -54366,6 +54405,7 @@ export function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
     ...PR_BODY_ACCEPTANCE_GRAMMAR,
     "- End your REPORT with exactly: PR_URL: <the pull request url>",
+    ]),
   ]
     .filter((l): l is string => l !== undefined)
     .join("\n");
@@ -54416,6 +54456,8 @@ export interface AlertFixDispatchDeps {
   fetch?: GhApiFetcher;
   readDiff?: (worktreePath: string) => string | undefined;
   readHeadSubject?: (worktreePath: string) => string;
+  pushBranch?: (worktreePath: string, expectedHeadSha: string) => Promise<unknown>; // W1-T9667: the host push of a harness commit
+  readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9667: `git ls-remote`
 }
 
 /** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
@@ -54483,8 +54525,11 @@ export async function dispatchAlertFixRun(
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const branch = `alert-fix-${originId}-${Date.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
+  const bodyFile = join(config.root, "tmp", `alert-fix-body-${taskId}-${systemClock.now()}.md`);
   try {
     await deps.worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    mkdirSync(dirname(bodyFile), { recursive: true });
+    writeFileSync(bodyFile, alertFixBody(alert, taskId));
     const settingsFile = deps.renderWorkerSettings({
       templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
       hooksDir: join(resolveInstallRoot(config), "hooks"),
@@ -54500,12 +54545,13 @@ export async function dispatchAlertFixRun(
     const fixMount: Mount = deps.resolveMount(mountsTable, "fix", "medium");
 
     log("alert-fix.dispatching", { branch, mount: fixMount.model });
+    // W1-T3616: an alert fix commits and pushes, so it takes the fix lane's own list rather than
+    // a narrower second copy.
+    const toolBound = [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")];
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
-      // W1-T3616: an alert fix commits and pushes, so it takes the fix lane's own list rather than
-      // a narrower second copy.
-      tools: [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")],
+      tools: toolBound,
       settingsFile,
       model: fixMount.model,
       mountProvider: fixMount.provider,
@@ -54513,7 +54559,7 @@ export async function dispatchAlertFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: alertFixPrompt(alert, taskId),
+      prompt: alertFixPrompt(alert, taskId, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound }) ? { bodyFile } : undefined),
     });
     log("alert-fix.dispatched_worker", {
       session_id: worker.sessionId,
@@ -54521,7 +54567,11 @@ export async function dispatchAlertFixRun(
       ...workerLedgerFields(worker),
     });
 
-    const report = parseReport(workerTranscript(worker));
+    const workerReport = parseReport(workerTranscript(worker));
+    const owned = (workerReport?.prUrl ?? "") === "" && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
+    const landed = owned ? await landHarnessCommit("alert-fix", worker, branch, worktreePath, log, deps) : undefined;
+    const report = landed === undefined ? workerReport : { prUrl: await openCheckedRepairPr(owner, repo, "alert-fix", { branch, base: "main", worktreePath,
+      bodyFile, pushedHead: landed, prose: `Fixes ${alert.source} alert #${alert.id} [${alert.severity}]: ${alert.summary}`, fallbackTitle: `fix(alert): ${alert.source} #${alert.id}` }, log, deps) };
     if (report?.prUrl) {
       deps.ensureTaskTrailer(report.prUrl, taskId, log);
       log("alert-fix.pr_opened", { pr_url: report.prUrl, origin: `alert#${originId}` });
@@ -54559,12 +54609,13 @@ export async function dispatchAlertFixRun(
           log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, check: "inert-proofs", error: String((e as Error)?.message ?? e) });
         }
       }
-    } else {
+    } else if (!owned || landed !== undefined) {
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
   } catch (e) {
     log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
   } finally {
+    rmSync(bodyFile, { force: true });
     try {
       deps.worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -54616,7 +54667,7 @@ export function mainRepairFixBody(request: MainRepairFixRequest): string {
  *  file at `bodyFile`. With failing test files known, the worker opens the PR with `--body-file` and writes only its
  *  prose; with none, it writes its bullets under {@link PR_BODY_ACCEPTANCE_GRAMMAR} into that file, pushes, and leaves
  *  the open to the dispatcher, which checks those proofs first. */
-export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string): string {
+export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: string, harnessOwnsGit = false): string {
   const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
   const known = request.testFiles.length > 0;
   const merges = mainRepairMergesBrief(request);
@@ -54656,6 +54707,7 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
         ]),
     "",
     "Then, from the working directory:",
+    ...(harnessOwnsGit ? harnessOwnedRepairSteps() : [
     "- git add the changed files && commit;",
     ...commitMessageContractLines(),
     "- `git push origin HEAD` (NOT -u); never push to main;",
@@ -54671,8 +54723,17 @@ export function mainRepairFixPrompt(request: MainRepairFixRequest, bodyFile: str
           "  commit's subject, so that subject must be a conventional-commit subject of <= 100 characters.",
           ...bodyVsDiffContractLines(),
           "- End your REPORT with a line `PUSHED: <your branch>`, and write no PR_URL line.",
-        ]),
+        ])]),
   ].join("\n");
+}
+
+function harnessOwnedRepairSteps(): string[] { // W1-T9667: a harness-committed repair worker's steps (the implement lane's wording)
+  return [
+    "- save your edits to the files and run NO git or gh command: the harness commits, pushes and opens the PR;",
+    ...commitMessageContractLines(),
+    ...bodyVsDiffContractLines(),
+    "- End your REPORT with a line `COMMIT_MESSAGE: <type>(<scope>): <subject>` (it titles the PR), and write no PR_URL line.",
+  ];
 }
 
 /** W1-T8572 — where the dispatcher writes the fix PR's body: a fresh file under `config.root/tmp`, outside the
@@ -54757,10 +54818,11 @@ export async function dispatchMainRepairFixRun(
     // A red main blocks every merge, so this rides the fix route at the "high" band (blast-radius).
     const fixMount: Mount = deps.resolveMount(deps.loadMounts(mountsPath(repoRoot)), "fix", "high");
     log("main-repair.dispatching", { branch, mount: fixMount.model, offending_sha: request.offendingSha, body_file: bodyFile });
+    const toolBound = [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")];
     const worker = await deps.spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
-      tools: [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")],
+      tools: toolBound,
       settingsFile,
       model: fixMount.model,
       mountProvider: fixMount.provider,
@@ -54768,11 +54830,16 @@ export async function dispatchMainRepairFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: mainRepairFixPrompt(request, bodyFile),
+      prompt: mainRepairFixPrompt(request, bodyFile, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound })),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
-    if (request.testFiles.length === 0) {
+    const owned = !prUrl && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
+    if (owned) {
+      const landed = await landHarnessCommit("main-repair", worker, branch, worktreePath, log, deps);
+      if (landed === undefined) return undefined;
+      prUrl = await openCheckedMainRepairPr(owner, repo, request, branch, worktreePath, bodyFile, log, deps, landed);
+    } else if (request.testFiles.length === 0) {
       // A no-test-file worker that opened its own PR broke the contract: its body reached GitHub unchecked, so the
       // breach is ledgered with whatever the body file holds. The PR exists, so it is still returned for review.
       if (prUrl) log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, mainRepairWorkerOpenedDefect(prUrl, existsSync(bodyFile) ? readFileSync(bodyFile, "utf8") : undefined));
@@ -54806,15 +54873,82 @@ async function openCheckedMainRepairPr(
   bodyFile: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: AlertFixDispatchDeps,
+  pushedHead?: string,
 ): Promise<string | undefined> {
-  const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
-  if (diffText === undefined || diffText.trim() === "") {
-    log("main-repair.no_change", { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
+  const pr = request.offendingPr !== undefined ? `PR #${request.offendingPr}` : "an unnamed PR";
+  const failing = request.testFiles.join(", ") || request.failingTestTitles.join("; ") || request.failingChecks.join(", ") || "(none named)";
+  return openCheckedRepairPr(owner, repo, "main-repair", { branch, base: request.branch, worktreePath, bodyFile, pushedHead,
+    prose: `Repairs \`${request.branch}\`, red since \`${request.offendingSha}\` (${pr}) on: ${failing}.`,
+    fallbackTitle: `fix(main): repair ${request.offendingSha.slice(0, 12)}` }, log, deps);
+}
+
+export function workerHarnessCommit(worker: WorkerResult): CodexHarnessCommit | undefined { // W1-T9667: off the result, not the mount
+  return (worker as WorkerResult & { harnessCommit?: CodexHarnessCommit }).harnessCommit;
+}
+
+export function repairHarnessOwnsGit(spawn: { provider?: string; tools: readonly string[]; harnessCommit?: CodexHarnessCommit }): boolean { // W1-T9667: both repair lanes
+  return spawn.harnessCommit !== undefined || (spawn.provider === "codex" && codexHarnessCommits({ tools: [...spawn.tools] }));
+}
+
+async function landHarnessCommit( // W1-T9667: host push + ls-remote; the pushed sha, or undefined after a named row
+  lane: "main-repair" | "alert-fix",
+  worker: WorkerResult,
+  branch: string,
+  worktreePath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: AlertFixDispatchDeps,
+): Promise<string | undefined> {
+  const commit = workerHarnessCommit(worker);
+  if (commit?.outcome !== "committed") {
+    if (commit?.outcome === "nothing-to-commit") log(`${lane}.no_change`, { branch, reason: "the harness found nothing to commit", subtype: worker.subtype });
+    else log(`${lane}.harness_commit_refused`, { branch, outcome: commit?.outcome ?? "absent", subtype: worker.subtype, ...(commit?.outcome === "refused" ? { reason: commit.reason } : {}) });
     return undefined;
   }
-  const checked = checkMainRepairWorkerBody(readFileSync(bodyFile, "utf8"), diffText);
+  try {
+    await (deps.pushBranch ?? ((wt: string, sha: string) => gitPushRunBranchAsync(wt, { expectedHeadSha: sha, stdio: "ignore" })))(worktreePath, commit.sha);
+  } catch (error) {
+    log(`${lane}.push_failed`, { branch, head_sha: commit.sha, error: String((error as Error)?.message ?? error).slice(0, 500) });
+    return undefined;
+  }
+  const remote = await readRepairRemoteHead(worktreePath, branch, deps);
+  if (remote.head !== commit.sha) {
+    log(`${lane}.push_unconfirmed`, { branch, head_sha: commit.sha, remote_head_sha: remote.head ?? null, ...(remote.error ? { error: remote.error } : {}) });
+    return undefined;
+  }
+  log(`${lane}.pushed`, { branch, head_sha: commit.sha });
+  return commit.sha;
+}
+
+async function readRepairRemoteHead(worktreePath: string, branch: string, deps: AlertFixDispatchDeps): Promise<{ head?: string; error?: string }> {
+  const read = deps.readRemoteBranchHead ?? (async (wt: string, b: string) => (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${b}`])).split(/\s/)[0] || undefined);
+  return read(worktreePath, branch).then((head) => ({ head }), (error: unknown) => ({ error: String((error as Error)?.message ?? error).slice(0, 500) }));
+}
+
+export function withoutRepairPlaceholders(body: string, prose: string): string { // W1-T9667: no placeholder line is ever opened
+  return body.split("\n").filter((line) => line !== MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER).map((line) => (line === MAIN_REPAIR_PROSE_PLACEHOLDER ? prose : line)).join("\n");
+}
+
+export function alertFixBody(alert: AlertLaneAlert, taskId: string): string { // W1-T9667: the dispatcher's body, `Remudero-Task:` last
+  return [MAIN_REPAIR_PROSE_PLACEHOLDER, "", `Acceptance:\n${MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER}`, "", `origin: alert#${alertOriginId(alert)}`, "", `Remudero-Task: ${taskId}`, ""].join("\n");
+}
+
+async function openCheckedRepairPr(
+  owner: string,
+  repo: string,
+  lane: "main-repair" | "alert-fix",
+  pr: { branch: string; base: string; worktreePath: string; bodyFile: string; pushedHead?: string; prose: string; fallbackTitle: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: AlertFixDispatchDeps,
+): Promise<string | undefined> {
+  const { branch, worktreePath } = pr;
+  const diffText = (deps.readDiff ?? diffSinceMergeBase)(worktreePath);
+  if (diffText === undefined || diffText.trim() === "") {
+    log(`${lane}.no_change`, { branch, reason: diffText === undefined ? "diff unreadable" : "the branch adds nothing to origin/main" });
+    return undefined;
+  }
+  const checked = checkMainRepairWorkerBody(readFileSync(pr.bodyFile, "utf8"), diffText);
   if ("defect" in checked) {
-    log(MAIN_REPAIR_ACCEPTANCE_DEFECT_STEP, {
+    log(`${lane}.acceptance_defect`, {
       defect: checked.defect,
       count: checked.inert.length,
       inert_proofs: checked.inert,
@@ -54823,15 +54957,22 @@ async function openCheckedMainRepairPr(
     });
   }
   if (!("body" in checked)) return undefined;
+  if (pr.pushedHead === undefined) {
+    const remote = await readRepairRemoteHead(worktreePath, branch, deps);
+    if (remote.head === undefined) {
+      log(`${lane}.unpushed_head`, { branch, reason: remote.error ?? `refs/heads/${branch} is absent on origin`, ...(remote.error ? { error: remote.error } : {}) });
+      return undefined;
+    }
+  }
   try {
     const title = (deps.readHeadSubject ?? ((wt: string) => hostWorktreeGitAtTopLevel(wt, ["log", "-1", "--format=%s", "HEAD"])))(worktreePath).trim();
     const created = (await (deps.fetch ?? ((args: string[]) => ghJsonAsync(args)))(
-      ratifyPrCreateRestArgs(owner, repo, { title: title || `fix(main): repair ${request.offendingSha.slice(0, 12)}`, body: checked.body, head: branch, base: request.branch }),
+      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(checked.body, pr.prose), head: branch, base: pr.base }),
     )) as { html_url?: unknown };
     if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
     return created.html_url;
   } catch (error) {
-    log("main-repair.pr_open_failed", { branch, error: String((error as Error)?.message ?? error) });
+    log(`${lane}.pr_open_failed`, { branch, error: String((error as Error)?.message ?? error) });
     return undefined;
   }
 }
@@ -57904,7 +58045,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["skill-eval", async (rest) => await skillEvalCommand(rest,
     skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
-  ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [

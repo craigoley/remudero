@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { createHash } from "node:crypto";
@@ -24,7 +25,7 @@ import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -2130,14 +2131,18 @@ function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutM
   });
 }
 
-/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
+/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. W1-T9651: `timeout` is a
+ *  loop-available budget, and a child stopped at it is a failure even when it exits 0 after the signal. */
 function execFileAsync(
   command: string,
   args: readonly string[],
   options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; killSignal?: NodeJS.Signals; maxBuffer?: number },
 ): Promise<string> {
+  const { timeout, killSignal, ...rest } = options;
   return new Promise((resolve, reject) => {
-    execFile(command, args as string[], { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+    const child = execFile(command, args as string[], { ...rest, encoding: "utf8" }, (execError, stdout, stderr) => {
+      bound?.cancel();
+      const error = bound?.timedOut ? bound.timeoutError([command, ...args].join(" "), { stdout, stderr }) : execError;
       if (!error) return resolve(stdout);
       const code = (error as NodeJS.ErrnoException).code;
       const failure = Object.assign(error, {
@@ -2148,6 +2153,7 @@ function execFileAsync(
       });
       reject(failure);
     });
+    const bound = timeout !== undefined && timeout > 0 ? boundChildByLoopTime(child, timeout, { killSignal }) : undefined;
   });
 }
 
@@ -6658,6 +6664,25 @@ export function postedArmFactsFromLedger(
 const STATUS_DESC_MAX = 140;
 const FAIL_PREFIX = "remudero-review: FAIL — ";
 
+/** W1-T9674: the failed step an UNKNOWN ownership reason names, short enough for the 140-character status. */
+export function unknownReservationStep(reason: string): string {
+  const timedOut = /timed out/.test(reason) ? " (timed out)" : "";
+  const step: Record<string, string> = {
+    "head-ref-unavailable": "no head ref", "head-checkout-unavailable": "no head checkout",
+    "base-unreadable": "base read timed out", "baseline-unreadable": "baseline read timed out",
+  };
+  const verb = /^(ls-remote|fetch|log) failed\b/.exec(reason);
+  if (verb) return `${verb[1] === "log" ? "anchor log" : verb[1]} failed${timedOut}`;
+  return step[reason.split(":")[0]] ?? (reason.trim() || "no reason recorded");
+}
+
+const clipTo = (text: string, room: number): string => (text.length > room ? `${text.slice(0, Math.max(1, room - 1))}…` : text);
+
+/** W1-T9674: each UNKNOWN finding's id and full reason, for the `review.post_refused` row a withheld verdict writes. */
+export function unknownReservationReads(findings: readonly TaskIdOwnershipFinding[] | undefined): { id: string; reason: string }[] {
+  return (findings ?? []).flatMap((f) => (f.kind === "unknown" ? [{ id: f.id, reason: f.reason }] : []));
+}
+
 /** Build a failure summary that TEACHES: it NAMES the first unmet criterion rather than a bare count (the W1-T2/#18
  * refusal said "1 criterion/criteria unmet" and cost a human round-trip), truncating with an ellipsis and `(+N more)`
  * inside the status-description limit, with the full list in the `review.posted` line and the PR review comment.
@@ -6704,10 +6729,12 @@ export function failSummary(
   const owned = idOwnership.find((f) => f.kind !== "unknown") ?? idOwnership[0];
   if (owned) {
     const more = idOwnership.length > 1 ? ` (+${idOwnership.length - 1} more)` : "";
-    if (owned.kind !== "foreign") {
-      const why = owned.kind === "unreserved" ? "is not reserved — mint it with rmd next-task-id --prefix" : "reservation unreadable (UNKNOWN) — verdict withheld";
-      return `${FAIL_PREFIX}id ${owned.id} ${why}${more}`.slice(0, STATUS_DESC_MAX);
+    if (owned.kind === "unknown") {
+      const head = `${FAIL_PREFIX}id ${owned.id} reservation unreadable (UNKNOWN): `;
+      const tail = ` — verdict withheld${more}`;
+      return `${head}${clipTo(unknownReservationStep(owned.reason), STATUS_DESC_MAX - head.length - tail.length)}${tail}`;
     }
+    if (owned.kind === "unreserved") return `${FAIL_PREFIX}id ${owned.id} is not reserved — mint it with rmd next-task-id --prefix${more}`.slice(0, STATUS_DESC_MAX);
     const tail = `, not this PR — renumber${more}`;
     const room = STATUS_DESC_MAX - `${FAIL_PREFIX}id ${owned.id} is reserved by ${tail}`.length;
     const holder = owned.holder.length > room ? `${owned.holder.slice(0, Math.max(1, room - 1))}…` : owned.holder;
@@ -7894,21 +7921,17 @@ export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; 
   const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
-        clearTimeout(timer);
+        bound.cancel();
+        // W1-T9651: a git stopped at its bound is a timeout even when it exits 0 after the signal.
+        if (bound.timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         if (!err) return resolve(stdout);
-        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
       });
       // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(stdin ?? "");
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
 

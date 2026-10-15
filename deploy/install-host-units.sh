@@ -509,8 +509,8 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
-  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
-  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
+  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
 
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
@@ -716,7 +716,9 @@ read_progress_verdict() {
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+  # W1-T9627: the revival log is the verdict's evidence of a container that died before node wrote
+  # any ledger row, so the verb reads it by name (src/lib/progress-watchdog.ts preNodeDeathRun).
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
     echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
     return 0
   fi
@@ -825,13 +827,16 @@ last_steps_before_exit() {
 
 # Returns 0 when the revive must NOT happen this tick.
 hold_revive_on_verdict() {
-  local was now fb steps line
+  local was now fb pnd steps line
   if [ ! -f "$WATCHDOG_HOLD" ]; then
     [ "$PROGRESS_ACTION" = "hold-revive" ] || return 1
     now="$(revive_input)"
     fb="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"failedBoots15m":\([0-9]*\).*/\1/p')"
+    pnd="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"preNodeDeaths":\([0-9]*\).*/\1/p')"
     steps="$(last_steps_before_exit "${fb:-0}")"
-    line="$(watchdog_stamp) crash-loop-hold failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
+    # W1-T9627: a loop that dies before node writes no failed boot, so it names its own count.
+    case "$pnd" in ''|0) pnd="" ;; *) pnd="pre_node_deaths=$pnd " ;; esac
+    line="$(watchdog_stamp) crash-loop-hold ${pnd}failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
     mkdir -p "$STATE_DIR/state" 2>/dev/null || true
     printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
     printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
@@ -1393,13 +1398,34 @@ read_progress_verdict
 note_progress_verdict
 if hold_revive_on_verdict; then exit 0; fi
 
+# W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
+# 2026-10-15 every revive removed a container that had died in deploy/entrypoint.sh about a second
+# in, so the only copy of "cannot check out main" went with it, 25 times. Its bounded log tail
+# goes to a per-revive file under state/diagnostics/, which the revive line below names (log=).
+# Never fatal: a failed capture names log=none and the revive goes ahead. The newest
+# REVIVE_LOG_KEEP files are kept (bound kind: physical -- each is at most 200 lines).
+REVIVE_LOG_KEEP=200
+REVIVE_LOG_FILE=none
+if docker inspect ${CONTAINER_NAME} >/dev/null 2>&1; then
+  REVIVE_LOG_FILE="\$STATE_DIR/state/diagnostics/revive-\$(date -u +%Y%m%dT%H%M%SZ)-${CONTAINER_NAME}.log"
+  mkdir -p "\$STATE_DIR/state/diagnostics" 2>/dev/null || true
+  REVIVE_LOG_TMO=(); command -v timeout >/dev/null 2>&1 && REVIVE_LOG_TMO=(timeout 30)
+  { printf '# docker logs --tail 200 %s, kept before the revive removed it\n' '${CONTAINER_NAME}'
+    \${REVIVE_LOG_TMO[@]+"\${REVIVE_LOG_TMO[@]}"} docker logs --tail 200 ${CONTAINER_NAME} 2>&1 || true
+  } > "\$REVIVE_LOG_FILE" 2>/dev/null || true
+  [ -s "\$REVIVE_LOG_FILE" ] || REVIVE_LOG_FILE=none
+  ls -1t "\$STATE_DIR/state/diagnostics"/revive-*-${CONTAINER_NAME}.log 2>/dev/null | tail -n +\$((REVIVE_LOG_KEEP + 1)) |
+    while IFS= read -r old_revive_log; do rm -f "\$old_revive_log"; done
+fi
+
 # A REVIVAL MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
-printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s\n' \\
+printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s log=%s\n' \\
   "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$BOOT" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.Status}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
+  "\$REVIVE_LOG_FILE" \\
   >> "\$REVIVAL_LOG" 2>/dev/null || true
 
 # THE COUNT IS TAKEN AFTER the STOP refusal, the idempotence check and the mount checks, so none of

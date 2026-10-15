@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=aa14ed4f5d15f375
   attempts: 0
   files:

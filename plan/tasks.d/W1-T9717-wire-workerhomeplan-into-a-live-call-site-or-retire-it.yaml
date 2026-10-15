@@ -1,0 +1,27 @@
+- id: W1-T9717
+  title: "Wire workerHomePlan into a live call site, or retire it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/worker-home.ts
+    - src/lib/worker.ts
+    - test/worker-home.test.ts
+  acceptance:
+    - claim: "workerHomePlan has at least one production adopter outside its own definition in src/lib/worker-home.ts, or the symbol is removed and its removal is recorded"
+      proof: "grep: workerHomePlan in src/lib/worker.ts"
+    - claim: "the adopting call site is exercised by a test that fails if the call is removed"
+      proof: "unit test: workerHomePlan is consumed by the worker spawn path"
+  origin: "adoption:symbol-no-caller:src/lib/worker-home.ts:workerHomePlan"
+  rationale: >-
+    From the 2026-10-15 proposal on
+    adoption:symbol-no-caller:src/lib/worker-home.ts:workerHomePlan, ratified via rmd approve:
+  
+    adoption-debt: "workerHomePlan" (symbol-no-caller) in src/lib/worker-home.ts has shipped since
+    2026-07-15T21:57:35-04:00 with no adopter found — no reference to `workerHomePlan` outside its
+    own definition in src/lib/worker-home.ts (rmd measurement-cadence's adoption report).
