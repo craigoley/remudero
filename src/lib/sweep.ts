@@ -22112,10 +22112,12 @@ export async function runStaleEscalationRejudge(
 /** The steps that record an issue's birth, each carrying the `triage_subject` the rung rejudges. */
 export const ESCALATION_TRIAGE_BIRTH_STEPS: readonly string[] = ["escalation.issue_opened", "escalation.demoted", "escalation.auto_resolve_started"];
 
-/** One holder's slice of the ledger union: the steps it reads, and the name its durable digest is kept under. */
+/** A holder's ledger slice: its steps, digest name, and the fields it keeps (`project` keeps `step`, is idempotent; bump `version`). */
 export interface EscalationTriageSlice {
   holder: string;
   steps: readonly string[];
+  project?: (row: Record<string, unknown>) => Record<string, unknown>;
+  version?: string;
 }
 
 /** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
@@ -22159,7 +22161,8 @@ export function createEscalationTriageHistoryReader(
   const stat = fsDeps.statSync ?? realLedgerFs.statSync;
   const slice = io.slice ?? ESCALATION_TRIAGE_HISTORY_SLICE;
   const steps = [...slice.steps];
-  const identity = { holder: slice.holder, reducerVersion: "1" };
+  const project = slice.project ?? ((row: Record<string, unknown>) => row);
+  const identity = { holder: slice.holder, reducerVersion: slice.version ?? "1", project };
   const union = createIncrementalLedgerUnion(identity, fsDeps);
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
@@ -22192,7 +22195,7 @@ export function createEscalationTriageHistoryReader(
       if (loaded.get(entry.path) !== key) fresh.push(entry);
     }
     if (fresh.length > 0) {
-      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)), {
+      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
         holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);

@@ -13,6 +13,7 @@
   files:
     - src/lib/host-memory-shadow.ts
     - src/lib/host-memory-learning.ts
+    - src/lib/producer-identity.ts
     - src/lib/host-memory-calibration.ts
     - src/lib/daemon-footprint.ts
     - test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts
@@ -45,6 +46,10 @@
     measurement basis. It introduces a separately named joint candidate in shadow, not implicit enforcement permission.
     The added files are the existing sample producer, passive daemon heartbeat collector, bounded calibration module
     and existing producer fixtures. One task and concern; no new reservation, activation, limit or concurrency change.
+    INTEGRATION 2026-10-15: the explicit calibration back-test writer uses the existing MEMORY-BUDGET pseudo sender.
+    The maintained producer census correctly refuses that undeclared identity. Declare the central producer registry
+    so the implementation can register this label without renaming it or bypassing the census. No runtime policy,
+    task priority, budget, risk, dependency, reservation or acceptance criterion changes.
   design: |
     1. Replace the sum of per-claim p90s with a joint quantile over the live claims' measured peak distributions:
        - the convolution of the empirical per-class samples, or the existing typical + one-tail rule where samples are

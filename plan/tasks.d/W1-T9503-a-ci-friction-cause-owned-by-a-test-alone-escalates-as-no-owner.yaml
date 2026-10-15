@@ -12,7 +12,7 @@
   files:
     - src/lib/ci-friction-gardener.ts
     - test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts
-  status: queued
+  status: merged
   priority: 1  # the ci-friction gardener filed nothing from 2026-10-14T09:58Z: 5 garden_filing_failed rows, then escalation #11716
   attempts: 0
   rationale: |
