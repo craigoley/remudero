@@ -11,7 +11,7 @@ import { daemonCommand } from "../src/run-task.js";
 import type { DaemonSummary } from "../src/lib/daemon.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
-function pulledCheckout(t: TestContext, path = "src/material.ts") {
+function loadedSourceScenario(t: TestContext, path = "src/material.ts") {
   const origin = gitRepo({ kind: "loaded-origin" });
   mkdirSync(dirname(join(origin.dir, path)), { recursive: true });
   writeFileSync(join(origin.dir, path), "A\n");
@@ -29,7 +29,7 @@ function pulledCheckout(t: TestContext, path = "src/material.ts") {
 }
 
 test("W1-T9687: a checkout pull does not erase loaded code staleness", async (t) => {
-  const { repo, loaded, current } = pulledCheckout(t);
+  const { repo, loaded, current } = loadedSourceScenario(t);
   assert.equal(repo.git("rev-parse", "HEAD"), current, "another actor has already advanced disk");
   const result = await checkServiceFreshnessAsync(repo.dir, {}, { loadedCodeSha: loaded });
   assert.equal(result.status, "assessed");
@@ -48,7 +48,7 @@ test("W1-T9687: a checkout pull does not erase loaded code staleness", async (t)
 });
 
 test("W1-T9687: daemon freshness uses the once captured loaded code sha", async (t) => {
-  const fixture = pulledCheckout(t);
+  const fixture = loadedSourceScenario(t);
   const home = mkdtempSync(join(tmpdir(), "rmd-loaded-wiring-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(join(home, ".config/remudero"), { recursive: true });
@@ -97,7 +97,7 @@ test("W1-T9687: daemon freshness uses the once captured loaded code sha", async 
 
 test("W1-T9687: loaded code freshness preserves guarded outcomes", async (t) => {
   await t.test("immaterial and dirty advances keep their original guards", async (t) => {
-    const docs = pulledCheckout(t, "docs/readme.md");
+    const docs = loadedSourceScenario(t, "docs/readme.md");
     const immaterial = daemonFreshnessFromService(await checkServiceFreshnessAsync(docs.repo.dir, {}, { loadedCodeSha: docs.loaded }));
     assert.ok(!immaterial.stale && immaterial.notStale?.arm === "immaterial");
     writeFileSync(join(docs.repo.dir, "docs/readme.md"), "tracked edit\n");
@@ -105,7 +105,7 @@ test("W1-T9687: loaded code freshness preserves guarded outcomes", async (t) => 
     assert.ok(!dirty.stale && dirty.notStale?.arm === "dirty");
   });
   await t.test("handshake retry and recent-ref fallback retain the loaded baseline", async (t) => {
-    const { repo, loaded, current } = pulledCheckout(t);
+    const { repo, loaded, current } = loadedSourceScenario(t);
     for (const failures of [1, 2]) {
       let fetches = 0;
       const real = asyncGit(repo.dir);
@@ -123,7 +123,7 @@ test("W1-T9687: loaded code freshness preserves guarded outcomes", async (t) => 
     }
   });
   await t.test("explicit missing, malformed and absent commit identities remain uncertainty", async (t) => {
-    const { repo } = pulledCheckout(t);
+    const { repo } = loadedSourceScenario(t);
     for (const loadedCodeSha of [undefined, "not-a-sha", "f".repeat(40)]) {
       const result = await checkServiceFreshnessAsync(repo.dir, {}, { loadedCodeSha });
       assert.equal(result.status, "degraded");
