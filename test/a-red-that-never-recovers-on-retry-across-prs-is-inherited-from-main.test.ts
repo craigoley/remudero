@@ -10,7 +10,8 @@ import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { flakeIncidentOrigin, runFlakeIncidentGardener, type FlakeIncidentSources } from "../src/lib/flake-incident-gardener.js";
-import { buildMainHealthRung, type MainHealthRungDeps } from "../src/lib/main-health-rung.js";
+import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
+import { buildMainHealthRung, mainInheritedHintReader, type MainHealthRungDeps } from "../src/lib/main-health-rung.js";
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -102,7 +103,7 @@ test("W1-T9551: a red main also fails at the base files no flake incident", asyn
     for (const pr of prs) h.evidence(pr, "also_failed");
     await runFlakeIncidentGardener(h.deps, h.sources({ mainFailures: (sha) => (read.push(sha), main(sha)) }));
     const routed = h.rows(FLAKE_INCIDENT_MAIN_INHERITED_STEP);
-    const out = { landed: h.landed.length, routed };
+    const out = { landed: h.landed.length, routed, unreadRows: h.rows("flake_incident.main_unread").length };
     h.dispose();
     return out;
   };
@@ -118,6 +119,48 @@ test("W1-T9551: a red main also fails at the base files no flake incident", asyn
   assert.equal(green.routed[0]!.main_red, false, "main green at every base reads false");
   const unread = await judged(() => undefined);
   assert.equal(unread.routed[0]!.main_red, "unread", "an unread or cancelled main run is no evidence either way");
+  const thrown = await judged(() => { throw new Error("main run list unreadable"); });
+  assert.equal(thrown.routed[0]!.main_red, "unread", "a failed main read is unread, never green");
+  assert.equal(thrown.unreadRows, prs.length, "each failed read is ledgered");
+});
+
+test("W1-T9551: the garden pass hands the flake classifier one memoized main read per base sha", async () => {
+  const h = harness();
+  for (const pr of W1_T9532_PRS) { h.evidence(pr, "also_failed"); h.evidence(pr, "also_failed", "a second title on the same runs"); }
+  const mainReads: string[] = [];
+  const readJson = async (args: string[]): Promise<unknown> => {
+    if (args[1]!.includes("/compare/")) return { files: [{ filename: "src/lib/unrelated.ts" }] };
+    if (args[1]!.includes("actions/workflows/ci.yml/runs?branch=main&head_sha=")) mainReads.push(args[1]!.split("head_sha=")[1]!.split("&")[0]!);
+    return { workflow_runs: [] };
+  };
+  await selectorShadowGardenPass(h.deps, "acme", "remudero", () => "W1-T9599", { readJson, readText: async () => "" })();
+  const routed = h.rows(FLAKE_INCIDENT_MAIN_INHERITED_STEP);
+  assert.equal(routed.length, 2, "both titles are main-inherited");
+  assert.deepEqual(routed.map((r) => r.main_red), ["unread", "unread"], "no completed main run is no evidence");
+  assert.deepEqual(mainReads.sort(), W1_T9532_PRS.map((pr) => `base-${pr}`), "two groups, one read per base sha");
+  assert.equal(h.landed.length, 0);
+  h.dispose();
+});
+
+test("W1-T9551: the rung's hint reader reads appended bytes only, counts a torn line, and re-reads a shrunk ledger", () => {
+  const h = harness();
+  const hint = (title: string, prsCount: number) => JSON.stringify({
+    ts: new Date(NOW).toISOString(), step: FLAKE_INCIDENT_MAIN_INHERITED_STEP, origin: flakeIncidentOrigin(TEST_FILE, title),
+    file: TEST_FILE, title, prs: W1_T9532_PRS.slice(0, prsCount), prs_count: prsCount,
+  }) + "\n";
+  const read = mainInheritedHintReader(h.ledger);
+  assert.deepEqual(read(), { pending: [], torn: 0 }, "an absent ledger has no hints");
+  writeFileSync(h.ledger, hint(TITLE, 2));
+  assert.deepEqual(read().pending.map((p) => [p.title, p.prsCount]), [[TITLE, 2]]);
+  appendFileSync(h.ledger, `{"step":"${FLAKE_INCIDENT_MAIN_INHERITED_STEP}", torn\n` + hint(TITLE, 1));
+  const after = read();
+  assert.equal(after.torn, 1, "a torn hint line is counted, not read as absent");
+  assert.deepEqual(after.pending.map((p) => p.prsCount), [2], "an older, smaller row never replaces a newer one");
+  appendFileSync(h.ledger, JSON.stringify({ step: MAIN_INHERITED_HINT_STEPS.resolved, origin: flakeIncidentOrigin(TEST_FILE, TITLE), prs_count: 2 }) + "\n");
+  assert.deepEqual(read().pending, [], "an answered hint is no longer pending");
+  writeFileSync(h.ledger, hint("after compaction", 3));
+  assert.deepEqual(read().pending.map((p) => p.title), ["after compaction"], "a shrunk ledger is re-read from its start");
+  h.dispose();
 });
 
 type CheckRun = { name: string; status: "completed"; conclusion: "success" | "failure" };
