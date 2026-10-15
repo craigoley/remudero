@@ -1,0 +1,28 @@
+id: incident-fc02119ad9d1b757
+ts: 2026-10-15T06:17:14.586Z
+raw: >-
+  Incident fc02119ad9d1: flow idle-capacity:unknown
+
+  First seen: 2026-10-15T06:16:55.671Z
+
+  Last seen: 2026-10-15T06:16:55.671Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=unknown:unnamed setter=unrecorded since=2026-10-15T05:29:23.116Z since=2026-10-15T05:29:23.116Z slot_minutes=142.63 dispatchable=3 cause=unknown reason="unknown:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#fc02119ad9d1b7578aad7dbfa1f5d5c4bfdac61d48e0841d268c64847c569034
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
