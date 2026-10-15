@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import {
   applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath, GhReadCadenceRefusal,
-  resetGhCadenceAdvisoryForTest, stampGhRead, withGhTransportFloorMode,
+  resetGhCadenceAdvisoryForTest, withGhTransportFloorMode,
   type GhReadCadenceDeps,
 } from "../src/lib/github-transport.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -221,12 +221,11 @@ test("W1-T7957: writes and budget probes neither wait nor earn a read burst", as
 });
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
-const WINDOW_S = 5;
-const FUTURE_S = 3;
+const WINDOW_S = 180;
+const STAMP_AGE_S = 120;
 
-/** Run the REAL `rmd next-task-id` in a child with a stubbed `gh` and a local git remote. The stamp
- *  is dated FUTURE_S ahead, so the floor still has the whole window to run less the child's startup:
- *  the outcome does not depend on how long `tsx` takes to boot. */
+/** Run the real CLI with a stubbed `gh` and local remote. Freeze time after imports and advance it
+ *  only through the transport's blocking sleep, so startup and scheduling cannot age the stamp. */
 function runNextTaskId(t: TestContext, floor: "advisory" | undefined) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-dispatch-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -248,23 +247,47 @@ function runNextTaskId(t: TestContext, floor: "advisory" | undefined) {
   delete env.RMD_GH_TRANSPORT_FLOOR;
   if (floor) env.RMD_GH_TRANSPORT_FLOOR = floor;
   const stampPath = ghReadCadenceStampPath(env)!;
-  stampGhRead(stampPath);
-  const stampMs = Date.now() + FUTURE_S * 1000;
-  utimesSync(stampPath, stampMs / 1000, stampMs / 1000);
+  const sleepsPath = join(dir, "sleeps.json");
+  const bootstrap = join(dir, "bootstrap.mjs");
+  writeFileSync(bootstrap, `
+    import assert from "node:assert/strict";
+    import { existsSync, statSync, utimesSync, writeFileSync } from "node:fs";
+    const { main } = await import(${JSON.stringify(join(ROOT, "src/run-task.ts"))});
+    const { systemClock } = await import(${JSON.stringify(join(ROOT, "src/lib/clock.ts"))});
+    const { stampGhRead } = await import(${JSON.stringify(join(ROOT, "src/lib/github-transport.ts"))});
+    let now = Date.now();
+    systemClock.now = () => now;
+    const stampPath = ${JSON.stringify(stampPath)};
+    const stampMs = now - ${STAMP_AGE_S * 1000};
+    stampGhRead(stampPath);
+    utimesSync(stampPath, stampMs / 1000, stampMs / 1000);
+    const sleeps = [];
+    writeFileSync(${JSON.stringify(sleepsPath)}, JSON.stringify(sleeps));
+    Atomics.wait = (_view, _index, _value, ms) => {
+      assert.equal(existsSync(stampPath + ".lock"), true, "sleep holds the shared lock");
+      assert.equal(Math.round(statSync(stampPath).mtimeMs), stampMs, "sleep precedes stamping");
+      sleeps.push(ms);
+      now += ms;
+      writeFileSync(${JSON.stringify(sleepsPath)}, JSON.stringify(sleeps));
+      return "timed-out";
+    };
+    process.argv = [process.execPath, ${JSON.stringify(join(ROOT, "src/run-task.ts"))},
+      "next-task-id", "--plan", ${JSON.stringify(plan)}, "--no-reserve"];
+    await main();
+  `);
   const run = spawnSync(
     process.execPath,
-    ["--import", "tsx", join(ROOT, "src", "run-task.ts"), "next-task-id", "--plan", plan, "--no-reserve"],
+    ["--import", "tsx", bootstrap],
     { cwd: ROOT, env, encoding: "utf8", timeout: 120_000 },
   );
   assert.equal(run.status, 0, run.stderr);
   assert.equal(shim.calls().filter((call) => call.includes("pulls")).length, 1, "next-task-id makes exactly one open-PR read");
-  // The transport stamps just before it reads, so the stamp's final mtime is when the read was admitted.
-  return { stderr: run.stderr, stampPath, stampMs, readMs: statSync(stampPath).mtimeMs };
+  return { stderr: run.stderr, stampPath, sleeps: JSON.parse(readFileSync(sleepsPath, "utf8")) };
 }
 
 test("W1-T7957: next-task-id waits for a read the hook stamped", { timeout: 180_000 }, (t) => {
   const result = runNextTaskId(t, undefined);
-  assert.ok(result.readMs >= result.stampMs + WINDOW_S * 1000 - 50, "the read waits out the whole window past the stamp");
+  assert.deepEqual(result.sleeps, [(WINDOW_S - STAMP_AGE_S) * 1000], "the read waits out the remaining floor");
   assert.ok(result.stderr.includes("gh read cadence (wait, W1-T7957)"), result.stderr);
   assert.ok(result.stderr.includes(result.stampPath) && result.stderr.includes(`${WINDOW_S}s`), result.stderr);
 });
@@ -290,7 +313,7 @@ test("W1-T7957: the transport window reads RMD_GH_COOLDOWN_S like the hook", asy
 
 test("W1-T7957: an inherited advisory floor does not wait", { timeout: 180_000 }, async (t) => {
   const result = runNextTaskId(t, "advisory");
-  assert.ok(result.readMs < result.stampMs + WINDOW_S * 1000, "the read is not held to the window");
+  assert.deepEqual(result.sleeps, [], "the read is not held to the window");
   assert.ok(result.stderr.includes("advisory, W1-T3297"), result.stderr);
   assert.ok(!result.stderr.includes("(wait, W1-T7957)"), result.stderr);
   const f = fixture(t);
