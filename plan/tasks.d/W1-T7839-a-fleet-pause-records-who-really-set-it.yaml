@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-11: a fleet pause records who really set it (core pause 2026-10-11T01:17:50Z, actor unknown)"
   plan_refs: [W1-T7721, W1-T2697, W1-T4068, W1-T4429, W1-T2262, W1-T7727, W1-T4244]
   files: [src/lib/fleet-control.ts, src/run-task.ts, src/lib/panel-actions.ts, src/lib/status-board.ts, src/lib/actor-evidence.ts, src/lib/operator-merge-hold.ts, test/a-fleet-pause-records-who-really-set-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

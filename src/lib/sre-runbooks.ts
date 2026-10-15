@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { fixedClock, systemClock } from "./clock.js";
+import { judgeNonWorkerRelease, NON_WORKER_BREAKER_RUNBOOK_ID, readBreakerStrikes, type BreakerRunbookHost } from "./breaker-release.js";
 import { escalate, ghIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { isQuietHours, pauseDetail, pendingPrActions, requestPrAction, stopDetail } from "./fleet-control.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -343,6 +344,7 @@ export const SRE_RUNBOOK_INCIDENTS = {
   "catch-up-managed-checkout": ["stale-managed-checkout"],
   "recycle-stale-container": ["stale-container"],
   "clear-stale-lock-or-nudge": ["stale-lock", "stale-review"],
+  "release-non-worker-breaker": ["stranded-task"],
 } as const satisfies Record<string, readonly string[]>;
 
 /** `key=value` from the incident's newest sample message, or undefined. Pure. */
@@ -367,6 +369,8 @@ export interface SreRunbookHost {
   removeLock(path: string): Promise<void>;
   reviewRequested(pr: number): Promise<boolean>;
   requestReview(pr: number): Promise<void>;
+  /** W1-T8241: the breaker reads and the release writer. A host without them offers no breaker runbook. */
+  breakers?: BreakerRunbookHost;
 }
 
 function refused(observed: string): RunbookObservation {
@@ -383,8 +387,62 @@ function answers(id: keyof typeof SRE_RUNBOOK_INCIDENTS): (incident: IncidentEvi
   return (incident) => names.includes(incident.name);
 }
 
-/** The allowlisted, reversible runbooks the daemon hands the SRE lane (the design's initial four). */
+/**
+ * W1-T8241: release-non-worker-breaker answers W1-T8240's `stranded-task` incident when its subject says
+ * `breaker=tripped`. It releases only when every strike since the last reset is non-worker, the task has no
+ * open PR, and no live receipt already covers the same strike run ids (the evidence fingerprint). Reversible:
+ * the breaker trips again on new evidence. Like every new runbook it starts in shadow under the governor.
+ */
+function releaseNonWorkerBreaker(breakers: BreakerRunbookHost, receipts: () => SreRunbookReceipt[]): SreRunbook {
+  const id = NON_WORKER_BREAKER_RUNBOOK_ID;
+  const judge = (taskId: string) => judgeNonWorkerRelease(breakers.ledger(), taskId, breakers.defaultRepo);
+  return {
+    id,
+    reversible: true,
+    blastRadius: "one task's dispatch circuit breaker (it trips again on new evidence)",
+    matches: (incident) => answers(id)(incident) && incidentSubject(incident, "breaker") === "tripped",
+    precheck: async (incident) => {
+      const taskId = incidentSubject(incident, "task");
+      if (!taskId) return refused("incident names no task=<id>");
+      const judged = judge(taskId);
+      const subject = judged.subject;
+      if (!judged.ok) return { ok: false, observed: judged.observed, subject };
+      const released = receipts().some((r) => r.id === id && r.subject === subject && r.mode === "live" && (r.outcome === "cleared" || r.outcome === "failed"));
+      if (released) return { ok: false, observed: `already released once for ${subject}`, subject };
+      const pr = await breakers.openPr(taskId, judged.repo);
+      return pr.open ? { ok: false, observed: pr.observed, subject } : { ok: true, observed: `${judged.observed}; ${pr.observed}`, subject };
+    },
+    act: async (incident) => {
+      const taskId = incidentSubject(incident, "task") as string;
+      const judged = judge(taskId);
+      if (!judged.ok) throw new Error(`refused at act: ${judged.observed}`);
+      const listed = judged.strikes.map((s) => `${s.runId}=${s.cause}`).join(", ");
+      await breakers.release({
+        taskId,
+        repo: judged.repo,
+        reason: `every strike since the last reset is non-worker (${listed}); no open PR — released by the ${id} runbook`,
+        strikeEvidence: judged.subject as string,
+        strikeRunIds: judged.strikes.map((s) => s.runId),
+      });
+    },
+    verify: async (incident) => {
+      const taskId = incidentSubject(incident, "task") as string;
+      const reading = readBreakerStrikes(breakers.ledger(), taskId);
+      return { ok: !reading.tripped, observed: `${taskId}: breaker ${reading.tripped ? "still tripped" : "released"}, ${reading.counted} counted` };
+    },
+  };
+}
+
+/** The allowlisted, reversible runbooks the daemon hands the SRE lane (the design's initial four, and
+ *  W1-T8241's breaker release when the host can read breakers). */
 export function sreRunbookCatalog(host: SreRunbookHost, receipts: () => SreRunbookReceipt[]): SreRunbook[] {
+  return [
+    ...sreRunbookBaseCatalog(host, receipts),
+    ...(host.breakers ? [releaseNonWorkerBreaker(host.breakers, receipts)] : []),
+  ];
+}
+
+function sreRunbookBaseCatalog(host: SreRunbookHost, receipts: () => SreRunbookReceipt[]): SreRunbook[] {
   return [
     {
       id: "rerun-failed-ci-once",

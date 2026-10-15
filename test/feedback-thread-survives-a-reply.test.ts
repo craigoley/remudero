@@ -265,7 +265,11 @@ test("the reply-handling branch of buildSubmitFeedbackRoute names no merge, no P
   const src = readSrc("lib/panel-graph.ts");
   const fnMatch = /export function buildSubmitFeedbackRoute\(deps: PanelGraphDeps\): Route \{[\s\S]*?\n\}/.exec(src);
   assert.ok(fnMatch, "buildSubmitFeedbackRoute must exist");
-  const body = fnMatch[0];
+  // W1-T8511: the reply half moved into captureFeedbackReply, which the route (and the GitHub-reply reader) calls.
+  const writerMatch = /export function captureFeedbackReply\([^)]*\)[^{]*\{[\s\S]*?\n\}/.exec(src);
+  assert.ok(writerMatch, "captureFeedbackReply must exist");
+  assert.match(fnMatch[0], /captureFeedbackReply\(deps,/, "the route writes its reply through captureFeedbackReply");
+  const body = `${fnMatch[0]}\n${writerMatch[0]}`;
   assert.doesNotMatch(body, /gh\s+pr\s+(merge|close)/i);
   assert.doesNotMatch(body, /["']merged["']|["']rejected_by_fleet["']/);
   // The only status this route ever writes explicitly is the reply-close state itself.

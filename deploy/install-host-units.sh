@@ -1716,6 +1716,9 @@ if [ -n "$CLEANUP_PATH" ]; then
   current_cron="$(crontab_read)"
   janitor_cron="$(cron_lines_for_janitor "$current_cron")"
   if [ "$MODE" = "check" ]; then
+    if ! cmp -s "$SCRIPT_DIR/workspace-retirement-guard.sh" "$(dirname "$CLEANUP_PATH")/workspace-retirement-guard.sh"; then
+      echo "install-host-units: DRIFTED workspace retirement guard"; drift=$(( drift + 1 ))
+    fi
     if ! cmp -s "$SCRIPT_DIR/dependency-seed-guard.sh" "$(dirname "$CLEANUP_PATH")/dependency-seed-guard.sh"; then
       echo "install-host-units: DRIFTED dependency seed guard"; drift=$(( drift + 1 ))
     fi
@@ -1753,6 +1756,7 @@ if [ -n "$CLEANUP_PATH" ]; then
   else
     mkdir -p "$(dirname "$CLEANUP_PATH")"
     install -m 0755 "$SCRIPT_DIR/dependency-seed-guard.sh" "$(dirname "$CLEANUP_PATH")/dependency-seed-guard.sh"
+    install -m 0755 "$SCRIPT_DIR/workspace-retirement-guard.sh" "$(dirname "$CLEANUP_PATH")/workspace-retirement-guard.sh"
     # keep the differing hand-installed host copy once: adoption must not destroy its values
     if [ -e "$CLEANUP_PATH" ] && ! cmp -s "$CLEANUP_SRC" "$CLEANUP_PATH" && [ ! -e "${CLEANUP_PATH}.pre-t4770" ]; then
       cp -p "$CLEANUP_PATH" "${CLEANUP_PATH}.pre-t4770"

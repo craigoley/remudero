@@ -10,11 +10,14 @@
  *
  * FALSIFIERS: test/serve-memory-names-where-rss-lives.test.ts,
  * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts,
- * test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts.
+ * test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts; a bundle-started worker's threads (#11859):
+ * test/serve-starts-its-workers-from-current-worker-bundles.test.ts.
  */
 
 import diagnosticsChannel from "node:diagnostics_channel";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
 
 /** What a thread's parent says the thread holds, by holder (`board:<instance>`): entries and bytes kept. */
@@ -70,11 +73,44 @@ export interface TrackedWorker {
 const SELF_MODULE = "worker-heaps";
 /** W1-T9370: startWorker constructs serve's workers, so a frame of its module is never the site that asked for one. */
 const SPAWN_HELPER_MODULE = "child-entry-argv";
-/** `<module>:<function>` of the first frame outside node, this module and the spawn helper: the call that spawned the thread. */
+const moduleName = (path: string): string => basename(path).replace(/\.[cm]?[jt]s$/, "");
+/**
+ * The line esbuild heads each module's code with in a bundle (`// src/lib/read-model-worker.ts`). W1-T8777's worker
+ * bundles carry no source map, and every frame inside one names the bundle's file, so the header is what says whose
+ * code a bundle line is.
+ */
+const BUNDLE_MODULE_HEADER = /^\/\/ (\S+\.[cm]?[jt]sx?)$/;
+/** Each file's module headers as `[line, module]`, ascending, read once per file; `null` for a file that holds none. */
+const bundleHeaders = new Map<string, Array<[number, string]> | null>();
+/** The source module a JS file's 1-based `line` lies in when the file is a bundle; undefined when it is not one. */
+function bundledModule(file: string, line: number): string | undefined {
+  if (!/\.[cm]?js$/.test(file)) return undefined;
+  let headers = bundleHeaders.get(file);
+  if (headers === undefined) {
+    const found: Array<[number, string]> = [];
+    try {
+      readFileSync(file.startsWith("file:") ? fileURLToPath(file) : file, "utf8").split("\n").forEach((text, at) => {
+        const source = BUNDLE_MODULE_HEADER.exec(text)?.[1];
+        if (source) found.push([at + 1, moduleName(source)]);
+      });
+    } catch {
+      // A file that cannot be read is no bundle this thread can see into: its frame keeps the file's own name.
+    }
+    headers = found.length > 0 ? found : null;
+    bundleHeaders.set(file, headers);
+  }
+  return headers?.findLast(([start]) => start <= line)?.[1];
+}
+
+/**
+ * `<module>:<function>` of the first frame outside node, this module and the spawn helper: the call that spawned the
+ * thread. A frame inside a bundle names the SOURCE module its line came from, as a tsx-loaded frame does, so a
+ * bundle-started worker's threads keep the names they had before W1-T9370 started workers from bundles.
+ */
 export function spawnSite(stack: string | undefined): string {
   for (const line of (stack ?? "").split("\n").slice(1)) {
-    const frame = /^\s*at (?:(.+?) \()?(.+?):\d+:\d+\)?$/.exec(line);
-    const module = frame ? basename(frame[2]).replace(/\.[cm]?[jt]s$/, "") : "";
+    const frame = /^\s*at (?:(.+?) \()?(.+?):(\d+):\d+\)?$/.exec(line);
+    const module = frame ? bundledModule(frame[2], Number(frame[3])) ?? moduleName(frame[2]) : "";
     // A source-mapped frame and import.meta.url can disagree on path and extension; the module name cannot.
     if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE || module === SPAWN_HELPER_MODULE) continue;
     return `${module}:${frame[1] ?? "<module>"}`;
