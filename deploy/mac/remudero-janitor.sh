@@ -418,7 +418,7 @@ clean_artifact() {
   local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
-  found=$(find "$artifact" \( -name .git -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \) -print -quit 2>/dev/null) || {
+  found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
     log "SKIP content scan failed (unknown) $artifact"; return;
   }
   if [ -n "$found" ]; then log "SKIP protected repository-or-bundle $artifact"; return; fi
@@ -610,7 +610,7 @@ scratch_directory_risk() {
   [ -z "$found" ] || { printf 'contains foreign-owned content'; return 0; }
   # Preserve all repositories, including bare object lenders, archived commits,
   # state/history, dependency seeds and coordination files. Do not follow links.
-  found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' \
+  found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
     -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
     -o -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' \
     -o -iname '*credential*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
@@ -644,7 +644,7 @@ scratch_directory_risk() {
   while [ "$parent" != / ]; do
     if [ -e "$parent/.git" ] || [ -L "$parent/.git" ]; then
       relative=${path#"$parent"/}
-      tracked=$(rmd_retirement_git "$parent" ls-files -- "$relative" 2>/dev/null) || {
+      tracked=$(GIT_LITERAL_PATHSPECS=1 rmd_retirement_git "$parent" ls-files -- "$relative" 2>/dev/null) || {
         printf 'enclosing Git status unavailable'; return 0;
       }
       [ -z "$tracked" ] || { printf 'tracked source directory'; return 0; }
@@ -696,6 +696,9 @@ clean_scratch_directory() {
     [ "$cwd_rc" = 1 ] || { log "SKIP scratch $path (working directory active or unknown)"; return; }
     is_open "$path"; open_rc=$?
     [ "$open_rc" = 1 ] || { log "SKIP scratch $path (open files or visibility unknown)"; return; }
+    if [ "$check_phase" = before-remove ] && reason=$(scratch_directory_risk "$path" "$root"); then
+      log "SKIP scratch $path ($reason)"; return;
+    fi
     stamp=$(artifact_mtime "$path") || { log "SKIP scratch $path (age unavailable)"; return; }
     case "$stamp" in ''|*[!0-9]*|0) log "SKIP scratch $path (age unavailable)"; return ;; esac
     if [ "$(( $(date +%s) - stamp ))" -lt "$((AGE_HOURS * 3600))" ]; then
@@ -703,9 +706,6 @@ clean_scratch_directory() {
     fi
     current=$(scratch_directory_identity "$path") || current=""
     [ "$current" = "$identity" ] || { log "SKIP scratch $path (identity changed)"; return; }
-    if [ "$check_phase" = before-remove ] && reason=$(scratch_directory_risk "$path" "$root"); then
-      log "SKIP scratch $path ($reason)"; return;
-    fi
     [ "$APPLY" = 1 ] || break
   done
   if [ "$APPLY" = 1 ]; then

@@ -85,7 +85,7 @@ test("unversioned source, reports, history, credentials and dependency seeds sur
   const fx = setup();
   try {
     const base = roots(fx)[3]!;
-    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "credentials.pem", ".rmd-dependency-seed-root.json"];
+    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json"];
     const held = names.map((file, i) => { const p = data(base, `held-${i}`); writeFileSync(join(p, file), "retain\n"); age(p, 8); return p; });
     const idle = data(base, "idle-sibling"); const r = sweep(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
