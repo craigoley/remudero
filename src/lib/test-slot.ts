@@ -32,6 +32,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
 import { acquireSlotMutation, slotMutationPending } from "./test-slot-mutation.js";
+import { observeTestSlotParent } from "./test-slot-parent.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
@@ -443,6 +444,9 @@ export interface TestSlotOptions {
   ownershipProtocol?: "private-capacity-v1";
   /** Required coordination remains fail-closed even when a directory cannot be inspected. */
   privateCoordinationRequired?: boolean;
+  /** Default-off mode-bit entry protection check. Requires a private writer and an existing
+   * parent; never creates or widens it. Not an ACL/ancestor audit or a live adoption switch. */
+  privateParentPolicy?: "require-entry-protection";
   slots?: number;
   waitBoundMs?: number;
   pollMs?: number;
@@ -550,7 +554,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
   const privateWriter = opts.ownershipProtocol === "private-capacity-v1";
-  let privateRequired = privateWriter || opts.privateCoordinationRequired === true;
+  const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
+  let privateRequired = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
   const privateStale = (held: TestSlotHolder): boolean => {
     if (held.ownershipProtocol !== "private-capacity-v1") return false;
     if (held.releaseRequestedAt !== undefined && Number.isFinite(Date.parse(held.releaseRequestedAt)) && Date.parse(held.releaseRequestedAt) <= clock.now()) return true;
@@ -559,7 +564,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     const mineNs = pidNamespace();
     if ((held.pidNs === undefined) !== (mineNs === undefined)) return false;
     if ((opts.platform ?? process.platform) === "linux" && (held.pidNs === undefined || mineNs === undefined)) return false;
-    return testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
+    // A private owner's age never proves death across an identity boundary. The legacy
+    // heartbeat fallback can reclaim a healthy long-running peer; leave it to its owner lane.
+    if (held.pidNs !== mineNs || held.host !== host()) return false;
+    return isHolderStale(held, { hostname: host, isPidAlive });
   };
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const cleanupLog = (row: Record<string, unknown>): void => {
@@ -601,13 +609,20 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     note: (privateRequired ? `NOT_RUN: private coordination requires an admitted lease (${outcome}); ${note.replace(/; ran unslotted.*$/i, "")}` : note) + basisNote,
     refresh: () => {}, release: () => {},
   });
+  if (parentPolicy) {
+    if (!privateWriter) return unslotted("slot_unavailable", 1, "parent policy requires the gated private writer");
+    const parent = observeTestSlotParent(dir);
+    if (parent.state !== "SAFE") return unslotted("slot_unavailable", 1, `parent entry protection ${parent.state}: ${parent.reason}`);
+  }
   const inherited = inheritedTestSlot(dir);
   if (inherited.lease) return inherited.lease;
   if (inherited.rejected) log(JSON.stringify({ step: "test_slot.parent_rejected", label, reason: inherited.rejected }));
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o777 });
-    // Every container user and the host operator reclaim each other's records: umask must not narrow it.
-    if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
+    if (!parentPolicy) {
+      mkdirSync(dir, { recursive: true, mode: 0o777 });
+      // Legacy preparation only: explicit parent policy must never widen a protected directory.
+      if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
+    }
   } catch (error) {
     // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
     const concurrency = sized();
