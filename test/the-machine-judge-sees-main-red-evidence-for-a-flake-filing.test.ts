@@ -16,7 +16,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, flakeIncidentOrigin, flakeIncidentRecordEvidence } from "../src/lib/flake-incident-gardener.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { renderMachineShard } from "../src/lib/machine-filing.js";
-import { renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
+import { machineJudgeFoundWork, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
 import { mainInheritedHintReader } from "../src/lib/main-health-rung.js";
 import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
@@ -74,12 +74,16 @@ interface Rig {
   root: string;
   shard: string;
   asked: RiskJudgeInput[];
+  lands: { paths: string[]; title: string; body: string }[];
   steps: { step: string; extra?: Record<string, unknown> }[];
   pass: () => ReturnType<typeof runMachineFilingJudge>;
   record: () => ReturnType<typeof loadPlan>["tasks"][number];
 }
 
-function rig(t: TestContext, o: { id: string; text: string; ledger: Record<string, unknown>[]; mainFailures: (base: string) => readonly string[] | undefined; verdict?: RiskJudgeVerdict }): Rig {
+function rig(t: TestContext, o: {
+  id: string; text: string; ledger: Record<string, unknown>[]; mainFailures: (base: string) => readonly string[] | undefined;
+  verdict?: RiskJudgeVerdict; landing?: "workspace" | "absent" | "directory";
+}): Rig {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flake-judge-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
@@ -88,6 +92,9 @@ function rig(t: TestContext, o: { id: string; text: string; ledger: Record<strin
   writeFileSync(shard, o.text);
   writeFileSync(join(root, LEDGER_FILENAME), o.ledger.map((row) => JSON.stringify(row)).join("\n") + "\n");
   const asked: RiskJudgeInput[] = [];
+  const lands: { paths: string[]; title: string; body: string }[] = [];
+  const elsewhere = join(root, "landing");
+  if (o.landing === "directory") mkdirSync(join(elsewhere, "plan", "tasks.d", `${o.id.toLowerCase()}-flake-incident.yaml`), { recursive: true });
   const steps: { step: string; extra?: Record<string, unknown> }[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => void steps.push({ step, ...(extra ? { extra } : {}) });
   // The production port, over this test's ledger: the same rows and main-CI reader the gardener uses.
@@ -102,14 +109,16 @@ function rig(t: TestContext, o: { id: string; text: string; ledger: Record<strin
       asked.push(input);
       return o.verdict ?? { verdict: "low", confidence: 0.95, reasons: ["a test-only repair of a measured flake"] };
     },
-    writeRoot: root,
+    ...(o.landing === "workspace"
+      ? { openWorkspace: () => ({ root, branch: "machine-judge-1", land: (l: { paths: string[]; title: string; body: string }) => (lands.push(l), "https://github.com/craigoley/remudero/pull/12200"), dispose: () => {} }) }
+      : { writeRoot: o.landing === undefined ? root : elsewhere }),
     stageProposal: () => {},
     log,
     clock: CLOCK,
     flakeEvidence: production.flakeEvidence!,
   };
   return {
-    root, shard, asked, steps,
+    root, shard, asked, lands, steps,
     pass: () => runMachineFilingJudge(ports),
     record: () => loadPlan(join(root, "plan", "tasks.yaml")).byId.get(o.id)!,
   };
@@ -253,4 +262,49 @@ test("W1-T9694: the gardener and the judge share one main-inherited classifier",
     ORIGIN, "W1-T9704");
   assert.deepEqual(filedOnly, { file: FILE, title: TITLE, prs: [1, 2, 3], recovered: 0, alsoFailed: 3, alsoFailedPrs: 3, baseShas: [BASE], runs: [7] });
   assert.equal(flakeIncidentRecordEvidence([], ORIGIN, "W1-T9704"), undefined);
+});
+
+test("W1-T9694: a retirement lands through the one judge PR, proven by its retirement line", async (t) => {
+  const id = "W1-T9705";
+  const r = rig(t, { id, text: flakeRecord(id, 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows(id, nine), mainFailures: () => [FILE], landing: "workspace" });
+  const report = await r.pass();
+  assert.deepEqual(report.retired, [id], "the retirement the landing tree reads is current, never withdrawn as stale");
+  assert.equal(report.prUrl, "https://github.com/craigoley/remudero/pull/12200");
+  assert.equal(machineJudgeFoundWork({ proceeded: [], escalated: [], unavailable: [], refused: [], failed: [], settled: [], retired: [id] }), true);
+  assert.equal(r.lands.length, 1);
+  assert.match(r.lands[0]!.body, new RegExp(`- \`${id}\`: \\*\\*retire\\*\\* \\(a red inherited from main, routed to main-health; W1-T9694\\)`));
+  assert.match(r.lands[0]!.body, new RegExp(`  proof: grep: \\^  retirement: retired in plan/tasks\\.d/${id.toLowerCase()}-flake-incident\\.yaml`));
+});
+
+test("W1-T9694: a retirement the landing tree cannot take is refused or failed, never released", async (t) => {
+  const absent = rig(t, { id: "W1-T9706", text: flakeRecord("W1-T9706", 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows("W1-T9706", nine), mainFailures: () => [FILE], landing: "absent" });
+  const refused = await absent.pass();
+  assert.deepEqual(refused.refused, ["W1-T9706"]);
+  assert.deepEqual(refused.proceeded, []);
+  assert.match(String(absent.steps.find((s) => s.step === "machine_judge.refused")?.extra?.reason), /is absent from the landing tree/);
+  const again = await absent.pass();
+  assert.deepEqual(again.refused, [], "a refused record is declined at its pin, not retried every pass");
+
+  const broken = rig(t, { id: "W1-T9707", text: flakeRecord("W1-T9707", 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows("W1-T9707", nine), mainFailures: () => [FILE], landing: "directory" });
+  const failed = await broken.pass();
+  assert.deepEqual(failed.failed, ["W1-T9707"], "a landing that throws is ledgered and skipped");
+  assert.ok(broken.steps.some((s) => s.step === "machine_judge.record_failed"));
+});
+
+test("W1-T9694: a released flake record the judge cannot answer is asked again next pass", async (t) => {
+  const id = "W1-T9708";
+  const rel = `plan/tasks.d/${id.toLowerCase()}-flake-incident.yaml`;
+  const text = flakeRecord(id, 1, 2, [12000, 12001, 12002]);
+  const out = renderRuledShard(text, rel, taskRulingPin({ ...parseTasksFromYaml(text, rel)[0]!, verify: "auto" }), {
+    verdict: "low", action: "proceed", confidence: 0.9, reasons: ["a flake"], judgedAt: "2026-10-10T12:00:00.000Z",
+  });
+  assert.ok("contents" in out);
+  const r = rig(t, {
+    id, text: out.contents, ledger: ledgerRows(id, ["recovered", "also_failed", "also_failed"]), mainFailures: () => [],
+    verdict: { verdict: "low", confidence: 0, reasons: ["no model reached"], availability: "unavailable" },
+  });
+  const first = await r.pass();
+  assert.deepEqual(first.unavailable, [id]);
+  await r.pass();
+  assert.equal(r.asked.length, 2, "an unanswered reconsideration books nothing, so it is asked again");
 });

@@ -508,6 +508,7 @@ interface RulingPins {
   relPath: string;
   pin: string;
   sourcePin: string;
+  action?: string;
 }
 
 function mainRecords(root: string, paths: string[]): Map<string, string> {
@@ -530,9 +531,11 @@ function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id
     const text = main.get(record.relPath);
     const task = text === undefined ? undefined : parseTasksFromYaml(text, record.relPath).find((t) => t.id === record.id);
     const pin = task === undefined ? null : taskRulingPin(task);
-    // The source pin covers the unruled record; the rendered pin covers verify/priority after release.
-    return task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)
-      ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
+    // The source pin covers the unruled record; the rendered pin covers verify/priority after release,
+    // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
+    const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
+      (record.action === "retire" && pin === record.pin);
+    return current ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
 }
 
@@ -1103,7 +1106,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       });
       if (report.prUrl) state.pending = {
         prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
-        repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
+        repoRoot: dirname(dirname(dirname((ruled[0]?.task ?? retire[0]!.task).sourcePath!))),
       };
       else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
