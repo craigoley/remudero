@@ -12,7 +12,7 @@ import {
   type CalibrationIo, type CalibrationState, type MemoryForecast,
 } from "../src/lib/host-memory-calibration.js";
 import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
-import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
+import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-15T00:00:00Z");
@@ -89,7 +89,7 @@ test("W1-T8879: the existing heartbeat invokes the real bounded collector withou
 
 test("W1-T8879: missing qualification is distinct from an unsupported scenario and neither blocks ordinary shadow recording", () => {
   const inherited = loadHostMemoryBudgetPolicy(new URL("../plan/policy.yaml", import.meta.url).pathname, fixedClock(NOW));
-  const policy = { ...inherited, mode: "enforce" as const, classModes: { implement: "enforce" as const }, claimModel: JOINT_MODEL };
+  const policy: HostMemoryBudgetPolicy = { ...inherited, mode: "enforce", classModes: { implement: "enforce" }, claimModel: JOINT_MODEL };
   const ports: ShadowMemoryPorts = {
     clock: fixedClock(NOW), nowNs: () => 0n,
     readFile: () => { throw Object.assign(new Error("fixture has no input"), { code: "ENOENT" }); },
