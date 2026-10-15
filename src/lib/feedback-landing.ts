@@ -244,8 +244,7 @@ function landingNet(git: GitExec, gh: GhExec, seam: { gitAsync?: GitExecAsync; g
   };
 }
 
-/** The async seam for a per-poll sweep: an explicit one wins, an injected sync `git`/`gh` is resolved as-is
- *  (an offline test seam), and only an un-injected one spawns a real, awaited child process. */
+/** The awaited seam: an explicit one wins, an injected sync `git`/`gh` resolves as-is (a test seam), else a real child. */
 function asyncSeamsOf(
   root: string,
   opts: { git?: GitExec; gh?: GhExec; gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
@@ -1409,14 +1408,12 @@ function landContent(
   return driveLanding(landContentSteps(root, kind, inputs, opts), syncPreflightOf(root, opts));
 }
 
-/** {@link LandFeedbackOpts} for an awaited landing (W1-T9695): the plan-PR preflight and the network verbs are awaited. */
 export interface LandFeedbackAsyncOpts extends Omit<LandFeedbackOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
   gitAsync?: GitExecAsync;
   ghAsync?: GhExecAsync;
 }
 
-/** {@link landContent} for a daemon-loop caller (W1-T9695): the same steps, its preflight and network verbs awaited off the loop. */
 async function landContentAsync(root: string, kind: LandingKind, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
   const { planPrPreflight, ...landOpts } = opts;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
@@ -1537,7 +1534,6 @@ export function landPlanReconcileShardsAsync(
   return landContentAsync(root, planReconcileLandingKind(root, opts), [...inputs], opts);
 }
 
-/** The sync {@link landPlanReconcileShardsAsync}, for a caller off the daemon loop. */
 export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
   return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
 }
@@ -1888,7 +1884,6 @@ export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
 
-/** A CI-learning shard lander, sync or awaited; W1-T9695: the daemon's runner names this, never the sync lander. */
 export type CiLearningShardLander = (
   drafts: readonly CiLearningShardDraft[],
   checkoutRoot: string,
