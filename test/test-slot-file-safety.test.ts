@@ -16,7 +16,7 @@ test("a host test slot lease is readable by peer accounts but never group or wor
   const fx = fixture(); try {
     assert.equal(statSync(fx.path).mode & 0o022, 0);
     assert.equal(statSync(fx.path).mode & 0o600, 0o600);
-    assert.equal(statSync(fx.path).mode & 0o044, 0o044 & ~process.umask());
+    assert.equal(statSync(fx.path).mode & 0o044, 0o044);
     fx.lease.refresh(); assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).pid, process.pid);
   } finally { fx.cleanup(); }
 });
@@ -26,6 +26,13 @@ test("a permissive caller umask cannot make an owned test slot group or world wr
     fx = fixture();
     assert.equal(statSync(fx.path).mode & 0o777, 0o644);
     fx.lease.refresh(); assert.equal(statSync(fx.path).mode & 0o022, 0);
+  } finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
+});
+test("a restrictive caller umask still leaves an owned test slot readable by peer accounts", () => {
+  const previous = process.umask(0o077); let fx: ReturnType<typeof fixture> | undefined;
+  try {
+    fx = fixture();
+    assert.equal(statSync(fx.path).mode & 0o777, 0o644);
   } finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
 });
 test("a refreshed test slot never follows a replacement symlink or overwrites its owned sentinel", () => {

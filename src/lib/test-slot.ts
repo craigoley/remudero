@@ -559,7 +559,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             // Created owner-only, then widened on the descriptor to peer-READ: other accounts parse the holder, only
             // the creating account may rewrite it. The exclusive descriptor stays the heartbeat target, never the path.
             const fd = openSync(path, "wx+", 0o600); openedFd = fd;
-            fchmodSync(fd, 0o644 & ~process.umask());
+            fchmodSync(fd, 0o644); // Like the 0o777 dir, a caller umask must not narrow cross-account coordination.
             const writeRecord = (body: string): void => {
               const bytes = Buffer.from(body); let offset = 0;
               while (offset < bytes.length) {
