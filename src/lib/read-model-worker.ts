@@ -266,6 +266,8 @@ export interface ReadModelLaneMove {
 
 export interface ReadModelViewContext {
   now: number;
+  /** Shared home store, retained when a view's instance inputs are scoped to one repository. */
+  sourceStore?: ReadModelDb;
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
@@ -1435,7 +1437,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications) : undefined;
-    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
+    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
@@ -1774,7 +1776,7 @@ export function readModelLaneViews(
     { name: WORKSTREAMS_VIEW_NAME, create: () => createWorkstreamsView({ instances, ledgerSource, clock, log }) },
     { name: ACTIONS_VIEW_NAME, create: () => createActionsView({ instances, ledgerSource }) },
     { name: HOST_VIEW_NAME, create: () => createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock }) },
-    { name: AGENT_VIEW_NAME, qualificationGeneration: AGENT_QUALIFICATION_GENERATION, snapshotSourced: true, create: () => createAgentView({ instances, ledgerSource, log }) },
+    { name: AGENT_VIEW_NAME, qualificationGeneration: AGENT_QUALIFICATION_GENERATION, perInstance: true, snapshotSourced: true, create: () => createAgentView({ instances, ledgerSource, log }) },
     { name: INCIDENTS_VIEW_NAME, create: () => createIncidentsView({ instances, ledgerSource }) },
     { name: OPERATOR_AGENT_ROWS_VIEW, create: () => createOperatorAgentRowsView(ledgerSource) },
   ];
