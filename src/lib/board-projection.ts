@@ -807,6 +807,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let planOnlyPending: StepRow[] = [];
   /** Every row of the three plan-only steps (plan-only or not) the cache's sets were read over, as the store digests it. */
   let planOnlyDigest: StepDigest | undefined;
+  const cacheStrings = strings ? new Map<string, string>() : undefined;
   let stepReads = noStepReads();
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
@@ -1192,6 +1193,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyCache = undefined;
     planOnlyPending = [];
     planOnlyDigest = undefined;
+    cacheStrings?.clear();
   }
 
   /** The store's digest of `step`'s rows up to `lastSeq`, or of every row of the plan-only steps. */
@@ -1220,8 +1222,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let bucket = stepCache.get(step);
     if (!bucket) {
       bucket = readStep(step, lastSeq);
-      // Held across builds, so its rows share the projection's strings as a held ingest row does (W1-T6467).
-      if (strings) for (const row of bucket.rows) internRowStrings(row as Row, strings);
+      // Held across builds, so its rows share equal strings (W1-T6467), in a table of the cache's own: the projection's
+      // holds only its kept rows' values.
+      if (cacheStrings) for (const row of bucket.rows) internRowStrings(row as Row, cacheStrings);
       stepReads.fullReads++;
       [stepReads.fullRows, stepReads.fullBytes] = [stepReads.fullRows + bucket.rows.length, stepReads.fullBytes + bucket.bytes];
     } else {
