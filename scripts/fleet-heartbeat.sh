@@ -279,7 +279,7 @@ else
   # contributes nothing; the union is still whatever the other forms hold.
 
   # ── ONE NEWEST-FIRST PASS, STOPPED WHEN EVERY ANSWER IS FINAL ───────────────────────────────
-  # Three whole-union zgreps per beat read ~6 GB from a disk near its IOPS cap. This one pass
+  # Three whole-union zgreps per beat read ~6 GB from a disk near its IOPS cap (#11937). This pass
   # answers T (the max leading ts over `"step":"daemon\.` lines), S (the last daemon step token on
   # a line carrying `"ts":"<T>"`) and B (the last daemon.boot line). S and B are LAST in union
   # order (live, plain, gzipped; glob order within each), as `tail -n 1` had them, so an archived
