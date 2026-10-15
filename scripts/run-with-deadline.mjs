@@ -54,7 +54,7 @@ function parseArgs(argv) {
  * (every member is this user's, so it is never a real permission refusal) is macOS's answer for a group holding
  * only zombies, which are dead too.
  */
-function signalGroup(pgid, signal) {
+export function signalGroup(pgid, signal) {
   try {
     process.kill(-pgid, signal);
     return true;

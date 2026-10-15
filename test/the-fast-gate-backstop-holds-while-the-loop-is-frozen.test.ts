@@ -207,6 +207,53 @@ test("W1-T9556: the runner passes a gate's own status through, and a runner told
   assert.equal(lastAlive(dir, "gc.alive"), gcLast, "the grandchild outlived its stopped runner");
 });
 
+test("W1-T9556: a gate that ignores SIGTERM at the deadline is SIGKILLed once the grace is spent", async () => {
+  const dir = scratch("stubborn");
+  const pidFile = join(dir, "stubborn.pid");
+  const gate = `process.on("SIGTERM", () => {}); require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+    ` setInterval(() => {}, 1000); setTimeout(() => process.exit(0), ${STUB_SELF_EXIT_MS});`;
+  const startedAt = Date.now();
+  const child = spawn(process.execPath, [DEADLINE_RUNNER, String(startedAt + DEADLINE_MS), "200", "--", process.execPath, "-e", gate],
+    { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr!.on("data", (d) => (stderr += String(d)));
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  assert.equal(code, GATE_DEADLINE_EXIT_CODE, stderr);
+  assert.match(stderr, new RegExp(`${GATE_DEADLINE_MARKER} enforced_by=runner`));
+  assert.ok(Date.now() - startedAt < STUB_SELF_EXIT_MS, "the runner waited for the gate's own exit instead of killing it");
+  // The runner exits as it sends SIGKILL, so the orphan may still be listed (a zombie) for a moment.
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  for (let waited = 0; alive() && waited < 2_000; waited += 25) await sleep(25);
+  assert.equal(alive(), false, "the SIGTERM-ignoring gate is gone");
+});
+
+test("W1-T9556: a command that exits past the deadline before the runner's own timer ran is credited to timeout", async () => {
+  // Deterministic stand-in for "the runner's loop was frozen across the deadline": the runner's wall clock jumps an
+  // hour 200 ms in, while its deadline timer (monotonic) is still a minute out, so the command's exit is the first
+  // thing the runner sees past the deadline. The --kernel-timeout bin is a pass-through shim: only the label matters.
+  const dir = scratch("late-exit");
+  const preload = join(dir, "clock-jump.mjs");
+  writeFileSync(preload, "const real = Date.now; const t0 = real(); Date.now = () => real() + (real() - t0 > 200 ? 3_600_000 : 0);\n");
+  const shim = join(dir, "timeout");
+  writeFileSync(shim, "#!/bin/sh\nshift 3\nexec \"$@\"\n");
+  chmodSync(shim, 0o755);
+  const child = spawn(process.execPath, ["--import", preload, DEADLINE_RUNNER, String(Date.now() + 60_000), "200", "--kernel-timeout", shim,
+    "--", process.execPath, "-e", "setTimeout(() => {}, 500)"], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr!.on("data", (d) => (stderr += String(d)));
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  assert.equal(code, GATE_DEADLINE_EXIT_CODE, stderr);
+  assert.match(stderr, new RegExp(`${GATE_DEADLINE_MARKER} enforced_by=timeout`));
+});
+
+test("W1-T9556: signalGroup rethrows an error that is not an empty group", async () => {
+  const { signalGroup } = (await import(new URL("../scripts/run-with-deadline.mjs", import.meta.url).href)) as
+    { signalGroup: (pgid: number, signal: NodeJS.Signals | 0) => boolean };
+  assert.equal(signalGroup(2 ** 22 + 12345, 0), false, "an empty group reads as gone");
+  assert.throws(() => signalGroup(process.pid, "SIGNOTASIGNAL" as NodeJS.Signals), { code: "ERR_UNKNOWN_SIGNAL" });
+});
+
 const timeoutBin = gateTimeoutBin();
 test("W1-T9556: coreutils timeout ends the gate group at the deadline even while the runner itself is frozen", { skip: timeoutBin ? false : "no coreutils timeout on PATH" }, async () => {
   const dir = scratch("kernel");
