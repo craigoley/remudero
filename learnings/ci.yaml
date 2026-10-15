@@ -683,3 +683,21 @@
   evidence: "scripts/task-id-existence-check.mjs (header: resolves to a reservation ref or a declared plan record, existence not ownership) and src/lib/task-id-reservation.ts. The ci-learning note for PR #10904 records that the gate went red and was repaired by editing plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml; the exact id that failed to resolve in that run was NOT read from the CI log in this entry, so the trigger is not verified here."
   src: "ci-learning:10904:task-id-existence"
   cited: "2026-10-14"
+
+- id: analyze-actions-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/codeql.yml", ".github/workflows/**"]
+  fact: >-
+    When the CodeQL `Analyze (actions)` check refuses a pull request, inspect that pull request's
+    failed job step and repair diff before choosing a remedy. A count of refusals and a later repair
+    do not establish a shared cause; do not apply a generic pre-push ritual as though it fixes this
+    gate. Record the observed failing step and the change that cleared it so the next worker can
+    act on the actual failure.
+  evidence: >-
+    The ci-learning finding lists PRs #10578, #10628, and #10671 (with #10671 duplicated) as
+    `Analyze (actions)` refusals followed by repairs. The PR failure logs and repair diffs were not
+    available to this run, so a shared cause and an effective gate-specific prevention are NOT
+    established. This guidance is limited to the evidence requirement before selecting a remedy.
+  src: "ci-learning:10578:Analyze (actions)"
+  cited: "2026-10-15"
