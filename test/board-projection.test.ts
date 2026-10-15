@@ -346,7 +346,7 @@ test("the github generation follows the open pull requests and the read state", 
   assert.equal(typeof githubGenerationOf(nulls), "string");
 });
 
-test("the default github generation re-derives every task when an open pull request moves", (t) => {
+test("the default github generation re-derives the task whose open pull request moves, and no other (W1-T6016)", (t) => {
   const r = rig(t);
   let open: PrRef[] = [];
   const board = createBoardProjection({ db: r.db, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1"), task("W1-T2")]),
@@ -354,7 +354,7 @@ test("the default github generation re-derives every task when an open pull requ
   board.update();
   later(r);
   open = [{ number: 3, url: "u3", state: "OPEN", headRefName: "run-W1-T1-1", headRefOid: "a" }];
-  assert.equal(board.update().full, true);
+  assert.deepEqual(board.update().rederived, ["W1-T1"]);
 });
 
 test("a comparison ignores key order and the clock-read elapsed time", () => {
