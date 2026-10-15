@@ -6,7 +6,6 @@ import { classifyAllProposalsMemo, classifyAllProposalsSliced, inboxClassificati
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
-import { inboxBoardReferents } from "../src/lib/inbox-board-referents.js";
 import type { StatusProjection } from "../src/lib/status.js";
 
 test("the production Inbox classifier observes its own board referent without a second GitHub read", async t => {
@@ -55,7 +54,8 @@ test("an Inbox referent absent from observed repository evidence stays unverifie
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("board referent evidence refuses unavailable conflicting and unobserved states", () => {
+test("board referent evidence refuses unavailable conflicting and unobserved states", async () => {
+  const { inboxBoardReferents } = await import("../src/lib/inbox-board-referents.js");
   const row = (prNumber: number | undefined, extra: Partial<StatusProjection> = {}): StatusProjection => ({
     taskId: "fixture", status: "running", source: "pr-field", merged: false, prNumber, prState: "OPEN", ...extra,
   });
