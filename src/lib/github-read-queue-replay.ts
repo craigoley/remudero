@@ -115,6 +115,9 @@ function ownPlainData(input: unknown, required: readonly string[], optional: rea
     if (required.some((key) => !Object.hasOwn(snapshot, key))) return undefined;
     return Object.freeze(snapshot);
   } catch {
+    // Malformed shapes and failed reflective/proxy inspection have the same remedy: resubmit
+    // plain whitelisted metadata. Every caller refuses this input; request/observation callers
+    // emit fixed malformed-* UNKNOWN receipts. Exception text adds no remedy and may hold secrets.
     return undefined;
   }
 }
