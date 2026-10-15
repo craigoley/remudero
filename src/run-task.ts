@@ -208,7 +208,7 @@ import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGarden
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
-import { FLAKE_INCIDENT_POLICY, flakeIncidentRecordEvidence, flakeMainRedAt, readFlakeIncidentRows } from "./lib/flake-incident-gardener.js";
+import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
@@ -225,7 +225,7 @@ import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, re
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type FlakeJudgeEvidencePort, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -632,7 +632,6 @@ import {
   buildMainHealthRung,
   mainCeilingLogReducer,
   mainRepairRecordsFromLedger,
-  type MainRepairRecord,
   mainRepairMergesBrief,
   withMainHealthOnLightPass,
   type MainCeilingLogVerdict,
@@ -52448,40 +52447,6 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
   return out;
 }
 
-/** W1-T9694: the machine-filing judge's flake-incident facts, read from the same ledger rows and main CI the
- *  flake-incident gardener reads. A completed main verdict at a sha never changes, so each is read once. */
-export function productionFlakeJudgeEvidence(o: {
-  stateDir: string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  clock: Clock;
-  mainFailures: SelectorShadowMainFailures;
-}): FlakeJudgeEvidencePort {
-  const mainReads = new Map<string, readonly string[]>();
-  const mainFailures = async (sha: string): Promise<readonly string[] | undefined> => {
-    const read = mainReads.get(sha) ?? (await o.mainFailures(sha));
-    if (read !== undefined) mainReads.set(sha, read);
-    return read;
-  };
-  let repairs: MainRepairRecord[] | undefined;
-  return {
-    retries: (tasks) => {
-      repairs = undefined;
-      const rows = readFlakeIncidentRows(o.stateDir, fixedClock(o.clock.now() - FLAKE_INCIDENT_POLICY.windowMs).iso());
-      return new Map(tasks.flatMap((t) => {
-        const evidence = flakeIncidentRecordEvidence(rows, t.origin ?? "", t.id);
-        return evidence === undefined ? [] : [[t.id, evidence] as const];
-      }));
-    },
-    mainRedAt: (file, baseShas) => flakeMainRedAt(file, baseShas, mainFailures, o.log),
-    repairFor: (file, title) => {
-      // ledger-read-intent: live — main.repair rows the rung itself reads from the live file.
-      repairs ??= [...mainRepairRecordsFromLedger(readLedgerLines(join(o.stateDir, LEDGER_FILENAME))).values()];
-      const hit = repairs.find((r) => (title !== "" ? r.red?.detail?.includes(`not ok ${title}`) : r.inherited?.testFiles.includes(file)) === true);
-      return hit === undefined ? undefined : { offendingSha: hit.offendingSha, ...(hit.fixPrUrl ? { fixPrUrl: hit.fixPrUrl } : {}) };
-    },
-  };
-}
-
 /**
  * `rmd verify-human-sweep` — W1-T3188's REAL entry point, and the reason
  * {@link realVerifyHumanJudge} is not another imported-but-uncalled factory. Judges the parked
@@ -52509,9 +52474,11 @@ export function productionMachineFilingJudgePorts(opts: {
   let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
-    flakeEvidence: productionFlakeJudgeEvidence({
+    flakeEvidence: flakeJudgeEvidencePort({
       stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
       mainFailures: opts.mainFailures ?? selectorShadowMainFailures(opts.owner, opts.repo),
+      // ledger-read-intent: live — the main.repair rows the main-health rung itself reads.
+      repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME))).values()],
     }),
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),

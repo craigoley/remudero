@@ -51,7 +51,7 @@ import {
 } from "./risk-judge.js";
 import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
 import {
-  FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, type FlakeIncidentRecordEvidence, type MainRedAtBase,
+  FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, type FlakeIncidentRecordEvidence, type FlakeJudgeEvidencePort, type MainRedAtBase,
 } from "./flake-incident-gardener.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
@@ -332,16 +332,6 @@ export async function judgeMachineShard(
       judgedAt: ports.clock.iso(),
     },
   };
-}
-
-/** W1-T9694: the harness's own facts about flake-incident records, for the judge's evidence line. */
-export interface FlakeJudgeEvidencePort {
-  /** Each record's retry outcomes from the ledger, read once per pass; a record missing from the map is unread. */
-  retries: (tasks: readonly Task[]) => ReadonlyMap<string, FlakeIncidentRecordEvidence>;
-  /** Whether main's own CI failed the test at one of the PRs' bases. Absent: unread. */
-  mainRedAt?: (file: string, baseShas: readonly string[]) => Promise<{ mainRed: MainRedAtBase; redSha?: string }>;
-  /** A main-health repair whose red names the test. */
-  repairFor?: (file: string, title: string) => { offendingSha: string; fixPrUrl?: string } | undefined;
 }
 
 /** What the judge knows about one flake-incident record beyond its own text. */

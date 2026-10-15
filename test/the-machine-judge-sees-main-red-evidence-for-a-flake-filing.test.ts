@@ -13,16 +13,18 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, flakeIncidentOrigin, flakeIncidentRecordEvidence } from "../src/lib/flake-incident-gardener.js";
+import {
+  FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, flakeIncidentOrigin, flakeIncidentRecordEvidence, flakeJudgeEvidencePort,
+} from "../src/lib/flake-incident-gardener.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { renderMachineShard } from "../src/lib/machine-filing.js";
 import { machineJudgeFoundWork, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import { mainInheritedHintReader } from "../src/lib/main-health-rung.js";
+import { mainInheritedHintReader, mainRepairRecordsFromLedger } from "../src/lib/main-health-rung.js";
 import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { productionMachineFilingJudgePorts } from "../src/run-task.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-15T16:35:05Z"));
 const FILE = "test/the-sweep-never-sends-a-fix-worker-at-a-red-it-cannot-fix.test.ts";
@@ -55,7 +57,7 @@ function flakeRecord(id: string, recovered: number, alsoFailed: number, prs: num
 }
 
 /** The ledger the flake-incident gardener leaves: one `test.flake_retry` row per PR, then its filing row. */
-function ledgerRows(id: string, outcomes: ("recovered" | "also_failed")[]): Record<string, unknown>[] {
+function retryRowsFor(id: string, outcomes: ("recovered" | "also_failed")[]): Record<string, unknown>[] {
   const prs = outcomes.map((_, i) => 12000 + i);
   const at = (i: number) => new Date(CLOCK.now() - (outcomes.length - i) * 3_600_000).toISOString();
   return [
@@ -97,10 +99,11 @@ function rig(t: TestContext, o: {
   if (o.landing === "directory") mkdirSync(join(elsewhere, "plan", "tasks.d", `${o.id.toLowerCase()}-flake-incident.yaml`), { recursive: true });
   const steps: { step: string; extra?: Record<string, unknown> }[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => void steps.push({ step, ...(extra ? { extra } : {}) });
-  // The production port, over this test's ledger: the same rows and main-CI reader the gardener uses.
-  const production = productionMachineFilingJudgePorts({
-    repoRoot: root, stateDir: root, worktreesRoot: join(root, "worktrees"), owner: "craigoley", repo: "remudero", log, clock: CLOCK,
-    mainFailures: (base) => o.mainFailures(base),
+  // The port the daemon builds, over this test's ledger: the same rows and main-CI reader the gardener uses.
+  const flakeEvidence = flakeJudgeEvidencePort({
+    stateDir: root, log, clock: CLOCK, mainFailures: (base) => o.mainFailures(base),
+    // ledger-read-intent: live — as productionMachineFilingJudgePorts reads the main.repair rows.
+    repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(root, LEDGER_FILENAME))).values()],
   });
   const ports: MachineJudgePorts = {
     stateDir: root,
@@ -115,7 +118,7 @@ function rig(t: TestContext, o: {
     stageProposal: () => {},
     log,
     clock: CLOCK,
-    flakeEvidence: production.flakeEvidence!,
+    flakeEvidence,
   };
   return {
     root, shard, asked, lands, steps,
@@ -128,7 +131,7 @@ const nine = Array.from({ length: 9 }, () => "also_failed" as const);
 
 test("W1-T9694: a flake filing whose retries never recovered and whose base main failed is retired, not released", async (t) => {
   const id = "W1-T9668";
-  const r = rig(t, { id, text: flakeRecord(id, 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows(id, nine), mainFailures: () => [FILE] });
+  const r = rig(t, { id, text: flakeRecord(id, 0, 9, nine.map((_, i) => 12000 + i)), ledger: retryRowsFor(id, nine), mainFailures: () => [FILE] });
   const report = await r.pass();
 
   assert.deepEqual(asked(r), 0, "no model is asked to release a red main itself failed");
@@ -167,7 +170,7 @@ test("W1-T9694: a recovered flake reaches the judge with its main-health evidenc
   const id = "W1-T9701";
   const outcomes = ["recovered", "also_failed", "also_failed"] as const;
   const ledger = [
-    ...ledgerRows(id, [...outcomes]),
+    ...retryRowsFor(id, [...outcomes]),
     { ts: CLOCK.iso(), step: "main.repair.located", offending_sha: BASE, red_checks: ["ci"], red_detail: [`not ok ${TITLE}`] },
     { ts: CLOCK.iso(), step: "main.repair.fix_opened", offending_sha: BASE, pr_url: "https://github.com/craigoley/remudero/pull/12034" },
   ];
@@ -188,7 +191,7 @@ test("W1-T9694: a recovered flake reaches the judge with its main-health evidenc
 test("W1-T9694: a flake filing whose main evidence is unread reaches the judge, said to be unread", async (t) => {
   const id = "W1-T9702";
   const outcomes = ["also_failed"] as const;
-  const r = rig(t, { id, text: flakeRecord(id, 0, 1, [12000]), ledger: ledgerRows(id, [...outcomes]), mainFailures: () => undefined });
+  const r = rig(t, { id, text: flakeRecord(id, 0, 1, [12000]), ledger: retryRowsFor(id, [...outcomes]), mainFailures: () => undefined });
   await r.pass();
 
   assert.equal(r.asked.length, 1, "one PR and an unread main are too little for the classifier: the model decides");
@@ -217,7 +220,7 @@ test("W1-T9694: a released flake record is reconsidered once on its moved eviden
   };
 
   // W1-T7532's shape: released on 2026-10-10 before any evidence was shown, and main-inherited.
-  const inherited = rig(t, { id: "W1-T7532", text: release("W1-T7532", flakeRecord("W1-T7532", 0, 9, nine.map((_, i) => 12000 + i))), ledger: ledgerRows("W1-T7532", nine), mainFailures: () => [FILE] });
+  const inherited = rig(t, { id: "W1-T7532", text: release("W1-T7532", flakeRecord("W1-T7532", 0, 9, nine.map((_, i) => 12000 + i))), ledger: retryRowsFor("W1-T7532", nine), mainFailures: () => [FILE] });
   assert.equal(inherited.record().verify, "auto");
   const first = await inherited.pass();
   assert.deepEqual(first.retired, ["W1-T7532"]);
@@ -226,7 +229,7 @@ test("W1-T9694: a released flake record is reconsidered once on its moved eviden
 
   // A released record whose evidence is a real flake is asked once; its unchanged proceed rewrites nothing.
   const id = "W1-T7765";
-  const flaky = rig(t, { id, text: release(id, flakeRecord(id, 1, 2, [12000, 12001, 12002])), ledger: ledgerRows(id, ["recovered", "also_failed", "also_failed"]), mainFailures: () => [] });
+  const flaky = rig(t, { id, text: release(id, flakeRecord(id, 1, 2, [12000, 12001, 12002])), ledger: retryRowsFor(id, ["recovered", "also_failed", "also_failed"]), mainFailures: () => [] });
   const before = readFileSync(flaky.shard, "utf8");
   const asked1 = await flaky.pass();
   assert.equal(flaky.asked.length, 1, "reconsidered once, with the evidence");
@@ -240,7 +243,7 @@ test("W1-T9694: a released flake record is reconsidered once on its moved eviden
   // The same record asked again escalates when the model now reads the evidence as risky.
   const parked = rig(t, {
     id: "W1-T7799", text: release("W1-T7799", flakeRecord("W1-T7799", 1, 2, [12000, 12001, 12002])),
-    ledger: ledgerRows("W1-T7799", ["recovered", "also_failed", "also_failed"]), mainFailures: () => [],
+    ledger: retryRowsFor("W1-T7799", ["recovered", "also_failed", "also_failed"]), mainFailures: () => [],
     verdict: { verdict: "high", confidence: 0.9, reasons: ["the retries say main, not a flake"] },
   });
   const escalated = await parked.pass();
@@ -264,7 +267,7 @@ test("W1-T9694: the gardener and the judge share one main-inherited classifier",
 
 test("W1-T9694: a retirement lands through the one judge PR, proven by its retirement line", async (t) => {
   const id = "W1-T9705";
-  const r = rig(t, { id, text: flakeRecord(id, 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows(id, nine), mainFailures: () => [FILE], landing: "workspace" });
+  const r = rig(t, { id, text: flakeRecord(id, 0, 9, nine.map((_, i) => 12000 + i)), ledger: retryRowsFor(id, nine), mainFailures: () => [FILE], landing: "workspace" });
   const report = await r.pass();
   assert.deepEqual(report.retired, [id], "the retirement the landing tree reads is current, never withdrawn as stale");
   assert.equal(report.prUrl, "https://github.com/craigoley/remudero/pull/12200");
@@ -275,7 +278,7 @@ test("W1-T9694: a retirement lands through the one judge PR, proven by its retir
 });
 
 test("W1-T9694: a retirement the landing tree cannot take is refused or failed, never released", async (t) => {
-  const absent = rig(t, { id: "W1-T9706", text: flakeRecord("W1-T9706", 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows("W1-T9706", nine), mainFailures: () => [FILE], landing: "absent" });
+  const absent = rig(t, { id: "W1-T9706", text: flakeRecord("W1-T9706", 0, 9, nine.map((_, i) => 12000 + i)), ledger: retryRowsFor("W1-T9706", nine), mainFailures: () => [FILE], landing: "absent" });
   const refused = await absent.pass();
   assert.deepEqual(refused.refused, ["W1-T9706"]);
   assert.deepEqual(refused.proceeded, []);
@@ -283,7 +286,7 @@ test("W1-T9694: a retirement the landing tree cannot take is refused or failed, 
   const again = await absent.pass();
   assert.deepEqual(again.refused, [], "a refused record is declined at its pin, not retried every pass");
 
-  const broken = rig(t, { id: "W1-T9707", text: flakeRecord("W1-T9707", 0, 9, nine.map((_, i) => 12000 + i)), ledger: ledgerRows("W1-T9707", nine), mainFailures: () => [FILE], landing: "directory" });
+  const broken = rig(t, { id: "W1-T9707", text: flakeRecord("W1-T9707", 0, 9, nine.map((_, i) => 12000 + i)), ledger: retryRowsFor("W1-T9707", nine), mainFailures: () => [FILE], landing: "directory" });
   const failed = await broken.pass();
   assert.deepEqual(failed.failed, ["W1-T9707"], "a landing that throws is ledgered and skipped");
   assert.ok(broken.steps.some((s) => s.step === "machine_judge.record_failed"));
@@ -298,7 +301,7 @@ test("W1-T9694: a released flake record the judge cannot answer is asked again n
   });
   assert.ok("contents" in out);
   const r = rig(t, {
-    id, text: out.contents, ledger: ledgerRows(id, ["recovered", "also_failed", "also_failed"]), mainFailures: () => [],
+    id, text: out.contents, ledger: retryRowsFor(id, ["recovered", "also_failed", "also_failed"]), mainFailures: () => [],
     verdict: { verdict: "low", confidence: 0, reasons: ["no model reached"], availability: "unavailable" },
   });
   const first = await r.pass();

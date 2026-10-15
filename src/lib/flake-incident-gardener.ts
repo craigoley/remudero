@@ -406,6 +406,59 @@ export function flakeIncidentMainInherited(
   return evidence.recovered === 0 && (evidence.alsoFailedPrs >= policy.watchPrs || evidence.mainRed === true);
 }
 
+/** W1-T9694: the harness's own facts about flake-incident records, for the machine-filing judge's evidence line. */
+export interface FlakeJudgeEvidencePort {
+  /** Each record's retry outcomes from the ledger, read once per pass; a record missing from the map is unread. */
+  retries: (tasks: readonly { id: string; origin?: string }[]) => ReadonlyMap<string, FlakeIncidentRecordEvidence>;
+  /** Whether main's own CI failed the test at one of the PRs' bases. Absent: unread. */
+  mainRedAt?: (file: string, baseShas: readonly string[]) => Promise<{ mainRed: MainRedAtBase; redSha?: string }>;
+  /** A main-health repair whose red names the test. */
+  repairFor?: (file: string, title: string) => { offendingSha: string; fixPrUrl?: string } | undefined;
+}
+
+/** The fields of a main-health repair record a flake judgement reads: what it fixed and the red it named. */
+export interface FlakeRepairRecord {
+  offendingSha: string;
+  fixPrUrl?: string;
+  red?: { detail?: readonly string[] };
+  inherited?: { testFiles: readonly string[] };
+}
+
+/** The judge's facts from the rows and main CI this gardener reads. A completed main verdict at a sha never
+ *  changes, so each is read once; `repairs` is read at most once per pass, and a repair names the test as
+ *  W1-T9551's rung matches a hint: by its `not ok <title>` line, or for a file-level incident, the file. */
+export function flakeJudgeEvidencePort(o: {
+  stateDir: string;
+  log: GardenerDeps["log"];
+  clock: { now: () => number };
+  mainFailures: SelectorShadowMainFailures;
+  repairs: () => readonly FlakeRepairRecord[];
+}): FlakeJudgeEvidencePort {
+  const mainReads = new Map<string, readonly string[]>();
+  const mainFailures = async (sha: string): Promise<readonly string[] | undefined> => {
+    const read = mainReads.get(sha) ?? (await o.mainFailures(sha));
+    if (read !== undefined) mainReads.set(sha, read);
+    return read;
+  };
+  let repairs: readonly FlakeRepairRecord[] | undefined;
+  return {
+    retries: (tasks) => {
+      repairs = undefined;
+      const rows = readFlakeIncidentRows(o.stateDir, fixedClock(o.clock.now() - FLAKE_INCIDENT_POLICY.windowMs).iso());
+      return new Map(tasks.flatMap((t) => {
+        const evidence = flakeIncidentRecordEvidence(rows, t.origin ?? "", t.id);
+        return evidence === undefined ? [] : [[t.id, evidence] as const];
+      }));
+    },
+    mainRedAt: (file, baseShas) => flakeMainRedAt(file, baseShas, mainFailures, o.log),
+    repairFor: (file, title) => {
+      repairs ??= o.repairs();
+      const hit = repairs.find((r) => (title !== "" ? r.red?.detail?.includes(`not ok ${title}`) : r.inherited?.testFiles.includes(file)) === true);
+      return hit === undefined ? undefined : { offendingSha: hit.offendingSha, ...(hit.fixPrUrl ? { fixPrUrl: hit.fixPrUrl } : {}) };
+    },
+  };
+}
+
 /** W1-T9694: a filed flake incident's retry outcomes, as the harness's own ledger rows state them. */
 export interface FlakeIncidentRecordEvidence {
   file: string;
