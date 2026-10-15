@@ -7296,10 +7296,9 @@ export function mainHealthFirstRedCommitFromRunHistory(
   allHistory: readonly MainHealthRunHistoryEntry[],
   options: MainHealthFirstRedOptions = {},
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
-  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
-  // green on a commit whose CI was cancelled is not a green main.
+  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going green
+  // on a commit whose CI was cancelled is not a green main. W1-T9690: an EMPTY (unknown) set names none.
   const workflows = options.requiredWorkflows;
-  // W1-T9690: a set passed EMPTY is unknown, and an unknown set names no green, so no boundary.
   if (workflows && workflows.size === 0) return undefined;
   const history =
     workflows && workflows.size > 0
