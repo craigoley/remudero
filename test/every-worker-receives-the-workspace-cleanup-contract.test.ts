@@ -60,22 +60,24 @@ test("provider fallback keeps exactly one cleanup contract and preserves the ori
 test("cleanup instructions preserve the auction seed and assignment", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-cleanup-auction-"));
   const task = { prompt: "fix rung 1", model: "sonnet", effort: "medium", taskId: "W1-T9301", runId: "run-W1-T9301-2" };
-  let assignment: WorkerSelectionAssignment | undefined;
+  const assignments: WorkerSelectionAssignment[] = [];
   let received = "";
   try {
     const result = await spawnWorker({
       ...task, cwd: root, permissionMode: "bypassPermissions", settingsFile: join(process.cwd(), "settings/worker.json"),
       config: { root, claudeBin: "/unused", workerProviders: { enabled: ["codex"] } },
       providerRouting: {
-        readCodex: async () => ({ provider: "codex", readable: true, model: "gpt-6-sol", effort: "medium", windows: [] }),
+        readCodex: async () => ({ provider: "codex", readable: true, model: "gpt-6-sol", effort: "medium",
+          windows: [{ name: "codex weekly", usedPercent: 50, resetsAt: Date.now() / 1000 + 3600 }] }),
         spawnCodex: async args => { received = args.prompt; return { provider: "codex", text: "done", model: "gpt-6-sol" } as never; },
         writeStatus: () => {},
       },
-      onSelectionAssignment: value => { assignment = value; },
+      onSelectionAssignment: value => { assignments.push(value); },
     });
     assert.equal(result.text, "done");
     assert.equal(received, withWorkspaceCleanup(task.prompt));
-    assert.equal(assignment?.routing.propensity?.draw?.key.point, spawnDecisionPoint(task));
+    assert.equal(assignments.length, 1);
+    assert.equal(assignments[0]!.routing.propensity?.draw?.key?.point, spawnDecisionPoint(task));
     assert.notEqual(spawnDecisionPoint(task), spawnDecisionPoint({ ...task, prompt: received }), "control: the extra instructions would change the routing seed");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
