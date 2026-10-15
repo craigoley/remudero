@@ -7299,6 +7299,8 @@ export function mainHealthFirstRedCommitFromRunHistory(
   // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
   // green on a commit whose CI was cancelled is not a green main.
   const workflows = options.requiredWorkflows;
+  // W1-T9690: a set passed EMPTY is unknown, and an unknown set names no green, so no boundary.
+  if (workflows && workflows.size === 0) return undefined;
   const history =
     workflows && workflows.size > 0
       ? allHistory.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName))
@@ -7349,7 +7351,9 @@ export function enrichMainHealthObservation(
 
   let firstRedCommit: MainHealthFirstRedCommit | undefined;
   let runHistoryWindowExhausted: boolean | undefined;
-  if (enrichment.runHistory) {
+  if (enrichment.runHistory && enrichment.requiredWorkflows?.size === 0) {
+    enrichmentFailures.push("the workflows carrying required checks are unknown, so no first-red commit is named");
+  } else if (enrichment.runHistory) {
     const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory, {
       ...(enrichment.requiredWorkflows ? { requiredWorkflows: enrichment.requiredWorkflows } : {}),
     });

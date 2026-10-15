@@ -1025,6 +1025,29 @@ function metPrFields(lookup: MetPrLookup | undefined): Record<string, unknown> {
   return lookup?.unreadable ? { met_prs_unreadable: lookup.unreadable } : {};
 }
 
+interface WorkflowEvidence {
+  readonly required: string;
+  readonly carries: Set<string>;
+  readonly carriesNone: Set<string>;
+}
+
+/** W1-T9690 — the one learner the walk back and a red head share: true when the run's jobs hold a
+ *  required check; a completed run with jobs but none required marks its workflow as carrying none. */
+function learnWorkflow(
+  learned: WorkflowEvidence,
+  run: MainHealthRunHistoryEntry,
+  jobs: readonly RollupCheckEntry[],
+  required: ReadonlySet<string>,
+): boolean {
+  const workflow = run.workflowName;
+  if (judgedRollup(jobs, required).length > 0) {
+    if (workflow !== undefined) learned.carries.add(workflow);
+    return true;
+  }
+  if (!mainRunIsInProgress(run) && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
+  return false;
+}
+
 /** W1-T7757: a job that reached a conclusion (or a terminal status), as opposed to one still queued or running. */
 function jobConcluded(job: RollupCheckEntry): boolean {
   return (job.conclusion ?? "") !== "" || (job.state ?? "") !== "" || (job.status ?? "").toUpperCase() === "COMPLETED";
@@ -1280,7 +1303,23 @@ export function buildMainHealthRung(
   // they crowd the newest completed history, and each one read costs a jobs read. A workflow is
   // passed over only once a run of it with jobs held no required check, and never once one did.
   // Keyed by the required set, so a changed ci-gate list relearns from scratch.
-  let workflowEvidence: { required: string; carries: Set<string>; carriesNone: Set<string> } | undefined;
+  let workflowEvidence: WorkflowEvidence | undefined;
+  const learnedFor = (required: ReadonlySet<string>): WorkflowEvidence => {
+    const key = [...required].sort().join(",");
+    if (workflowEvidence?.required !== key) workflowEvidence = { required: key, carries: new Set(), carriesNone: new Set() };
+    return workflowEvidence;
+  };
+  /** One run's jobs through the per-head cache; a running run is cached only once its required jobs concluded (W1-T7757). */
+  const jobsOf = async (run: MainHealthRunHistoryEntry, required: ReadonlySet<string>): Promise<RollupCheckEntry[]> => {
+    const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
+    const cached = runHistoryCache?.jobsByRunId.get(jobsKey);
+    if (cached) return cached;
+    const jobs = rollupFromJobs(
+      (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+    );
+    if (!mainRunIsInProgress(run) || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+    return jobs;
+  };
   const mergeReader = deps.mergeReader ?? restMergeReader(owner, repo, deps.fetch);
   const readPrFiles =
     deps.readPrFiles ??
@@ -2152,9 +2191,7 @@ export function buildMainHealthRung(
       let walkedPast = 0;
       const headReason = observation.reason;
       if (runHistory && recentShas && mainHealthHeadInconclusive(observation)) {
-        const requiredKey = [...required].sort().join(",");
-        if (workflowEvidence?.required !== requiredKey) workflowEvidence = { required: requiredKey, carries: new Set(), carriesNone: new Set() };
-        const learned = workflowEvidence;
+        const learned = learnedFor(required);
         const { runs, skipped } = mainHealthWalkRuns(runHistory, recentShas);
         let decidedBy: MainHealthRunHistoryEntry | undefined;
         // W1-T7757: the newest commit passed over because a required check of it is still running.
@@ -2162,17 +2199,10 @@ export function buildMainHealthRung(
         for (const run of runs) {
           const workflow = run.workflowName;
           if (workflow !== undefined && learned.carriesNone.has(workflow) && !learned.carries.has(workflow)) continue;
-          const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
           const running = mainRunIsInProgress(run);
           let jobs: RollupCheckEntry[];
           try {
-            jobs =
-              runHistoryCache?.jobsByRunId.get(jobsKey) ??
-              rollupFromJobs(
-                (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
-              );
-            // W1-T7757: only a run whose required jobs have all concluded is cached; a pending run is read again.
-            if (!running || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+            jobs = await jobsOf(run, required);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -2183,16 +2213,14 @@ export function buildMainHealthRung(
             });
             break;
           }
-          if (judgedRollup(jobs, required).length === 0) {
+          if (!learnWorkflow(learned, run, jobs, required)) {
             // A running run's required jobs may simply not have registered yet: that proves nothing
             // about the workflow, unless it is already known to carry required checks (then it is pending).
-            if (running && workflow !== undefined && learned.carries.has(workflow)) {
-              if (run.headSha !== sha) pendingCommit ??= { sha: run.headSha, checks: [] };
+            if (running && workflow !== undefined && learned.carries.has(workflow) && run.headSha !== sha) {
+              pendingCommit ??= { sha: run.headSha, checks: [] };
             }
-            else if (!running && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
             continue;
           }
-          if (workflow !== undefined) learned.carries.add(workflow);
           const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
           if (fallback.state === "undetermined") {
             // A running commit with a required check still going decides nothing YET: remembered, and the
@@ -2276,6 +2304,26 @@ export function buildMainHealthRung(
           reason: `main guard workflow(s) failed on main: ${guardNames.join(", ")}${observation.state === "red" || skippedGuards.length > 0 ? `; ${observation.reason}` : ""}`,
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
+      }
+      // W1-T9690: a red head never walked back, so its own completed runs teach the set the boundary reads.
+      const learned = observation.state === "red" && runHistory ? learnedFor(required) : undefined;
+      if (learned && learned.carries.size === 0) {
+        for (const run of runHistory!) {
+          const workflow = run.workflowName;
+          if (run.headSha !== decidedBySha || workflow === undefined || mainRunIsInProgress(run) || learned.carriesNone.has(workflow)) continue;
+          try {
+            learnWorkflow(learned, run, await jobsOf(run, required), required);
+          } catch (error) {
+            deps.log("main.health.completed_run_unreadable", {
+              branch,
+              sha,
+              run_sha: run.headSha,
+              run_id: run.runId,
+              error: String((error as Error)?.message ?? error),
+            });
+            break;
+          }
+        }
       }
       // EVERY check on the deciding run, judged alike: the advisory list and `decideBaseRed`'s census.
       const everyCheck = mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging);
@@ -2387,7 +2435,8 @@ export function buildMainHealthRung(
           });
         }
         observation = enrichMainHealthObservation(observation, {
-          ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+          // W1-T9690: always passed, so an empty (unknown) set names no green rather than reading every workflow.
+          requiredWorkflows: workflowEvidence?.carries ?? new Set<string>(),
           ...(failures ? { ciFailures: failures } : {}),
           ...(ciFailuresUnavailable ? { ciFailuresUnavailable } : {}),
           ...(runHistory ? { runHistory } : {}),
