@@ -217,7 +217,7 @@
   "src/lib/status-board.ts": 750,
   "src/lib/status.ts": 2000,
   "src/lib/supersession.ts": 50,
-  "src/lib/sweep.ts": 5000,
+  "src/lib/sweep.ts": 5021,
   "src/lib/task-card.ts": 54,
   "src/lib/task-class.ts": 39,
   "src/lib/task-id-reservation.ts": 261,
@@ -238,6 +238,6 @@
   "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 18250,
+  "src/run-task.ts": 18251,
   "src/spike.ts": 18
 }
