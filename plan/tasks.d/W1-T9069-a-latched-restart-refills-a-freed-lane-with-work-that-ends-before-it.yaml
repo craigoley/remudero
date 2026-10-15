@@ -18,7 +18,7 @@
     - test/a-latched-restart-lets-a-build-finish-when-its-yield-costs-more.test.ts
     - test/a-restart-latched-while-a-lane-has-no-safe-boundary-keeps-refilling.test.ts
     - test/a-daemon-draining-for-a-restart-dispatches-no-new-run.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

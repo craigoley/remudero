@@ -7,7 +7,7 @@ import { affectedSelectionOrFull, changedSymbols, isPlanOnlyDiff, planOnlySelect
   readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
-  TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency } from '../src/lib/test-slot.ts';
+  TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { listTestFiles, medianMeasuredDurationMs, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
@@ -357,6 +357,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+          if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
           let runtimeProfile, runtimeManifest;
           const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
             workers = Math.min(AUTHOR_MAX_WORKERS, slot.concurrency)) => {

@@ -5,7 +5,7 @@ import {
 } from "./operator-message.js";
 import { hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES } from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
-import { acquireTestSlot, readMemoryHeadroom, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 
 /**
  * Conventional-Commits shaping for commit messages the harness builds (MASTER-PLAN §6A, the
@@ -545,6 +545,7 @@ export function typecheckStep(
     const prepared = prepareTypecheckRun(repoRoot, canWrite);
     if (!hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot))) {
       slot = acquireTestSlot("typecheck:preflight", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
+      if (!testSlotExecutionAllowed(slot)) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     }
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
     const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot });

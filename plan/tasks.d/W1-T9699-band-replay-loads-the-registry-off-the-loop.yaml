@@ -1,0 +1,65 @@
+- id: W1-T9699
+  title: "Band replay loads the proposal registry off the daemon loop: registryIds still calls synchronous loadProposalRegistry beside W1-T9443's awaited incremental reader; a live profile credited 6.4 seconds to this read chain"
+  repo: remudero
+  depends_on: [W1-T9443]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the daemon band replay's registry read and its production wiring
+  band_meaning: span
+  origin: "operator-approved bounded stall follow-up 2026-10-15 after #12030 and #12045 runtime adoption"
+  plan_refs: [W1-T9443, W1-T8714, W1-T9041, W1-T9324, W1-T1270]
+  files: [src/lib/inbox.ts, src/lib/inbox-replay.ts, src/lib/fleet-lane.ts, src/run-task.ts, test/band-replay-loads-the-registry-off-the-loop.test.ts, test/the-fleet-triages-its-own-findings.test.ts, test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts, test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts, test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Both #12030 and #12045 boot-adopted at17:32:34.798Z on source03269ad67c43398e5e13082cc8106b1a5d691c6e,
+    host55a5b5e22f86 / PID120 / DAEMON-1792085514136 / startTicks256791469. Native alive reports still recorded33.1s
+    and30.7s maxima. These intervals do not fully align with the21 process samples17:41:50–18:01:51, so they do not
+    establish a matched-load benefit or locate the maxima inside that collection.
+    One authorized CPU capture17:58:18–17:58:30 has actual V8 duration11,857.507ms,2395samples and418nodes. The
+    replayPass -> registryIds -> loadProposalRegistry -> readProposalShards chain has6435.75ms inclusive sampled
+    time, with6431.034ms self time in readFileUtf8 beneath it. This identifies a cost in THIS capture, not the cause
+    of the full earlier30–33s maxima. The inspector endpoint was closed and process identity retained; a separate
+    later read confirmed it absent. Raw profile and cleanup controls are retained with the runtime receipts.
+    On loaded03269 and main7ce58d39ffda26bc8d022807b749b92b8709ce2a, registryIds synchronously reads the legacy
+    blob and calls loadProposalRegistry, which invokes readProposalShards' per-file sync reader. The call is inside
+    replayBandMeaningRefusals at the head of triageFleetLaneAsync; an awaited step driver does not move its inner I/O.
+    W1-T9443 already supplies createProposalShardReader: awaited refresh, unchanged-file reuse by inode/size/mtimeNs,
+    removals and guarded errors. Its scope and wiring cover the draft rung, not inbox-replay. This is a separate caller
+    follow-up. Existing8714/9041/9324 replay decisions and1270's unknown-versus-empty contract remain authoritative.
+    Subject census18:07: main plus31 captured open PR heads (421 advertised branches),181 main hits as a positive
+    control; every registryIds body is the synchronous reader, with no new per-head matches. Related task titles were
+    reviewed separately. Durable profile/source/census evidence: task-receipts-20261015-runtime-health/adoption-and-repair-20261015.
+  design: |
+    1. Give the daemon replay an awaited registry read using W1-T9443's createProposalShardReader. Hold the reader for
+       the daemon lifetime and refresh each pass; unchanged shards are neither read nor parsed again. Read the legacy
+       blob off the loop too, preserving merge precedence. Do not introduce an unbounded per-root memo.
+    2. Wire triageFleetLaneAsync to the awaited path through the repo's async-step/driver pattern. Keep the existing
+       synchronous API for non-daemon callers with one decision implementation shared between drivers. A Promise
+       around the old synchronous read is not an async filesystem port. Include daemon-owned reader wiring in run-task
+       only where its lifetime requires it; verify the real daemon path, not only an injected replay seam.
+    3. Preserve replay decisions, delivery, stores/ledger, locks and re-offer/escalation behavior. Corrupt/unreadable
+       blob or shard, a colliding ID or a refused refresh must defer absence judgments as today. A last-good memo does
+       not turn unreadable current evidence into an empty registry or authorize dropping a proposal.
+    4. Prove the real default on a private fixture and the waiting boundary with a controlled pending async read.
+       Repeated refresh reads no unchanged shard; replacement/deletion changes exactly the affected population.
+       Exercise refused reads and preserve the existing guarded outcomes and proposal IDs. Run the caller and garden
+       driver census suites this diff joins, without a new allowance, dropped population or disabled replay.
+    5. After normal source adoption, retain one natural replay refresh and its existing files/read/unchanged/removed
+       counts. This task claims the measured caller read path; overall loop-health qualification remains separate.
+  acceptance:
+    - claim: "the daemon band-replay registry suite runs and passes"
+      proof: 'unit test: test/band-replay-loads-the-registry-off-the-loop.test.ts'
+    - claim: "the production triage path awaits registry I/O instead of using the synchronous reader"
+      proof: 'grep: test("W1-T9699: daemon band replay awaits the proposal registry off the loop" in test/band-replay-loads-the-registry-off-the-loop.test.ts'
+    - claim: "the daemon-owned reader reuses unchanged shards and observes replacements and deletions"
+      proof: 'grep: test("W1-T9699: replay refresh reuses unchanged shards and observes changes" in test/band-replay-loads-the-registry-off-the-loop.test.ts'
+    - claim: "unavailable registry evidence cannot prove a proposal disappeared"
+      proof: 'grep: test("W1-T9699: an unreadable replay registry judges no absence" in test/band-replay-loads-the-registry-off-the-loop.test.ts'
+  falsifier: |
+    Keep the new daemon API and tests, but route its read back through registryIds/loadProposalRegistry. The pending
+    async-read/default-sync-read trap fails. Restore the awaited/cache path and the same test passes with unchanged
+    replay outcomes. Record both TAP summaries on the committed tree; deleting the API is not the behavioral falsifier.

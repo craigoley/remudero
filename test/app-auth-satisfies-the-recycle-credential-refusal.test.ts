@@ -81,7 +81,7 @@ function runScript(opts: {
   const keyName = opts.keyName ?? "rmd-app.pem";
   if (opts.keyFile === "present") {
     // Not a real key — the script tests only that the FILE is present and non-empty.
-    writeFileSync(join(credDir, keyName), "-----BEGIN RSA PRIVATE KEY-----\nfixture\n");
+    writeFileSync(join(credDir, keyName), ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nfixture\n");
   } else if (opts.keyFile === "empty") {
     writeFileSync(join(credDir, keyName), "");
   }

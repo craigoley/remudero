@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 import { renderDigest, summarize } from "../src/lib/digest.js";
 import { feedbackDir, feedbackEntryPath, readFeedbackEntry, type FeedbackEntry, type FeedbackStatus } from "../src/lib/feedback.js";
+import { queuedFeedbackDir, queuedFeedbackLandings } from "../src/lib/feedback-landing.js";
 import type { RepairFilingCapture } from "./helpers/sweep-test.js";
 import { captureRepairFeedbackWithPriorVerdict, latestPriorVerdictSuppresses } from "../src/run-task.js";
 
@@ -292,4 +293,17 @@ test("digest: a QUIET board omits the line entirely — soft-composed, never a p
   const summary = summarize([{ ts: "2026-08-27T09:00:00.000Z", step: "run.start", task_id: "W1-T1" }], "2026-08-27T00:00:00.000Z");
   const text = renderDigest(summary);
   assert.doesNotMatch(text, /repair filings suppressed/, "no line at all");
+});
+
+test("W1-T9615: the daemon sweep's repair filing stages its entry and skips it while queued", () => {
+  const r = root();
+  const stateRoot = root();
+  const filing = { id: "repair-w9615", origin: "repair#stale", raw: "repair evidence" };
+  captureRepairFeedbackWithPriorVerdict(r, filing, () => {}, stateRoot);
+  assert.deepEqual(queuedFeedbackLandings(stateRoot), ["plan/feedback/repair-w9615.yaml"], "staged for the async landing sweep");
+  assert.equal(existsSync(feedbackEntryPath(r, filing.id)), false, "nothing left in the checkout for an inline landing");
+  const bytes = readFileSync(join(queuedFeedbackDir(stateRoot), "repair-w9615.yaml"), "utf8");
+
+  captureRepairFeedbackWithPriorVerdict(r, { ...filing, raw: "newer evidence" }, () => {}, stateRoot);
+  assert.equal(readFileSync(join(queuedFeedbackDir(stateRoot), "repair-w9615.yaml"), "utf8"), bytes, "already filed this window");
 });
