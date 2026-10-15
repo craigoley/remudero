@@ -110,7 +110,10 @@ export type SlotCapacityObservation = { state: "missing" } | { state: "unknown" 
 export function observeSlotCapacity(path: string, slot: number): SlotCapacityObservation {
   let owner;
   try { owner = lstatSync(path); }
-  catch (error) { return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown" }; }
+  catch (error) {
+    // Only ENOENT establishes absence; every other lookup failure remains occupied UNKNOWN.
+    return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown" };
+  }
   if (!owner.isFile() || (owner.mode & 0o077) !== 0) return { state: "unknown" };
   try {
     const directory = join(dirname(path), `capacity-${owner.uid}`), st = lstatSync(directory);
@@ -134,5 +137,8 @@ export function observeSlotCapacity(path: string, slot: number): SlotCapacityObs
     } finally { dir.closeSync(); }
     const current = lstatSync(path);
     return capacity && current.isFile() && sameInode(owner, current) && current.mtimeMs === owner.mtimeMs ? { state: "observed", capacity } : { state: "unknown" };
-  } catch { return { state: "unknown" }; }
+  } catch {
+    // Enumeration or metadata failure grants no capacity and no ownership authority.
+    return { state: "unknown" };
+  }
 }

@@ -190,8 +190,8 @@ for (const kind of ["identical-json", "symlink", "fifo", "oversized"]) {
         import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
         import {execFileSync} from 'node:child_process'; import {join} from 'node:path';
         const root=process.argv[1],kind=process.argv[2],path=join(root,'slot-1.json');
-        const original=fs.openSync,postSwapReads=[]; let swapped=false;
-        fs.openSync=(name,flags,...rest)=>{if(swapped&&name===path&&flags!=='wx+')postSwapReads.push(flags);return original(name,flags,...rest)};
+        const original=fs.openSync,postSwapReads=[]; let swapped=false,swapping=false;
+        fs.openSync=(name,flags,...rest)=>{if(swapped&&!swapping&&name===path&&flags!=='wx+')postSwapReads.push(flags);return original(name,flags,...rest)};
         syncBuiltinESMExports();
         const {acquireTestSlot}=await import(${JSON.stringify(new URL("../src/lib/test-slot.ts", import.meta.url).href)});
         const options={dir:root,slots:1,ownershipProtocol:'private-capacity-v1',waitBoundMs:0,log:()=>{},memoryHeadroom:()=>undefined};
@@ -199,10 +199,10 @@ for (const kind of ["identical-json", "symlink", "fifo", "oversized"]) {
         if(first.outcome!=='acquired')throw Error('positive fixture acquisition failed');
         const originalBytes=fs.readFileSync(path,'utf8'),sentinel=join(root,'sentinel');fs.writeFileSync(sentinel,'SENTINEL');
         const replacement=acquireTestSlot('replacement',{...options,isPidAlive:()=>{
-          if(!swapped){swapped=true;fs.renameSync(path,join(root,'retained-private'));
+          if(!swapped){swapped=true;swapping=true;fs.renameSync(path,join(root,'retained-private'));
             if(kind==='symlink')fs.symlinkSync(sentinel,path);
             else if(kind==='fifo')execFileSync('/usr/bin/mkfifo',[path]);
-            else fs.writeFileSync(path,kind==='oversized'?'x'.repeat(1024*1024+1):originalBytes,{mode:0o600});}
+            else fs.writeFileSync(path,kind==='oversized'?'x'.repeat(1024*1024+1):originalBytes,{mode:0o600});swapping=false;}
           return false;
         }});
         const flagsSafe=postSwapReads.length>0&&postSwapReads.every(f=>typeof f==='number'&&(f&fs.constants.O_NOFOLLOW)!==0&&(f&fs.constants.O_NONBLOCK)!==0);

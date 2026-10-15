@@ -16,7 +16,10 @@ const mutationPath = (path: string): string => join(dirname(path), `.${basename(
 /** Presence includes non-files and lookup failures; only ENOENT establishes an absent guard. */
 export function slotMutationPending(path: string): boolean {
   try { lstatSync(mutationPath(path)); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+  catch (error) {
+    // Absence alone is free; denied/failed lookups retain the occupied guard.
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
 }
 
 /** path is the canonical slot JSON pathname. A busy result never establishes free capacity. */
@@ -56,10 +59,16 @@ export function acquireSlotMutation(path: string): SlotMutation {
           if (!same(current)) throw new Error("slot mutation guard ownership changed");
           unlinkSync(guard);
         }
-      } catch (error) { errors.push(error); }
+      } catch (error) {
+        // Carry the original failure through descriptor cleanup into the thrown aggregate below.
+        errors.push(error);
+      }
       finally {
         try { closeSync(fd); }
-        catch (error) { errors.push(error); }
+        catch (error) {
+          // A close failure joins, rather than replaces, the failed unlink diagnosis.
+          errors.push(error);
+        }
       }
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) throw new AggregateError(errors, "slot mutation guard release is incomplete");

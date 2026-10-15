@@ -647,6 +647,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           if (observation.state !== "missing") others.push(observation.state === "observed" ? observation.capacity : { unknown: true });
         } else others.push(st.isFile() ? readTestSlotHolder(path) ?? { unknown: true } : { unknown: true });
       } catch (error) {
+        // Only an absent peer is omitted; failed inspection still reserves UNKNOWN capacity.
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") others.push({ unknown: true });
       }
     }
@@ -787,7 +788,12 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                   const releaseMutation = acquireSlotMutation(path);
                   if (releaseMutation.state !== "acquired") { lastError = new Error("slot mutation pending during release"); continue; }
                   try {
-                    if (!stillOwnsRecord()) { held = false; close(false); return; }
+                    if (!stillOwnsRecord()) {
+                      held = false; close(false);
+                      log(JSON.stringify({ step: privateWriter ? "test_slot.release_lost" : "test_slot.release_failed", label, path,
+                        reason: "owner identity no longer matches; replacement preserved" }));
+                      return;
+                    }
                     // Metadata first: on failure the canonical anchor remains occupied/recoverable.
                     removeCapacity?.();
                     const ours = (h: TestSlotHolder) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce;
@@ -796,7 +802,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                     held = false; close(false);
                     if (result.outcome !== "reclaimed" && result.outcome !== "missing") log(JSON.stringify({ step: "test_slot.release_lost", label, path }));
                     return;
-                  } catch (error) { lastError = error; }
+                  } catch (error) {
+                    // Preserve the latest failure for the bounded terminal cleanup receipt.
+                    lastError = error;
+                  }
                   finally { finishMutation(releaseMutation); }
                 }
                 const terminalMutation = acquireSlotMutation(path);
@@ -804,7 +813,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                   if (terminalMutation.state === "acquired" && privateWriter && stillOwnsRecord()) {
                     writeRecord(JSON.stringify({ ...ownedRecord, heartbeatAt: clock.iso(), releaseRequestedAt: clock.iso() }));
                   }
-                } catch (error) { lastError = error; }
+                } catch (error) {
+                  // A failed terminal write stays occupied and is named in cleanup_incomplete below.
+                  lastError = error;
+                }
                 finally {
                   if (terminalMutation.state === "acquired") finishMutation(terminalMutation);
                   held = false; close(false);
@@ -816,7 +828,11 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             if (openedFd !== undefined) {
               try {
                 let metadataRemoved = !(error instanceof SlotCapacityCleanupError);
-                try { removeCapacity?.(); } catch { metadataRemoved = false; }
+                try { removeCapacity?.(); }
+                catch (cleanupError) {
+                  metadataRemoved = false;
+                  log(JSON.stringify({ step: "test_slot.capacity_rollback_incomplete", label, path, error: String(cleanupError) }));
+                }
                 if (metadataRemoved && privateWriter) {
                   // Exclusive creation + pinned original fd authorizes OUR empty/partial unpublished rollback.
                   reclaimPrivateTestSlot(path, fstatSync(openedFd), h => h.ownerNonce === ownerNonce, () => {}, true);
@@ -830,7 +846,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           }
           const capacity = observeSlotCapacity(path, i);
-          const currentStat = (() => { try { return lstatSync(path); } catch { return undefined; } })();
+          const currentStat = (() => {
+            try { return lstatSync(path); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return undefined; }
+          })();
           if (currentStat?.isDirectory()) throw new Error("test slot path is a directory, not a reservation file");
           if (currentStat && !currentStat.isFile()) { holders.push(`slot ${i}: non-file reservation UNKNOWN`); break; }
           const privateRecord = currentStat !== undefined && (currentStat.mode & 0o077) === 0;
