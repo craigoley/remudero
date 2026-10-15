@@ -68,7 +68,10 @@ export interface FixProgressInput {
     /** Rounds whose scope amendment merged: the paths they lacked are now in scope, so the next round can act. */
     scopeAmendmentsMerged?: number;
     /** Rounds whose scope amendment is still open: a wait on that PR, not a failed attempt. */
-    scopeAmendmentsPending?: number };
+    scopeAmendmentsPending?: number;
+    /** W1-T9618: rounds whose commit never reached the remote (`fix.done` subtype push_failed). Each is also a
+     *  no-op round; a count that keeps growing is a push path that is broken, not a worker that needs another try. */
+    pushFailedRounds?: number };
   /** The excerpts behind {@link signals.reviewerOnlyFailurePersists}, for the escalation to carry. */
   persistentReviewerFailures?: ReviewerProofFailure[];
 }
@@ -211,6 +214,7 @@ export function buildFixProgressInput(facts: {
   }
   // A round that opened a scope amendment moved the task forward through the plan, not the branch: while the
   // amendment is open it is a wait, and once merged the next round can do what this one could not.
+  const notLanded = (r: FixProgressRound) => r.subtype === "push_failed";
   const awaitedOrLanded = (r: FixProgressRound) => r.scopeAmendment?.state === "pending" || r.scopeAmendment?.state === "merged";
   const currentRed = sorted(facts.currentRed);
   for (const [index, round] of rounds.entries()) {
@@ -218,7 +222,8 @@ export function buildFixProgressInput(facts: {
   }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const signals: FixProgressInput["signals"] = {
-    noOpRounds: rounds.filter(r => r.completed && !awaitedOrLanded(r) && (!r.pushedHead || r.pushedHead === r.dispatchedHead)).length,
+    noOpRounds: rounds.filter(r => r.completed && !awaitedOrLanded(r) &&
+      (notLanded(r) || !r.pushedHead || r.pushedHead === r.dispatchedHead)).length,
     identicalRedSets: rounds.filter(r => r.redAfter !== undefined && same(r.redBefore, r.redAfter)).length,
     identicalDiffs: rounds.filter((r, i) => i > 0 && r.diffDigest !== undefined && r.diffDigest === rounds[i - 1].diffDigest).length,
     oscillating: rounds.length >= 2 && same(currentRed, rounds.at(-2)!.redBefore) && !same(currentRed, rounds.at(-1)!.redBefore),
@@ -231,9 +236,11 @@ export function buildFixProgressInput(facts: {
   const pending = rounds.filter(r => r.scopeAmendment?.state === "pending").length;
   if (merged > 0) signals.scopeAmendmentsMerged = merged;
   if (pending > 0) signals.scopeAmendmentsPending = pending;
+  const pushFailed = rounds.filter(r => r.completed && notLanded(r)).length;
+  if (pushFailed > 0) signals.pushFailedRounds = pushFailed;
   const persistentReviewerFailures: ReviewerProofFailure[] = [];
   for (const round of rounds) {
-    if (round.fixOutcome !== "FIXED" || !round.reviewerFailures || !round.reviewAfter) continue;
+    if (round.fixOutcome !== "FIXED" || notLanded(round) || !round.reviewerFailures || !round.reviewAfter) continue;
     const repeated = round.reviewAfter.filter(after =>
       round.reviewerFailures!.some(before => before.claim === after.claim && before.digest === after.digest));
     if (repeated.length === 0) continue;

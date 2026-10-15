@@ -178,7 +178,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   mergeBaseFor: 1,
   mergeDirectViaRest: 1,
   mergeShaNow: 1,
-  mergedPrsSince: 1,
   mergedTriageSubjects: 1,
   openPrFileScopes: 1,
   openPrMintTexts: 1,
@@ -313,10 +312,15 @@ function trackedSourceFiles(): string[] {
   return execFileSync("git", [sub, "src/**/*.ts", "src/*.ts"], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
 }
 
+/** W1-T9615: a column-0 object-literal const (`const defaultPreflightChecks = {`). Its member arrows are not
+ *  functions to {@link topLevelFunctions}, so a name reached only through one (plan-pr-emitter's `runInTree`, the
+ *  sync preflight's in-tree spawn) is invisible to the function-only walk. */
+const OBJECT_DECL = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\{/;
+
 /** Column-0 function declarations (generators included) and column-0 arrow consts; a body runs to the
  *  next column-0 declaration (a closing brace at column 0 is NOT a boundary: a multi-line parameter type
- *  closes with one). */
-function topLevelFunctions(): Fn[] {
+ *  closes with one). `objectLiterals` also walks {@link OBJECT_DECL} bodies. */
+function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[] {
   const fns: Fn[] = [];
   const decl =
     /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/;
@@ -324,7 +328,7 @@ function topLevelFunctions(): Fn[] {
   for (const file of trackedSourceFiles()) {
     const lines = stripComments(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")).split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const m = decl.exec(lines[i]!);
+      const m = decl.exec(lines[i]!) ?? (opts.objectLiterals ? OBJECT_DECL.exec(lines[i]!) : null);
       if (!m) continue;
       let end = i + 1;
       while (end < lines.length && !NEXT_DECL.test(lines[end]!)) end++;
@@ -543,5 +547,62 @@ test("the baseline records only positive counts for real functions", () => {
   for (const [name, count] of Object.entries(SYNC_SPAWN_LOOP_BASELINE)) {
     assert.ok(Number.isInteger(count) && count > 0, `${name} must carry a positive count`);
     assert.ok(names.has(name), `${name} no longer exists — delete its baseline row`);
+  }
+});
+
+/** W1-T9615: `body` with string and template-literal text and trailing `//` comments blanked (a template's `${}`
+ *  expressions are kept). The name walk reads every identifier-shaped word, so "origin/main" in a git argument or a
+ *  comment reaches the CLI's `main`, and through it every function in src. A seeded reach only separates once they go. */
+function codeOnly(body: string): string {
+  let out = "";
+  const braces: number[] = [];
+  let inTemplate = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (inTemplate) {
+      if (c === "\\") i++;
+      else if (c === "`") { inTemplate = false; out += '""'; }
+      else if (c === "$" && body[i + 1] === "{") { inTemplate = false; braces.push(0); out += " "; i++; }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== c && body[j] !== "\n") j += body[j] === "\\" ? 2 : 1;
+      out += '""';
+      i = j;
+    } else if (c === "`") inTemplate = true;
+    else if (c === "/" && body[i + 1] === "/") {
+      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
+    } else if (braces.length > 0 && c === "}" && braces[braces.length - 1] === 0) {
+      braces.pop();
+      inTemplate = true;
+      out += " ";
+    } else {
+      if (braces.length > 0 && c === "{") braces[braces.length - 1]!++;
+      if (braces.length > 0 && c === "}") braces[braces.length - 1]!--;
+      out += c;
+    }
+  }
+  return out;
+}
+
+/** The sync landing chain W1-T9615 measured: captureFeedback -> landFeedback -> syncPreflightOf -> planPrPreflightAtCommit,
+ *  whose in-tree checks spawnSync in runInTree (lint-plan-precheck, task-id-existence-check, the shard census). */
+const SYNC_PREFLIGHT_CHAIN = ["landFeedback", "syncPreflightOf", "planPrPreflightAtCommit", "runInTree"] as const;
+
+test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR preflight", () => {
+  const fns = topLevelFunctions({ objectLiterals: true }).map((f) => ({ ...f, body: codeOnly(f.body) }));
+  // Positive controls: this walk sees the whole chain from the inline capture, and the census's own walk cannot see runInTree.
+  const fromCapture = loopReachable(fns, "captureFeedback");
+  assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => !fromCapture.has(name)), [], "captureFeedback reaches the sync preflight chain");
+  assert.ok((population(fns).get("runInTree") ?? 0) > 0, "runInTree is a sync spawner");
+  assert.ok(!loopReachable(topLevelFunctions(), "captureFeedback").has("runInTree"), "the function-only walk is blind to runInTree");
+  assert.equal(codeOnly('git(["show", `origin/main:${rel(a)}`]); // main'), 'git(["",  rel(a) ""]); ', "only code is left");
+
+  const pass = loopReachable(fns, "runSreLanePass");
+  assert.ok(pass.has("stageFeedbackCapture") && pass.has("readLandedFeedbackEntry"), "the pass reaches its staging capture and its landed read");
+  for (const seed of ["runSreLanePass", "daemonSreLaneInput"]) {
+    const reach = loopReachable(fns, seed);
+    assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => reach.has(name)), [], `${seed} reaches the synchronous plan-PR preflight`);
   }
 });

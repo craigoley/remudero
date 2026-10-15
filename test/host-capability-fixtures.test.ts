@@ -136,6 +136,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "test-slot-private-capacity.test.ts", key: "0o644", count: 1,
+    reason: "Publication rejects group/world-readable ownership by descriptor stat mode, independent of OS read privileges. This tests the explicit private-mode contract, not EACCES, so uid 0 cannot turn refusal into success.",
+  },
+  {
+    kind: "chmod", file: "test-slot-private-capacity.test.ts", key: "0o600", count: 1,
+    reason: "Restores the same ownership inode to its supported private mode after the uid-independent publication-policy refusal. Subsequent real directory/link/identity controls are positive; this is not an OS denial fixture.",
+  },
+  {
     kind: "chmod", file: "heavy-ready-startup.test.ts", key: "0o644", count: 1,
     reason: "The startup reader rejects group/world-readable file stat modes before parsing, independent of OS read privileges. This fixture asserts the explicit privacy policy, not EACCES, so uid 0 cannot turn it into a readable-success case.",
   },
