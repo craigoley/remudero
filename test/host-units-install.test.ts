@@ -1,4 +1,4 @@
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -28,8 +28,8 @@ writeFileSync(MEMINFO, "MemTotal:       16371996 kB\n");
 after(() => rmSync(INPUT_ROOT, { recursive: true, force: true }));
 
 /** Run the installer against a throwaway tree so no test can touch real systemd. */
-function run(args: string[], env: Record<string, string>, root: string) {
-  return spawnSync("bash", [SCRIPT, ...args], {
+function run(args: string[], env: Record<string, string>, root: string, script = SCRIPT, shell = "bash") {
+  return spawnSync(shell, [script, ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -1181,4 +1181,103 @@ test("an install run from a dirty install root is refused and installs nothing",
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+function modeInstallerFixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-mode-install-")), output = join(root, "output");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(output);
+  const registry = join(root, "instances.yaml"), traps = join(root, "traps"), calls = join(root, "calls");
+  mkdirSync(traps);
+  writeFileSync(calls, "");
+  for (const name of ["docker", "az", "systemctl", "crontab"]) {
+    const path = join(traps, name);
+    writeFileSync(path, `#!/bin/bash\nprintf '%s\\n' '${name}' >> '${calls}'\nexit 97\n`);
+    chmodSync(path, 0o755);
+  }
+  const row = ["instances:", "  fixture:", "    repo: remudero", `    state_dir: ${root}/state`,
+    "    container_name: remudero-fixture", "    service_user: fixture", "    image: example.invalid/remudero:fixture",
+    "    max_old_space_mb: 4096", "    service_name: rmd-fixture.service", "    watchdog_service_name: rmd-fixture-watch.service",
+    "    watchdog_timer_name: rmd-fixture-watch.timer", `    launcher_path: ${output}/rmd-relaunch.sh`,
+    `    revival_log: ${output}/revivals.log`, "    gh_app_id: 1234", "    gh_app_installation_id: 5678",
+    "    gh_app_private_key_path: /home/node/.claude/fixture.pem", `    claude_dir: ${root}/claude`,
+    `    codex_dir: ${root}/codex`, `    container_config_dir: ${root}/config`];
+  const invoke = (extra: string[], script = SCRIPT) => {
+    writeFileSync(registry, [...row, ...extra.map(line => `    ${line}`)].join("\n") + "\n");
+    return run(["--install", "--instance", "fixture"], { RMD_INSTANCE_REGISTRY: registry,
+      RMD_CASH_SECRET_DIR: join(root, "secrets"), RMD_CLEANUP_PATH: "", RMD_LEGACY_USER_UNIT_DIR: "",
+      RMD_CRONTAB_CMD: join(traps, "crontab"), PATH: `${traps}:${process.env.PATH ?? ""}` }, output, script, "/bin/bash");
+  };
+  const snapshot = () => filesUnder(output).map(path => ({ path, bytes: readFileSync(join(output, path), "utf8"), mode: statSync(join(output, path)).mode & 0o777 }));
+  return { root, output, calls, invoke, snapshot };
+}
+
+test("installer accepts existing shadow and live mode without activating it", t => {
+  const f = modeInstallerFixture(t);
+  assert.equal(f.invoke([]).status, 0);
+  const legacy = f.snapshot();
+  for (const mode of ["shadow", "live", '"shadow"', '"live"', "shadow   # comment", "live   "]) {
+    const result = f.invoke([`mode: ${mode}`]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(f.snapshot(), legacy, `mode ${mode} changes no rendered authority or output`);
+  }
+  const launcher = readFileSync(join(f.output, "rmd-relaunch.sh"), "utf8");
+  assert.match(launcher, /RMD_INSTANCE_NAME=fixture/);
+  assert.doesNotMatch(launcher, /RMD_INSTANCE_MODE=|RMD_SHADOW_MODE=|RMD_CONTRIBUTOR_ADMISSION=/);
+  assert.equal(readFileSync(f.calls, "utf8"), "", "rendering must not execute a host/container transport");
+});
+
+test("installer refuses invalid or duplicate mode before effects", t => {
+  const control = modeInstallerFixture(t);
+  assert.equal(control.invoke(["mode: shadow"]).status, 0);
+  const rows = [[], ["mode: LIVE"], ["mode:"], ["mode: unknown"], ['mode: "shadow'], ['mode: live"'],
+    ['mode: "live"suffix"'], ["mode: 'shadow'"], ["mode: shadow extra"], ["mode: shadow", "mode: live"],
+    ["mode: shadow", "mode: shadow"], ["mode:", "mode: live"]].slice(1);
+  for (const fields of rows) {
+    const f = modeInstallerFixture(t), result = f.invoke(fields);
+    assert.equal(result.status, 2, `${fields.join(" / ")}: ${result.stderr}`);
+    assert.match(result.stderr, /mode/);
+    assert.deepEqual(filesUnder(f.output), [], "the first artifact write is forbidden for invalid mode");
+    assert.equal(readFileSync(f.calls, "utf8"), "");
+  }
+});
+
+test("installer mode compatibility preserves legacy output and unknown field refusal", t => {
+  const f = modeInstallerFixture(t);
+  assert.equal(f.invoke([]).status, 0);
+  const legacy = f.snapshot();
+  assert.equal(f.invoke(["mode: live"]).status, 0);
+  assert.deepEqual(f.snapshot(), legacy);
+  assert.equal(f.invoke([]).status, 0);
+  assert.deepEqual(f.snapshot(), legacy, "absence introduces no mode default or output field");
+  const unknown = modeInstallerFixture(t), result = unknown.invoke(["mode: shadow", "future_mode_policy: enabled"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /unknown field 'future_mode_policy'/);
+  assert.deepEqual(filesUnder(unknown.output), []);
+});
+
+test("lifecycle mode grammar falsifiers exercise the real script arms: installer", t => {
+  const f = modeInstallerFixture(t), deploy = join(f.root, "deploy");
+  cpSync("deploy", deploy, { recursive: true });
+  const script = join(deploy, "install-host-units.sh"), source = readFileSync(SCRIPT, "utf8");
+  assert.equal(f.invoke(["mode: shadow"], script).status, 0, "the unmodified copied default must run first");
+  const withoutRecognition = source.replace(/      mode\)\n[\s\S]*?        ;;\n/, "");
+  assert.notEqual(withoutRecognition, source);
+  writeFileSync(script, withoutRecognition);
+  const refused = f.invoke(["mode: shadow"], script);
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /unknown field 'mode'/);
+  for (const [pattern, fields] of [
+    [/^        case "\$value" in shadow\|live\|.*$/m, ["mode: invalid"]],
+    [/^        \[ "\$instance_mode_seen" = 0 \].*$/m, ["mode: shadow", "mode: live"]],
+  ] as const) {
+    const bad = modeInstallerFixture(t), mutated = source.replace(pattern, "        :");
+    assert.notEqual(mutated, source);
+    writeFileSync(script, mutated);
+    const accepted = bad.invoke([...fields], script);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.ok(filesUnder(bad.output).length > 0, "deleting validation reaches real fixture artifact writes");
+  }
+  writeFileSync(script, source);
+  assert.equal(f.invoke(["mode: live"], script).status, 0);
 });
