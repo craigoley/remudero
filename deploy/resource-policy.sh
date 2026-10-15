@@ -53,7 +53,7 @@ RMD_MEMORY_WEIGHTS="${RMD_MEMORY_WEIGHTS:-remudero-daemon=16 remudero-serve=10 r
 # WORKING SET (2026-10-15): the daemon's memory governor restarts at daemonMemory.restartShare 0.5
 # of memory.high, and an idle site boot is charged 769-942 MiB rss+swap (189 heap_pressure exits,
 # 10-14 08:38Z to 10-15 10:28Z). At 1536 the line was 768 MiB, so it restarted in a loop doing no
-# work; 2304 puts it at 1152 MiB.
+# work; 2304 puts it at 1152 MiB (#11971).
 RMD_MEMORY_HIGH_FLOORS="${RMD_MEMORY_HIGH_FLOORS:-remudero-daemon=8192 remudero-serve=5632 remudero-console-daemon=2048 remudero-site-daemon=2304}"
 RMD_MEMORY_WEIGHT_UNLISTED="${RMD_MEMORY_WEIGHT_UNLISTED:-2}"
 RMD_MEMORY_HIGH_MAX_PCT="${RMD_MEMORY_HIGH_MAX_PCT:-95}" # a high never reaches its own memory.max
