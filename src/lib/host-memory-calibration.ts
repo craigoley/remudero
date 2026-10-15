@@ -14,7 +14,7 @@ const CONVOLUTION_OPS = 250_000;
 /** The acceptance's future outcome window and qualification history, not a polling cadence. */
 export const BACKTEST_WINDOW_MS = 30 * 60_000;
 export const CALIBRATION_DAY_MS = 24 * 60 * 60_000;
-/** PROPOSAL: one missed3minute memory reading makes coverage unknown, not an apparently successful prediction. */
+/** PRIMARY CONTROL, proposed: one missed3minute memory reading makes coverage unknown, never a successful prediction. */
 export const OBSERVATION_MAX_GAP_MS = 4 * 60_000;
 /** BACKSTOP: pending forecasts normally cover only30minutes; overload is named and never drops a start. */
 const PENDING_MAX = 4096;
@@ -76,7 +76,7 @@ export interface MemoryForecast {
   id: string; at: number; generation: string; scenario: string; model: string; quantile: number;
   projectedMib: number; initialMib: number; basis: "cgroup-current-mib";
 }
-export interface MemoryObservation { at: number; mib: number | null; peakMib?: number | null; generation: string }
+export interface MemoryObservation { at: number; mib: number | null; peakMib?: number | null; generation: string; reason?: string }
 export interface MemoryOutcome extends MemoryForecast { closedAt: number; observedMaxMib: number | null; miss: boolean | null; complete: boolean; reason?: string }
 export interface CalibrationState {
   version: 1; startedAt: number; coveredSince: number; lastAt: number; generation: string;
@@ -197,7 +197,10 @@ export function collectMemoryCalibration(stateDir: string, observation: MemoryOb
   const now = observation.at;
   let state: CalibrationState;
   try { state = readCalibrationState(stateDir, io); }
-  catch { state = { version: 1, startedAt: now, coveredSince: now, lastAt: now, generation: observation.generation, observations: [], outcomes: [], issues: [] }; }
+  catch {
+    // An absent, reset or corrupt store restarts coverage NOW; no earlier history is certified by the replacement.
+    state = { version: 1, startedAt: now, coveredSince: now, lastAt: now, generation: observation.generation, observations: [], outcomes: [], issues: [] };
+  }
   if (now < state.lastAt || now - state.lastAt > OBSERVATION_MAX_GAP_MS || state.generation !== observation.generation ||
       observation.mib === null || state.observations.at(-1)?.mib === null) state.coveredSince = now;
   state.generation = observation.generation; state.lastAt = now;
@@ -207,6 +210,7 @@ export function collectMemoryCalibration(stateDir: string, observation: MemoryOb
   const issue = (reason: string) => { state.issues = [...state.issues.filter(i => i.reason !== reason && i.at >= now - CALIBRATION_DAY_MS), { at: now, reason }]; };
   let names: string[] = [];
   try { names = io.list(pendingDir(stateDir)); } catch (error) {
+    // Only first-boot ENOENT is ordinary absence. Later loss or read failure is recorded as unqualified coverage.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT" || state.startedAt !== now) issue("pending store missing or unreadable");
   }
   if (names.length > PENDING_MAX) issue("pending backlog exceeded");
@@ -218,7 +222,10 @@ export function collectMemoryCalibration(stateDir: string, observation: MemoryOb
       if (!validForecast(forecast) || forecast.at > now) throw new Error("invalid forecast");
       const result = gradeMemoryForecast(forecast, state.observations, now);
       if (result) { if (!known.has(forecast.id + ":" + forecast.at)) state.outcomes.push(result); consumed.push(path); }
-    } catch { issue("pending forecast unreadable"); }
+    } catch {
+      // Keep the unreadable receipt and mark the whole qualification unknown, not an omitted successful start.
+      issue("pending forecast unreadable");
+    }
   }
   if (state.outcomes.length > OUTCOMES_MAX) { state.outcomes = state.outcomes.slice(-OUTCOMES_MAX); state.coveredSince = now; issue("outcome population truncated"); }
   state.issues = state.issues.filter(i => i.at >= now - CALIBRATION_DAY_MS);
@@ -240,5 +247,5 @@ export function kernelMemoryObservation(at: number, read: (path: string) => stri
     if (!/^\d+$/.test(text) || !Number.isSafeInteger(Number(text)) || !/^\d+$/.test(peak) ||
         !Number.isSafeInteger(Number(peak)) || Number(peak) < Number(text)) throw new Error("invalid cgroup charge or high-water mark");
     return { at, mib: Number(text) / 1024 ** 2, peakMib: Number(peak) / 1024 ** 2, generation };
-  } catch { return { at, mib: null, generation: "unreadable" }; }
+  } catch { return { at, mib: null, generation: "unreadable", reason: "kernel charge, high-water mark or generation unreadable" }; }
 }
