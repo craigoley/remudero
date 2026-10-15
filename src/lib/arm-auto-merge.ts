@@ -37,11 +37,14 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.js";
 import {
   decidePlanPrMergeSafety,
+  mainChangedOwnFiles,
   planPrRefreshesFromLedger,
   planSafetyGitAsync,
   planSafetyGitSync,
   planRelPaths,
+  readOwnFilesSteps,
   readPlanMergeSafetySteps,
+  type OwnFilesReadings,
   type PlanMergeSafeBasis,
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
@@ -574,6 +577,9 @@ export interface ArmDeps<A extends boolean = false> {
   /** W1-T5748 — OPTIONAL. What `decidePlanPrMergeSafety` rules on for a behind plan PR GitHub would
    *  merge as-is. Absent: refreshed, as W1-T5472 did. */
   readPlanMergeSafety?: (prUrl: string) => MaybeAsync<PlanMergeSafetyReadings, A>;
+  /** W1-T9536 — OPTIONAL. The PR's own files and main's since the merge base, for a behind PR GitHub
+   *  would merge as-is. Absent: only a plan merge-safety reading's lists are checked. */
+  readOwnFiles?: (prUrl: string) => MaybeAsync<OwnFilesReadings, A>;
   /** W1-T5615 — OPTIONAL. Set only by W1-T5492's armed-idle fallback: GitHub already holds an arm,
    *  so the plan-PR hold is skipped and the direct path (which updates a behind plan PR) runs. */
   armStanding?: true;
@@ -656,6 +662,7 @@ export function realArmDeps(
     },
     readPlanTouch: (prUrl, headSha) => runStepsSync(cachedPlanTouchSteps(prUrl, headSha, ghJson)),
     readPlanMergeSafety: (prUrl) => runStepsSync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJson, planSafetyGitSync)),
+    readOwnFiles: (prUrl) => runStepsSync(ownFilesSteps(prUrl, ghJson)),
     sleepSync: (ms) => {
       if (ms <= 0) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -720,6 +727,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
     },
     mergeQueue: (prUrl) => runStepsAsync(cachedMergeQueueSteps(prUrl, ghJsonAsync)),
     readPlanMergeSafety: (prUrl) => runStepsAsync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync)),
+    readOwnFiles: (prUrl) => runStepsAsync(ownFilesSteps(prUrl, ghJsonAsync)),
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = await securityMergeHeadAsync(prUrl);
@@ -776,6 +784,12 @@ function* planMergeSafetyInClone(
   }
   const clone = join(root, "repos", target.repo);
   return yield* readPlanMergeSafetySteps(target, rest, gitIn(clone), planRelPaths(clone));
+}
+
+function* ownFilesSteps(prUrl: string, rest: RestReader): Steps<OwnFilesReadings> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return { error: `cannot resolve owner/repo/number from ${prUrl}` };
+  return yield* readOwnFilesSteps(target, rest);
 }
 
 const mergeQueueReads = new Map<string, { at: number; value: boolean }>();
@@ -962,7 +976,10 @@ export interface DirectMergePreflightEvidence {
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files";
+  /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
+  ownFilesCause?: "overlap" | "baseline" | "unread";
+  mainChangedOwnFiles?: string[];
   mergeabilityUnknownElapsedMs?: number;
   /** W1-T5748 — why a behind plan PR was safe to merge as-is. */
   planMergeSafe?: PlanMergeSafeBasis;
@@ -1074,7 +1091,7 @@ function* armDetailedSteps(
  * armAutoMergeAtOpen} share the EXACT same completion logic rather than duplicating it.
  */
 type DirectMergePreflightDeps = Pick<ArmDeps<true>, "say"> &
-  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleep" | "sleepSync">>;
+  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "sleep" | "sleepSync">>;
 
 type DirectMergePreflightDecision =
   | { proceed: true; evidence?: DirectMergePreflightEvidence }
@@ -1169,24 +1186,35 @@ function* directMergePreflightSteps(
   // one shard, and the duplicate key refused the whole plan on main. An "unreadable" file list
   // counts as plan-touching.
   const planTouch = behindBlocksThisMerge ? undefined : yield* readPlanTouchOrUnreadable(prUrl, deps, observedHead);
-  if (!behindBlocksThisMerge && (planTouch === undefined || planTouch === "untouched")) {
-    return {
-      proceed: true,
-      evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge" },
-    };
-  }
-  // W1-T5748: A PLAN PR WHOSE MERGED PLAN IS SAFE MERGES AS-IS. A refresh costs ~15 min of checks
-  // and review, and main moved faster than that all evening on 2026-10-04, so #9138 and #9155 were
-  // re-headed again and again. Unsafe or unreadable: refresh, and past the bound escalate.
+  // W1-T9536: NEITHER MERGE-AS-IS ARM BELOW MAY SKIP COMMITS THAT CHANGED THE PR'S OWN FILES. On
+  // 2026-10-14 #11744 merged 23 behind, past #11758's change to its own src/run-task.ts, and main
+  // went red. An overlap, a refresh-relevant path or an unread list refreshes instead.
   let planEvidence: Partial<DirectMergePreflightEvidence> = {};
-  if (planTouch !== undefined) {
-    const safety = yield* planMergeSafetySteps(prUrl, deps);
+  if (!behindBlocksThisMerge && (planTouch === undefined || planTouch === "untouched")) {
+    const own = deps.readOwnFiles ? mainChangedOwnFiles(yield* readOwnFilesOrError(prUrl, deps)) : undefined;
+    if (own === undefined) {
+      return {
+        proceed: true,
+        evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge" },
+      };
+    }
+    planEvidence = { ...(planTouch !== undefined ? { planTouch } : {}), ...ownFilesEvidence(own) };
+  } else if (planTouch !== undefined) {
+    // W1-T5748: A PLAN PR WHOSE MERGED PLAN IS SAFE MERGES AS-IS. A refresh costs ~15 min of checks
+    // and review, and main moved faster than that all evening on 2026-10-04, so #9138 and #9155 were
+    // re-headed again and again. Unsafe or unreadable: refresh, and past the bound escalate.
+    const { decision: safety, readings } = yield* planMergeSafetySteps(prUrl, deps);
     if (safety.action === "merge") {
-      deps.say(
-        `automerge.plan_pr_merge_safe (W1-T5748): basis=${safety.basis} behind_by=${facts.behindBy} plan_touch=${planTouch}` +
-          ` — merging the behind plan PR as-is: ${prUrl}`,
-      );
-      return { proceed: true, evidence: { ...baseEvidence, planTouch, planMergeSafe: safety.basis, remedy: "direct-merge" } };
+      const ownReadings = readings?.ownFiles ?? (deps.readOwnFiles ? yield* readOwnFilesOrError(prUrl, deps) : undefined);
+      const own = ownReadings === undefined ? undefined : mainChangedOwnFiles(ownReadings);
+      if (own === undefined) {
+        deps.say(
+          `automerge.plan_pr_merge_safe (W1-T5748): basis=${safety.basis} behind_by=${facts.behindBy} plan_touch=${planTouch}` +
+            ` — merging the behind plan PR as-is: ${prUrl}`,
+        );
+        return { proceed: true, evidence: { ...baseEvidence, planTouch, planMergeSafe: safety.basis, remedy: "direct-merge" } };
+      }
+      planEvidence = { planTouch, ...ownFilesEvidence(own) };
     }
     if (safety.action === "escalate") {
       const refreshedHeads = [...safety.heads, ...(observedHead !== undefined ? [observedHead] : [])];
@@ -1204,7 +1232,15 @@ function* directMergePreflightSteps(
       };
       return { proceed: false, result: { outcome: "plan-pr-held", ...context, directMergePreflight } };
     }
-    planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why };
+    if (safety.action === "refresh") planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why };
+  }
+  // W1-T5921's one update per (PR, head): a refresh already asked of this head awaits its new head.
+  if (planEvidence.reason === "main_changed_own_files" && observedHead !== undefined &&
+      (deps.ledgerLines?.() ?? []).some((l) => l.step === "automerge.direct_merge_updated" && l.reason === "main_changed_own_files" &&
+        l.pr_url === prUrl && l.prior_head_sha === observedHead)) {
+    deps.say(`automerge.direct_merge_preflight_refused (W1-T9536): head ${observedHead} was already refreshed — awaiting its new head: ${prUrl}`);
+    const directMergePreflight: DirectMergePreflightEvidence = { ...baseEvidence, ...planEvidence, remedy: "retry-later" };
+    return { proceed: false, result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight } };
   }
 
   let update: { ok: boolean; error?: string };
@@ -1232,7 +1268,9 @@ function* directMergePreflightSteps(
 
   deps.say(
     `automerge.direct_merge_updated (W1-T2855): prior_head=${observedHead ?? "unknown"} ` +
-      `behind_by=${facts.behindBy}${planTouch !== undefined ? ` reason=plan_pr_behind plan_touch=${planTouch}` : ""}` +
+      `behind_by=${facts.behindBy}${planEvidence.reason !== undefined ? ` reason=${planEvidence.reason}` : ""}` +
+      `${planTouch !== undefined ? ` plan_touch=${planTouch}` : ""}` +
+      `${planEvidence.mainChangedOwnFiles?.length ? ` files=${planEvidence.mainChangedOwnFiles.join(",")}` : ""}` +
       ` — updated once; awaiting fresh checks and review: ${prUrl}`,
   );
   return {
@@ -1253,9 +1291,25 @@ function* readPlanTouchOrUnreadable(prUrl: string, deps: DirectMergePreflightDep
   }
 }
 
+/** W1-T9536 — a reader that throws reads as an error, which {@link mainChangedOwnFiles} refreshes on. */
+function* readOwnFilesOrError(prUrl: string, deps: DirectMergePreflightDeps): Steps<OwnFilesReadings> {
+  try {
+    return yield* step(() => deps.readOwnFiles!(prUrl));
+  } catch (e) {
+    return { error: String((e as Error)?.message ?? e) };
+  }
+}
+
+function ownFilesEvidence(own: NonNullable<ReturnType<typeof mainChangedOwnFiles>>): Partial<DirectMergePreflightEvidence> {
+  return { reason: "main_changed_own_files", ownFilesCause: own.cause, mainChangedOwnFiles: own.files };
+}
+
 /** W1-T5748 — read the merge-safety inputs (a reader that throws reads as an error) and this PR's
  *  earlier refreshes, then rule. Absent a reader the decision refreshes, as W1-T5472 did. */
-function* planMergeSafetySteps(prUrl: string, deps: DirectMergePreflightDeps): Steps<ReturnType<typeof decidePlanPrMergeSafety>> {
+function* planMergeSafetySteps(
+  prUrl: string,
+  deps: DirectMergePreflightDeps,
+): Steps<{ decision: ReturnType<typeof decidePlanPrMergeSafety>; readings: PlanMergeSafetyReadings | undefined }> {
   let readings: PlanMergeSafetyReadings | undefined;
   const read = deps.readPlanMergeSafety;
   if (read) {
@@ -1266,7 +1320,7 @@ function* planMergeSafetySteps(prUrl: string, deps: DirectMergePreflightDeps): S
       readings = { error: String((e as Error)?.message ?? e) };
     }
   }
-  return decidePlanPrMergeSafety({ readings, refreshes: planPrRefreshesFromLedger(deps.ledgerLines?.() ?? [], prUrl) });
+  return { decision: decidePlanPrMergeSafety({ readings, refreshes: planPrRefreshesFromLedger(deps.ledgerLines?.() ?? [], prUrl) }), readings };
 }
 
 /**
@@ -1287,7 +1341,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1304,7 +1358,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1314,7 +1368,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1730,7 +1784,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1746,7 +1800,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1757,7 +1811,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
@@ -1886,6 +1940,8 @@ export function logArmAttribution(
         ...(directMergePreflight.planMergeSafe !== undefined ? { plan_pr_merge_safe: directMergePreflight.planMergeSafe } : {}),
         ...(directMergePreflight.planMergeUnsafe !== undefined ? { plan_merge_unsafe: directMergePreflight.planMergeUnsafe } : {}),
         ...(directMergePreflight.refreshedHeads !== undefined ? { refreshed_heads: directMergePreflight.refreshedHeads } : {}),
+        ...(directMergePreflight.ownFilesCause !== undefined ? { own_files_cause: directMergePreflight.ownFilesCause } : {}),
+        ...(directMergePreflight.mainChangedOwnFiles !== undefined ? { main_changed_own_files: directMergePreflight.mainChangedOwnFiles } : {}),
       }
     : {};
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
