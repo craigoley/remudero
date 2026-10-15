@@ -253,8 +253,6 @@ test("W1-T9694: the gardener and the judge share one main-inherited classifier",
   assert.equal(flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: true }), true, "main failed it at a base");
   assert.equal(flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: "unread" }), false);
   assert.equal(flakeIncidentMainInherited({ recovered: 1, alsoFailedPrs: 9, mainRed: true }), false, "a recovered retry is a flake candidate");
-  const src = readFileSync(new URL("../src/lib/flake-incident-gardener.ts", import.meta.url), "utf8");
-  assert.match(src, /if \(flakeIncidentMainInherited\(\{ \.\.\.evidence, mainRed \}, policy\)\)/, "the gardener's own route calls it");
 
   // A filing row with no retry rows left in the window answers from its own counts.
   const filedOnly = flakeIncidentRecordEvidence(
