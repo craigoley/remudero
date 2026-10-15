@@ -38661,7 +38661,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
     case "issue-revalidation":
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
-        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        owner, repo, stateDir, repoRoot, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log,
         ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
       }));
     case "evidence-coverage":
@@ -38721,8 +38721,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         stateDir,
         log,
         readHeartbeats: gitHeartbeatSource(repoRoot),
-        handoff: (h: { id: string; raw: string; origin: string }) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
-        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+        handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
@@ -54264,6 +54264,7 @@ export async function opsCommand(
     runId,
     root: repoRoot,
     dryRun,
+    capture: captureFeedback,
   });
   console.log(`### rmd ops${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\nalerts: ${renderAlertsSummary(result.summary)}`);
   if (dryRun) {
@@ -55222,6 +55223,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     runId,
     dryRun,
     admission: feedbackIntakeAdmission(config, ledgerPath, runId),
+    capture: captureFeedback,
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

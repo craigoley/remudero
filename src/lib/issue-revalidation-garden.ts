@@ -23,12 +23,12 @@
  * residue no producer owns.
  */
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghIssueGatewayAsync, splitConcatenatedJsonPages, type AsyncIssueGateway } from "./escalate.js";
-import { captureFeedback, feedbackEntryPath } from "./feedback.js";
+import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
 import { ghTextAsync } from "./github-transport.js";
 import { issueFeedbackId, renderIssueRaw } from "./issues-intake.js";
@@ -681,6 +681,8 @@ export interface ProductionIssueRevalidationOpts {
   issues?: Pick<AsyncIssueGateway, "closeWithComment" | "comment">;
   runGit?: (args: string[]) => string;
   readLedgerRows?: (steps: readonly string[], sinceIso: string) => Array<Record<string, unknown>>;
+  /** W1-T9696: the daemon's state root; a conversion stages in its landing queue, never landed on the loop. */
+  landingStateRoot?: string;
 }
 
 /** The garden's ports as the daemon builds them. Reads are lazy and read once per pass. */
@@ -785,10 +787,10 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     },
     fileConversion: async (issue, verdict) => {
       const id = issueFeedbackId(opts.owner, opts.repo, issue.number);
-      if (existsSync(feedbackEntryPath(opts.repoRoot, id))) return id;
+      if (feedbackCaptured(opts.repoRoot, id, opts.landingStateRoot)) return id;
       const raw = renderIssueRaw({ owner: opts.owner, repo: opts.repo, number: issue.number, title: issue.title, body: issue.body,
         state: "open", createdAt: issue.createdAt, url: issue.url, labels: issue.labels });
-      captureFeedback(opts.repoRoot, { id, raw: `${raw}\n\nissue-revalidation (W1-T8864): ${verdict.reason}`, origin: `issue#${issue.number}` });
+      stageFeedbackCapture(opts.repoRoot, opts.landingStateRoot, { id, raw: `${raw}\n\nissue-revalidation (W1-T8864): ${verdict.reason}`, origin: `issue#${issue.number}` });
       return id;
     },
   };

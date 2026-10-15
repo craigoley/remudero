@@ -5,7 +5,7 @@ import { appendLedger } from "./ledger.js";
 import { escalate, splitConcatenatedJsonPages, type Escalation, type IssueGateway } from "./escalate.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { isGhRateLimitError, readLedgerLines } from "./status.js";
-import { captureFeedback, feedbackCaptured, feedbackDir, setFeedbackStatus, stageFeedbackCapture, type FeedbackEntry } from "./feedback.js";
+import { feedbackCaptured, feedbackDir, setFeedbackStatus, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin } from "./feedback.js";
 import { isTestRunner } from "./live-write-guard.js";
 
 /**
@@ -538,6 +538,8 @@ export interface OpsPollDeps {
   land?: LandFeedbackOpts;
   /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
   landingStateRoot?: string;
+  /** W1-T9696: the CLI's inline capture (`captureFeedback`); absent, a new entry is staged and never landed here. */
+  capture?: (root: string, opts: { id: string; raw: string; origin: FeedbackOrigin }) => FeedbackEntry;
 }
 
 export interface OpsPollResult {
@@ -597,9 +599,7 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
       const id = alertFeedbackId(owner, repo, alert);
       if (feedbackCaptured(deps.root, id, deps.landingStateRoot)) continue;
       const capture = { id, raw: renderAlertRaw(owner, repo, alert), origin: `alert#${alertOriginId(alert)}` as const };
-      feedbackCreated.push(deps.landingStateRoot === undefined
-        ? captureFeedback(deps.root, capture)
-        : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
+      feedbackCreated.push(deps.capture ? deps.capture(deps.root, capture) : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
     }
     // RECONCILE the other direction (impl-EV): the capture loop above only ever ADDS. An entry
     // whose alert has since been dismissed or fixed was never closed by anything, so it aged into
@@ -609,7 +609,7 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
     for (const feedbackId of staleAlertFeedbackIds(deps.root, owner, repo, open, reconciledPrior)) {
       // THROUGH THE BRIDGE, never a raw local write: a raw `writeFileSync` here would dirty the
       // daemon's own checkout on every poll, which is what has been aborting deploys.
-      setFeedbackStatus(deps.root, feedbackId, "rejected", { land: deps.land ?? {} });
+      setFeedbackStatus(deps.root, feedbackId, "rejected", { land: deps.land ?? (deps.landingStateRoot === undefined ? {} : { stateRoot: deps.landingStateRoot }) });
       reconciled.push(feedbackId);
       appendLedger(deps.ledgerPath, {
         run_id: deps.runId,

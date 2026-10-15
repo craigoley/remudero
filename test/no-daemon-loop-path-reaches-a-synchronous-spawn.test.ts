@@ -252,7 +252,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks. W1-T9695 awaited the boot sweep and the daemon's landContent and CI-learning landings; still sync: captureFeedback's inline landFeedback (W1-T9696), recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the `planPrPreflight` option and the `sweepFeedbackLanding` dep
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696 moved the boot sweep, daemon landContent, CI-learning and the intake/alert/revalidation/evidence/handoff captures off it. Still sync: captureFeedback from coverage-improvement, hand-run census, source-size follow-up, grilled reply, dep-review, the CLI sweep's repair capture; recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -562,6 +562,20 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   for (const seed of ["runSreLanePass", "daemonSreLaneInput"]) {
     const reach = loopReachable(fns, seed);
     assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => reach.has(name)), [], `${seed} reaches the synchronous plan-PR preflight`);
+  }
+});
+
+/** W1-T9696: daemon-loop captures that now stage for the async sweep, and so never name captureFeedback. */
+const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
+
+test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback", () => {
+  const fns = censusFunctions();
+  // Positive control: the CLI verbs inject the inline capture, and this walk sees it.
+  assert.ok(loopReachable(fns, "issuesCommand").has("captureFeedback") && loopReachable(fns, "opsCommand").has("captureFeedback"));
+  for (const seed of STAGED_CAPTURE_SEEDS) {
+    const reach = loopReachable(fns, seed);
+    assert.ok(reach.has("stageFeedbackCapture"), `${seed} reaches its staging capture`);
+    assert.ok(!reach.has("captureFeedback"), `${seed} reaches the inline captureFeedback`);
   }
 });
 
