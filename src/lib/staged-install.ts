@@ -188,7 +188,7 @@ function reuseDonor(
         continue;
       }
       (deps.linkInstall ?? ((from: string, stage: string) => {
-        execFileSync("cp", ["-al", join(from, "node_modules"), join(stage, "node_modules")], { stdio: "pipe", timeout: STAGED_NPM_CI_TIMEOUT_MS });
+        execFileSync("cp", [process.platform === "darwin" ? "-cR" : "-al", join(from, "node_modules"), join(stage, "node_modules")], { stdio: "pipe", timeout: STAGED_NPM_CI_TIMEOUT_MS });
       }))(donor, stagingDir);
       const stagedMissing = verify(stagingDir, names);
       if (stagedMissing.length > 0) throw new Error(`linked tree does not resolve ${stagedMissing.join(", ")}`);
@@ -269,7 +269,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
       repo: basename(repoDir),
       hash: wanted,
       swapped,
-      method: donor ? "hard-linked" : "npm-ci",
+      method: donor ? (process.platform === "darwin" ? "apfs-cloned" : "hard-linked") : "npm-ci",
       donor: donor ?? null,
       donor_rejections: donorRejections,
       error: failure.error,
@@ -298,7 +298,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}):
     repo: basename(repoDir),
     before_hash: before ?? null,
     after_hash: wanted,
-    method: donor ? "hard-linked" : "npm-ci",
+    method: donor ? (process.platform === "darwin" ? "apfs-cloned" : "hard-linked") : "npm-ci",
     donor: donor ?? null,
     donor_rejections: donorRejections,
     elapsed_ms: clock.now() - startedAt,

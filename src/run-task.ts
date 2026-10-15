@@ -9,6 +9,7 @@ export {
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
@@ -790,6 +791,7 @@ import {
   onDrainRequest,
   onShedRequest,
   onRestoreRequest,
+  onShedWorkersRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -1860,7 +1862,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { terminalUnionScans } from "./lib/sweep.js";
+import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -3456,7 +3458,6 @@ export async function refreshEscalationTriageEvidence(
 // reason (see lib/cli-args.ts's own header) — src/lib/report-commands.ts's moved report verbs
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
-import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { fetchPrChecks, renderPrChecks } from "./lib/pr-checks.js";
 export { unknownArgError };
 
@@ -41836,6 +41837,8 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
+    // W1-T9508: tier 2, which no generation answered (0 of 122 rows answered on 10-13/14), so every ask timed out.
+    onShedWorkersRequest(channel, { shed: () => generation?.shedWorkers(), restore: (reason) => generation?.restoreWorkers(reason) });
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
@@ -48278,7 +48281,8 @@ export function buildSweepHook(
  * `runSweep` the full sweep hook above uses — never a second, independently
  * built reconciler — but passes `actionable: d => d === "post-review"` so
  * ONLY the deterministic, sha-pinned, mutex-serialized re-post can fire here;
- * dispatchFix/close/escalate/depReview always stand down (arm: W1-T5922)
+ * close/escalate/depReview always stand down (arm: W1-T5922; capacity-gated
+ * dispatchFix: W1-T8086, see `lightPassActionable`)
  * ("deferred to full sweep (light pass)") and re-derive on the next FULL
  * sweep instead, preserving the single-threaded reason those lanes exist
  * for. Deliberately excludes the credit-backfill rung and the inbox-draft
@@ -48346,17 +48350,23 @@ export function lightPassActionable(
   // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
   // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
   armAllowed: boolean = false,
-  // W1-T8086: the ordinary own-red lane uses the existing per-claim fix-capacity admission.
-  ownRedFixAllowed: boolean = false,
+  // W1-T8086: the ordinary pass's repair lanes use the existing per-claim fix-capacity admission.
+  // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.
+  repairFixAllowed: boolean = false,
 ): boolean {
-  if (disposition === "post-review") return true;
+  // W1-T9558: all three review-lane dispositions; the cheap modes otherwise waited on a full pass.
+  if (isReviewLaneDisposition(disposition)) return true;
   if (disposition === "mergeable") return armAllowed;
-  // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
-  // `blocked-fixable` also admits requeues and capacity-gated own-red fixes; `conflicted`'s action is
-  // always `dispatchFix` (merge-conflict resolution), so it stays gated on `fixRungAllowed` only
-  // — W1-T1211's own widening, deliberately untouched (design note iii, unchanged by this task).
-  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly || ownRedFixAllowed;
-  if (disposition === "conflicted") return fixRungAllowed;
+  // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker. Both
+  // take `runSweep`'s per-claim fix-capacity admission (`claimFixAdmission`, after the per-head
+  // `claimFixDispatch` mutex) before they spawn, so on the ordinary pass that claim is the gate, not
+  // W1-T1211's "every in-flight run is waiting" blanket. `blocked-fixable` also admits requeues.
+  // MEASURED 2026-10-14 on the core ledger: 220 `conflicted` rows read "deferred to full sweep
+  // (light pass)" against 7 that acted. Full passes finished a median 18.9 min apart (p90 44.5, max
+  // 100), and #11604, #11679, #11689 and #11699 each waited 68-241 min for a conflict round that never
+  // came. A refused claim names the capacity; a review-only pass still stands both lanes down.
+  if (disposition === "blocked-fixable") return fixRungAllowed || requeueLaneOnly || repairFixAllowed;
+  if (disposition === "conflicted") return fixRungAllowed || repairFixAllowed;
   return false;
 }
 
@@ -48561,8 +48571,8 @@ export function buildSweepLightHook(
             runId,
             log,
             reviewerCodeRecovery,
-            // W1-T8086: own-red fixes use per-claim capacity on ordinary passes; review-only still
-            // stands them down. Conflicted keeps W1-T1211's waiting-run gate, read once per tick.
+            // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
+            // review-only still stands them down.
             actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, !reviewOnly),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,

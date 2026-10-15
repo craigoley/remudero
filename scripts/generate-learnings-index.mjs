@@ -1,26 +1,13 @@
 #!/usr/bin/env node
 // scripts/generate-learnings-index.mjs
 //
-// Learnings INDEX generator (W1-T33, MASTER-PLAN §8A Tier 1).
-//
-// The learnings corpus is split into subsystem shards (learnings/{platform,architecture,ci,
-// testing,failures}.yaml, or any other *.yaml file dropped into learnings/) so a growing corpus
-// never becomes a full SCAN. This script builds the LOOKUP index every shard is checked against:
-// for each shard filename, the entry ids it carries and the union of `files:`, `symbols:` and
-// `error_signatures:`, plus a `subsystem -> shard filename(s)` map. src/lib/learnings.ts's
-// `loadLearningsForTaskFiles` reads the committed learnings/index.json to decide which shard(s) a
-// task could possibly match WITHOUT parsing every shard.
-//
-// The generated index is content-only (no timestamp) so it is byte-stable across runs when the
-// corpus hasn't changed -- that is what makes `--check` a meaningful staleness gate rather than a
-// permanent false positive.
-//
-// Usage:
-//   node scripts/generate-learnings-index.mjs [--dir learnings] [--out learnings/index.json]
-//   node scripts/generate-learnings-index.mjs --check   # exit 1 if the committed index is stale
+// Build an optional local lookup from legacy shards and per-entry files (W1-T7954).
+// --check validates the corpus without reading or writing a generated index.
+// Usage: node scripts/generate-learnings-index.mjs [--dir learnings] [--out <path>] [--check]
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { learningsSourceFiles } from "./lib/learnings-files.mjs";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { parse as parseYaml } from "yaml";
@@ -72,19 +59,17 @@ export function loadShardEntries(path) {
 }
 
 /**
- * Build the index from every `*.yaml` file directly inside `dir` (sorted for determinism). Throws
+ * Build the index from every shard and per-entry file (sorted for determinism). Throws
  * on a duplicate id across shards -- same discipline as loadLearningsCorpus in src/lib/learnings.ts.
  */
 export function buildIndex(dir) {
-  const filenames = readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml"))
-    .sort();
+  const sources = learningsSourceFiles(dir);
 
   const files = {};
   const bySubsystem = {};
   const seen = new Set();
 
-  for (const filename of filenames) {
+  for (const { filename } of sources) {
     const entries = loadShardEntries(join(dir, filename));
     const globSet = new Set();
     const symbolSet = new Set();
@@ -148,23 +133,28 @@ function main(argv) {
   }
 
   if (values.check) {
-    let committed;
+    // W1-T7954: the default <dir>/index.json is an optional local artifact, so --check alone proves only that the
+    // corpus builds. An index NAMED with --out is one the caller asked to verify, and a stale one fails.
+    if (values.out === undefined) {
+      console.log(`generate-learnings-index: OK -- ${values.dir} corpus builds an index.`);
+      process.exitCode = 0;
+      return;
+    }
+    let existing;
     try {
-      committed = readFileSync(outPath, "utf8");
-    } catch {
-      console.error(`generate-learnings-index: ${outPath} does not exist -- run 'npm run learnings-index' to generate it.`);
+      existing = readFileSync(outPath, "utf8");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      console.log(`generate-learnings-index: OK -- ${values.dir} corpus builds an index (no ${outPath} to compare).`);
+      process.exitCode = 0;
+      return;
+    }
+    if (existing !== fresh) {
+      console.error(`generate-learnings-index: ${outPath} is STALE -- run \`npm run learnings-index\` or delete it.`);
       process.exitCode = 1;
       return;
     }
-    if (committed !== fresh) {
-      console.error(
-        `generate-learnings-index: ${outPath} is STALE -- it does not match a fresh regeneration from ${values.dir}/*.yaml.\n` +
-          `Run 'npm run learnings-index' and commit the result.`,
-      );
-      process.exitCode = 1;
-      return;
-    }
-    console.log(`generate-learnings-index: OK -- ${outPath} matches the current corpus.`);
+    console.log(`generate-learnings-index: OK -- ${outPath} is fresh.`);
     process.exitCode = 0;
     return;
   }

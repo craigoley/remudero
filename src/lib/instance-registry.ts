@@ -35,6 +35,14 @@ export const DEFAULT_PROJECT = "default";
 /** Where the watchdog on the fleet host converges from; `GET /v1/registry` compares against it. */
 export const DEFAULT_HOST_INSTANCE_REGISTRY_PATH = "/etc/remudero/daemon-instances.yaml";
 
+export const SELECTED_INSTANCE_REGISTRY_FIELDS: readonly string[] = Object.freeze([
+  "repo", "github_repo", "project", "retired", "mode", "primary", "state_dir",
+  "container_name", "service_user", "image", "max_old_space_mb", "service_name",
+  "watchdog_service_name", "watchdog_timer_name", "launcher_path", "revival_log",
+  "gh_app_id", "gh_app_installation_id", "gh_app_private_key_path", "gh_app_private_key_host_path",
+  "claude_dir", "codex_dir", "container_config_dir",
+]);
+
 export type InstanceRegistryErrorCode =
   | "no_instances_block"
   | "malformed_line"
