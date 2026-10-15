@@ -945,9 +945,23 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const peak = candidateNeed();
     if (peak.bytes === undefined) return deferUpgrade(from, slot, { hold: "peak_unknown", detail: peak.detail });
     const peakBytes = peak.bytes;
+    const admissionNow = async (): Promise<ServeUpgradeAdmission> => {
+      const reading = await hostPressure().catch((err: unknown): undefined => {
+        opts.log("serve.host_pressure_unread", { reason: errorText(err) });
+        return undefined;
+      });
+      return judgeServeUpgradeAdmission({ reading, thresholds: upgradeThresholds(from.slot.dir), candidatePeakBytes: peakBytes, peakBasis: peak.detail, nowMs: clock.now() });
+    };
     const short = (bytes: number | undefined): bytes is number => bytes !== undefined && bytes < peakBytes;
     let free = freeMemory();
-    if (short(free)) free = await shedActive(from, free);
+    if (short(free)) {
+      // Shedding and rewarming the live workers itself faults pages back in. Do not create that
+      // churn when the host already refuses the fork; keep the same guard and check it again below.
+      const beforeShed = await admissionNow();
+      // Dropping caches can recover host headroom; only the final read judges that recoverable hold.
+      if (!beforeShed.admit && beforeShed.hold !== "host_headroom") return deferUpgrade(from, slot, { hold: beforeShed.hold, detail: beforeShed.detail, freeBytes: free, phase: "before_shed" });
+      free = await shedActive(from, free);
+    }
     // Tier 2 only once an earlier attempt was deferred for memory, and at most once per interval.
     if (short(free) && deferrals > 0 && (lastWorkerShedAt === undefined || clock.now() - lastWorkerShedAt >= workerShedIntervalMs)) {
       free = await shedWorkers(from, free ?? 0, short);
@@ -956,11 +970,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     }
     if (short(free)) return deferUpgrade(from, slot, { hold: "container_headroom", freeBytes: free });
     // W1-T8311: the cgroup sees only this container; the host's other containers share the same RAM.
-    const reading = await hostPressure().catch((err: unknown): undefined => {
-      opts.log("serve.host_pressure_unread", { reason: errorText(err) });
-      return undefined;
-    });
-    const admission = judgeServeUpgradeAdmission({ reading, thresholds: upgradeThresholds(from.slot.dir), candidatePeakBytes: peakBytes, peakBasis: peak.detail, nowMs: clock.now() });
+    const admission = await admissionNow();
     if (!admission.admit) return deferUpgrade(from, slot, { hold: admission.hold, detail: admission.detail, freeBytes: free });
     // needBytes here is the host's need (reserve + candidate); the candidate's own is candidateNeedBytes.
     const { needBytes: candidateNeedBytes, ...evidence } = need(from);
@@ -1045,6 +1055,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
         askedAgain = true;
         return inFlight;
       }
+      // A memory refusal owns one retry. An external/coalesced ask must not skip its backoff and
+      // prepare/shed/restore again; that retry prepares the newest main when it actually wakes.
+      if (retryPending && handoffEnabled()) return Promise.resolve();
       inFlight = handoff()
         .catch((err: unknown) => opts.log("serve.handoff_failed", { reason: errorText(err) }))
         // Whatever ended the handoff without replacing the generation, its worker threads come back.

@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { createHash } from "node:crypto";
@@ -24,7 +25,7 @@ import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -2130,14 +2131,18 @@ function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutM
   });
 }
 
-/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
+/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. W1-T9651: `timeout` is a
+ *  loop-available budget, and a child stopped at it is a failure even when it exits 0 after the signal. */
 function execFileAsync(
   command: string,
   args: readonly string[],
   options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; killSignal?: NodeJS.Signals; maxBuffer?: number },
 ): Promise<string> {
+  const { timeout, killSignal, ...rest } = options;
   return new Promise((resolve, reject) => {
-    execFile(command, args as string[], { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+    const child = execFile(command, args as string[], { ...rest, encoding: "utf8" }, (execError, stdout, stderr) => {
+      bound?.cancel();
+      const error = bound?.timedOut ? bound.timeoutError([command, ...args].join(" "), { stdout, stderr }) : execError;
       if (!error) return resolve(stdout);
       const code = (error as NodeJS.ErrnoException).code;
       const failure = Object.assign(error, {
@@ -2148,6 +2153,7 @@ function execFileAsync(
       });
       reject(failure);
     });
+    const bound = timeout !== undefined && timeout > 0 ? boundChildByLoopTime(child, timeout, { killSignal }) : undefined;
   });
 }
 
@@ -7929,21 +7935,17 @@ export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; 
   const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
-        clearTimeout(timer);
+        bound.cancel();
+        // W1-T9651: a git stopped at its bound is a timeout even when it exits 0 after the signal.
+        if (bound.timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         if (!err) return resolve(stdout);
-        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
       });
       // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(stdin ?? "");
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
 

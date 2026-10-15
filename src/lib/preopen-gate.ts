@@ -13,6 +13,7 @@
  * minutes per build and already run under CI; the fast gate is the set a build can satisfy alone.
  */
 import { execFile } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -176,11 +177,11 @@ export function defaultRunGate(cwd: string, harnessRmd?: string, log?: GateLog, 
   const { file, args } = harnessRmd === undefined
     ? preopenGateLaunch(cwd, log, HARNESS_RMD, HARNESS_ROOT, { deadline_enforced_by: armedEnforcers(timeoutBin) })
     : preopenGateCommand(cwd, harnessRmd);
-  return new Promise((resolve) => {
-    execFile(process.execPath, deadlineRunnerArgs(file, args, deadlineAt, timeoutBin),
-      { cwd, timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 },
-      (error, _stdout, stderr) => resolve(classifyGateExit(error, String(stderr))));
-  });
+  return execFileLoopBounded(process.execPath, deadlineRunnerArgs(file, args, deadlineAt, timeoutBin),
+    { cwd, encoding: "utf8", timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 }).then(
+    () => classifyGateExit(null, ""),
+    (error: Error & { code?: unknown; killed?: boolean; stderr?: unknown }) => classifyGateExit(error, String(error.stderr ?? "")),
+  );
 }
 
 /** The failing step names recorded by a summary written at or after `startedAt`, or why it can't be read. */

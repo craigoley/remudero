@@ -10,10 +10,14 @@
 # clones retain their object stores until cross-account lending is proven safe;
 # their old regenerable caches can still be cleaned.
 #
+# Also removes inactive non-Git scratch directories in the account's explicit
+# Remudero/rmd-work roots (and Craig's /private/tmp). Every descendant must be
+# idle for six hours; unversioned source/reports and persistent data are retained.
+#
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
 # follows an artifact symlink, and never touches protected, dirty, or open
 # trees. Worktree deletion uses Git; branch refs are retained. A standalone
-# clone's object store and unknown non-repository data stay protected.
+# clone's object store, marked data and unversioned source/reports stay protected.
 #
 # Why this exists: src/lib/tmp.ts's sweepStaleTempDirs() roots at os.tmpdir()
 # (/var/folders/... on macOS) and so structurally cannot see the disposable
@@ -192,8 +196,16 @@ for scan_root in "${SCAN_ROOTS[@]}"; do
     done
   done
 done
+CHECKOUT_SCANNED_ROOTS=()
 for scan_root in "${CHECKOUT_SCAN_ROOTS[@]}"; do
   [ -d "$scan_root" ] || continue
+  scan_real=$(cd "$scan_root" 2>/dev/null && pwd -P) || continue
+  root_seen=0
+  for existing_root in "${CHECKOUT_SCANNED_ROOTS[@]+"${CHECKOUT_SCANNED_ROOTS[@]}"}"; do
+    [ "$existing_root" != "$scan_real" ] || { root_seen=1; break; }
+  done
+  [ "$root_seen" = 0 ] || continue
+  CHECKOUT_SCANNED_ROOTS+=("$scan_real")
   if ! markers=$(find "$scan_root" -maxdepth 8 \
     \( -name node_modules -o -path "$scan_root/lanes" -o -path "$scan_root/state" \) -prune -o \
     -name .git -print -prune 2>/dev/null); then
@@ -210,6 +222,31 @@ for scan_root in "${CHECKOUT_SCAN_ROOTS[@]}"; do
     [ "$seen" = "0" ] || continue
     RETAINED_CHECKOUTS+=("$candidate")
   done <<< "$markers"
+done
+
+# Whole-directory scope approved by the operator. The canonical checkout is a
+# scan container, never a removal target; tracked children remain protected.
+DIRECTORY_SCAN_ROOTS=("$USER_HOME/Remudero" "$USER_HOME/Remudero/lanes-wt"
+  "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work")
+if [ "$RUN_USER" = craigoley ]; then
+  if [ -n "${REMUDERO_JANITOR_SCAN_ROOTS:-}" ]; then DIRECTORY_SCAN_ROOTS+=("${SCAN_ROOTS[@]}")
+  else DIRECTORY_SCAN_ROOTS+=("/private/tmp")
+  fi
+fi
+if [ -n "${REMUDERO_JANITOR_DIRECTORY_ROOTS:-}" ]; then
+  IFS=: read -r -a DIRECTORY_SCAN_ROOTS < <(printf '%s\n' "$REMUDERO_JANITOR_DIRECTORY_ROOTS")
+fi
+DIRECTORY_ROOTS=()
+for directory_root in "${DIRECTORY_SCAN_ROOTS[@]}"; do
+  [ -d "$directory_root" ] && [ ! -L "$directory_root" ] || continue
+  directory_real=$(cd "$directory_root" 2>/dev/null && pwd -P) || continue
+  # Parent aliases such as macOS /var -> /private/var are legitimate;
+  # final-component symlink roots were refused above. Scan the physical path.
+  root_seen=0
+  for existing_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
+    [ "$existing_root" != "$directory_real" ] || { root_seen=1; break; }
+  done
+  [ "$root_seen" = 1 ] || DIRECTORY_ROOTS+=("$directory_real")
 done
 
 NOW=$(date +%s)
@@ -237,7 +274,18 @@ is_scratch_checkout() {
 
 # A checkout is LIVE if any running process names its path on the command line.
 # This is what keeps an in-flight ci-parity/vitest run from losing its deps.
-PSOUT=$(ps -axww -o command= 2>/dev/null)
+PSOUT=$(ps -axww -o pid=,command= 2>/dev/null)
+# Bash 3.2 has sparse indexed arrays. Snapshot PID->command once, rather than
+# running ps or reparsing the entire process list for every ancestor cwd.
+index_process_commands() {
+  local pid command
+  PS_COMMANDS=()
+  while read -r pid command; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    PS_COMMANDS[pid]="$command"
+  done <<< "$PSOUT"
+}
+index_process_commands
 # Pure-bash substring match on purpose: a `printf | grep -q` pipeline returns
 # 141 under `set -o pipefail` (grep exits on first match, printf takes SIGPIPE),
 # which silently inverts this guard to always-false. No pipe, no subshell.
@@ -255,20 +303,22 @@ if [ "$HAS_LSOF" = "1" ]; then
   CWD_STATUS=$?
 fi
 is_cwd_in() {
-  local root="$1" line path
+  local root="$1" line path cwd_pid="" relative command
   [ "$HAS_LSOF" = "1" ] && [ "$CWD_STATUS" -le 1 ] || return 2
   while IFS= read -r line; do
-    case "$line" in n*)
+    case "$line" in
+      p*) cwd_pid=${line#p} ;;
+      n*)
       path="${line#n}"
       case "$path" in "$root"|"$root"/*) return 0 ;; esac
-      # A process can sit in the scratch parent while a nested checkout lives
-      # below it (for example, <run>/repo). Protect that artifact too. Ignore
-      # only broad launcher roots whose cwd does not identify a particular job.
+      # A launcher cwd does not make every idle sibling active. Preserve a
+      # child explicitly named by that process's relative command instead.
       case "$root" in "$path"/*)
-        case "$path" in
-          /|"$USER_HOME"|"$USER_HOME/Remudero"|"$USER_HOME/Remudero/remudero"|"$USER_HOME/rmd-work"|"$DEFAULT_TMP"|/tmp|/private/tmp) ;;
-          *) return 0 ;;
-        esac
+        relative=${root#"${path%/}"/}
+        case "$cwd_pid" in ''|*[!0-9]*) return 2 ;; esac
+        [ "${PS_COMMANDS[cwd_pid]+present}" = present ] || return 2
+        command=${PS_COMMANDS[cwd_pid]}
+        case "$command" in *"$relative"*) return 0 ;; esac
         ;;
       esac
       ;;
@@ -370,7 +420,8 @@ removed_link_paths=(); removed_link_targets=()
 
 refresh_process_snapshot() {
   local rc
-  PSOUT=$(ps -axww -o command= 2>/dev/null) || return 1
+  PSOUT=$(ps -axww -o pid=,command= 2>/dev/null) || return 1
+  index_process_commands
   [ "$HAS_LSOF" = "1" ] || return 1
   CWDOUT=$(lsof -nP -a -d cwd -Fn 2>/dev/null)
   rc=$?
@@ -379,7 +430,7 @@ refresh_process_snapshot() {
 }
 
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
   found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
@@ -389,6 +440,7 @@ clean_artifact() {
   parent=$(dirname "$artifact")
   while [ "$parent" != / ]; do
     if [ -e "$parent/.git" ]; then
+      activity_root="$parent"
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
       }
@@ -404,7 +456,7 @@ clean_artifact() {
     skipped_owner=$((skipped_owner+1)); log "SKIP owner=${owner:-unknown} $artifact"; return 0
   fi
   is_live "$artifact" && { skipped_live=$((skipped_live+1)); log "SKIP live      $artifact"; return 0; }
-  is_cwd_in "$artifact"
+  is_cwd_in "$activity_root"
   cwd_rc=$?
   if [ "$cwd_rc" -eq 0 ]; then
     skipped_cwd=$((skipped_cwd+1)); log "SKIP cwd       $artifact"; return 0
@@ -430,7 +482,7 @@ clean_artifact() {
   if [ "$APPLY" = "1" ]; then
     refresh_process_snapshot || { log "SKIP unverified process snapshot $artifact"; return; }
     is_live "$artifact" && { skipped_live=$((skipped_live+1)); log "SKIP live      $artifact"; return 0; }
-    is_cwd_in "$artifact"
+    is_cwd_in "$activity_root"
     cwd_rc=$?
     if [ "$cwd_rc" -eq 0 ]; then
       skipped_cwd=$((skipped_cwd+1)); log "SKIP cwd       $artifact"; return 0
@@ -543,6 +595,158 @@ worktree_registration() {
     END { if (!found) print "missing"; else if (locked) print "locked"; else print "registered" }
   '
 }
+
+# Return a reason for a non-Git directory that cannot be established as scratch.
+# The user's source/report preservation rule is independent of age. No name prefix
+# is required for a data-only scratch directory inside these explicit scan roots.
+scratch_directory_risk() {
+  local path="$1" root="$2" q found parent relative tracked owner mount_text mount_line
+  for q in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}" "${PROTECTED[@]+"${PROTECTED[@]}"}"; do
+    case "$q" in "$path"|"$path"/*) printf 'protected scan container or persistent checkout'; return 0 ;; esac
+  done
+  case "${path##*/}" in
+    .git|.remudero|.claude|.codex|.ssh|state|lanes|repos|worker-home|node_modules|claude-*|com.apple.*|launchd*|powerlog|.X*|.font-unix|.ICE-unix)
+      printf 'persistent account/runtime directory'; return 0 ;;
+  esac
+  [ ! -e "$path/.git" ] && [ ! -L "$path/.git" ] || {
+    printf 'Git workspace uses publication-aware retirement'; return 0;
+  }
+  if found=$(rmd_dependency_seed_risk "$path"); then printf '%s' "$found"; return 0; fi
+  mount_text=$(mount 2>/dev/null) || { printf 'mount visibility unavailable'; return 0; }
+  while IFS= read -r mount_line; do
+    case "$mount_line" in
+      *" on $path ("*|*" on $path type "*|*" on $path/"*) printf 'directory contains a mount'; return 0 ;;
+    esac
+  done < <(printf '%s\n' "$mount_text")
+  owner=$(artifact_owner "$path")
+  [ "$owner" = "$RUN_USER" ] || { printf 'foreign or unknown owner'; return 0; }
+  found=$(find -P "$path" -xdev ! -user "$RUN_USER" -print -quit 2>/dev/null) || {
+    printf 'ownership scan unavailable'; return 0;
+  }
+  [ -z "$found" ] || { printf 'contains foreign-owned content'; return 0; }
+  # Preserve all repositories, including bare object lenders, archived commits,
+  # state/history, dependency seeds and coordination files. Do not follow links.
+  found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
+    -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
+    -o -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' \
+    -o -iname '*credential*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
+    -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {
+    printf 'repository/state scan unavailable'; return 0;
+  }
+  [ -z "$found" ] || { printf 'repository, retained evidence, credentials or coordination'; return 0; }
+  found=$(find -P "$path" -xdev ! -type d ! -type f -print -quit 2>/dev/null) || {
+    printf 'file-type scan unavailable'; return 0;
+  }
+  [ -z "$found" ] || { printf 'symlink, mount boundary or special file'; return 0; }
+  found=$(find -P "$path" -xdev -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print -quit 2>/dev/null) || {
+    printf 'executable-source scan unavailable'; return 0;
+  }
+  [ -z "$found" ] || { printf 'unversioned executable or script'; return 0; }
+  # Do not treat old non-Git scripts, manifests or reports as disposable data.
+  found=$(find -P "$path" -xdev -type f \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' \
+    -o -iname '*.py' -o -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -iname '*.ts' \
+    -o -iname '*.tsx' -o -iname '*.jsx' -o -iname '*.rs' -o -iname '*.go' -o -iname '*.c' \
+    -o -iname '*.h' -o -iname '*.cpp' -o -iname '*.swift' -o -iname '*.rb' -o -iname '*.pl' \
+    -o -iname '*.md' -o -iname '*.txt' -o -iname '*.csv' -o -iname '*.tsv' -o -iname '*.pdf' \
+    -o -iname '*.docx' -o -iname '*.xlsx' -o -iname '*.html' -o -iname '*.yaml' -o -iname '*.yml' \
+    -o -iname '*.toml' -o -iname '*.ini' -o -iname '*.sql' -o -iname '*.ipynb' -o -iname '*.svelte' -o -iname '*.vue' -o -iname '*.ps1' -o -iname '*.java' -o -iname '*.cs' -o \( -iname '*.json' ! -name 'coverage-[0-9]*-[0-9]*-[0-9]*.json' \) \
+    -o -iname 'README*' -o -iname 'LICENSE*' -o -name Makefile -o -name Dockerfile \) -print -quit 2>/dev/null) || {
+    printf 'unversioned source/report scan unavailable'; return 0;
+  }
+  [ -z "$found" ] || { printf 'unversioned source, manifest or report'; return 0; }
+  # An ignored scratch child in a canonical repository may be cleaned, but a
+  # tracked or merely untracked source child cannot. No Git state is changed.
+  parent="$root"
+  while [ "$parent" != / ]; do
+    if [ -e "$parent/.git" ] || [ -L "$parent/.git" ]; then
+      relative=${path#"$parent"/}
+      tracked=$(GIT_LITERAL_PATHSPECS=1 rmd_retirement_git "$parent" ls-files -- "$relative" 2>/dev/null) || {
+        printf 'enclosing Git status unavailable'; return 0;
+      }
+      [ -z "$tracked" ] || { printf 'tracked source directory'; return 0; }
+      rmd_retirement_git "$parent" check-ignore -q -- "$relative" 2>/dev/null || {
+        printf 'untracked source directory is not ignored'; return 0;
+      }
+      break
+    fi
+    parent=$(dirname "$parent")
+  done
+  return 1
+}
+
+scratch_directory_identity() {
+  if [ "$OS_NAME" = Darwin ]; then stat -f '%d:%i' "$1" 2>/dev/null
+  else stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
+clean_scratch_directory() {
+  local path="$1" root="$2" reason stamp identity current kb cwd_rc open_rc check_phase metadata modified changed
+  [ -d "$path" ] && [ ! -L "$path" ] || return 0
+  # A recently touched root already proves the whole tree is ineligible. Avoid
+  # traversing today's large job directories merely to rediscover that fact.
+  if [ "$OS_NAME" = Darwin ]; then
+    metadata=$(stat -f '%m %c' "$path" 2>/dev/null) || { log "SKIP scratch $path (root age unavailable)"; return; }
+  else
+    metadata=$(stat -c '%Y %Z' "$path" 2>/dev/null) || { log "SKIP scratch $path (root age unavailable)"; return; }
+  fi
+  read -r modified changed <<< "$metadata"
+  case "$modified:$changed" in :*|*:|*[!0-9:]*) log "SKIP scratch $path (root age unavailable)"; return ;; esac
+  if [ "$(( $(date +%s) - modified ))" -lt "$((AGE_HOURS * 3600))" ] || \
+     [ "$(( $(date +%s) - changed ))" -lt "$((AGE_HOURS * 3600))" ]; then
+    log "SKIP scratch $path (content or metadata touched within ${AGE_HOURS}h)"; return;
+  fi
+  # A Git checkout is handled exclusively by the publication-aware worktree
+  # lane, not by recursive rm. A containing scratch directory is also retained.
+  if reason=$(scratch_directory_risk "$path" "$root"); then
+    log "SKIP scratch $path ($reason)"; return;
+  fi
+  identity=$(scratch_directory_identity "$path") || { log "SKIP scratch $path (identity unavailable)"; return; }
+  case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) log "SKIP scratch $path (invalid identity)"; return ;; esac
+  kb=$(du -sk "$path" 2>/dev/null | cut -f1)
+  case "$kb" in ''|*[!0-9]*) log "SKIP scratch $path (size unavailable)"; return ;; esac
+  for check_phase in initial before-remove; do
+    refresh_process_snapshot || { log "SKIP scratch $path (process visibility unavailable)"; return; }
+    is_live "$path" && { log "SKIP scratch $path (live command)"; return; }
+    is_cwd_in "$path"; cwd_rc=$?
+    [ "$cwd_rc" = 1 ] || { log "SKIP scratch $path (working directory active or unknown)"; return; }
+    is_open "$path"; open_rc=$?
+    [ "$open_rc" = 1 ] || { log "SKIP scratch $path (open files or visibility unknown)"; return; }
+    if [ "$check_phase" = before-remove ] && reason=$(scratch_directory_risk "$path" "$root"); then
+      log "SKIP scratch $path ($reason)"; return;
+    fi
+    stamp=$(artifact_mtime "$path") || { log "SKIP scratch $path (age unavailable)"; return; }
+    case "$stamp" in ''|*[!0-9]*|0) log "SKIP scratch $path (age unavailable)"; return ;; esac
+    if [ "$(( $(date +%s) - stamp ))" -lt "$((AGE_HOURS * 3600))" ]; then
+      log "SKIP scratch $path (content or metadata touched within ${AGE_HOURS}h)"; return;
+    fi
+    current=$(scratch_directory_identity "$path") || current=""
+    [ "$current" = "$identity" ] || { log "SKIP scratch $path (identity changed)"; return; }
+    [ "$APPLY" = 1 ] || break
+  done
+  if [ "$APPLY" = 1 ]; then
+    if rm -rf -- "$path"; then
+      removed=$((removed+1)); reclaimed_kb=$((reclaimed_kb+kb))
+      log "REMOVED-SCRATCH age>=${AGE_HOURS}h $((kb/1024))M $path"
+    else log "FAILED scratch directory $path"; fi
+  else
+    planned=$((planned+1)); estimated_kb=$((estimated_kb+kb))
+    log "WOULD-REMOVE-SCRATCH age>=${AGE_HOURS}h $((kb/1024))M $path"
+  fi
+}
+
+# Direct children of each approved container are independently assessed. This
+# reaches lanes-wt and ignored scratch beneath the canonical checkout without
+# making either container itself disposable or traversing its tracked source.
+for directory_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
+  [ "$(artifact_owner "$directory_root")" = "$RUN_USER" ] || {
+    log "SKIP scratch root $directory_root (foreign or unknown owner)"; continue;
+  }
+  log "scratch-directory-scan: $directory_root; all-content age>=${AGE_HOURS}h"
+  for scratch in "$directory_root"/* "$directory_root"/.[!.]* "$directory_root"/..?*; do
+    clean_scratch_directory "$scratch" "$directory_root"
+  done
+done
 
 for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     marker="$repo/.git"
@@ -885,6 +1089,8 @@ done
 # temp subtree after the enclosing root is idle and old enough.
 if [ "$OS_NAME" = "Darwin" ]; then
   RMD_SCAN_ROOTS=("$DEFAULT_TMP" "/private/tmp")
+  # An explicit scope applies to this legacy cache lane too, including fixture runs.
+  [ -z "${REMUDERO_JANITOR_SCAN_ROOTS:-}" ] || RMD_SCAN_ROOTS=("${SCAN_ROOTS[@]}")
   for root in "${RMD_SCAN_ROOTS[@]}"; do
     [ -d "$root" ] || continue
     for d in "$root"/rmd[0-9]*; do
@@ -950,6 +1156,29 @@ for parent in "$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/r
     log "SKIP unknown-directory $child (no independently verifiable Git state; data retained)"
   done
 done
+# Include generated caches under historical job TMPDIRs on every scheduled
+# pass. The helper's cache-only mode never retires source or runtime folders.
+tsx_helper="$SCRIPT_DIR/tmp-reclaim.sh"
+if [ -f "$tsx_helper" ]; then
+  TSX_ROOTS_SEEN=()
+  for tsx_root in "${SCAN_ROOTS[@]}" "$USER_HOME/Remudero" "$USER_HOME/rmd-work"; do
+    [ -d "$tsx_root" ] && [ ! -L "$tsx_root" ] || continue
+    tsx_real=$(cd "$tsx_root" 2>/dev/null && pwd -P) || continue
+    tsx_seen=0
+    for seen in "${TSX_ROOTS_SEEN[@]+"${TSX_ROOTS_SEEN[@]}"}"; do [ "$seen" = "$tsx_real" ] && tsx_seen=1 && break; done
+    [ "$tsx_seen" = 0 ] || continue
+    TSX_ROOTS_SEEN+=("$tsx_real")
+    tsx_mode=--dry-run; [ "$APPLY" = 1 ] && tsx_mode=--apply
+    tsx_key=$(printf '%s' "$tsx_real" | cksum | awk '{print $1}')
+    tsx_report="$USER_HOME/.local/state/remudero/tsx-$tsx_key-kept.txt"
+    tsx_output=$(RMD_RECLAIM_ROOT="$tsx_real" RMD_RECLAIM_REPORT="$tsx_report" TMPDIR="$tsx_real/" bash "$tsx_helper" --tsx-only "$tsx_mode" 2>&1)
+    tsx_status=$?
+    while IFS= read -r tsx_line; do [ -z "$tsx_line" ] || log "generated-cache: $tsx_line"; done <<< "$tsx_output"
+    [ "$tsx_status" = 0 ] || log "FAILED generated-cache-sweep $tsx_real (exit=$tsx_status)"
+  done
+else
+  log "SKIP generated-cache-sweep (maintained helper missing: $tsx_helper)"
+fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; published Git workspaces only)"
 
