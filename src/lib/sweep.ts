@@ -14410,7 +14410,7 @@ function readFixHostPressureOnce(
   const named = { hostAvailableMib: host.availableMib, hostFloorMib: floorMib };
   const totalKb = /^MemTotal:\s*(\d+)\s*kB\s*$/m.exec(meminfo)?.[1];
   const reading = container.read();
-  const unit = container.unitMib ?? DEFAULT_ESTIMATE_MIB.implement; // W1-T9679: the fix admission's learned unit.
+  const unit = container.unitMib ?? DEFAULT_ESTIMATE_MIB.implement;
   const hostTier = host.availableMib - floorMib < unit ? "host-short" as const : "fits" as const;
   // Unbounded, unread, or no MemTotal to size its floor by: the host reading alone, as before, with the reading named.
   if (!("headroomMib" in reading) || totalKb === undefined || Number(totalKb) <= 0) {
@@ -14426,8 +14426,7 @@ function readFixHostPressureOnce(
   return { ...out, tier: container.ownWorkLive() ? "container-short" : "nothing-to-wait-for" };
 }
 
-/** The production fix pressure: the host and this container, its live work read from the instance's reservations.
- *  `unitMib` is what one worker needs for the tier ("fits"); default the implement class default. */
+/** The production fix pressure: the host and this container, live work from its reservations; `unitMib` sizes "fits". */
 export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number): FixHostPressure {
   return readFixHostPressure(floorMib, undefined, {
     unitMib,
@@ -14468,13 +14467,10 @@ export interface FixAdmissionCharge {
   fixEstimateMib: number;
   fixEstimateSource: "measured" | "default-unmeasured";
   reviewEstimateMib: number;
-  /** W1-T9679: the fix class's typical (median) peak, and the rung that set the admissions available. */
   fixTypicalMib: number;
   admissionRung: FixAdmissionRung;
 }
 
-/** W1-T9679: what admitted. "fits": the learned estimate fits. "typical": none fits, no fix is live or reserved, and
- *  the typical peak fits. "nothing-live": no worker tree at all is live. "none": nothing admits. */
 export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
 
 /**
@@ -14541,9 +14537,10 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
  * on each refresh (`readReviewReservations`): a review's reservation ends when it settles. Measured 2026-10-14: whole
  * 2,048 MiB slots, a review counted as a slot for the controller's whole life, and running workers charged on top of
  * the reading that already held them, read 0 admissions on 57-66% of the minutes a repair was queued. The floor is
- * kept, and a learned fix estimate above 2,048 MiB admits fewer fixes, down to one on a W1-T9679 rung. Without a
- * pressure reading the stand-in counts workers against `hostWorkerBudget`, as before; an unreadable reading admits
- * none; the nothing-to-wait-for tier still admits one while nothing is outstanding. */
+ * kept; a learned estimate above 2,048 MiB admits fewer, and W1-T9679's rungs admit ONE (charged whole) when none fits
+ * and no fix is reserved here: "typical" when no fix tree is live and what is left covers the typical peak
+ * (`readTypical`), else "nothing-live" when that peak exceeds the headroom and no tree is live (unreadable is not idle).
+ * No reading: the stand-in counts `hostWorkerBudget`; an unreadable one admits none; nothing-to-wait-for admits one. */
 export function createSweepFixAdmissionController(input: {
   surface: SweepRepairSurface;
   queueDepth: number;
@@ -14555,7 +14552,6 @@ export function createSweepFixAdmissionController(input: {
   readReviewReservations?: () => number;
   /** W1-T9498: a class's learned estimate. Default: the class default, unmeasured. */
   readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
-  /** W1-T9679: a class's typical (median) peak. Default: the estimate, so the typical rung adds nothing. */
   readTypical?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   /** W1-T9498: the live trees' residency. Default: unread, so every reservation is charged its whole estimate. */
   readResidents?: () => FixAdmissionResidents;
@@ -14593,8 +14589,6 @@ export function createSweepFixAdmissionController(input: {
   };
   let residents: FixAdmissionResidents;
   let residentsRead = false;
-  // W1-T9679: the rungs below judge "live" on the residency reading, read here when the refresh did not; unreadable
-  // residency is never read as nothing live.
   const liveTrees = (): FixAdmissionResidents => {
     if (!residentsRead) {
       residents = readResidents();
@@ -14638,10 +14632,6 @@ export function createSweepFixAdmissionController(input: {
       charge.admissionRung = "nothing-live";
       return;
     }
-    // W1-T9679: a learned estimate above the whole headroom must not wedge an idle fleet. With no fix reserved here,
-    // one is admitted on its typical peak when no fix tree is live and what is left covers it; when even the typical
-    // exceeds the headroom, when no worker tree is live at all. It is then charged its whole estimate, so no second
-    // rides on it; the spawn guard stays the hard stop.
     const live = reservations === 0 ? liveTrees() : undefined;
     if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
@@ -14664,7 +14654,6 @@ export function createSweepFixAdmissionController(input: {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
     reviewReservations = Math.max(0, Math.trunc(input.readReviewReservations?.() ?? input.reviewReservations));
     pressure = input.readPressure?.();
-    // Residency is read only when a reading can use it: something is outstanding to charge.
     residentsRead = pressure !== undefined && pressure.reason === undefined && reviewReservations + reservations > 0;
     residents = residentsRead ? readResidents() : undefined;
     compute();
