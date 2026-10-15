@@ -18,10 +18,6 @@ export type TestSlotParentObservation =
   | { state: "UNKNOWN"; reason: "parent-missing" | "parent-lookup-failed"; errorCode: TestSlotParentErrorCode };
 
 type ParentStat = Pick<Stats, "dev" | "ino" | "uid" | "gid" | "mode" | "isDirectory" | "isSymbolicLink">;
-export interface TestSlotParentDeps {
-  lstat?: (directory: string) => ParentStat;
-  platform?: NodeJS.Platform;
-}
 
 function metadata(st: ParentStat): TestSlotParentMetadata | undefined {
   if (![st.dev, st.ino, st.uid, st.gid, st.mode].every(n => Number.isSafeInteger(n) && n >= 0) || st.mode > 0o177777) return undefined;
@@ -47,14 +43,14 @@ function lookupFailure(error: unknown): TestSlotParentObservation {
  * No contents, enumeration, writes, chmod, deletion, retries or runtime activation occur here.
  * At most two synchronous lstat calls; this bounds work count, not filesystem syscall latency.
  */
-export function observeTestSlotParent(directory: string, deps: TestSlotParentDeps = {}): TestSlotParentObservation {
-  const platform = deps.platform ?? process.platform;
+export function observeTestSlotParent(directory: string,
+  lstat: (directory: string) => ParentStat = lstatSync,
+  platform: NodeJS.Platform = process.platform): TestSlotParentObservation {
   if (platform !== "linux" && platform !== "darwin") return { state: "UNKNOWN", reason: "unsupported-platform" };
   // Do not resolve dot segments through symlinks or let a trailing slash hide a final symlink.
   if (!directory || directory.length > 4096 || directory.includes("\0") || !posix.isAbsolute(directory) ||
     directory.split("/").some(part => part === "." || part === "..")) return { state: "UNKNOWN", reason: "invalid-path" };
   const path = directory.replace(/\/+$/, "") || "/";
-  const lstat = deps.lstat ?? lstatSync;
   try {
     const first = lstat(path), parent = metadata(first);
     if (!parent) return { state: "UNKNOWN", reason: "invalid-metadata" };
