@@ -240,7 +240,8 @@ DIRECTORY_ROOTS=()
 for directory_root in "${DIRECTORY_SCAN_ROOTS[@]}"; do
   [ -d "$directory_root" ] && [ ! -L "$directory_root" ] || continue
   directory_real=$(cd "$directory_root" 2>/dev/null && pwd -P) || continue
-  [ "$directory_real" = "$directory_root" ] || continue
+  # Parent aliases such as macOS /var -> /private/var are legitimate;
+  # final-component symlink roots were refused above. Scan the physical path.
   root_seen=0
   for existing_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
     [ "$existing_root" != "$directory_real" ] || { root_seen=1; break; }

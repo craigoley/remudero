@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { age as fixtureAge, fixture, git, repos, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
@@ -40,7 +40,10 @@ function roots(fx: Fixture) {
     join(fx.home, "Remudero/remudero"), join(fx.home, "rmd-work"), fx.scratch];
 }
 function setup() {
-  const fx = fixture(); probes(fx);
+  const fx = fixture();
+  fx.root = realpathSync(fx.root); fx.home = realpathSync(fx.home);
+  fx.scratch = realpathSync(fx.scratch); fx.lsofList = realpathSync(fx.lsofList);
+  probes(fx);
   for (const path of roots(fx)) mkdirSync(path, { recursive: true });
   return fx;
 }
