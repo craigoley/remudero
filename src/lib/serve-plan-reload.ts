@@ -6,7 +6,7 @@
  * restart emptied every in-memory cache. This reads the plan from COMMITTED OBJECTS at the sha the
  * restart diff was taken against and installs it with one assignment.
  */
-import { execFile } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
@@ -59,15 +59,9 @@ export function unpackPlanBlobs(text: PlanText): Array<{ label: string; text: st
 const PLAN_RELOAD_WORKER_KIND = "remudero-serve-plan-reload" as const;
 
 function gitAsync(repoDir: string, args: string[], stdin?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      "git",
-      ["-C", repoDir, ...args],
-      { encoding: "utf8", maxBuffer: 1 << 26, timeout: PLAN_RELOAD_TIMEOUT_MS },
-      (err, stdout) => (err ? reject(err) : resolve(stdout)),
-    );
-    if (stdin !== undefined) child.stdin?.end(stdin);
-  });
+  const command = execFileLoopBounded("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26, timeout: PLAN_RELOAD_TIMEOUT_MS });
+  if (stdin !== undefined) command.child.stdin?.end(stdin);
+  return command.then(({ stdout }) => stdout);
 }
 
 /** The plan AT `ref`, from committed objects and never the working tree: the blob for the monolith,

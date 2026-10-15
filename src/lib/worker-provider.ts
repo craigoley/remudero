@@ -2,14 +2,14 @@ import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-req
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
-import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
@@ -29,7 +29,7 @@ import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js"
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
-import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { fixedClock, loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
@@ -1555,7 +1555,7 @@ export async function readCodexRuntime(
 
   return new Promise<CodexRuntimeResult>((resolve) => {
     let settled = false;
-    let overrunGraceTimer: NodeJS.Timeout | undefined;
+    let cancelOverrunGrace: (() => void) | undefined;
     let buffer = "";
     let stderr = "";
     let rateLimits: unknown;
@@ -1567,8 +1567,8 @@ export async function readCodexRuntime(
     const finish = (result: CodexRuntimeResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (overrunGraceTimer) clearTimeout(overrunGraceTimer);
+      cancelDeadline();
+      cancelOverrunGrace?.();
       deps.signal?.removeEventListener("abort", onAbort);
       child.kill("SIGKILL");
       resolve(result);
@@ -1582,7 +1582,7 @@ export async function readCodexRuntime(
       return pending;
     };
     const deadlineSetAt = monotonicNow();
-    const timer = setTimeout(() => {
+    const cancelDeadline = loopAvailableDeadline(systemClock, timeoutMs, () => {
       const malformed = malformedStdoutLines > 0 ? `; malformed app-server stdout: ${malformedStdoutLines} line(s)` : "";
       // THE DEADLINE OVERRAN => WE STALLED, NOT THE APP-SERVER. See CODEX_DEADLINE_OVERRUN_MS.
       // The child's reply may be sitting unread in the poll queue right now; this exchange
@@ -1592,11 +1592,11 @@ export async function readCodexRuntime(
         // Timers run before the poll phase that delivers child stdout. Give a reply already
         // waiting in that phase one bounded turn before killing the child. Otherwise every
         // concurrent probe can declare Codex unreadable after the same event-loop stall.
-        overrunGraceTimer = setTimeout(() => finish(codexRuntimeFailure(
+        cancelOverrunGrace = loopAvailableDeadline(systemClock, CODEX_OVERDUE_STDOUT_GRACE_MS, () => finish(codexRuntimeFailure(
           `app-server deadline overran: ${timeoutMs}ms budget fired after ${elapsedMs}ms, so this process was stalled; ` +
             `unfinished after ${CODEX_OVERDUE_STDOUT_GRACE_MS}ms stdout grace: ${unfinishedPhases().join(", ") || "response validation"}`,
           malformedStdoutLines > 0 ? "terminal" : "starved",
-        )), CODEX_OVERDUE_STDOUT_GRACE_MS);
+        )));
         return;
       }
       finish(codexRuntimeFailure(
@@ -1604,7 +1604,7 @@ export async function readCodexRuntime(
         // Protocol noise is not the fleet-observed transient RPC stall and must not be retried.
         malformedStdoutLines > 0 ? "terminal" : "timeout",
       ));
-    }, timeoutMs);
+    });
     if (deps.signal?.aborted) {
       onAbort();
       return;
@@ -3708,7 +3708,6 @@ export function openWeightCheckSandboxArgv(
 }
 
 /** The only production route for `RunCheck`: no fallback can execute an unchecked process. */
-const execFileAsync = promisify(execFileChild);
 
 interface CheckJudge {
   inlineJudgedArgs(): string[];
@@ -3730,7 +3729,7 @@ export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<s
   const cwd = realpathSync(input.cwd);
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+    ({ stdout } = await execFileLoopBounded(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
       cwd,
       env: input.env,
       encoding: "utf8",
@@ -3976,7 +3975,7 @@ export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Re
   const code = "const m = await import(process.argv[1]);" +
     "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
   try {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileLoopBounded(
       process.execPath,
       ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
