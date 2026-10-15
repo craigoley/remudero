@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,3 +76,38 @@ test("absent parent policy preserves the existing default writer preparation", (
     finally { lease.release(); }
   });
 });
+
+test("private parent policy without an explicit directory never creates a test-process parent", () => {
+  fixture((root, options) => {
+    const code = `import {acquireTestSlot} from './src/lib/test-slot.ts'; const l=acquireTestSlot('no implicit parent',${JSON.stringify(options)}); console.log(JSON.stringify({outcome:l.outcome,allowed:l.executionAllowed,note:l.note})); l.release();`;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+      cwd: process.cwd(), encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, TMPDIR: root, TSX_DISABLE_CACHE: "1", NODE_TEST_CONTEXT: "child", RMD_TEST_SLOT_DIR: undefined, RMD_TEST_SLOT_PARENT: undefined },
+    });
+    assert.equal(child.status, 0, child.stderr); const result = JSON.parse(child.stdout);
+    assert.equal(result.outcome, "slot_unavailable"); assert.equal(result.allowed, false);
+    assert.match(result.note, /requires an explicit existing directory/); assert.deepEqual(readdirSync(root), []);
+  });
+});
+
+for (const privateOwner of [false, true]) {
+  test(`private parent policy ${privateOwner ? "inherits a private" : "rejects a legacy"} real ancestor reservation`, () => {
+    fixture((root, options) => {
+      chmodSync(root, 0o1777);
+      const owner = acquireTestSlot("ancestor owner", { dir: root, slots: 1, waitBoundMs: 0,
+        ownershipProtocol: privateOwner ? "private-capacity-v1" : undefined, log: () => {} });
+      try {
+        assert.equal(owner.outcome, "acquired"); assert(owner.childEnvironment);
+        const code = `import {acquireTestSlot} from './src/lib/test-slot.ts'; const l=acquireTestSlot('protected descendant',{dir:${JSON.stringify(root)},slots:1,waitBoundMs:0,ownershipProtocol:'private-capacity-v1',privateParentPolicy:'require-entry-protection'}); console.log(JSON.stringify({outcome:l.outcome,allowed:l.executionAllowed,note:l.note})); l.refresh(); l.release();`;
+        const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], {
+          cwd: process.cwd(), encoding: "utf8", timeout: 10_000,
+          env: { ...process.env, ...owner.childEnvironment, TSX_DISABLE_CACHE: "1", NODE_TEST_CONTEXT: undefined },
+        });
+        assert.equal(child.status, 0, child.stderr); const result = JSON.parse(child.stdout);
+        if (privateOwner) { assert.equal(result.outcome, "acquired"); assert.match(result.note, /inherited live parent/); }
+        else { assert.notEqual(result.outcome, "acquired"); assert.equal(result.allowed, false); assert.match(child.stderr, /private-protocol-required/); }
+        assert.equal(lstatSync(root).mode & 0o7777, 0o1777); owner.refresh();
+      } finally { owner.release(); }
+    });
+  });
+}
