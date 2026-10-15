@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
+import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { openWeightEstimatedTokens, spawnDecisionPoint } from "../src/lib/worker-provider.js";
 import { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } from "../src/lib/workspace-cleanup-contract.js";
 
 // Real common dispatcher, synthetic provider boundaries: no paid calls or live credentials.
@@ -54,6 +55,53 @@ test("provider fallback keeps exactly one cleanup contract and preserves the ori
   const first = withWorkspaceCleanup(prompt);
   assert.equal(first, `${prompt}\n\n${WORKSPACE_CLEANUP_INSTRUCTIONS}`);
   assert.equal(withWorkspaceCleanup(first), first);
+});
+
+test("cleanup instructions preserve the auction seed and assignment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cleanup-auction-"));
+  const task = { prompt: "fix rung 1", model: "sonnet", effort: "medium", taskId: "W1-T9301", runId: "run-W1-T9301-2" };
+  let assignment: WorkerSelectionAssignment | undefined;
+  let received = "";
+  try {
+    const result = await spawnWorker({
+      ...task, cwd: root, permissionMode: "bypassPermissions", settingsFile: join(process.cwd(), "settings/worker.json"),
+      config: { root, claudeBin: "/unused", workerProviders: { enabled: ["codex"] } },
+      providerRouting: {
+        readCodex: async () => ({ provider: "codex", readable: true, model: "gpt-6-sol", effort: "medium", windows: [] }),
+        spawnCodex: async args => { received = args.prompt; return { provider: "codex", text: "done", model: "gpt-6-sol" } as never; },
+        writeStatus: () => {},
+      },
+      onSelectionAssignment: value => { assignment = value; },
+    });
+    assert.equal(result.text, "done");
+    assert.equal(received, withWorkspaceCleanup(task.prompt));
+    assert.equal(assignment?.routing.propensity?.draw?.key.point, spawnDecisionPoint(task));
+    assert.notEqual(spawnDecisionPoint(task), spawnDecisionPoint({ ...task, prompt: received }), "control: the extra instructions would change the routing seed");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cash context estimates include the cleanup prompt actually sent", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-cleanup-cash-estimate-"));
+  const task = "Return one classification.";
+  let received = "";
+  let estimated: number | undefined;
+  try {
+    await spawnWorker({
+      cwd: root, prompt: task, model: "haiku", effort: "medium", mountProvider: "cash",
+      permissionMode: "bypassPermissions", settingsFile: join(process.cwd(), "settings/worker.json"),
+      config: { root, claudeBin: "/unused", workerProviders: { enabled: ["cash"] } },
+      providerRouting: {
+        spawnOpenWeight: async (args, _config, selection) => {
+          received = args.prompt; estimated = selection.estimatedTokens;
+          return { provider: "cash", text: "done", isError: false } as never;
+        },
+        writeStatus: () => {},
+      },
+    });
+    assert.equal(received, withWorkspaceCleanup(task));
+    assert.equal(estimated, openWeightEstimatedTokens(Buffer.byteLength(received, "utf8")));
+    assert.ok(estimated! > openWeightEstimatedTokens(Buffer.byteLength(task, "utf8")), "control: ignoring the added instructions understates the request");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Claude and generated agent instructions require every worker to clean its owned workspace safely", () => {
