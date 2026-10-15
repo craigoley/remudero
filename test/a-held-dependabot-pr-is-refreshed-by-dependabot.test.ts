@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
+  DEPENDABOT_NOREPLY_EMAIL_RE,
   DEPENDABOT_REBASE_COMMAND,
   DEPENDABOT_RECREATE_COMMAND,
   dependabotRefreshCommand,
@@ -243,6 +244,7 @@ test("W1-T9584: a stale held Dependabot head asks Dependabot to rebase once per 
   assert.equal(requested[0].command, DEPENDABOT_REBASE_COMMAND);
   assert.equal(requested[0].cause, "base-red-recovered");
   assert.equal(requested[0].head_sha, HEAD);
+  assert.equal(requested[0].pr_number, 11793);
   f.advance(120_000);
   assert.equal(await f.run("base-red-recovered"), 1);
   assert.equal(f.comments.length, 1, "the same head is never asked twice");
@@ -277,6 +279,8 @@ test("W1-T9584: a stale held Dependabot head asks Dependabot to rebase once per 
   assert.equal(f.comments.at(-1)?.body, DEPENDABOT_RECREATE_COMMAND);
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.refresh_requested").at(-1)?.edited_head, true);
   assert.equal(headCarriesForeignCommit([{ authors: [{ login: "dependabot[bot]" }] }]), false);
+  assert.equal(DEPENDABOT_NOREPLY_EMAIL_RE.test(DEPENDABOT_AUTHOR.email), true);
+  assert.equal(DEPENDABOT_NOREPLY_EMAIL_RE.test(FLEET_AUTHOR.email), false, "the fleet App's noreply address is not Dependabot's");
   assert.equal(dependabotRefreshCommand(undefined), DEPENDABOT_RECREATE_COMMAND, "unread commits fail toward recreate");
   assert.equal(dependabotRefreshCommand([{ authors: [] }]), DEPENDABOT_RECREATE_COMMAND);
 

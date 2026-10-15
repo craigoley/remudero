@@ -18945,7 +18945,7 @@ export async function runSweep(
                 const refresh = dependabotRefreshVerdict(decideBaseRed(pr, mainLatestRun, baseRedHistory),
                   fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache));
                 if (refresh.kind === "wait" && !baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) {
-                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl,
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber,
                     head_sha: pr.headSha, check_name: refresh.check, main_sha: mainLatestRun?.sha ?? "unread", step: BASE_RED_STOOD_DOWN_STEP });
                 }
                 if (isBlockedCi(pr)) extraDisposedFields = { ...extraDisposedFields, dependabot_refresh: refresh.kind === "request" ? refresh.cause : refresh.kind };

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { fixedClock } from "./clock.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
@@ -774,7 +775,7 @@ export function buildDepReviewEscalation(args: {
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
         ...(refresh === undefined ? [] : [
           `Refresh requested: \`${refresh.command}\` was posted for this head at ` +
-            `${new Date(refresh.requestedAtMs).toISOString()} (${refresh.cause}), and Dependabot has not produced a new head.`,
+            `${fixedClock(refresh.requestedAtMs).iso()} (${refresh.cause}), and Dependabot has not produced a new head.`,
         ]),
         `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
         `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
@@ -883,29 +884,14 @@ export function reconcileDepReviewHold(args: {
   args.log("dep-review.hold_escalated", { issue_url: issueUrl, head_sha: args.headSha, red_checks: args.result.redChecks });
 }
 
-// ── W1-T9584 — a held Dependabot head is refreshed by Dependabot ─────────────────────────────
-//
-// OBSERVED 2026-10-14 (#11788, #11791, #11793): the sweep's `dep-review` row outranks every base-red
-// row, so a Dependabot PR that went red on a stale base only ever held. The one refresh it got was
-// the fleet's distance update-branch rung merging main onto the Dependabot branch, after which
-// Dependabot no longer manages it ("edited by someone other than Dependabot"). An operator's
-// `@dependabot rebase` produced a rebased head in two minutes.
-//
-// So a held head whose red is MAIN's is refreshed by asking Dependabot, once per head:
-//   - the evidence is the sweep's own base-red evidence (`decideBaseRed`'s main-health census and
-//     once-per-head stand-down history, and W1-T6405's fixed-on-main probe), never a new rule;
-//   - `@dependabot rebase` on a head of Dependabot's own commits, `@dependabot recreate` on a head
-//     carrying any other author's commit (Dependabot refuses to rebase an edited branch);
-//   - the asked-for head is recorded in the durable dep-review-holds state BEFORE the comment is
-//     posted, so a restart or rotation never asks twice, and a NEW head re-earns judgement;
-//   - an unanswered request is ledgered on every later pass of that head with its age, and the
-//     aged-hold escalation names it. No timeout is added: DEP_REVIEW_HOLD_AGE_MS stays the backstop.
+// ── W1-T9584 — a held Dependabot head whose red is MAIN's is refreshed by asking Dependabot, once per head.
+// The dep-review row outranks every base-red row, and a fleet merge onto a Dependabot branch ends Dependabot's
+// management of it (#11791, #11793 on 2026-10-14). The evidence is decideBaseRed's, never a new rule.
 
 export const DEPENDABOT_REBASE_COMMAND = "@dependabot rebase";
 export const DEPENDABOT_RECREATE_COMMAND = "@dependabot recreate";
 
-/** Why a held head's red is main's: decideBaseRed would refresh it (main went green after a recorded
- *  base-red stand-down, or a probe reproduced it on main), or every failing test file passes at main's tip. */
+/** decideBaseRed would refresh the head, or every failing test file passes at main's tip (W1-T6405). */
 export type DependabotRefreshCause = "base-red-recovered" | "fixed-on-main";
 export const DEPENDABOT_REFRESH_CAUSES: readonly DependabotRefreshCause[] = ["base-red-recovered", "fixed-on-main"];
 
@@ -925,8 +911,7 @@ export type DependabotRefreshVerdict =
   | { kind: "request"; cause: DependabotRefreshCause; check: string }
   | { kind: "own" };
 
-/** Folds the sweep's own base-red evidence (`decideBaseRed`, `fixedOnMainTestFiles`) into a verdict.
- *  Structural inputs, so this module never imports the sweep. */
+/** Folds `decideBaseRed` and `fixedOnMainTestFiles` into a verdict; structural inputs, so no sweep import. */
 export function dependabotRefreshVerdict(
   baseRed: { kind: "own" } | { kind: "wait" | "refresh"; check: string },
   fixedOnMainFiles: readonly string[] | undefined,
@@ -946,7 +931,7 @@ export interface DependabotHeadCommit {
   authors?: Array<{ login?: string; name?: string; email?: string }>;
 }
 
-const DEPENDABOT_NOREPLY_EMAIL_RE = /^(?:\d+\+)?dependabot\[bot\]@users\.noreply\.github\.com$/i;
+export const DEPENDABOT_NOREPLY_EMAIL_RE = /^(?:\d+\+)?dependabot\[bot\]@users\.noreply\.github\.com$/i;
 
 function isDependabotCommitAuthor(author: { login?: string; name?: string; email?: string }): boolean {
   return [author.login, author.name].some((who) => typeof who === "string" && who !== "" && isDependabotAuthor({ login: who })) ||
@@ -987,7 +972,7 @@ export type DependabotRefreshOutcome = "requested" | "unanswered" | "failed" | "
  *  `hold` with red checks: a hold on pending checks has nothing to refresh. */
 export function reconcileDependabotRefresh(args: {
   statePath: string;
-  prUrl: string;
+  prNumber: number;
   headSha: string;
   result: DepReviewResult;
   cause: DependabotRefreshCause | undefined;
@@ -1002,8 +987,8 @@ export function reconcileDependabotRefresh(args: {
   const prior = state.refreshes?.find((r) => r.headSha === args.headSha);
   if (prior !== undefined) {
     args.log("dep-review.refresh_unanswered", {
-      pr_url: args.prUrl, head_sha: args.headSha, command: prior.command, cause: prior.cause, delivered: prior.delivered,
-      requested_at: new Date(prior.requestedAtMs).toISOString(), age_ms: args.nowMs - prior.requestedAtMs,
+      pr_number: args.prNumber, head_sha: args.headSha, command: prior.command, cause: prior.cause, delivered: prior.delivered,
+      requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs,
       red_checks: args.result.redChecks,
     });
     return "unanswered";
@@ -1021,7 +1006,7 @@ export function reconcileDependabotRefresh(args: {
     state.refreshes = state.refreshes.filter((r) => r !== record);
     save();
     args.log("dep-review.refresh_failed", {
-      pr_url: args.prUrl, head_sha: args.headSha, command: record.command, cause: record.cause,
+      pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
       error: String((error as Error)?.message ?? error),
     });
     return "failed";
@@ -1029,7 +1014,7 @@ export function reconcileDependabotRefresh(args: {
   record.delivered = true;
   save();
   args.log("dep-review.refresh_requested", {
-    pr_url: args.prUrl, head_sha: args.headSha, command: record.command, cause: record.cause,
+    pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
     edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
   });
   return "requested";
