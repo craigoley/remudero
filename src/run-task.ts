@@ -13719,7 +13719,7 @@ export async function runFixRung(opts: {
       ...lastCommitRefusalPromptLines(
         (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
         opts.taskId,
-        opts.task.files ?? [],
+        fixDeclaredPaths,
       ),
       ...(censusRefusalIsCurrent()
         ? ["", "PRE-PUSH CENSUS (W1-T4693): hooks/pre-push refused the last round's push with the census rows above; the PR still shows its old head.", CENSUS_PUSH_NEVER_BYPASS]
