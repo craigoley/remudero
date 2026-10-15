@@ -1074,6 +1074,8 @@ done
 # temp subtree after the enclosing root is idle and old enough.
 if [ "$OS_NAME" = "Darwin" ]; then
   RMD_SCAN_ROOTS=("$DEFAULT_TMP" "/private/tmp")
+  # An explicit scope applies to this legacy cache lane too, including fixture runs.
+  [ -z "${REMUDERO_JANITOR_SCAN_ROOTS:-}" ] || RMD_SCAN_ROOTS=("${SCAN_ROOTS[@]}")
   for root in "${RMD_SCAN_ROOTS[@]}"; do
     [ -d "$root" ] || continue
     for d in "$root"/rmd[0-9]*; do

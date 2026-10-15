@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { age as fixtureAge, fixture, git, repos, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
@@ -232,4 +232,24 @@ test("parent aliases resolve once while a symlink scan root stays excluded", () 
     assert.equal(existsSync(old), false, r.stdout); assert.equal(existsSync(keep), true, r.stdout);
     assert.equal((r.stdout.match(/REMOVED-SCRATCH/g) ?? []).length, 1, r.stdout);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+
+test("explicit temp roots also confine the legacy Darwin coverage cache lane", { skip: process.platform !== "darwin" }, () => {
+  const fx = setup();
+  const outside = mkdtempSync("/private/tmp/rmd9-janitor-isolation-");
+  function legacy(root: string) {
+    mkdirSync(join(root, "r/.git"), { recursive: true });
+    writeFileSync(join(root, "r/package.json"), '{"name":"remudero"}');
+    const cache = join(root, "cov/r/tmp/node-coverage-fixture"); mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "coverage-1-2-3.json"), "{}"); age(root, 7); return cache;
+  }
+  try {
+    const kept = legacy(outside); const inside = join(fx.scratch, "rmd9-inside");
+    const removed = legacy(inside);
+    const r = sweep(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(kept), true, r.stdout);
+    assert.equal(existsSync(removed), false, r.stdout);
+    assert.equal(r.stdout.includes(outside), false, "no decision may inspect the excluded fixture root");
+  } finally { rmSync(outside, { recursive: true, force: true }); rmSync(fx.root, { recursive: true, force: true }); }
 });
