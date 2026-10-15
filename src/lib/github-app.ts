@@ -23,7 +23,7 @@
 
 import { readFileSync } from "node:fs";
 import { sign as cryptoSign } from "node:crypto";
-import { clockFromMillisFn, fixedClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, fixedClock, loopAvailableDeadline, type Clock } from "./clock.js";
 
 /** Env var names, not values — mirrors `GH_TOKEN`'s own shape. `GH_APP_PRIVATE_KEY_PATH_ENV`
  *  names a path to the mounted key file, never the key material itself. */
@@ -183,23 +183,11 @@ function describeExchangeCatch(err: unknown, timeoutController: AbortController)
   return "exchange request failed: unknown";
 }
 
-const STALLED_TIMER_LATENESS_MS = EXCHANGE_TIMEOUT_MS / 20;
-
 // Aborts after EXCHANGE_TIMEOUT_MS of LOOP-AVAILABLE time: timers run before I/O when a stalled loop
 // resumes, so on 2026-10-15 a plain timer aborted 17 delivered exchanges while serve and the socket
 // thread minted at once. A timer that fires late (a stall, not a spent budget) re-arms instead.
 function exchangeDeadline(controller: AbortController, clock: Clock, reason: string): () => void {
-  let timer: ReturnType<typeof setTimeout>;
-  const arm = (ms: number): void => {
-    const dueAt = clock.now() + ms;
-    timer = setTimeout(() => {
-      const late = clock.now() - dueAt;
-      if (late >= STALLED_TIMER_LATENESS_MS) arm(Math.min(late, EXCHANGE_TIMEOUT_MS));
-      else controller.abort(new Error(reason));
-    }, ms);
-  };
-  arm(EXCHANGE_TIMEOUT_MS);
-  return () => clearTimeout(timer);
+  return loopAvailableDeadline(clock, EXCHANGE_TIMEOUT_MS, () => controller.abort(new Error(reason)));
 }
 
 /**

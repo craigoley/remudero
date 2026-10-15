@@ -24,7 +24,15 @@
 
 import { normalQuantile } from "./eval-card.js";
 import { seedOf, seededRandom } from "./knowledge-value.js";
-import { proposePromptCandidates, type PromptCandidate } from "./prompt-evolution.js";
+import {
+  paretoFront,
+  proposePromptCandidates,
+  scoreCandidatesOnHeldOut,
+  type FixRungOutcome,
+  type FixTranscript,
+  type HeldOutScoreResult,
+  type PromptCandidate,
+} from "./prompt-evolution.js";
 
 export const EXPERIMENT_PROMOTION_VERSION = "experiment-promotion-v1";
 
@@ -232,29 +240,53 @@ export interface PromptEvolutionPromotionInput {
   expiresAt: string;
   createdAt: string;
   rollback: PromotionRollback;
+  /** Re-runs the fix rung for one candidate against one held-out failure (W1-T9639). Absent means
+   *  nothing was scored, so nothing may be proposed. */
+  runFixRung?: (candidate: PromptCandidate, transcript: FixTranscript) => FixRungOutcome;
 }
 
 export interface PromptEvolutionPromotionOutcome {
   candidates: PromptCandidate[];
   winner: PromptCandidate | undefined;
   promotion: PromotionRecord | null;
+  /** Held-out score of every candidate; empty when nothing was scored. */
+  scores: HeldOutScoreResult[];
+  /** Why no promotion was proposed: unscored | no-candidates | no-held-out-cases | base-not-beaten
+   *  | invalid-promotion. Absent when a promotion was proposed. */
+  reason?: string;
 }
 
 /**
  * The ONLY route a fix-rung prompt candidate may take toward production: propose candidates from
- * recorded fix transcripts via prompt-evolution.ts's reflective, held-out-scored search
- * (`proposePromptCandidates`), then wrap the leading candidate as a `proposed` `PromotionRecord` —
- * validated by the exact same `validatePromotionRecord` every other candidate must pass — so it
- * still has to clear this module's replayPromotion -> approved -> shadow -> canary -> observing ->
- * promoted path with rollback before it is ever exposed. Nothing else in this codebase installs a
- * prompt candidate directly: this function performs no I/O itself and returns `promotion: null`
- * whenever no candidate was proposed or the wrapped record fails validation, rather than a partial
- * or unguarded promotion.
+ * recorded fix transcripts (`proposePromptCandidates`), score every one on the HELD-OUT half through
+ * the caller's `runFixRung` (`scoreCandidatesOnHeldOut`), keep the Pareto front (`paretoFront`), and
+ * wrap the held-out winner as a `proposed` `PromotionRecord` — validated by the exact same
+ * `validatePromotionRecord` every other candidate must pass — so it still has to clear this module's
+ * replayPromotion -> approved -> shadow -> canary -> observing -> promoted path with rollback.
+ *
+ * The unmodified base prompt (`candidates[0]`) is the baseline, never a candidate: only a non-base
+ * front member whose overall held-out pass rate is strictly above the base's can win (ties break by
+ * higher pass rate, then candidate id). With no `runFixRung`, nothing is scored and nothing is
+ * proposed (`reason: "unscored"`). This function performs no I/O itself and returns
+ * `promotion: null` with a `reason` whenever no candidate beat the base or the wrapped record fails
+ * validation, rather than a partial or unguarded promotion.
  */
 export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionInput): PromptEvolutionPromotionOutcome {
   const candidates = proposePromptCandidates(input.basePrompt, input.transcripts, input.seed);
-  const winner = candidates[0];
-  if (!winner) return { candidates, winner: undefined, promotion: null };
+  const runFixRung = input.runFixRung;
+  if (!runFixRung) return { candidates, winner: undefined, promotion: null, scores: [], reason: "unscored" };
+  const base = candidates[0];
+  if (!base) return { candidates, winner: undefined, promotion: null, scores: [], reason: "no-candidates" };
+  const scores = scoreCandidatesOnHeldOut(candidates, input.transcripts, input.seed, runFixRung);
+  const baseScore = scores.find((score) => score.candidateId === base.id);
+  if (!baseScore || baseScore.overall.scored === 0) {
+    return { candidates, winner: undefined, promotion: null, scores, reason: "no-held-out-cases" };
+  }
+  const best = paretoFront(scores)
+    .filter((score) => score.candidateId !== base.id && score.overall.passRate > baseScore.overall.passRate)
+    .sort((a, b) => b.overall.passRate - a.overall.passRate || (a.candidateId < b.candidateId ? -1 : a.candidateId > b.candidateId ? 1 : 0))[0];
+  const winner = best ? candidates.find((candidate) => candidate.id === best.candidateId) : undefined;
+  if (!winner) return { candidates, winner: undefined, promotion: null, scores, reason: "base-not-beaten" };
   const promotion = validatePromotionRecord({
     version: EXPERIMENT_PROMOTION_VERSION,
     promotionId: `prompt-evolution:${input.seed}:${winner.id}`,
@@ -272,7 +304,8 @@ export function proposePromptEvolutionPromotion(input: PromptEvolutionPromotionI
     createdAt: input.createdAt,
     state: "proposed",
   });
-  return { candidates, winner, promotion };
+  if (!promotion) return { candidates, winner, promotion: null, scores, reason: "invalid-promotion" };
+  return { candidates, winner, promotion, scores };
 }
 
 // --- Replay ------------------------------------------------------------------------------------

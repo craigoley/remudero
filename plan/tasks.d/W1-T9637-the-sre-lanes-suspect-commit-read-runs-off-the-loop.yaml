@@ -1,0 +1,59 @@
+- id: W1-T9637
+  title: "THE SRE LANE'S SUSPECT-COMMIT READ HOLDS THE DAEMON LOOP 9-16 S A FILING — mergedPrsSince runs one synchronous git log plus one synchronous git show per merged commit (256-259 execFileSync calls a pass at sre-lane.ts:218), and W1-T9615 moves only the capture, not this read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the suspect-commit read is one awaited child; the suspects it names are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9564 analysis of the 06:16Z full pass (53.4 min reverification to sweep.pass)"
+  plan_refs: [W1-T9564, W1-T9615, W1-T5689, W1-T4385, W1-T6123]
+  files:
+    - src/lib/sre-lane.ts
+    - test/sre-lane.test.ts
+    - test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: stuck PRs and stalls must not happen; a held loop starves every timer-bounded daemon read
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger union, read-only; ~/Remudero-notes/w1-t9564/all.ndjson):
+    - daemon.loop_lag 06:18:54Z (lag 69 s, sync_spawn_ms 112 s): sync_spawn_by_caller names
+      `at run (src/lib/sre-lane.ts:218:47)` with 259 calls, 15.9 s. The 06:58:35Z row (lag 98 s,
+      sync_spawn_ms 150 s) names it with 256 calls, 8.8 s. Summed over the corpus's lag rows: 45.8 s.
+    - sre_lane.filed came every 60-100 s from 06:18 to 07:10Z, so the read runs about once a minute.
+    READ at origin/main 7a9076fd4:
+    - mergedPrsSince (src/lib/sre-lane.ts) defaults `run` to `execFileSync("git", args)`. It runs
+      `git log <range> --first-parent` and then one `git show --name-only` per commit whose subject ends
+      `(#N)`, over the deploy-sha range or the last 24 hours.
+    - runSreLanePass is already async. It calls `deps.mergedPrsSince(...)` synchronously, just before
+      captureFeedback.
+    - W1-T9615 (queued, claimed) moves the captureFeedback landing off the loop. Its design does not
+      name this read, so after it merges the read still holds the loop.
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts has the row `mergedPrsSince: 1`.
+      test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts has the widened exception
+      `src/lib/sre-lane.ts` count 3, which is these three `-C` argvs.
+  design: |
+    1. mergedPrsSince becomes async and runs ONE awaited child:
+       `git -C <repo> log <range> --first-parent --name-only --format=%x00%H%x01%s`, parsed per NUL-led
+       chunk. The default `run` is a promisified execFile with a large maxBuffer. The same commits are
+       named; a subject with no `(#N)` still names no suspect, and an unreadable window still returns [].
+    2. The SreLaneInput seam may return a promise, and runSreLanePass awaits it. Existing `() => []`
+       fakes keep working.
+    3. Delete the `mergedPrsSince` row from SYNC_SPAWN_LOOP_BASELINE. Lower the sre-lane.ts widened
+       hardened-leaf exception to the remaining argv count.
+  acceptance:
+    - claim: "a slow git child in the suspect-commit read does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9637: a slow git child in the suspect-commit read does not delay a concurrent timer" in test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts'
+    - claim: "the suspect-commit read names each merged PR and its files from one git log child, never a git show per commit"
+      proof: 'grep: test("W1-T9637: the suspect-commit read names each merged PR and its files from one git log child" in test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts'
+    - claim: "an SRE pass awaits an asynchronous suspect-commit reader"
+      proof: 'grep: test("W1-T9637: an SRE pass names the suspect PRs an awaited reader returns" in test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts'
+  falsifier: |
+    Put a `git` on PATH that sleeps 0.8 s and then prints one merged commit, and start a 20 ms timer
+    beside a mergedPrsSince call. At origin/main the call is synchronous, so the timer has not fired when
+    the read settles, and the first test fails. Hand runSreLanePass a seam that returns a promise: at
+    origin/main suspectPullRequests receives the promise and throws `mergedPrs.filter is not a function`.

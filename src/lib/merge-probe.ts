@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -8,7 +9,7 @@ import { readLedgerLines } from "./status.js";
 import {
   canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
 } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync, readMemoryHeadroom, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import type { OpenPrView } from "./sweep.js";
 
@@ -35,10 +36,11 @@ export function defaultMergeProbeGit(cwd: string): MergeProbeGit {
   // its review clock can still admit and post reviews while this observation is in flight.
   return (args) => new Promise((resolve) => {
     try {
-      execFile("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-        const code = (error as { code?: unknown } | null)?.code;
-        resolve({ status: error ? (typeof code === "number" ? code : null) : 0, stdout: stdout ?? "" });
-      });
+      execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }).then(
+        ({ stdout }) => resolve({ status: 0, stdout: stdout ?? "" }),
+        (error: { code?: unknown; stdout?: unknown }) =>
+          resolve({ status: typeof error.code === "number" ? error.code : null, stdout: typeof error.stdout === "string" ? error.stdout : "" }),
+      );
     } catch {
       resolve({ status: null, stdout: "" });
     }
@@ -215,6 +217,7 @@ function harnessTypecheck(
     const slot = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion)
       ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
     try {
+      if (slot && !testSlotExecutionAllowed(slot)) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
       return await new Promise<TypecheckRun>((resolveRun) => {
         let output = "";
         let timedOut = false;

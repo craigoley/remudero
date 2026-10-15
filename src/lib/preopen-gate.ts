@@ -19,7 +19,6 @@
  * the worktree; a `coverage/preflight-summary.json` inside the worktree is never read. No sandbox, no run:
  * the gate is unmeasured with the reason, never run with the daemon's environment.
  */
-import { execFile } from "node:child_process";
 import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
@@ -30,6 +29,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -257,12 +257,10 @@ export async function defaultGateContainment(
   } catch (error) {
     return { mode: "unavailable", reason: `the sandbox argv could not be built: ${String((error as Error)?.message ?? error).slice(0, 160)}` };
   }
-  return new Promise((resolve) => {
-    execFile(binary, [...argv, process.execPath, "-e", ""], { cwd: input.cwd, env: input.env, timeout: 10_000, killSignal: "SIGKILL" },
-      (error, _stdout, stderr) => resolve(error
-        ? { mode: "unavailable", reason: `${binary} cannot start here (${sandboxFailureText(Object.assign(error, { stderr }), binary)})` }
-        : { mode: "sandboxed", file: binary, argv }));
-  });
+  return execFileLoopBounded(binary, [...argv, process.execPath, "-e", ""], { cwd: input.cwd, env: input.env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+    (): GateContainment => ({ mode: "sandboxed", file: binary, argv }),
+    (error: unknown): GateContainment => ({ mode: "unavailable", reason: `${binary} cannot start here (${sandboxFailureText(error, binary)})` }),
+  );
 }
 
 export interface RunGateDeadline {
@@ -316,11 +314,11 @@ export function defaultRunGate(
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,
       }, extraArgs)
       : preopenGateCommand(cwd, harnessRmd, extraArgs);
-    return new Promise<GateRun>((resolve) => {
-      execFile(process.execPath, deadlineRunnerArgs(sandbox.file, [...sandbox.argv, file, ...args], deadlineAt, timeoutBin),
-        { cwd, env, timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 },
-        (error, _stdout, stderr) => resolve(classifyGateExit(error, String(stderr))));
-    }).then((exited) => {
+    return execFileLoopBounded(process.execPath, deadlineRunnerArgs(sandbox.file, [...sandbox.argv, file, ...args], deadlineAt, timeoutBin),
+      { cwd, env, encoding: "utf8", timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 }).then(
+      () => classifyGateExit(null, ""),
+      (error: Error & { code?: unknown; killed?: boolean; stderr?: unknown }) => classifyGateExit(error, String(error.stderr ?? "")),
+    ).then((exited) => {
       const summary = exited.exitCode === 1 && exited.error === undefined ? readGateSummary(summaryFile, startedAt, containment.readFile) : undefined;
       return { ...exited, containment: "sandboxed" as const, ...(summary ? { summary } : {}) };
     });

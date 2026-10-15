@@ -1,0 +1,63 @@
+- id: W1-T9641
+  title: "NOTHING FEEDS PROMPT EVOLUTION — no code builds a fix transcript from the ledger, although `fix.commit_refused` rows carry each refusal reason and `fix.done` rows name the worker model; turn the window's refused rounds into transcripts in the fix-lane gardener's daily pass and record the lessons they would teach, in shadow, installing nothing"
+  repo: remudero
+  depends_on: [W1-T9640]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19 span: a pure producer in prompt-evolution and its one caller, the fix-lane gardener. One concern — the first producer of prompt-evolution input, report-only
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T4665, W1-T7421, W1-T5535, W1-T9639, W1-T9640]
+  files: [src/lib/prompt-evolution.ts, src/lib/fix-lane-gardener.ts, test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    THE LOOP HAS NO INPUT:
+      - No file outside src/lib/prompt-evolution.ts names `FixTranscript`, `validateFixTranscript` or
+        `reflectOnTranscripts` (git grep over src and scripts: 0; control: prompt-evolution.ts itself matches).
+      - So W1-T4665's reflective search has never seen a real fix round. With W1-T9639 the bridge can pick a winner,
+        but there is still nothing to pick from.
+    THE INPUT ALREADY EXISTS IN THE LEDGER:
+      - `fix.commit_refused` rows carry `reason`, `round_id`, `strike`, `mode` and `head_sha` (src/run-task.ts:6965
+        and the fix rung's own write at :14121).
+      - `fix.done` rows carry `provider` and `selected_model`: W1-T5535's learner folds them per
+        (provider, selected_model) arm (src/lib/fix-routing-learner.ts:72).
+      - The fix-lane gardener (W1-T7421) already reads both steps (`STEPS`, src/lib/fix-lane-gardener.ts:94) once per
+        UTC day, has the plan's tasks (`fixLaneGardenSpec`, :560) and writes fix-lane-report.md (:622).
+    WHY SHADOW FIRST: scoring a candidate means re-running the fix rung in sealed side worktrees, which spends. The
+    operator should first see what the refused rounds would teach, per model, before any spend is designed. This is the
+    flywheel half the catalogs lack: agent-skills logs rejected changes by hand (evals/skill-impact.md, still empty), and
+    wshobson's improve-agent command calls tools that exist nowhere in its tree.
+  design: |
+    1. prompt-evolution.ts gains a pure `fixTranscriptsFromLedger(records, taskTypeOf)`:
+       - one transcript per `fix.commit_refused` row whose `round_id` has a `fix.done` row naming `selected_model`;
+       - `model` is that `selected_model`, `taskShape` is the task's plan `type` (or "unknown" when the task is
+         absent), `commitRefusedReason` is the row's `reason`, and `excerpt` is the bounded reason plus `fix_outcome`;
+       - a refused round with no model is counted and never pooled, the rule fix-routing-learner.ts already follows.
+    2. The fix-lane gardener's daily pass, per model with transcripts in its window:
+       - takes the train half with `splitHeldOut` and calls `reflectOnTranscripts` on it;
+       - writes one `prompt_evolution.shadow` ledger row: `{ model, transcripts, unmodelled, lessons: [{ reason,
+         lesson, task_shapes, count }] }`, with each lesson bounded;
+       - adds a "Prompt lessons (shadow — nothing installed)" section to fix-lane-report.md.
+    3. Nothing here calls `proposePromptEvolutionPromotion`, runs a worker, spends, or changes any prompt.
+    4. A failed fold records `prompt_evolution.shadow` with `{ error }`, never an empty success, and never stops the
+       gardener's own pass.
+    New tests go in test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts, with `test(` titles
+    exactly as in the proofs below. Drive the gardener spec with injected ledger records, as
+    test/the-fix-lane-gardener-files-one-remedy-per-defect-class.test.ts does.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts"
+    - claim: "refused fix rounds become transcripts keyed by their worker model, and an unmodelled round is counted, never pooled"
+      proof: 'grep: test("W1-T9641: refused fix rounds become transcripts keyed by their worker model" in test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts'
+    - claim: "the daily pass records the lessons its refused rounds would teach and installs none"
+      proof: 'grep: test("W1-T9641: the fix-lane report names the lessons its refused rounds would teach and installs none" in test/the-fix-lane-feeds-its-refused-rounds-to-prompt-evolution.test.ts'
+  falsifier: |
+    Remove the gardener's call. No `prompt_evolution.shadow` row is written and the second test fails.
+  note: |
+    NEXT, NOT IN SCOPE: scoring these candidates on the held-out half needs sealed fix-rung re-runs (paired-trial.ts)
+    behind the operator's spend consent, as skill-eval does. File that once the shadow rows show lessons worth testing.

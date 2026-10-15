@@ -7,9 +7,9 @@
   verify: auto
   risk: high
   band_meaning: span
-  priority: 3
-  status: queued
-  # backlog gardener: band=3 evidence=8ec2e278c0b9b1fd
+  priority: 2
+  status: merged
+  # backlog gardener: band=2 evidence=daf79eb7a1ba6878
   attempts: 0
   files:
     - src/lib/proofExecutor.ts
