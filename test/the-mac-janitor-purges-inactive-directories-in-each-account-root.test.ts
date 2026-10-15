@@ -23,7 +23,7 @@ if [ "$2" = '%m %c' ]; then shift 2; exec '${stat}' -f '%m %m' "$@"; fi
 if [ "$2" = '%Y %Z' ]; then shift 2; exec '${stat}' -c '%Y %Y' "$@"; fi
 exec '${stat}' "$@"
 `, { mode: 0o755 });
-  writeFileSync(join(fx.root, "bin/ps"), '#!/bin/bash\n[ "${FAIL_PS:-0}" != 1 ] || exit 2\nprintf "%s\\n" "${LIVE_PATH:-}"\n', { mode: 0o755 });
+  writeFileSync(join(fx.root, "bin/ps"), '#!/bin/bash\n[ "${FAIL_PS:-0}" != 1 ] || exit 2\nprintf "1 %s\\n" "${LIVE_PATH:-/bin/sh}"\n', { mode: 0o755 });
   writeFileSync(join(fx.root, "bin/lsof"), `#!/bin/bash
 [ "\${FAIL_LSOF:-0}" != 1 ] || exit 2
 case " $* " in

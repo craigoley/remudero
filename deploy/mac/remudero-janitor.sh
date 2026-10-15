@@ -274,7 +274,18 @@ is_scratch_checkout() {
 
 # A checkout is LIVE if any running process names its path on the command line.
 # This is what keeps an in-flight ci-parity/vitest run from losing its deps.
-PSOUT=$(ps -axww -o command= 2>/dev/null)
+PSOUT=$(ps -axww -o pid=,command= 2>/dev/null)
+# Bash 3.2 has sparse indexed arrays. Snapshot PID->command once, rather than
+# running ps or reparsing the entire process list for every ancestor cwd.
+index_process_commands() {
+  local pid command
+  PS_COMMANDS=()
+  while read -r pid command; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    PS_COMMANDS[pid]="$command"
+  done <<< "$PSOUT"
+}
+index_process_commands
 # Pure-bash substring match on purpose: a `printf | grep -q` pipeline returns
 # 141 under `set -o pipefail` (grep exits on first match, printf takes SIGPIPE),
 # which silently inverts this guard to always-false. No pipe, no subshell.
@@ -292,20 +303,22 @@ if [ "$HAS_LSOF" = "1" ]; then
   CWD_STATUS=$?
 fi
 is_cwd_in() {
-  local root="$1" line path
+  local root="$1" line path cwd_pid="" relative command
   [ "$HAS_LSOF" = "1" ] && [ "$CWD_STATUS" -le 1 ] || return 2
   while IFS= read -r line; do
-    case "$line" in n*)
+    case "$line" in
+      p*) cwd_pid=${line#p} ;;
+      n*)
       path="${line#n}"
       case "$path" in "$root"|"$root"/*) return 0 ;; esac
-      # A process can sit in the scratch parent while a nested checkout lives
-      # below it (for example, <run>/repo). Protect that artifact too. Ignore
-      # only broad launcher roots whose cwd does not identify a particular job.
+      # A launcher cwd does not make every idle sibling active. Preserve a
+      # child explicitly named by that process's relative command instead.
       case "$root" in "$path"/*)
-        case "$path" in
-          /|"$USER_HOME"|"$USER_HOME/Remudero"|"$USER_HOME/Remudero/remudero"|"$USER_HOME/rmd-work"|"$DEFAULT_TMP"|/tmp|/private/tmp) ;;
-          *) return 0 ;;
-        esac
+        relative=${root#"${path%/}"/}
+        case "$cwd_pid" in ''|*[!0-9]*) return 2 ;; esac
+        [ "${PS_COMMANDS[cwd_pid]+present}" = present ] || return 2
+        command=${PS_COMMANDS[cwd_pid]}
+        case "$command" in *"$relative"*) return 0 ;; esac
         ;;
       esac
       ;;
@@ -407,7 +420,8 @@ removed_link_paths=(); removed_link_targets=()
 
 refresh_process_snapshot() {
   local rc
-  PSOUT=$(ps -axww -o command= 2>/dev/null) || return 1
+  PSOUT=$(ps -axww -o pid=,command= 2>/dev/null) || return 1
+  index_process_commands
   [ "$HAS_LSOF" = "1" ] || return 1
   CWDOUT=$(lsof -nP -a -d cwd -Fn 2>/dev/null)
   rc=$?
@@ -416,7 +430,7 @@ refresh_process_snapshot() {
 }
 
 clean_artifact() {
-  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope
+  local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
   found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
@@ -426,6 +440,7 @@ clean_artifact() {
   parent=$(dirname "$artifact")
   while [ "$parent" != / ]; do
     if [ -e "$parent/.git" ]; then
+      activity_root="$parent"
       status=$(rmd_retirement_git "$parent" status --porcelain --untracked-files=all 2>/dev/null) || {
         log "SKIP git-unverified $artifact"; return;
       }
@@ -441,7 +456,7 @@ clean_artifact() {
     skipped_owner=$((skipped_owner+1)); log "SKIP owner=${owner:-unknown} $artifact"; return 0
   fi
   is_live "$artifact" && { skipped_live=$((skipped_live+1)); log "SKIP live      $artifact"; return 0; }
-  is_cwd_in "$artifact"
+  is_cwd_in "$activity_root"
   cwd_rc=$?
   if [ "$cwd_rc" -eq 0 ]; then
     skipped_cwd=$((skipped_cwd+1)); log "SKIP cwd       $artifact"; return 0
@@ -467,7 +482,7 @@ clean_artifact() {
   if [ "$APPLY" = "1" ]; then
     refresh_process_snapshot || { log "SKIP unverified process snapshot $artifact"; return; }
     is_live "$artifact" && { skipped_live=$((skipped_live+1)); log "SKIP live      $artifact"; return 0; }
-    is_cwd_in "$artifact"
+    is_cwd_in "$activity_root"
     cwd_rc=$?
     if [ "$cwd_rc" -eq 0 ]; then
       skipped_cwd=$((skipped_cwd+1)); log "SKIP cwd       $artifact"; return 0
@@ -1141,6 +1156,29 @@ for parent in "$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/r
     log "SKIP unknown-directory $child (no independently verifiable Git state; data retained)"
   done
 done
+# Include generated caches under historical job TMPDIRs on every scheduled
+# pass. The helper's cache-only mode never retires source or runtime folders.
+tsx_helper="$SCRIPT_DIR/tmp-reclaim.sh"
+if [ -f "$tsx_helper" ]; then
+  TSX_ROOTS_SEEN=()
+  for tsx_root in "${SCAN_ROOTS[@]}" "$USER_HOME/Remudero" "$USER_HOME/rmd-work"; do
+    [ -d "$tsx_root" ] && [ ! -L "$tsx_root" ] || continue
+    tsx_real=$(cd "$tsx_root" 2>/dev/null && pwd -P) || continue
+    tsx_seen=0
+    for seen in "${TSX_ROOTS_SEEN[@]+"${TSX_ROOTS_SEEN[@]}"}"; do [ "$seen" = "$tsx_real" ] && tsx_seen=1 && break; done
+    [ "$tsx_seen" = 0 ] || continue
+    TSX_ROOTS_SEEN+=("$tsx_real")
+    tsx_mode=--dry-run; [ "$APPLY" = 1 ] && tsx_mode=--apply
+    tsx_key=$(printf '%s' "$tsx_real" | cksum | awk '{print $1}')
+    tsx_report="$USER_HOME/.local/state/remudero/tsx-$tsx_key-kept.txt"
+    tsx_output=$(RMD_RECLAIM_ROOT="$tsx_real" RMD_RECLAIM_REPORT="$tsx_report" TMPDIR="$tsx_real/" bash "$tsx_helper" --tsx-only "$tsx_mode" 2>&1)
+    tsx_status=$?
+    while IFS= read -r tsx_line; do [ -z "$tsx_line" ] || log "generated-cache: $tsx_line"; done <<< "$tsx_output"
+    [ "$tsx_status" = 0 ] || log "FAILED generated-cache-sweep $tsx_real (exit=$tsx_status)"
+  done
+else
+  log "SKIP generated-cache-sweep (maintained helper missing: $tsx_helper)"
+fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; published Git workspaces only)"
 

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { age, fixture, git, repos, run, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
 const GUARD = join(process.cwd(), "deploy/workspace-retirement-guard.sh");
@@ -24,7 +24,7 @@ function mac(fx: Fixture, apply = true, extra: Record<string, string> = {}) {
 function macProbes(fx: Fixture) {
   const nativeStat = execFileSync("sh", ["-c", "command -v stat"], { encoding: "utf8" }).trim();
   writeFileSync(join(fx.root, "bin/stat"), `#!/bin/bash\nif [ "$2" = '%m %c' ]; then shift 2; exec '${nativeStat}' -f '%m %m' "$@"; fi\nif [ "$2" = '%Y %Z' ]; then shift 2; exec '${nativeStat}' -c '%Y %Y' "$@"; fi\nexec '${nativeStat}' "$@"\n`, { mode: 0o755 });
-  writeFileSync(join(fx.root, "bin/ps"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(fx.root, "bin/ps"), "#!/bin/bash\nprintf '1 /bin/sh\\n'\n", { mode: 0o755 });
   writeFileSync(join(fx.root, "bin/lsof"), `#!/bin/bash
 if [ "\${FAKE_LSOF_FAIL:-0}" = 1 ]; then exit 2; fi
 case " $* " in
@@ -258,8 +258,54 @@ test("Mac installer installs both safety helpers and preserves the previous scri
     const dest = join(fx.root, "install"); mkdirSync(dest); writeFileSync(join(dest, "remudero-janitor.sh"), "old script");
     const r = spawnSync("bash", ["deploy/mac/install-janitor.sh"], { encoding: "utf8", env: { ...process.env, REMUDERO_JANITOR_INSTALL_DIR: dest } });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh"]) assert.equal(existsSync(join(dest, name)), true);
+    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh", "tmp-reclaim.sh"]) assert.equal(existsSync(join(dest, name)), true);
     assert.equal(readFileSync(join(dest, "remudero-janitor.sh"), "utf8"), readFileSync(MAC, "utf8"));
+    assert.equal(readFileSync(join(dest, "tmp-reclaim.sh"), "utf8"), readFileSync("deploy/mac/tmp-reclaim.sh", "utf8"));
     assert.match(r.stdout, /schedules unchanged/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("a parent launcher keeps its referenced child active while inactive published siblings retire", () => {
+  const fx = fixture();
+  try {
+    macProbes(fx); const { main } = repos(fx);
+    const parent = join(fx.home, "Remudero", "jobs"); mkdirSync(parent, { recursive: true });
+    const names = ["idle-published", "relative-worker", "cwd-worker", "unpublished", "dirty", "cash-reservations", "young"];
+    const paths = names.map(name => { const p = join(parent, name); git(main, "worktree", "add", "-b", name, p, "main"); return p; });
+    git(paths[3]!, "commit", "--allow-empty", "-m", "unpublished changes");
+    writeFileSync(join(paths[4]!, "work.txt"), "uncommitted");
+    const cash = join(paths[5]!, "state", "openweight-allowance.json"); mkdirSync(dirname(cash), { recursive: true });
+    writeFileSync(cash, '{"reservations":{"uncertain":"held"}}\n');
+    const exclude = join(main, ".git/info/exclude"); writeFileSync(exclude, "state/\n");
+    for (const p of paths) age(p, 8); age(paths[6]!, 5);
+    writeFileSync(fx.lsofList, `${realpathSync(parent)}\n${realpathSync(paths[2]!)}\n`);
+    writeFileSync(join(fx.root, "bin/ps"), "#!/bin/bash\nprintf '1 node relative-worker/entry.mjs\\n'\n", { mode: 0o755 });
+    const r = mac(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(existsSync(paths[0]!), false, r.stdout);
+    for (const p of paths.slice(1)) assert.ok(existsSync(p), p + r.stdout);
+    assert.equal(readFileSync(cash, "utf8"), '{"reservations":{"uncertain":"held"}}\n');
+    assert.match(r.stdout, /not-proven-published/); assert.match(r.stdout, /ignored-or-unverified/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("the scheduled Mac janitor invokes nested-cache cleanup from its installed helper", () => {
+  const fx = fixture();
+  try {
+    macProbes(fx);
+    const job = join(fx.scratch, "historical-ci"); const cache = join(job, "tsx-501");
+    mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
+    const file = join(cache, `17920-${"a".repeat(40)}`); writeFileSync(file, "compiled cache"); age(job, 8);
+    const dest = join(fx.root, "installed");
+    const install = spawnSync("bash", ["deploy/mac/install-janitor.sh"], { encoding: "utf8", env: { ...process.env, REMUDERO_JANITOR_INSTALL_DIR: dest } });
+    assert.equal(install.status, 0, install.stderr);
+    const r = spawnSync("bash", [join(dest, "remudero-janitor.sh"), "--apply"], { encoding: "utf8", env: {
+      ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`,
+      REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.scratch,
+      REMUDERO_JANITOR_LOG: join(fx.root, "mac.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "mac.lock"),
+      RMD_RECLAIM_TSX_FIND: join(fx.root, "bin/find-age"),
+    } });
+    assert.equal(r.status, 0, r.stderr + r.stdout); assert.equal(existsSync(file), false, r.stdout);
+    assert.ok(existsSync(join(job, "fixture", ".git")));
+    assert.match(r.stdout, /generated-cache: pruned tsx cache files=1/);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
