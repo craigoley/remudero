@@ -143,7 +143,11 @@ test("every claude worker spawn denies the account connector tools even beside i
   // spelling would name the server "claude_ai_*" and deny nothing.
   for (const entry of ACCOUNT_CONNECTOR_DENY) assert.match(entry, /^mcp__claude_ai_[A-Za-z0-9_-]+$/);
   const { argv } = await cliLaunch(caller.options);
-  const denied = argv[argv.indexOf("--disallowedTools") + 1]!.split(",");
+  // The installed SDK 0.3.296 serializes this option as one flag=value argument.
+  // Require exactly one complete deny list; a missing flag must not read argv[0].
+  const denyArgs = argv.filter(arg => arg.startsWith("--disallowedTools="));
+  assert.equal(denyArgs.length, 1, "the SDK must send exactly one account-connector deny list");
+  const denied = denyArgs[0]!.slice("--disallowedTools=".length).split(",");
   assert.deepEqual(denied, ["WebSearch", "WebFetch", ...ACCOUNT_CONNECTOR_DENY]);
 });
 
