@@ -28557,7 +28557,8 @@ export async function nextTaskIdCommand(
           /* no readable config ⇒ no row, never a crash in a read-only verb */
         }
       };
-      // W1-T9683: N walks from the ONE mint above, each starting above the last id held.
+      // W1-T9683: N walks from the ONE mint above, each starting above the last id held. Unlike
+      // reserveTaskIdBlockRemote, a failure keeps the ids already held, so only those are printed.
       const contestedAt: number[] = [];
       const { held, error } = reserveTaskIdsKeepingHeld(mint.n, countArg.count, (from) => {
         const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver));

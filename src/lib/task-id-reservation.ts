@@ -1059,8 +1059,6 @@ export function reserveTaskIdBlockRemote(
   };
 }
 
-/** W1-T9683: how many ids one `rmd next-task-id` call reserves. Absent is 1 and today's output;
- *  `--count` is refused beside every flag that does not reserve on this repo's origin. */
 export function parseTaskIdCount(rest: readonly string[]): { count: number; explicit: boolean } | { error: string } {
   if (!rest.includes("--count")) return { count: 1, explicit: false };
   const raw = rest[rest.indexOf("--count") + 1];
@@ -1071,11 +1069,6 @@ export function parseTaskIdCount(rest: readonly string[]): { count: number; expl
   return { count: Number(raw), explicit: true };
 }
 
-/**
- * W1-T9683: `count` ids, each walk starting above the last id held, so contention advances exactly
- * as it does for one. Unlike {@link reserveTaskIdBlockRemote}, a failure KEEPS what is already held
- * and hands back the error, so a caller prints exactly the ids it holds and then refuses.
- */
 export function reserveTaskIdsKeepingHeld(
   startId: number,
   count: number,
@@ -1092,7 +1085,6 @@ export function reserveTaskIdsKeepingHeld(
   return { held };
 }
 
-/** The `--count` summary line, plus the refusal head a short block adds; never names an unheld id. */
 export function describeHeldTaskIds(held: readonly { taskId: string }[], count: number): { held: string; partial?: string } {
   const line = `HELD ${held.length} of ${count}: ${held.map((h) => h.taskId).join(" ") || "(none)"}`;
   if (held.length >= count || held.length === 0) return { held: line };
