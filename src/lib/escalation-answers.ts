@@ -49,14 +49,13 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { appendQuestionAnswer } from "./worker.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
@@ -352,8 +351,6 @@ function recordedQuestionStoreOrigins(root: string): Set<string> {
   return origins;
 }
 
-const execFileAsync = promisify(execFile);
-
 /** W1-T8511: the feedback record a `TRIAGE-<feedback id>` escalation grills — any id shape (an `fb-*` capture or a
  *  gardener's `evidence-coverage-*` record), never a path: the id must be one plain file-name segment. */
 export function grilledFeedbackId(taskId: string): string | undefined {
@@ -398,10 +395,10 @@ async function applyGrilledFeedbackAnswer(
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
     if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
     // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
-    const mainBlob = await execFileAsync("git", ["-C", feedback.root, "show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`],
-      { encoding: "utf8" }).then((r) => r.stdout, (error: unknown) => error as Error);
+    const mainBlob = await hostWorktreeGitAsync(feedback.root, ["show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`])
+      .catch((error: unknown) => ({ unreadable: error }));
     if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
-      if (mainBlob instanceof Error) throw mainBlob;
+      if (typeof mainBlob !== "string") throw mainBlob.unreadable;
       return mainBlob;
     })) return undefined;
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
