@@ -16,7 +16,7 @@ import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import type { EscalationAnswerGateway } from "../src/lib/escalation-answers.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepHook } from "../src/run-task.js";
+import { buildSweepHook } from "./helpers/run-task-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
