@@ -14363,7 +14363,7 @@ export async function runFixRung(opts: {
         continue;
       }
       if (mergeCommitRefused || markerCommitRefused) continue;
-      const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
+      const refusedAtHead = fixRoundTally([...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows], opts.taskId, priorHeadSha).refusals.length;
       // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
       // repaired; re-read the PR once at this head rather than stand down for a person.
       if (shouldSelfHealNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
