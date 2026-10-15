@@ -25,6 +25,11 @@
  * released with the update (`storeIndex`). The rows it keeps in memory are only those {@link BOARD_ROW_RETENTION}
  * holds for the now view's readers outside the derive: per key, never per row ever ingested (board:core held 663,486
  * entries on 2026-10-14). `keepEveryRow` keeps the old behaviour as an equality test's reference arm.
+ *
+ * WHAT IT DOES NOT RE-READ (W1-T9604): the whole-ledger step buckets and plan-only sets an index answers. Each is read
+ * in full once and then extended from the rows the ingest reads anyway, so a build reads no step body it read before.
+ * A row of a cached step deleted under it (an index-only count) or a store behind it drops the cache, and the oracle
+ * audits it against a full read every pass; its `read_model.board_oracle` row carries what it read and reused.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -83,12 +88,33 @@ export const BOARD_ROW_UNREAD_FIELDS: ReadonlySet<string> = new Set([
 const LATEST_TS_META = "board.latest_ts_ms";
 /** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
 export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
-
 export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(task_id TEXT PRIMARY KEY,
   stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS board_oracle_run(at_ms INTEGER NOT NULL, outcome TEXT NOT NULL, mismatches INTEGER NOT NULL,
   healed INTEGER NOT NULL, issue_url TEXT);
   CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;`;
+
+/** W1-T9604: what the step cache read and reused since the last `read_model.board_oracle` row, which carries it. */
+export interface BoardStepReads {
+  /** Indexes built over the store, each asking its steps and plan-only sets on demand. */
+  indexes: number;
+  /** Step buckets and plan-only sets read in full from the fact store: the reads, their rows and body bytes. */
+  fullReads: number;
+  fullRows: number;
+  fullBytes: number;
+  /** Rows the ingest had already read that extended a cached bucket or set: no store read of their own. */
+  extendedRows: number;
+  extendedBytes: number;
+  /** Rows an index was handed from the cache without a store read, and their body bytes. */
+  reusedRows: number;
+  reusedBytes: number;
+  /** Times the cache was dropped, by why: a row of a cached step deleted under it, a store behind it, or the oracle's
+   *  audit disagreeing. */
+  resets: { deleted: number; behind: number; audit: number };
+  /** What the cache holds now: its steps; its buckets' rows and body bytes plus the plan-only sets' entries and their
+   *  string lengths. */
+  held: { steps: number; rows: number; bytes: number };
+}
 
 export type Row = Record<string, unknown>;
 
@@ -564,6 +590,109 @@ export function boardSweepRepeat(row: object): boolean | undefined {
   return SWEEP_REPEATS.get(row);
 }
 
+/** W1-T9604: one fact row of a cached step, with the keys `stepFacts` orders by and its body's length. */
+interface StepRow {
+  readonly row: Row;
+  readonly tsMs: number;
+  readonly seq: number;
+  readonly bytes: number;
+  /** The `step` column: a plan-only row is filed by it. */
+  readonly step: string;
+}
+
+/** W1-T9604: a cached step's rows in `stepFacts` order, never mutated once built (a later extension builds a new one). */
+interface StepBucket {
+  readonly rows: readonly Row[];
+  readonly tsMs: readonly number[];
+  readonly seqs: readonly number[];
+  readonly bytes: number;
+}
+
+/** W1-T9604: the two plan-only sets, as `storeIndex`'s full read builds them; never mutated once handed out. */
+interface PlanOnlySets {
+  readonly filing: Set<string>;
+  readonly reviewed: Map<string, Set<string>>;
+  readonly rows: number;
+  readonly bytes: number;
+}
+
+const PLAN_ONLY_STEPS: ReadonlySet<string> = new Set(["pr.opened", "review.posted", PLAN_ONLY_REVIEW_MARKER_STEP]);
+
+/** W1-T9604: a set of fact rows as count, seq sum and ts_ms sum (each ts_ms reduced, so a sum stays an exact double). */
+interface StepDigest {
+  readonly n: number;
+  readonly s: number;
+  readonly t: number;
+}
+const DIGEST_MOD = 1_000_003;
+const digestWith = (d: StepDigest, seq: number, tsMs: number): StepDigest => ({ n: d.n + 1, s: d.s + seq, t: d.t + (tsMs % DIGEST_MOD) });
+const sameDigest = (a: StepDigest, b: StepDigest): boolean => a.n === b.n && a.s === b.s && a.t === b.t;
+
+/** The digest of a cached bucket and the rows queued to extend it: the rows the store holds for it up to `lastSeq`. */
+function bucketDigest(bucket: StepBucket, more: readonly StepRow[] = []): StepDigest {
+  let [n, s, t] = [bucket.seqs.length + more.length, 0, 0];
+  for (let at = 0; at < bucket.seqs.length; at++) [s, t] = [s + bucket.seqs[at]!, t + (bucket.tsMs[at]! % DIGEST_MOD)];
+  for (const m of more) [s, t] = [s + m.seq, t + (m.tsMs % DIGEST_MOD)];
+  return { n, s, t };
+}
+
+function noStepReads(): BoardStepReads {
+  return {
+    indexes: 0, fullReads: 0, fullRows: 0, fullBytes: 0, extendedRows: 0, extendedBytes: 0, reusedRows: 0, reusedBytes: 0,
+    resets: { deleted: 0, behind: 0, audit: 0 }, held: { steps: 0, rows: 0, bytes: 0 },
+  };
+}
+
+/** `bucket` with `more` merged in by (ts_ms, seq), as one `stepFacts` read returns them: a late row can sort before
+ *  rows already held, so the rows are merged, never appended. A new bucket; `bucket` is left as it was. */
+function extendBucket(bucket: StepBucket, more: StepRow[]): StepBucket {
+  const after = (a: { tsMs: number; seq: number }, tsMs: number, seq: number): boolean => a.tsMs > tsMs || (a.tsMs === tsMs && a.seq > seq);
+  more.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+  const rows: Row[] = [];
+  const tsMs: number[] = [];
+  const seqs: number[] = [];
+  let at = 0;
+  for (let i = 0; i < bucket.rows.length; i++) {
+    while (at < more.length && !after(more[at]!, bucket.tsMs[i]!, bucket.seqs[i]!)) {
+      const m = more[at++]!;
+      rows.push(m.row);
+      tsMs.push(m.tsMs);
+      seqs.push(m.seq);
+    }
+    rows.push(bucket.rows[i]!);
+    tsMs.push(bucket.tsMs[i]!);
+    seqs.push(bucket.seqs[i]!);
+  }
+  for (; at < more.length; at++) {
+    rows.push(more[at]!.row);
+    tsMs.push(more[at]!.tsMs);
+    seqs.push(more[at]!.seq);
+  }
+  return { rows, tsMs, seqs, bytes: more.reduce((sum, m) => sum + m.bytes, bucket.bytes) };
+}
+
+/** `sets` with the plan-only rows of `more` added: new sets, so an index holding the old ones keeps them as they were. */
+function extendPlanOnly(sets: PlanOnlySets, more: readonly StepRow[]): PlanOnlySets {
+  const filing = new Set(sets.filing);
+  const reviewed = new Map(sets.reviewed);
+  const copied = new Set<string>();
+  let bytes = sets.bytes;
+  for (const m of more) {
+    bytes += m.bytes;
+    const url = m.row.pr_url;
+    if (typeof url !== "string") continue;
+    if (m.step === "pr.opened") filing.add(url);
+    else if (typeof m.row.head_sha === "string") {
+      const held = reviewed.get(url);
+      if (held && !copied.has(url)) reviewed.set(url, new Set(held).add(m.row.head_sha));
+      else if (held) held.add(m.row.head_sha);
+      else reviewed.set(url, new Set([m.row.head_sha]));
+      copied.add(url);
+    }
+  }
+  return { filing, reviewed, rows: sets.rows + more.length, bytes };
+}
+
 export function createBoardProjection(opts: BoardProjectionOptions): BoardProjection {
   const { db, lease } = opts;
   const clock = opts.clock ?? systemClock;
@@ -596,6 +725,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     seqFact: db.prepare("SELECT seq, ts_ms, step, body FROM fact WHERE seq = ?"),
     stepFacts: db.prepare("SELECT seq, ts_ms, body FROM fact WHERE step = ? AND seq <= ? ORDER BY ts_ms, seq"),
     planOnlyFacts: db.prepare(`SELECT step, body FROM fact WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ? AND json_type(body, '$.plan_only') = 'true'`),
+    maxSeq: db.prepare("SELECT MAX(seq) AS seq FROM fact"),
+    // Index-only (fact_step holds step, ts_ms and the rowid): what a deleted row would move, read without a body.
+    stepDigest: db.prepare(`SELECT count(*) AS n, sum(seq) AS s, sum(ts_ms % ${DIGEST_MOD}) AS t FROM fact WHERE step = ? AND seq <= ?`),
+    planOnlyDigest: db.prepare(`SELECT count(*) AS n, sum(seq) AS s, sum(ts_ms % ${DIGEST_MOD}) AS t FROM fact
+      WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ?`),
     runNewestFact: db.prepare(`SELECT MAX(ts_ms) AS ms FROM fact WHERE task_id = ? AND run_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       AND json_type(body, '$.task_id') = 'text'`),
   };
@@ -661,6 +795,19 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let readerNowMs: number | undefined;
   const retainFrom = (): number => readerNowMs ?? clock.now();
   const onIngest = opts.onIngest;
+  /**
+   * W1-T9604: each step an index has asked for, its rows as the fact store holds them up to `lastSeq`, in `stepFacts`
+   * order (ts_ms, then seq), with each row's ts_ms and seq. A bucket is read in full once; afterwards the ingest, which
+   * reads every new fact row anyway, queues the rows of a cached step in `stepPending`, and the next index to ask merges
+   * them into a NEW array: an array once handed to an index never changes. The plan-only sets are kept the same way.
+   */
+  const stepCache = new Map<string, StepBucket>();
+  const stepPending = new Map<string, StepRow[]>();
+  let planOnlyCache: PlanOnlySets | undefined;
+  let planOnlyPending: StepRow[] = [];
+  /** Every row of the three plan-only steps (plan-only or not) the cache's sets were read over, as the store digests it. */
+  let planOnlyDigest: StepDigest | undefined;
+  let stepReads = noStepReads();
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
@@ -942,6 +1089,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       noteParsedTs(row.ts);
       latestTsMs = Math.max(latestTsMs, tsMs);
       if (onIngest) ingested.push(row);
+      // W1-T9604: a row of a cached step, or a plan-only row, extends the cache from this read; no index reads it again.
+      const step = String(r.step);
+      if (stepCache.has(step)) (stepPending.get(step) ?? stepPending.set(step, []).get(step)!).push({ row, tsMs, seq, bytes: body.length, step });
+      if (planOnlyCache && PLAN_ONLY_STEPS.has(step)) {
+        planOnlyDigest = digestWith(planOnlyDigest!, seq, tsMs);
+        if (row.plan_only === true) planOnlyPending.push({ row, tsMs, seq, bytes: body.length, step });
+      }
       const ord: Ord = [tsMs, ++ins];
       const repeat = keepAll ? false : sweepRepeatOf(row, ord);
       if (offer(row, ord, { standIn: false, repeat }) > 0) {
@@ -998,21 +1152,179 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { fresh, caughtUp };
   }
 
+  const parse = (body: unknown): Row => withoutUnreadFields(JSON.parse(String(body)) as Row);
+
+  /** `step`'s rows up to `upTo`, read in full from the fact store. */
+  function readStep(step: string, upTo: number): StepBucket {
+    const rows: Row[] = [];
+    const tsMs: number[] = [];
+    const seqs: number[] = [];
+    let bytes = 0;
+    for (const r of sql.stepFacts.all(step, upTo)) {
+      const body = String(r.body);
+      rows.push(parse(body));
+      tsMs.push(Number(r.ts_ms));
+      seqs.push(Number(r.seq));
+      bytes += body.length;
+    }
+    return { rows, tsMs, seqs, bytes };
+  }
+
+  /** The plan-only filing PRs and reviewed heads up to `upTo`, read in full from the fact store. */
+  function readPlanOnly(upTo: number): PlanOnlySets {
+    const filing = new Set<string>();
+    const reviewed = new Map<string, Set<string>>();
+    let [rows, bytes] = [0, 0];
+    for (const r of sql.planOnlyFacts.iterate(PLAN_ONLY_REVIEW_MARKER_STEP, upTo)) {
+      const body = String(r.body);
+      [rows, bytes] = [rows + 1, bytes + body.length];
+      const row = JSON.parse(body) as Row;
+      if (typeof row.pr_url !== "string") continue;
+      if (r.step === "pr.opened") filing.add(row.pr_url);
+      else if (typeof row.head_sha === "string") reviewed.set(row.pr_url, (reviewed.get(row.pr_url) ?? new Set()).add(row.head_sha));
+    }
+    return { filing, reviewed, rows, bytes };
+  }
+
+  function dropStepCache(): void {
+    stepCache.clear();
+    stepPending.clear();
+    planOnlyCache = undefined;
+    planOnlyPending = [];
+    planOnlyDigest = undefined;
+  }
+
+  /** The store's digest of `step`'s rows up to `lastSeq`, or of every row of the plan-only steps. */
+  const storeDigest = (step: string | undefined): StepDigest => {
+    const r = step === undefined ? sql.planOnlyDigest.get(PLAN_ONLY_REVIEW_MARKER_STEP, lastSeq) : sql.stepDigest.get(step, lastSeq);
+    return { n: Number(r?.n ?? 0), s: Number(r?.s ?? 0), t: Number(r?.t ?? 0) };
+  };
+
+  /**
+   * W1-T9604: drops the cache when a row of a cached step was deleted under it (the fact table otherwise only grows by
+   * seq; the consistency oracle's heal deletes a corrupt or duplicate row), or the store reads behind it. Each step is
+   * checked by an index-only digest of its rows, never by reading a body.
+   */
+  function checkStepCache(): void {
+    if (stepCache.size === 0 && !planOnlyCache) return;
+    const moved = [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
+      || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
+    const reason = moved ? "deleted" : Number(sql.maxSeq.get()?.seq ?? 0) < lastSeq ? "behind" : undefined;
+    if (!reason) return;
+    dropStepCache();
+    stepReads.resets[reason]++;
+  }
+
+  /** `step`'s cached rows as of `upTo`: read in full at `lastSeq` on the first ask, so the ingest extends it from there. */
+  function cachedStep(step: string, upTo: number): readonly Row[] {
+    let bucket = stepCache.get(step);
+    if (!bucket) {
+      bucket = readStep(step, lastSeq);
+      // Held across builds, so its rows share the projection's strings as a held ingest row does (W1-T6467).
+      if (strings) for (const row of bucket.rows) internRowStrings(row as Row, strings);
+      stepReads.fullReads++;
+      [stepReads.fullRows, stepReads.fullBytes] = [stepReads.fullRows + bucket.rows.length, stepReads.fullBytes + bucket.bytes];
+    } else {
+      const more = stepPending.get(step) ?? [];
+      const [held, heldBytes] = [bucket.rows.length, bucket.bytes];
+      if (more.length > 0) bucket = extendBucket(bucket, more);
+      stepPending.delete(step);
+      [stepReads.extendedRows, stepReads.extendedBytes] = [stepReads.extendedRows + more.length, stepReads.extendedBytes + bucket.bytes - heldBytes];
+      [stepReads.reusedRows, stepReads.reusedBytes] = [stepReads.reusedRows + held, stepReads.reusedBytes + heldBytes];
+    }
+    stepCache.set(step, bucket);
+    if (upTo >= lastSeq) return bucket.rows;
+    const seqs = bucket.seqs;
+    return bucket.rows.filter((_, at) => seqs[at]! <= upTo);
+  }
+
+  /** The cached plan-only sets as of `upTo`; an index built before the cache moved past it reads its own in full. */
+  function cachedPlanOnly(upTo: number): PlanOnlySets {
+    if (!planOnlyCache) {
+      planOnlyDigest = storeDigest(undefined);
+      planOnlyCache = readPlanOnly(lastSeq);
+      stepReads.fullReads++;
+      [stepReads.fullRows, stepReads.fullBytes] = [stepReads.fullRows + planOnlyCache.rows, stepReads.fullBytes + planOnlyCache.bytes];
+    } else {
+      const [held, heldBytes] = [planOnlyCache.rows, planOnlyCache.bytes];
+      if (planOnlyPending.length > 0) planOnlyCache = extendPlanOnly(planOnlyCache, planOnlyPending);
+      [stepReads.extendedRows, stepReads.extendedBytes] = [stepReads.extendedRows + planOnlyPending.length, stepReads.extendedBytes + planOnlyCache.bytes - heldBytes];
+      [stepReads.reusedRows, stepReads.reusedBytes] = [stepReads.reusedRows + held, stepReads.reusedBytes + heldBytes];
+      planOnlyPending = [];
+    }
+    if (upTo >= lastSeq) return planOnlyCache;
+    const own = readPlanOnly(upTo);
+    stepReads.fullReads++;
+    [stepReads.fullRows, stepReads.fullBytes] = [stepReads.fullRows + own.rows, stepReads.fullBytes + own.bytes];
+    return own;
+  }
+
+  /** What the step cache holds: its buckets' rows and body bytes, queued extensions included, and the plan-only sets'
+   *  entries (a filing PR, a reviewed head) and their string lengths: the sets keep no row. */
+  function heldStepCache(): BoardStepReads["held"] {
+    let [rowCount, bytes] = [0, 0];
+    for (const bucket of stepCache.values()) [rowCount, bytes] = [rowCount + bucket.rows.length, bytes + bucket.bytes];
+    for (const more of [...stepPending.values(), planOnlyPending]) for (const m of more) [rowCount, bytes] = [rowCount + 1, bytes + m.bytes];
+    for (const url of planOnlyCache?.filing ?? []) [rowCount, bytes] = [rowCount + 1, bytes + url.length];
+    for (const [url, heads] of planOnlyCache?.reviewed ?? []) for (const head of heads) [rowCount, bytes] = [rowCount + 1, bytes + url.length + head.length];
+    return { steps: stepCache.size, rows: rowCount, bytes };
+  }
+
+  /**
+   * W1-T9604: the oracle's A/A of the cache. Every cached step and both plan-only sets, as the cache hands them out now,
+   * against `fresh`, the oracle's own uncached index at the same seq. A difference drops the cache, so the next index
+   * reads in full; the differing names ride the oracle's row.
+   */
+  function auditStepCache(fresh: LedgerIndex): { steps: number; rows: number; mismatches: string[] } {
+    // The audit's own look at the cache is not a build's: of its counts, only a reset it finds is kept.
+    const counted = stepReads;
+    stepReads = noStepReads();
+    const mine = storeIndex(rows);
+    const cachedSteps = [...stepCache.keys()].sort();
+    const mismatches: string[] = [];
+    let compared = 0;
+    for (const step of cachedSteps) {
+      const [have, want] = [mine.byStep.get(step) ?? [], fresh.byStep.get(step) ?? []];
+      compared += want.length;
+      if (have.length !== want.length || have.some((row, at) => JSON.stringify(row) !== JSON.stringify(want[at]))) mismatches.push(step);
+    }
+    if (planOnlyCache) {
+      const sorted = (sets: Pick<LedgerIndex, "planOnlyFilingPrUrls" | "planOnlyReviewedHeads">): string => JSON.stringify([
+        [...sets.planOnlyFilingPrUrls].sort(), [...sets.planOnlyReviewedHeads].map(([url, heads]) => [url, [...heads].sort()]).sort(),
+      ]);
+      if (sorted(mine) !== sorted(fresh)) mismatches.push("plan_only");
+    }
+    if (mismatches.length > 0) {
+      dropStepCache();
+      stepReads.resets.audit++;
+    }
+    const found = stepReads.resets;
+    stepReads = { ...counted, resets: { deleted: counted.resets.deleted + found.deleted, behind: counted.resets.behind + found.behind, audit: counted.resets.audit + found.audit } };
+    return { steps: cachedSteps.length, rows: compared, mismatches };
+  }
+
   /**
    * W1-T9436: a ledger index whose task and step buckets are read on demand from the fact store, as
    * {@link buildLedgerIndex} would file them over every row: a task's rows by `fact_task` and `fact_alias`, with
    * its runs' stand-ins built as ingest builds them, in row order. Its rows are released with it, after the update.
+   *
+   * W1-T9604: `cached` (every index but the oracle's) takes its step buckets and plan-only sets from the projection's
+   * step cache, which is read in full once and then extended by the rows the ingest reads; uncached, the index reads
+   * them in full, as before, so the oracle derives from a read the cache never touched.
    */
-  function storeIndex(bound: ReadonlyArray<Row>): LedgerIndex {
+  function storeIndex(bound: ReadonlyArray<Row>, cached = true): LedgerIndex {
     const upTo = lastSeq;
+    if (cached) {
+      stepReads.indexes++;
+      checkStepCache();
+    }
     const aliasReady = factAliasReady(db);
     let aliasSeqs: Map<string, number[]> | undefined;
     let last: { id: string; rows: Row[] } | undefined;
-    const steps = new Map<string, Row[]>();
+    const steps = new Map<string, readonly Row[]>();
     const runSql = taskRunStatements();
     let filing: Set<string> | undefined;
     let reviewed: Map<string, Set<string>> | undefined;
-    const parse = (body: unknown): Row => withoutUnreadFields(JSON.parse(String(body)) as Row);
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
       const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
@@ -1048,14 +1360,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       return facts.map((f) => f.row);
     };
     const planOnly = (): void => {
-      filing = new Set();
-      reviewed = new Map();
-      for (const r of sql.planOnlyFacts.iterate(PLAN_ONLY_REVIEW_MARKER_STEP, upTo)) {
-        const row = JSON.parse(String(r.body)) as Row;
-        if (typeof row.pr_url !== "string") continue;
-        if (r.step === "pr.opened") filing.add(row.pr_url);
-        else if (typeof row.head_sha === "string") reviewed.set(row.pr_url, (reviewed.get(row.pr_url) ?? new Set()).add(row.head_sha));
-      }
+      const sets = cached ? cachedPlanOnly(upTo) : readPlanOnly(upTo);
+      [filing, reviewed] = [sets.filing, sets.reviewed];
     };
     return {
       rows: bound,
@@ -1064,7 +1370,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         get: (step) => {
           let bucket = steps.get(step);
           if (!bucket) {
-            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : sql.stepFacts.all(step, upTo).map((r) => parse(r.body));
+            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : readStep(step, upTo).rows;
             steps.set(step, bucket);
           }
           return bucket;
@@ -1090,7 +1396,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   /** One `projectPlan` pass and, per task it derived, the GitHub reads that derive made (W1-T6016): `projectPlan` asks
    *  `reuseProjection` of each task just before deriving it, so the log a refusal opens takes that task's reads. */
-  function project(plan: Plan, credit: CreditStore, overrides: string, reuse?: (task: Task) => StatusProjection | undefined): {
+  function project(plan: Plan, credit: CreditStore, overrides: string, reuse?: (task: Task) => StatusProjection | undefined, index?: LedgerIndex): {
     projections: Map<string, StatusProjection>; reads: Map<string, GithubReadLog>;
   } {
     const reads = new Map<string, GithubReadLog>();
@@ -1113,7 +1419,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       writeCreditStore: () => {},
       readCreditOverrideFile: () => overrides,
       skipUncreditedBuildWarning: true,
-      ...(fromRows ? {} : { ledgerIndex: storeIndex(rows) }),
+      ...(fromRows ? {} : { ledgerIndex: index ?? storeIndex(rows) }),
       reuseProjection: deriveOrReuse,
     };
     return { projections: projectPlan(plan, deps), reads };
@@ -1216,14 +1522,18 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
     const now = clock.now();
     const view = currentGithubView();
-    let pass = project(plan, credit, overrides);
+    // W1-T9604: the oracle derives from full reads the step cache never touched, and audits the cache against them.
+    const uncached = (): LedgerIndex | undefined => (fromRows ? undefined : storeIndex(rows, false));
+    const first = uncached();
+    let pass = project(plan, credit, overrides, undefined, first);
     let fresh = pass.projections;
     let mismatches = diffAgainstHeld(fresh);
     let outcome: BoardOracleOutcome = "agree";
     const reasons: string[] = [];
     let healedCount = 0;
+    const audit = first ? auditStepCache(first) : undefined;
     if (mismatches.length > 0) {
-      pass = project(plan, credit, overrides);
+      pass = project(plan, credit, overrides, undefined, uncached());
       fresh = pass.projections;
       mismatches = diffAgainstHeld(fresh);
       outcome = mismatches.length > 0 ? "healed" : "transient";
@@ -1241,7 +1551,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       for (const id of removed) githubReads.delete(id);
       persist(healed, removed);
       healedCount = mismatches.length;
-      const survived = diffAgainstHeld(project(plan, credit, overrides).projections);
+      const survived = diffAgainstHeld(project(plan, credit, overrides, undefined, uncached()).projections);
       if (survived.length > 0) reasons.push(`${survived.length} task(s) still differ after the heal (${survived.slice(0, 5).map((m) => m.taskId).join(", ")})`);
       const prior = heals.filter((at) => at >= now - BOARD_ORACLE_RECURRENCE_MS);
       if (prior.length > 0) reasons.push(`the board drifted again within 24 h of an earlier self-heal (${prior.length} heal(s) in the window)`);
@@ -1257,9 +1567,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
           .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
       });
     }
+    // W1-T9604: what the step cache read and reused since the last oracle row, and its audit: the saving, measured.
+    const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), ...(audit ? { audit } : {}) } };
+    stepReads = noStepReads();
     log("read_model.board_oracle", {
       outcome, compared: result.compared, mismatches: mismatches.length, sample: mismatches.slice(0, 5),
-      ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}),
+      ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}), ...stepCacheRow,
     });
     return result;
   }
