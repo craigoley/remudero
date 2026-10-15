@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: review-throughput diagnosis (\"figure out why reviews aren't posting efficiently\"); operator approved this filing 2026-10-14. Standing rulings: no hard fixed thresholds, measure before tuning"
   plan_refs: [W1-T100, W1-T7734, W1-T4054, W1-T5761, W1-T5762, W1-T7747, W1-T9552, W1-T9544, W1-T9554, W1-T9085, W1-T9114, W1-T9390, W1-T9558, W1-T9563]
   files: [src/run-task.ts, src/lib/sweep.ts, test/the-full-pass-builds-its-snapshot-in-minutes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

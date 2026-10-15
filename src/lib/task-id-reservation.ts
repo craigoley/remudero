@@ -1145,9 +1145,12 @@ export type ReservationAnchorRead =
 
 type GitAnswer = { status: number; stdout: string; stderr: string };
 
+const anchorReadFailure = (verb: string, answer: GitAnswer): ReservationAnchorRead =>
+  ({ status: "unknown", reason: `${verb} failed: ${answer.stderr.trim() || `exited ${answer.status}`}` });
+
 function unreadAnchorListing(ids: readonly string[], listed: GitAnswer): Map<string, ReservationAnchorRead> | undefined {
   if (listed.status === 0) return undefined;
-  return new Map(ids.map((id) => [id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` }]));
+  return new Map(ids.map((id) => [id, anchorReadFailure("ls-remote", listed)]));
 }
 
 function anchorShaByRef(listed: GitAnswer): Map<string, string> {
@@ -1159,7 +1162,7 @@ const anchorFetchArgs = (id: string): string[] => ["fetch", "--quiet", "--no-tag
 const anchorLogArgs = (sha: string): string[] => ["log", "--first-parent", "-n", "16", "--format=%B%x00", sha];
 
 function anchorReadFrom(body: GitAnswer): ReservationAnchorRead {
-  if (body.status !== 0) return { status: "unknown", reason: body.stderr.trim() };
+  if (body.status !== 0) return anchorReadFailure("log", body);
   const messages = body.stdout.includes("\0") ? body.stdout.split("\0").slice(0, -1) : [body.stdout];
   const chain = messages.map((message, index) => index === 0 ? message : message.replace(/^\n/, ""));
   const message = body.stdout.includes("\0") ? `${chain[0] ?? ""}\n` : body.stdout;
@@ -1184,7 +1187,7 @@ export function readReservationAnchors(
       continue;
     }
     const fetched = run(anchorFetchArgs(id));
-    reads.set(id, anchorReadFrom(fetched.status === 0 ? run(anchorLogArgs(sha)) : fetched));
+    reads.set(id, fetched.status === 0 ? anchorReadFrom(run(anchorLogArgs(sha))) : anchorReadFailure("fetch", fetched));
   }
   return reads;
 }
@@ -1207,7 +1210,7 @@ export async function readReservationAnchorsAsync(
       continue;
     }
     const fetched = await run(anchorFetchArgs(id));
-    reads.set(id, anchorReadFrom(fetched.status === 0 ? await run(anchorLogArgs(sha)) : fetched));
+    reads.set(id, fetched.status === 0 ? anchorReadFrom(await run(anchorLogArgs(sha))) : anchorReadFailure("fetch", fetched));
   }
   return reads;
 }

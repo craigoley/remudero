@@ -37,7 +37,7 @@
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/no-daemon-loop-path-arms-a-wall-clock-child-timeout.test.ts
     - test/a-loop-bounded-child-is-stopped-never-truncated.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a wall-clock child timer turns any loop hold into a truncated SUCCESS (pushes with no credential helper)
   attempts: 0
   rationale: |
