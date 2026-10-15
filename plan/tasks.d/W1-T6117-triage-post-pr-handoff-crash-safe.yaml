@@ -31,5 +31,5 @@
   files: [src/run-task.ts, src/lib/auto-triage.ts, test/triage-post-pr-handoff-crash-safe.test.ts]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=f618c4af38a770c2
+  # backlog gardener: band=3 evidence=c3a541ce6287bf6f
   attempts: 0
