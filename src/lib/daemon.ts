@@ -233,8 +233,9 @@ export const SWEEP_BOUND_WINDOW = 40;
 /** BACKSTOP: fewest settled passes the quantile is read from; below it nearest-rank p90 is only the newest few maxima. */
 export const SWEEP_BOUND_MIN_SAMPLES = 5;
 
-/** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first. */
-export interface SweepBoundLearner { fallbackMs: number; settledMs: number[] }
+/** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first;
+ *  `seededFrom` is the boot seed's source, logged once with the first pass (W1-T9632). */
+export interface SweepBoundLearner { fallbackMs: number; settledMs: number[]; seededFrom?: "ledger_union" | "live_ledger" }
 
 export interface LearnedSweepBound { boundMs: number; basis: "observed_passes" | "settled_max_fallback" | "no_history_fallback"; samples: number }
 
@@ -2616,6 +2617,8 @@ async function runGatedSweep(
   let outcome: SweepCycleOutcome | undefined;
   try {
     const bound = learnedSweepBound(sweepBound);
+    if (sweepBound.seededFrom) log("daemon.sweep.seeded", { samples: bound.samples, source: sweepBound.seededFrom });
+    sweepBound.seededFrom = undefined;
     log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
     const continueReviewAdmissions = (() =>
       deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
@@ -3577,7 +3580,7 @@ export async function runDaemon(
   }
   // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
   for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
-  log("daemon.sweep.seeded", { samples: sweepBound.settledMs.length, source: sweepSeedSource });
+  sweepBound.seededFrom = sweepSeedSource;
   const restartHistory = restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now());
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
   // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
