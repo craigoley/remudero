@@ -140,6 +140,14 @@ if (process.env.NODE_V8_COVERAGE !== undefined) {
   process.env.RMD_GH_SHARED_READ_GAP_MS ??= "0";
 }
 
+// The transport floor's mode is the OPERATOR's choice (src/lib/github-transport.ts
+// resolveGhTransportFloorMode), and an operator wrapper or developer shell may export
+// RMD_GH_TRANSPORT_FLOOR=enforce. Inherited, it refused a suite's second gh-shim read inside 180 s:
+// test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts went 5 of 11 red on host env alone.
+// A test of a mode sets it itself, after this runs. Main thread only: under SHARE_ENV a worker's
+// delete would clear the mode its parent test chose.
+if (isMainThread) delete process.env.RMD_GH_TRANSPORT_FLOOR;
+
 /**
  * DISABLE GIT'S AUTOMATIC BACKGROUND GC FOR EVERY GIT THIS SUITE SPAWNS (W1-T1217).
  *
