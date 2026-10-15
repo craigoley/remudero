@@ -1481,7 +1481,10 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce" &&
       !policy.jointQualification?.scenarios.includes(inputs.serve.scenario)) throw new Error("joint enforce unavailable: current scenario is not qualified");
   const candidate = jointClaimFor(gathered, ports, policy);
-  if (candidate.kind !== "joint") throw new Error(`joint enforce unavailable: ${candidate.reason}`);
+  if (candidate.kind !== "joint") {
+    if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") throw new Error(`joint enforce unavailable: ${candidate.reason}`);
+    return gathered;
+  }
   return { ...gathered, jointClaim: candidate, containerLift: { unlearned: "joint model is not the legacy pressure cohort" } };
 }
 
