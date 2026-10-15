@@ -58,7 +58,12 @@ function successResult(head: string, verdictWithheld?: string): ReviewRunResult 
 }
 
 /** Drive `rmd review` with a fake reviewer that posts through the REAL W1-T228 guard. */
-async function reviewWith(start: ReviewerCodeFreshness | undefined, justInTime: ReviewerCodeFreshness) {
+async function reviewWith(
+  start: ReviewerCodeFreshness | undefined,
+  justInTime: ReviewerCodeFreshness | (() => ReviewerCodeFreshness),
+  onReview: () => void = () => {},
+  extraArgs: string[] = [],
+) {
   const root = mkdtempSync(join(tmpdir(), "rmd-judge-at-start-"));
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
   const posts: string[] = [];
@@ -66,7 +71,7 @@ async function reviewWith(start: ReviewerCodeFreshness | undefined, justInTime: 
   const originalLog = console.log;
   console.log = () => {};
   try {
-    const code = await reviewCommand("6011", ["--repo", "acme/remudero"], {
+    const code = await reviewCommand("6011", ["--repo", "acme/remudero", ...extraArgs], {
       fetchView: () => ({
         number: 6011,
         html_url: "https://github.com/acme/remudero/pull/6011",
@@ -80,10 +85,11 @@ async function reviewWith(start: ReviewerCodeFreshness | undefined, justInTime: 
       postReviewPending: async () => ({ posted: false }),
       reviewerCodeFreshness: () => {
         justInTimeReads++;
-        return justInTime;
+        return typeof justInTime === "function" ? justInTime() : justInTime;
       },
       ...(start === undefined ? {} : { reviewStartFreshness: start }),
       runReview: async (args) => {
+        onReview();
         const posted = await postReviewStatusGuarded({
           owner: "acme",
           repo: "remudero",
@@ -192,4 +198,60 @@ test("judge at review start: a PR closed before its review starts leaves a ledge
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** W1-T9727 — a fresh-tree child is handed no start reading; the gate asks it to take its own. Its reader answers
+ *  `before` until the fake reviewer starts and `during` after: main moves DURING the review, as it does across a
+ *  memory-admission wait on the fleet. */
+async function freshTreeReview(before: () => ReviewerCodeFreshness, during: ReviewerCodeFreshness) {
+  let reviewing = false;
+  return reviewWith(undefined, () => (reviewing ? during : before()), () => {
+    reviewing = true;
+  }, ["--judge-at-own-start"]);
+}
+
+test("W1-T9727: a fresh-tree review is judged against main at its own start", async () => {
+  const { code, posts, justInTimeReads } = await freshTreeReview(() => FRESH_AT_START, MERGED_DURING_REVIEW);
+  assert.deepEqual(posts, ["success"], "fresh when it began, so main's advance during the review never withholds it");
+  assert.equal(code, 0);
+  assert.equal(justInTimeReads, 1, "one reading, taken before the reviewer ran");
+});
+
+test("W1-T9727: a fresh-tree review whose own start reading is stale is still withheld", async () => {
+  const fresh: ReviewerCodeFreshness = { status: "fresh", codeSha: MAIN_AT_START, originMainSha: MAIN_AT_START, advance: "none" };
+  const { code, posts, rows } = await freshTreeReview(() => STALE_AT_START, fresh);
+  assert.deepEqual(posts, [], "W1-T3337: code stale when it judged never publishes");
+  assert.equal(code, 2);
+  const refused = rows.find((row) => row.step === "review.post_refused");
+  assert.equal(refused?.origin_main_sha, MAIN_AT_START, "the refusal names main as of the review start");
+});
+
+test("W1-T9727: a thrown own start reading is unreadable and the just-in-time read decides", async () => {
+  const { code, posts, rows, justInTimeReads } = await freshTreeReview(() => {
+    throw new Error("git fetch origin failed: exit 128");
+  }, MERGED_DURING_REVIEW);
+  const row = rows.find((r) => r.step === "review.reviewer_freshness_unreadable_at_start");
+  assert.ok(row, "the unreadable own start reading leaves a ledger row");
+  assert.match(String(row.reason), /git fetch origin failed: exit 128/);
+  assert.equal(justInTimeReads, 2, "the just-in-time read follows the unreadable start reading");
+  assert.deepEqual(posts, [], "the just-in-time read saw main materially ahead");
+  assert.equal(code, 2);
+});
+
+test("W1-T9727: the freshness gate asks a fresh-tree review to judge at its own start", async () => {
+  const handed: string[][] = [];
+  const gate = buildReviewerCodeFreshnessGate(
+    () => STALE_AT_START,
+    () => {},
+    async () => {
+      throw new Error("a stale reading never reaches the in-process review");
+    },
+    async (_pr, rest) => {
+      handed.push(rest);
+      return 0;
+    },
+  );
+  assert.equal(await gate.call("6011", ["--repo", "acme/remudero"], {}), 0);
+  assert.equal(handed.length, 1);
+  assert.ok(handed[0]!.includes("--judge-at-own-start"), `fresh-tree args ${JSON.stringify(handed[0])}`);
 });
