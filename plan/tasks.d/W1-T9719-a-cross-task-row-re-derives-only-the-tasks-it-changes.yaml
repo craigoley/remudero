@@ -1,0 +1,68 @@
+- id: W1-T9719
+  title: "A CROSS-TASK ROW RE-DERIVES ONLY THE TASKS WHOSE ANSWER IT CHANGES — boardDirtForRow marks EVERY task dirty for each daemon.boot row and each plan_only pr.opened, because three status.ts readers consult them whole-ledger; core wrote 17 daemon.boot rows on 2026-10-14 and 7-9 plan-only filing PRs a day, each a full re-derive of ~4,145 tasks (~1.2 GB read on a production-sized store)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, which tasks a cross-task fact row re-derives; every projection's value is unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9604 (#12121) follow-up L'
+  plan_refs: [W1-T6016, W1-T9604, W1-T9436, W1-T6014]
+  files:
+    - src/lib/board-projection.ts
+    - src/lib/status.ts
+    - test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/board-projection.ts boardDirtForRow returns `{all: true}` for any step in BOARD_CROSS_TASK_STEPS
+      (daemon.boot) and for a `pr.opened` with plan_only true. The header names why: environmentChangedSince,
+      lifetimeDispatchTally and isPlanOnlyFilingPr (src/lib/status.ts) read those rows whole-ledger.
+    - Whether a task's derivation consults them depends on the task: environmentChangedSince matters only to a
+      task held by an independent-failure block, and isPlanOnlyFilingPr only to a task with an open or merged PR.
+      A task that did not consult them cannot change when one is appended.
+    - W1-T6016 solved the same shape for GitHub: each task's GitHub reads are recorded (recordingGithub) and
+      replayed against the new gateway, and only a task whose answers moved re-derives (githubDigest).
+    - Persisted reuse already survives a serve restart (task_projection with stamps). A serve deploy still
+      re-derives everything through codeVersion in the global stamp; that is correct for a code change and is
+      not this task.
+    OBSERVED, core ledger 2026-10-15 12:00-19:17Z, read_model.now_slow_stage rows for instance core (thread views):
+    325 slow board stages, median 7.8 s, max 87.7 s, 4,486 s in total (snapshot: 160, 1,007 s).
+    OBSERVED offline by the W1-T9604 builder (#12121, head f5ef8e690; synthetic store of 779k fact rows and 4,085
+    tasks, 13 now-view builds per arm, bodies byte-identical between arms; logs-8864/W1-T9604-bench): a steady build
+    reads 106.4 MB on main and 71.3 MB with W1-T9604; taskFacts task buckets are 67.0 MB of each, ~94% of what is
+    left. A full re-derive after a daemon.boot row read 1,238 MB on main and 1,161 MB at head.
+    OBSERVED, core ledger, de-duplicated across rotation overlap: daemon.boot 17 rows on 2026-10-14 and 12 on
+    2026-10-15 to 19:17Z; pr.opened with plan_only true 2, 7, 8 and 9 on 2026-10-11..14.
+    INFERRED: ~20-26 full re-derives a day on core from these two rules, ~25-30 GB of reads a day, plus the board
+    stage time each one takes on the views thread.
+  design: |
+    1. Record the cross-task reads. While a task derives, the three readers report what they consulted from the
+       cross-task rows (for example the newest daemon.boot ts at or after the task's window, the tally inputs, the
+       plan-only filing answer for each PR url asked), as recordingGithub does for GitHub reads, and the answers are
+       kept with the task's projection (and persisted beside task_github_read).
+    2. On a cross-task row, re-derive only the tasks whose recorded cross-task answers change when replayed
+       against the new rows. A task with no recorded cross-task read is reused. Any reader that cannot be replayed
+       keeps the whole-board rule for that row and names why.
+    3. The board oracle is unchanged and audits the result (no-reuse derive vs reused board, A/A).
+    4. BoardUpdate already reports `rederived` and `full`; add `cross_task: {rows, rederived, reused}` to the board
+       stage's row so the fleet sees each boot's cost before and after.
+    5. No new constant.
+    Tests go in test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts, titled verbatim as in the proofs,
+    over createBoardProjection with a real in-memory fact store.
+  acceptance:
+    - claim: "a daemon.boot row re-derives only the tasks whose derivation read the boot history, and the board equals a full re-derive"
+      proof: 'grep: test("W1-T9719: a daemon.boot row re-derives only the tasks that read it" in test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts'
+    - claim: "a plan-only filing PR re-derives only the tasks whose plan-only answer moved, and the board equals a full re-derive"
+      proof: 'grep: test("W1-T9719: a plan-only pr.opened re-derives only the tasks whose answer moved" in test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts'
+    - claim: "recorded cross-task reads survive a restart, so the first boot row after one is not a full re-derive"
+      proof: 'grep: test("W1-T9719: recorded cross-task reads survive a restart" in test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts'
+  falsifier: |
+    On origin/main, build a board of 50 tasks, one of them under an independent-failure block, and append a
+    daemon.boot row: update() reports full true and 50 re-derived, so the first test fails. Record the reads but
+    replay only the boot step, not the window bound the task read: the blocked task is reused with a stale answer,
+    its projection differs from a full re-derive, and the first test fails on the equality.

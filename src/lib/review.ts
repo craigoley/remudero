@@ -23,7 +23,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { formatTail } from "./proofExecutor.js";
@@ -5787,6 +5787,41 @@ export function reviewLedgerKeyFor(taskId: string | undefined, prNumber: number)
  *  `armLedgerLinesForPr` keeps it. This is also the transition: rows already written as `unfiled` carry their url. */
 export function reviewRowNamesPr(line: Record<string, unknown>, key: string | undefined, prUrl: string): boolean {
   return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
+}
+
+/** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
+ *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does. */
+export async function priorPostedReviewRow(
+  ledgerPath: string,
+  taskId: string | undefined,
+  prUrl: string,
+): Promise<Record<string, unknown> | undefined> {
+  const names = (line: Record<string, unknown>): boolean =>
+    line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
+  const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
+  if (live) return live;
+  const key = taskId === undefined ? "" : `|"task_id":${JSON.stringify(taskId)}`;
+  const pattern = new RegExp(`"pr_url":${JSON.stringify(prUrl)}${key}`.replace(/[.*+?^${}()[\]\\]/g, "\\$&"));
+  const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
+  return union.rawLines.flatMap((raw) => {
+    try {
+      return [JSON.parse(raw) as Record<string, unknown>];
+    } catch {
+      return []; // a torn archived row names no verdict; the union reports it, this lookup skips it
+    }
+  }).filter(names).at(-1);
+}
+
+/** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
+export function missingReviewReuseFact(
+  prior: ReviewVerdict | undefined,
+  inputs: { currentOwnDiffDigest?: unknown; currentMergeBaseSha?: unknown },
+): string | undefined {
+  if (!prior) return "no-prior-verdict";
+  if (prior.state !== "success" && prior.state !== "failure") return "prior-not-terminal";
+  if (!Array.isArray(prior.criteria)) return "criteria-unreadable";
+  if (inputs.currentOwnDiffDigest === undefined) return "own-diff-digest-unread";
+  return inputs.currentMergeBaseSha === undefined ? "merge-base-unread" : undefined;
 }
 
 /** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins — the same scanning
