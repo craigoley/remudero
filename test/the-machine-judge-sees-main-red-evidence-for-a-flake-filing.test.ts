@@ -13,13 +13,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
-import {
-  FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, flakeIncidentOrigin, flakeIncidentRecordEvidence, flakeJudgeEvidencePort,
-} from "../src/lib/flake-incident-gardener.js";
+// Namespace imports, so at a base without these exports the file still loads and each test fails on its own.
+import * as flake from "../src/lib/flake-incident-gardener.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { renderMachineShard } from "../src/lib/machine-filing.js";
 import { machineJudgeFoundWork, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts } from "../src/lib/machine-filing-judge.js";
-import { mainInheritedHintReader, mainRepairRecordsFromLedger } from "../src/lib/main-health-rung.js";
+import * as rung from "../src/lib/main-health-rung.js";
 import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -29,7 +28,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const CLOCK = fixedClock(Date.parse("2026-10-15T16:35:05Z"));
 const FILE = "test/the-sweep-never-sends-a-fix-worker-at-a-red-it-cannot-fix.test.ts";
 const TITLE = "W1-T9503: a cause owned by a test alone escalates as no-owner";
-const ORIGIN = flakeIncidentOrigin(FILE, TITLE);
+const ORIGIN = flake.flakeIncidentOrigin(FILE, TITLE);
 const BASE = "037a58d8f".padEnd(40, "0");
 const sha = (n: number) => `${n}`.padStart(40, "a");
 
@@ -100,10 +99,10 @@ function rig(t: TestContext, o: {
   const steps: { step: string; extra?: Record<string, unknown> }[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => void steps.push({ step, ...(extra ? { extra } : {}) });
   // The port the daemon builds, over this test's ledger: the same rows and main-CI reader the gardener uses.
-  const flakeEvidence = flakeJudgeEvidencePort({
+  const flakeEvidence = flake.flakeJudgeEvidencePort({
     stateDir: root, log, clock: CLOCK, mainFailures: (base) => o.mainFailures(base),
     // ledger-read-intent: live — as productionMachineFilingJudgePorts reads the main.repair rows.
-    repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(root, LEDGER_FILENAME))).values()],
+    repairs: () => [...rung.mainRepairRecordsFromLedger(readLedgerLines(join(root, LEDGER_FILENAME))).values()],
   });
   const ports: MachineJudgePorts = {
     stateDir: root,
@@ -146,7 +145,7 @@ test("W1-T9694: a flake filing whose retries never recovered and whose base main
 
   const judged = r.steps.find((s) => s.step === "machine_judge.main_inherited");
   assert.deepEqual(judged?.extra, { task_id: id, origin: ORIGIN, recovered: 0, also_failed: 9, main_red: true });
-  const routed = r.steps.filter((s) => s.step === FLAKE_INCIDENT_MAIN_INHERITED_STEP);
+  const routed = r.steps.filter((s) => s.step === flake.FLAKE_INCIDENT_MAIN_INHERITED_STEP);
   assert.equal(routed.length, 1);
   assert.equal(routed[0]!.extra?.route, "main-health");
   assert.equal(routed[0]!.extra?.prs_count, 9);
@@ -154,7 +153,7 @@ test("W1-T9694: a flake filing whose retries never recovered and whose base main
   // The row reaches W1-T9551's main-health rung as a pending hint, as a gardener-written one does.
   const ledger = join(r.root, "routed.ndjson");
   writeFileSync(ledger, routed.map((s) => JSON.stringify({ step: s.step, ...s.extra })).join("\n") + "\n");
-  assert.deepEqual(mainInheritedHintReader(ledger)().pending.map((h) => [h.origin, h.prsCount]), [[ORIGIN, 9]]);
+  assert.deepEqual(rung.mainInheritedHintReader(ledger)().pending.map((h) => [h.origin, h.prsCount]), [[ORIGIN, 9]]);
 
   // A second pass finds a retired record and asks nothing.
   const again = await r.pass();
@@ -252,17 +251,17 @@ test("W1-T9694: a released flake record is reconsidered once on its moved eviden
 });
 
 test("W1-T9694: the gardener and the judge share one main-inherited classifier", () => {
-  assert.equal(flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 2, mainRed: "unread" }), true, "two PRs never recovered");
-  assert.equal(flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: true }), true, "main failed it at a base");
-  assert.equal(flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: "unread" }), false);
-  assert.equal(flakeIncidentMainInherited({ recovered: 1, alsoFailedPrs: 9, mainRed: true }), false, "a recovered retry is a flake candidate");
+  assert.equal(flake.flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 2, mainRed: "unread" }), true, "two PRs never recovered");
+  assert.equal(flake.flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: true }), true, "main failed it at a base");
+  assert.equal(flake.flakeIncidentMainInherited({ recovered: 0, alsoFailedPrs: 1, mainRed: "unread" }), false);
+  assert.equal(flake.flakeIncidentMainInherited({ recovered: 1, alsoFailedPrs: 9, mainRed: true }), false, "a recovered retry is a flake candidate");
 
   // A filing row with no retry rows left in the window answers from its own counts.
-  const filedOnly = flakeIncidentRecordEvidence(
+  const filedOnly = flake.flakeIncidentRecordEvidence(
     [{ ts: CLOCK.iso(), step: "flake_incident.filed", origin: ORIGIN, task_id: "W1-T9704", prs: [3, 1, 2], recovered: 0, also_failed: 3, also_failed_prs: 3, base_shas: [BASE], run_ids: [7] }],
     ORIGIN, "W1-T9704");
   assert.deepEqual(filedOnly, { file: FILE, title: TITLE, prs: [1, 2, 3], recovered: 0, alsoFailed: 3, alsoFailedPrs: 3, baseShas: [BASE], runs: [7] });
-  assert.equal(flakeIncidentRecordEvidence([], ORIGIN, "W1-T9704"), undefined);
+  assert.equal(flake.flakeIncidentRecordEvidence([], ORIGIN, "W1-T9704"), undefined);
 });
 
 test("W1-T9694: a retirement lands through the one judge PR, proven by its retirement line", async (t) => {
