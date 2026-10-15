@@ -10,7 +10,16 @@
 # / untracked paths are already out of scope) at the current commit.
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+if repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+  if ! cd "$repo_root"; then
+    echo "leak-grep: ERROR — cannot enter Git worktree; scan incomplete." >&2
+    exit 2
+  fi
+else
+  status=$?
+  echo "leak-grep: ERROR — git rev-parse failed (exit ${status}); scan incomplete." >&2
+  exit 2
+fi
 
 # Each pattern targets a real secret FORMAT (fixed prefix / structure), not
 # a generic "looks like a password" heuristic — keeps false positives low
@@ -27,11 +36,18 @@ PATTERNS=(
 
 hits=0
 for pattern in "${PATTERNS[@]}"; do
-  if matches=$(git grep -InE "$pattern" -- . ':!.github/scripts/leak-grep.sh' 2>/dev/null); then
+  if matches=$(git grep -InE -e "$pattern" -- . ':!.github/scripts/leak-grep.sh' 2>/dev/null); then
     echo "leak-grep: possible secret matching /${pattern}/:"
     echo "$matches"
     echo
     hits=1
+  else
+    status=$?
+    # Only 1 means no matches; an invalid pattern or failed Git is not a clean scan.
+    if [ "$status" -ne 1 ]; then
+      echo "leak-grep: ERROR — git grep failed (exit ${status}); scan incomplete." >&2
+      exit 2
+    fi
   fi
 done
 

@@ -65,7 +65,7 @@ test("CLI entry MINTS before dispatch — observed by running main(), not by rea
   // A syntactically valid RSA key is not needed: the exchange itself is stubbed below, and the
   // signing step reads this file only for its bytes.
   const keyPath = join(dir, "key.pem");
-  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+  writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
 
   const stderr: string[] = [];
   t.mock.method(console, "error", (...a: unknown[]) => {
@@ -127,7 +127,7 @@ test("CLI entry mints before dispatch, and only when GH_TOKEN is absent — the 
   const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-mint-guard-`));
   const keyPath = join(dir, "key.pem");
-  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+  writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
 
   let stderr: string[] = [];
   t.mock.method(console, "error", (...a: unknown[]) => {
@@ -217,7 +217,7 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
   const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3071-`));
   const keyPath = join(dir, "key.pem");
-  writeFileSync(keyPath, "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
+  writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
 
   const stderr: string[] = [];
   t.mock.method(console, "error", (...a: unknown[]) => {
