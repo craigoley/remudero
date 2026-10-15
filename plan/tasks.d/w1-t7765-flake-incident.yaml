@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a census red each PR caused, superseded by W1-T9708 (a census red on a PR whose diff enters its walk is that PR's own). Every cited PR adds a raw git spawn the hardened-leaf ratchet counts: #10203 (909500c21), #10377 (1e27fa25f), #10643 (42907e7b1) and #10671 (94c377cf9) a `"-C", <root>` argv, #10310 (6bc18ef00) a cwd-option spawn (W1-T6123); #10203 and #10671 exempted the site before merge; main stayed green on the test (15 sweep.base_reproduction passes); 0 recovered on retry, 10 also failed; operator 2026-10-15 via the filing session
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts"
