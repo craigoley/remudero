@@ -239,10 +239,10 @@ test("idle_starved: a detached PR action must settle before the Node process can
 // Run entirely in-process over an injected log + env — NO real launchd load
 // (that live commissioning step is W1-T12d).
 
-test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode=subscription", () => {
+test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode=subscription", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
-  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
   // W1-T991: result also carries node_path/node_version (and possibly node_drift) —
   // checked precisely by the dedicated test/node-runtime-provenance.test.ts suite, so this
   // pre-existing test only pins the billing fields it was written to prove.
@@ -254,29 +254,29 @@ test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode
   assert.equal(lines[0].extra.billing_mode, "subscription");
 });
 
-test("daemonBoot: a NON-valve ANTHROPIC_* (e.g. BASE_URL) still logs env_clean=false but billing_mode=subscription — a loud canary, not a throw, and NOT api", () => {
+test("daemonBoot: a NON-valve ANTHROPIC_* (e.g. BASE_URL) still logs env_clean=false but billing_mode=subscription — a loud canary, not a throw, and NOT api", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const dirtyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_BASE_URL: "https://example.invalid" };
-  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), dirtyEnv);
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), dirtyEnv);
   assert.equal(result.env_clean, false);
   assert.equal(result.billing_mode, "subscription");
   assert.equal(lines[0].extra.env_clean, false);
   assert.equal(lines[0].extra.billing_mode, "subscription", "only the sanctioned ANTHROPIC_API_KEY valve flips billing to api");
 });
 
-test("daemonBoot: the KEY ALONE (no config intent) stays subscription — an inherited key can't silently flip the daemon to api", () => {
+test("daemonBoot: the KEY ALONE (no config intent) stays subscription — an inherited key can't silently flip the daemon to api", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const keyEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sk-ant-daemon" };
-  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), keyEnv); // allowApiKey defaults false
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), keyEnv); // allowApiKey defaults false
   assert.equal(result.env_clean, false);
   assert.equal(result.billing_mode, "subscription");
 });
 
-test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log env_clean=false AND billing_mode=api (overnight-on-credits, W1-T258)", () => {
+test("daemonBoot: BOTH factors (config intent allowApiKey=true + the key) log env_clean=false AND billing_mode=api (overnight-on-credits, W1-T258)", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const valveEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", ANTHROPIC_API_KEY: "sk-ant-daemon" };
   // allowApiKey is daemonBoot's 8th param; the intervening optional hooks are unused here.
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     valveEnv,
     undefined,
@@ -318,19 +318,21 @@ function withScrubbedAnthropicEnv<T>(fn: () => T): T {
   }
 }
 
-test("daemonBoot: defaults to checking process.env when no env is injected", () => {
-  withScrubbedAnthropicEnv(() => {
-    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-    const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }));
-    const surviving = Object.keys(process.env).filter((k) => /^ANTHROPIC_/i.test(k));
-    assert.equal(
-      result.env_clean,
-      true,
-      surviving.length > 0
-        ? `expected a clean env but found surviving ANTHROPIC_* keys: ${surviving.join(", ")}`
-        : "expected a clean env",
-    );
-  });
+test("daemonBoot: defaults to checking process.env when no env is injected", async () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  // daemonBoot reads the env before its first await, so the scrub covers the read.
+  const { boot, surviving } = withScrubbedAnthropicEnv(() => ({
+    boot: daemonBoot((step, extra = {}) => lines.push({ step, extra })),
+    surviving: Object.keys(process.env).filter((k) => /^ANTHROPIC_/i.test(k)),
+  }));
+  const result = await boot;
+  assert.equal(
+    result.env_clean,
+    true,
+    surviving.length > 0
+      ? `expected a clean env but found surviving ANTHROPIC_* keys: ${surviving.join(", ")}`
+      : "expected a clean env",
+  );
 });
 
 // ── daemonBoot: the injected temp-dir sweep (W1-T115, the 26,711-dir ENOSPC
@@ -3269,14 +3271,14 @@ test("daemonBoot: a successful resolveClaudeBin logs daemon.claude_bin with the 
   assert.equal(line?.extra.path, "/home/op/.local/bin/claude");
 });
 
-test("daemonBoot: a REFUSING resolveClaudeBin logs daemon.claude_bin blocked=true and STILL COMPLETES boot (never throws onward)", () => {
+test("daemonBoot: a REFUSING resolveClaudeBin logs daemon.claude_bin blocked=true and STILL COMPLETES boot (never throws onward)", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const resolveClaudeBin = (): string => {
     throw Object.assign(new Error("claude executable not found or not runnable — searched: npm-global=... (missing)"), {
       reasonClass: "blocked_toolchain",
     });
   };
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     { PATH: "/usr/bin" },
     undefined,
@@ -3392,12 +3394,12 @@ test("daemonBoot: calls the injected orphan sweep once and logs daemon.orphan_sw
   assert.equal(line?.extra.left_alone, 1);
 });
 
-test("daemonBoot: a THROWING orphan sweep still completes boot (never throws onward) — logged as a failure, not silently dropped", () => {
+test("daemonBoot: a THROWING orphan sweep still completes boot (never throws onward) — logged as a failure, not silently dropped", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const sweepOrphanWorkers = (): never => {
     throw new Error("ps: command not found");
   };
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     { PATH: "/usr/bin" },
     undefined,
@@ -3427,9 +3429,9 @@ test("daemonBoot: with no orphan sweep injected, no daemon.orphan_sweep line is 
 // trailing param appended after `declaredNodeVersion` (daemon.ts's own "no positional caller
 // shifts" discipline), with no real git and no daemon — a pure record-shape assertion.
 
-test("daemonBoot: a measured checkout depth is recorded on the SAME daemon.boot row, alongside its siblings", () => {
+test("daemonBoot: a measured checkout depth is recorded on the SAME daemon.boot row, alongside its siblings", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     { PATH: "/usr/bin" },
     undefined, // sweepTmp
@@ -3453,9 +3455,9 @@ test("daemonBoot: a measured checkout depth is recorded on the SAME daemon.boot 
   assert.ok("env_clean" in boots[0]!.extra, "still carries its sibling boot facts on the same row");
 });
 
-test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot still completes — it never halts boot", () => {
+test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot still completes — it never halts boot", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     { PATH: "/usr/bin" },
     undefined,
@@ -3478,9 +3480,9 @@ test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot sti
   assert.equal(boot?.extra.checkout_commit_count, 208);
 });
 
-test("daemonBoot: with no checkoutDepth measurement (unreadable), the fields are OMITTED rather than a guessed value — and boot still completes", () => {
+test("daemonBoot: with no checkoutDepth measurement (unreadable), the fields are OMITTED rather than a guessed value — and boot still completes", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" });
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" });
   assert.ok(result, "an absent measurement never blocks boot");
   const boot = lines.find((l) => l.step === "daemon.boot");
   assert.ok(boot);

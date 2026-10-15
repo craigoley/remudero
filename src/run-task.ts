@@ -688,12 +688,14 @@ import {
   landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
-  landPlanReconcileShards,
+  landPlanReconcileShardsAsync,
   recordDecision,
   recordRuling,
-  sweepFeedbackLanding,
   sweepFeedbackLandingAsync,
+  type CiLearningShardLander,
   type LandCiLearningShardsOptions,
+  type LandContentInput,
+  type LandFeedbackAsyncOpts,
   type LandFeedbackResult,
   type LandFeedbackOpts,
   type LandingReviewRequest,
@@ -23337,14 +23339,14 @@ export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
 
 /**
  * The daemon's two feedback-landing rungs over one set of options (W1-T5620). `perPoll` is the loop's per-iteration
- * rung and awaits its plan-PR preflight as child processes; `atBoot` is daemonBoot's synchronous boot-time pass.
- * Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts.
+ * rung and awaits its plan-PR preflight as child processes; `atBoot` is daemonBoot's boot-time pass, awaited the same
+ * way since W1-T9695. Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts.
  */
 export function feedbackLandingSweepRungs(
   root: string,
   opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
-): { atBoot: () => LandFeedbackResult; perPoll: () => Promise<LandFeedbackResult> } {
-  return { atBoot: () => sweepFeedbackLanding(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
+  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
 }
 
 /**
@@ -29321,28 +29323,37 @@ export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot =
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
+export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
+
 export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
-  land?: typeof landPlanReconcileShards;
+  land?: PlanReconcileLand;
+  /** W1-T9695: the landing's git/gh/preflight seams; production passes none. */
+  landSeams?: Pick<LandFeedbackAsyncOpts, "git" | "gh" | "gitAsync" | "ghAsync" | "planPrPreflight">;
 }
 
-export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileCadenceOpts | undefined {
+/** The cadence input plus `settled`: the sync cadence only STARTS an awaited landing, so the hook awaits it and a refusal still throws. */
+export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & { settled: () => Promise<void> };
+
+export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
+  const landings: Promise<void>[] = [];
+  const requireLanded = (landing: LandFeedbackResult): void => {
+    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+  };
   try {
-    return buildPlanReconcileCadenceInput({
+    const cadence = buildPlanReconcileCadenceInput({
       checkoutRoot: deps.checkoutRoot,
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
       land: (inputs) => {
-        const landOpts = { targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
-        // Kept on ONE line so a test driving either arm marks the whole call site covered — see
-        // buildMeasurementCadenceDaemonHooks's `planReconcileOption` a few hundred lines down for
-        // the same fold, done for the same reason: diff-coverage is line-based, and a multi-line
-        // ternary here would credit only the branch a given test actually took.
-        const landing = deps.land ? deps.land(deps.checkoutRoot, inputs, landOpts) : landPlanReconcileShards(deps.checkoutRoot, inputs, landOpts);
-        if (!landing.landed || landing.error) {
-          throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
-        }
+        const landOpts = { ...deps.landSeams, targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
+        const landing = (deps.land ?? landPlanReconcileShardsAsync)(deps.checkoutRoot, inputs, landOpts);
+        if (!(landing instanceof Promise)) return requireLanded(landing);
+        const settled = landing.then(requireLanded);
+        settled.catch(() => {}); // observed here; the hook's `settled()` rethrows it
+        landings.push(settled);
       },
     });
+    return { ...cadence, settled: async () => void (await Promise.all(landings)) };
   } catch {
     // An unavailable config, plan, ledger or credit projection must not abort the other
     // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
@@ -32379,7 +32390,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   ratifications?: Ratifications;
   coverageImprovementReader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
   /** W1-T3970: keep the cadence landing bridge injectable while production retains the real PR path. */
-  planReconcileLand?: typeof landPlanReconcileShards;
+  planReconcileLand?: PlanReconcileLand;
   /** W1-T3970: keep the production credit read injectable so offline cadence fixtures do not
    * accidentally shell out to the live GitHub projection. */
   creditedMergedIds?: () => ReadonlySet<string>;
@@ -32519,6 +32530,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
             }),
         },
       });
+      // W1-T9695: the plan-reconcile landing the report started; a refused one throws and the cadence records it.
+      await planReconcile?.settled();
       return { ...report, successorWatch: successorWatchReading };
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
@@ -37601,7 +37614,7 @@ export function buildCiLearningCadenceRunner(deps: {
   loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
   fileShards?: typeof fileCiLearningShards;
   /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
-  landShards?: (...args: Parameters<typeof landCiLearningShards>) => ReturnType<typeof landCiLearningShards> | Promise<ReturnType<typeof landCiLearningShards>>;
+  landShards?: CiLearningShardLander;
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
   pendingOrigins?: typeof ciLearningPendingOrigins;
@@ -38687,7 +38700,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "evidence-coverage":
       return withDue(() => {
         try {
-          runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log }));
+          runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log, landingStateRoot: config.root }));
         } catch (e) {
           log("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again", error: String((e as Error)?.message ?? e) });
         }
@@ -39842,7 +39855,7 @@ export async function daemonCommand(
     reviewCommand,
     `${target.owner}/${target.repo}`,
   );
-  // W1-T5620: the per-poll rung awaits its plan-PR preflight off the loop; the boot pass stays synchronous.
+  // W1-T5620: the per-poll rung awaits its plan-PR preflight off the loop; W1-T9695: so does the boot pass.
   const feedbackLandingRungs = target.isSelf
     ? feedbackLandingSweepRungs(repoRoot, {
         log,
@@ -39877,7 +39890,7 @@ export async function daemonCommand(
     // outlive the hold. Same predicate as daemonBoot's sweep; nothing else runs.
     runInflightLockSweepRung(config, log);
   } else {
-    (deps.daemonBoot ?? invokeDaemonBoot)(
+    await (deps.daemonBoot ?? invokeDaemonBoot)(
     log,
     process.env,
     () => {
@@ -39961,7 +39974,7 @@ export async function daemonCommand(
     daemonLoadedCodeSha,
     // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
     // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
-    // shared `feedbackLandingRungs` defined above this call (its synchronous boot form).
+    // shared `feedbackLandingRungs` defined above this call (its boot form, awaited since W1-T9695).
     feedbackLandingRungs?.atBoot,
     // W1-T991: `undefined` ⇒ daemonBoot's own default (THIS process's real
     // process.execPath/version) — never overridden here, only in tests.

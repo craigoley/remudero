@@ -1409,6 +1409,20 @@ function landContent(
   return driveLanding(landContentSteps(root, kind, inputs, opts), syncPreflightOf(root, opts));
 }
 
+/** {@link LandFeedbackOpts} for an awaited landing (W1-T9695): the plan-PR preflight and the network verbs are awaited. */
+export interface LandFeedbackAsyncOpts extends Omit<LandFeedbackOpts, "planPrPreflight"> {
+  planPrPreflight?: PlanPrPreflightAsyncFn;
+  gitAsync?: GitExecAsync;
+  ghAsync?: GhExecAsync;
+}
+
+/** {@link landContent} for a daemon-loop caller (W1-T9695): the same steps, its preflight and network verbs awaited off the loop. */
+async function landContentAsync(root: string, kind: LandingKind, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
+  const { planPrPreflight, ...landOpts } = opts;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
+  return driveLandingAsync(landContentSteps(root, kind, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
+}
+
 function* landContentSteps(
   root: string,
   kind: LandingKind,
@@ -1514,12 +1528,22 @@ function* landContentSteps(
   }
 }
 
-export function landPlanReconcileShards(
+/** The measurement cadence's plan-status landing (W1-T3970); W1-T9695: awaited, so its plan-PR preflight runs off the loop. */
+export function landPlanReconcileShardsAsync(
   root: string,
   inputs: readonly LandContentInput[],
-  opts: LandFeedbackOpts = {},
-): LandFeedbackResult {
-  const kind = landingKind(
+  opts: LandFeedbackAsyncOpts = {},
+): Promise<LandFeedbackResult> {
+  return landContentAsync(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+}
+
+/** The sync {@link landPlanReconcileShardsAsync}, for a caller off the daemon loop. */
+export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
+  return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+}
+
+function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "planPrPreflight">): LandingKind {
+  return landingKind(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
@@ -1529,7 +1553,6 @@ export function landPlanReconcileShards(
     opts,
     opts.git ?? defaultGit(root),
   );
-  return landContent(root, kind, [...inputs], opts);
 }
 
 /** `<root>/plan/decisions.d/<taskId>-<runId>.md` — one file per decision.autochoose resolution,
@@ -1864,6 +1887,13 @@ export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
    *  measurement-cadence.ts's `ciLearningRecordVerdict`. */
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
+
+/** A CI-learning shard lander, sync or awaited; W1-T9695: the daemon's runner names this, never the sync lander. */
+export type CiLearningShardLander = (
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: LandCiLearningShardsOptions,
+) => CiLearningFilingResult | Promise<CiLearningFilingResult>;
 
 /** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR; the daemon awaits the Async form (W1-T5965). */
 export function landCiLearningShards(

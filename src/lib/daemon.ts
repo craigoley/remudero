@@ -2849,7 +2849,7 @@ export function detectDaemonCrashLoop(
  * never touches the filesystem; run once here; logged either way, so the step's own pass or fail is part of the boot
  * record; and omitted means no step and behaviour unchanged. A failure is logged and the boot continues — the T197
  * doctrine, that the daemon sleeps through problems. Forensics: docs/forensics/daemon.md. */
-export function daemonBoot(
+export async function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
   env: NodeJS.ProcessEnv = process.env,
   sweepTmp?: () => { removed: string[]; kept: string[] },
@@ -2882,9 +2882,9 @@ export function daemonBoot(
    *  which is consumed by anyone who pulls first and left the daemon running stale code silently. */
   bootHeadSha?: string,
   /** The boot-time half of the feedback-landing backstop, so a pre-existing stranded entry is picked
-   *  up when the daemon comes up rather than only on its next per-poll pass. Synchronous, like the
-   *  orphan sweep above. Appended last so no positional caller shifts (W1-T530 part ii). */
-  sweepFeedbackLanding?: () => LandFeedbackResult,
+   *  up when the daemon comes up rather than only on its next per-poll pass. Awaited, so its plan-PR
+   *  preflight runs off the loop (W1-T9695). Appended last so no positional caller shifts (W1-T530 part ii). */
+  sweepFeedbackLanding?: () => Promise<LandFeedbackResult> | LandFeedbackResult,
   /** The runtime reading the boot assertion now also carries. Defaults to this process's own values so a real boot
    * needs no caller change; a test overrides it to prove drift without a real foreign-account install (W1-T991). */
   nodeRuntime: { execPath: string; version: string } = { execPath: process.execPath, version: process.version },
@@ -2895,7 +2895,7 @@ export function daemonBoot(
    *  the filesystem. Why: a shallow clone breaks every history read silently — log searches, follows and
    *  merge-base checks all stay plausible over a truncated corpus — and nothing asked (W1-T2332). */
   checkoutDepth?: { shallow: boolean; commitCount: number },
-): BootAssertion {
+): Promise<BootAssertion> {
   const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
     env_clean: assertion.env_clean,
@@ -2992,7 +2992,7 @@ export function daemonBoot(
   // boot continues rather than dying over a git or GitHub hiccup (W1-T530 part ii).
   if (sweepFeedbackLanding) {
     try {
-      const result = sweepFeedbackLanding();
+      const result = await sweepFeedbackLanding();
       log("daemon.feedback_landing_sweep", {
         landed: result.landed,
         pushed: result.pushed ?? false,
