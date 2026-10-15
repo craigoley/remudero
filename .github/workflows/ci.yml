@@ -1482,7 +1482,6 @@ jobs:
           name: coverage-ledger-choice-${{ github.run_id }}
           path: ${{ runner.temp }}/coverage-ledger-publish
           retention-days: 1
-          # No payload on a reused choice or a non-source lane. finish refuses an absent source choice.
           if-no-files-found: ignore
       - name: Require the published choice identity
         id: finish
