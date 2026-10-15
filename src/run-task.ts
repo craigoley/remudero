@@ -834,12 +834,14 @@ import {
 import {
   type RemoteRefReserver,
   type RemoteReservationBlock,
-  type RemoteReservationHandle,
   type ReservationPolicyCurrency,
   type TaskIdReservationBlock,
   TaskIdReservationError,
+  describeHeldTaskIds,
   describeReservationTakeover,
   firstUnreservedAtOrAbove,
+  parseTaskIdCount,
+  reserveTaskIdsKeepingHeld,
   nextPrefixedTaskIdStart,
   parsePrefixedTaskId,
   parseReservationHolderLine,
@@ -27866,18 +27868,6 @@ export function validateReserveArgs(rest: readonly string[]): string | undefined
   return undefined;
 }
 
-/** W1-T9683: how many ids one call reserves. Absent is 1 and today's output; `--count` is refused
- *  beside every flag that does not reserve on this repo's origin, as `--reserve` is. */
-export function nextTaskIdCount(rest: readonly string[]): { count: number; explicit: boolean } | { error: string } {
-  if (!rest.includes("--count")) return { count: 1, explicit: false };
-  const raw = rest[rest.indexOf("--count") + 1];
-  if (raw === undefined || !/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw)))
-    return { error: `### rmd next-task-id: --count needs a positive whole number, got ${raw === undefined ? "nothing" : JSON.stringify(raw)}` };
-  const clash = ["--offline", "--no-reserve", "--audit", "--prefix", "--repo"].find((f) => rest.includes(f));
-  if (clash) return { error: `### rmd next-task-id: --count and ${clash} are contradictory — --count reserves ids on this repo's origin` };
-  return { count: Number(raw), explicit: true };
-}
-
 /**
  * Adapt a `spawnSync`-shaped runner to {@link RemoteReserveDeps}'s stricter contract.
  *
@@ -28398,7 +28388,7 @@ export async function nextTaskIdCommand(
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
-  const countArg = nextTaskIdCount(rest);
+  const countArg = parseTaskIdCount(rest);
   if ("error" in countArg) {
     console.error(countArg.error + "\n" + USAGE);
     return 2;
@@ -28568,36 +28558,26 @@ export async function nextTaskIdCommand(
         }
       };
       // W1-T9683: N walks from the ONE mint above, each starting above the last id held.
-      const held: { handle: RemoteReservationHandle; contestedTo: number }[] = [];
-      let failure: unknown;
-      for (let next = mint.n; held.length < countArg.count; ) {
-        try {
-          const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(next, reserver));
-          held.push({ handle, contestedTo: contested.length });
-          next = handle.id + 1;
-        } catch (e) {
-          failure = e;
-          break;
-        }
-      }
-      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].handle.id, held[0].handle.taskId)));
-      let printed = 0;
-      for (const { handle, contestedTo } of held) {
-        for (const line of contested.slice(printed, contestedTo)) console.log(line);
-        printed = contestedTo;
+      const contestedAt: number[] = [];
+      const { held, error } = reserveTaskIdsKeepingHeld(mint.n, countArg.count, (from) => {
+        const handle = withIdReservationLogging(logRow, "next_task_id.reserve", () => reserveTaskIdRemote(from, reserver));
+        contestedAt.push(contested.length);
+        return handle;
+      });
+      if (held.length) console.log(describeMintWithHistory(mintForReservationAttempt(mint, held[0].id, held[0].taskId)));
+      held.forEach((handle, i) => {
+        for (const line of contested.slice(contestedAt[i - 1] ?? 0, contestedAt[i])) console.log(line);
         // W1-T6026: a takeover rides the RESERVED line itself, and leaves one durable row.
         const takeover = handle.takenOver ? ` — ${describeReservationTakeover(handle.takenOver)}` : "";
         console.log(`RESERVED ${handle.taskId} on origin (${handle.ref}) after ${handle.attempts} attempt(s)${takeover}`);
         if (handle.takenOver) logRow("next_task_id.reclaimed", reservationTakeoverFields(handle, handle.takenOver));
-        if (handle === held[0].handle && handle.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${handle.taskId} is the id actually HELD)`);
-      }
-      for (const line of contested.slice(printed)) console.log(line);
-      if (countArg.explicit) console.log(`HELD ${held.length} of ${countArg.count}: ${held.map((h) => h.handle.taskId).join(" ") || "(none)"}`);
-      if (failure !== undefined) {
-        if (countArg.explicit && held.length)
-          console.error(`### rmd next-task-id --count: PARTIAL — holds ${held.length} of ${countArg.count}; could not reserve the other ${countArg.count - held.length}`);
-        throw failure;
-      }
+        if (i === 0 && handle.taskId !== mint.id) console.log(`(note: the reservation walk advanced from ${mint.id}; ${handle.taskId} is the id actually HELD)`);
+      });
+      for (const line of contested.slice(contestedAt[held.length - 1] ?? 0)) console.log(line);
+      const summary = countArg.explicit ? describeHeldTaskIds(held, countArg.count) : undefined;
+      if (summary) console.log(summary.held);
+      if (summary?.partial && error !== undefined) console.error(summary.partial);
+      if (error !== undefined) throw error;
       for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
         (overlapDeps.say ?? console.log)(line);
     } catch (e) {
