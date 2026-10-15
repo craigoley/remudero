@@ -178,12 +178,6 @@ export function triageEscalation(
   }
 }
 
-/** The model is worth asking only when no rule decided and the class is not operator-owned. */
-export function triageNeedsModel(e: TriageSubject, evidence: TriageEvidence = {}): boolean {
-  const first = triageEscalation(e, evidence);
-  return first.kind === "deliver" && first.decidedBy === "default";
-}
-
 // ── Policy (plan/policy.yaml `escalationTriage:`) ──────────────────────────────────────────
 
 /** BACKSTOP: at most this many auto-resolves per pass — the design guardrail; the parser clamps any policy value to it. */

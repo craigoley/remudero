@@ -1,0 +1,79 @@
+- id: W1-T9590
+  title: "THE LEARNED SWEEP BOUND LEARNS ONLY FROM PASSES THAT DID WORK — W1-T9563 bounds the next full pass at 3x the p90 of the last 40 settled passes, so a run of near-instant passes (a GitHub quota outage, an empty board) shrinks the bound to seconds and healthy passes are abandoned until slow passes widen the sample again"
+  repo: remudero
+  depends_on: [W1-T9563]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which settled passes W1-T9563's learner may sample; high for span: the learner in daemon.ts, the work count the real sweep closure in run-task.ts returns, #11879's suite and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-14: follow-up found while reviewing #11879 (W1-T9563); operator approved it 2026-10-14 (\"go with all recommended follow ups\"). Standing ruling: no hard thresholds or floors, so the fix is a mechanism"
+  plan_refs: [W1-T9563, W1-T1044, W1-T2582, W1-T4002, W1-T9554, W1-T147]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts
+    - test/a-sweep-bound-learns-only-from-passes-that-did-work.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 from #11879's head (25c010dde, `git fetch origin refs/pull/11879/head`), src/lib/daemon.ts:
+      - `learnedSweepBound` returns nearest-rank p90 of `learner.settledMs` x `SWEEP_BOUND_HEADROOM` (3) once
+        `SWEEP_BOUND_MIN_SAMPLES` (5) durations are held. `recordSettledSweep` appends every positive settled
+        duration and keeps the newest `SWEEP_BOUND_WINDOW` (40). `settledSweepDurations` seeds the learner at boot
+        from every `daemon.sweep.settled` row's `elapsed_ms`.
+      - A settled pass is sampled whatever it did. With 36 instant passes and 4 normal ones in the window, the
+        nearest-rank p90 (rank 36 of 40) is the slowest instant pass, so the bound becomes 3x a few seconds.
+    WHERE INSTANT PASSES COME FROM (src/run-task.ts on origin/main, the daemon sweep closure):
+      - When `tickRead.openPrError` is set (an open-PR read that failed, for example on GitHub quota), the closure
+        throws straight into its `sweep.error` catch, runs the draft hook and RESOLVES `undefined`. That pass settles
+        fast and is a healthy-looking sample.
+      - An empty board builds `openPrs` of length 0 and walks nothing.
+      - Neither pass measures how long a pass with work takes, which is the population W1-T9563 means to learn.
+    A floor under the learned value would be a hard threshold, which the operator ruling forbids. Instead the learner
+    leaves out samples that measured no work.
+    RELATED, NOT OVERLAPPING: W1-T147 (queued, the overnight chaos drill) also declares src/run-task.ts and
+    src/lib/daemon.ts. It injects kill-9, ENOSPC and a GitHub-outage stub and checks each recovery ledger line. This
+    task changes which settled passes the sweep-bound learner samples. Its GitHub-outage stub would produce exactly
+    the zero-work passes this task leaves out of the sample.
+  design: |
+    1. The pass reports its work. `SweepCycleOutcome` (src/lib/daemon.ts) gains `prsWalked: number`, the count of open
+       PR views the pass walked. The daemon sweep closure in src/run-task.ts returns it on every path: `openPrs.length`
+       once the views are built, and 0 when the open-PR read threw (the `sweep.error` path) or the board was empty.
+       Today that closure returns `undefined` when it has no receipts and no stale reviewer code. It now always returns
+       an outcome, and the other fields keep their current meaning. A consumer that tests the outcome for
+       truthiness (`latestSweepOutcome`, `completedSweeps`) reads its fields instead.
+    2. The learner samples only passes that did work. `runGatedSweep` writes `prs_walked` on `daemon.sweep.settled`
+       and records the duration only when `prsWalked` is above 0. A pass that walked nothing still writes its settled
+       row, with `sampled: false`, so the exclusion can be seen in the ledger. A pass whose outcome has no
+       `prsWalked` (a caller-supplied sweep that returns nothing) keeps today's behaviour and is sampled.
+    3. The boot seed follows the same rule. `settledSweepDurations` skips a row whose `prs_walked` is 0. It keeps a row
+       with no `prs_walked`, because that row was written before this task. Those rows leave the 40-pass window within
+       about one 12 h window.
+    4. `SWEEP_BOUND_MIN_SAMPLES` counts sampled passes only. Below it the policy cold-start value applies with
+       `bound_basis: no_history_fallback`, as today. Do not add a minimum, maximum or clamp on the learned value, and
+       do not change the quantile, headroom or window.
+    5. Out of scope: the review-drain bound, the light pass, and weighting samples by PR count. Weighting is the
+       alternative if the falsifier below shows that a pass walking few PRs still skews the bound. File it as its own
+       task with the measurement.
+  acceptance:
+    - claim: "after 40 normal passes settle, 36 instant passes that walked no PRs and 4 normal ones leave the learned bound at or above the slowest normal pass"
+      proof: "unit test: W1-T9590: instant passes that walked no PRs do not shrink the learned sweep bound"
+    - claim: "a boot seed of 36 settled rows with prs_walked 0 and 4 normal rows falls back to the policy value and never learns a bound of seconds"
+      proof: "unit test: W1-T9590: a boot seed of empty passes keeps the cold-start sweep bound"
+    - claim: "the daemon sweep closure reports zero PRs walked when its open-PR read fails"
+      proof: "unit test: W1-T9590: a full pass whose open-PR read failed reports zero PRs walked"
+    - claim: "the suite exists under its own title"
+      proof: "grep: W1-T9590: instant passes that walked no PRs do not shrink the learned sweep bound in test/a-sweep-bound-learns-only-from-passes-that-did-work.test.ts"
+    - claim: "the settled row carries the pass's work count"
+      proof: "grep: prs_walked in src/lib/daemon.ts"
+  falsifier: |
+    Seed `runGatedSweep`'s learner with 40 settled passes of 11-35 min, each with `prsWalked` above 0, then settle 36
+    passes of 50-900 ms with `prsWalked: 0` and 4 passes of 20 min with `prsWalked: 12`. At #11879's head
+    `recordSettledSweep` takes all 40 newest durations, the nearest-rank p90 is the 36th sorted value (an instant pass),
+    and `learnedSweepBound` returns under 3 s with `bound_basis: observed_passes`, so the first test fails. With the
+    change the 36 instant passes are not sampled and the bound stays at 3x the normal passes' p90. Sample a pass
+    whatever its `prsWalked`: the first and second tests fail. Return `undefined` again from the closure's
+    `sweep.error` path: the third test fails.

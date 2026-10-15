@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=cae98ba919c730bb
   attempts: 0
   files:
     - test/the-overflow-valve-is-reachable-from-a-blocked-auction.test.ts
