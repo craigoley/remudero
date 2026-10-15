@@ -4053,8 +4053,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             },
             runReview,
             fetchPrBody: fetchPrBodyViaGh,
-            // W1-T4693: the run loop's own push (`pushFixRound`), so a refused round is named, never swallowed.
-            push: pushFixRound,
+            // W1-T4693/W1-T8833: the run loop's own prechecked push, so a refused round is named and a moved tip re-applied.
+            push: (wt: string, br: string, sha?: string, prior?: string) => pushFixRound(wt, br, sha, prior, (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra })),
             readHeadShaForProvenance: readHeadShaRest,
             issues,
             ledgerPath,
