@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: core outage 08:22-10:29Z; operator: the outage must reach the operator fast, through a Remudero issue"
   plan_refs: [W1-T9623, W1-T3367, W1-T5688]
   files: [src/lib/launcher-host-alerts.ts, src/lib/host-escalation-spool.ts, test/a-down-daemon-alert-reaches-github-without-the-daemon.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -1,0 +1,56 @@
+- id: W1-T9698
+  title: "THE ALERT-FIX AND MAIN-REPAIR FIX DISPATCH READ THE OPENED PR'S BODY WITH A SYNCHRONOUS gh — REAL_ALERT_FIX_DISPATCH_DEPS binds checkAcceptance to checkAlertFixAcceptance and readPrBody to readAlertFixPrBody, both defaulting to the sync ghJson (`gh pr view --json body`), so every alert-fix or main-repair fix open holds the daemon loop for one or two gh round trips; W1-T9660 recorded both as census rows with no conversion filed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — how the alert-fix dispatch reads the opened PR's body; the acceptance check and the inert-proof count are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9660 (#12081, fcfaeb5d4) census rows checkAlertFixAcceptance and readAlertFixPrBody"
+  plan_refs: [W1-T9660, W1-T8625, W1-T952, W1-T8572, W1-T6403, W1-T5689]
+  files:
+    - src/run-task.ts
+    - test/the-alert-fix-dispatch-reads-its-pr-body-off-the-loop.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  priority: 2  # operator-2026-10-15: the main-repair lane opens its fix PR through this seam while main is red, when the loop matters most
+  attempts: 0
+  rationale: |
+    READ at origin/main 03269ad67 (2026-10-15), src/run-task.ts:
+    - `readAlertFixPrBody(prUrl, read = ghJson)` runs `read(["pr", "view", prUrl, "--json", "body"])`. ghJson is
+      the synchronous gh wrapper.
+    - `checkAlertFixAcceptance(prUrl, read = ghJson)` returns `acceptanceAuthorTimeCheck(readAlertFixPrBody(prUrl,
+      read))`.
+    - `REAL_ALERT_FIX_DISPATCH_DEPS` binds `checkAcceptance: checkAlertFixAcceptance` and `readPrBody:
+      readAlertFixPrBody`. `AlertFixDispatchDeps` types both as synchronous: `checkAcceptance: (prUrl) =>
+      AcceptanceAuthorTimeResult`, `readPrBody?: (prUrl) => string`. `dispatchAlertFixRun` is already async.
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts holds `checkAlertFixAcceptance: 1` (daemonCommand >
+      mainRepairLaneFor > dispatchMainRepairFixRun > REAL_MAIN_REPAIR_FIX_DEPS > REAL_ALERT_FIX_DISPATCH_DEPS) and
+      `readAlertFixPrBody: 1` (the same path), both marked "no conversion filed".
+    - The two seams read the same body (W1-T8625 says it is "the ONE body read both ... go through"), so one open
+      can read it twice.
+  design: |
+    1. `AlertFixDispatchDeps.checkAcceptance` and `readPrBody` may return a promise. dispatchAlertFixRun and the
+       main-repair fix dispatch await them. A fake that returns a plain value keeps working.
+    2. The real bindings read the body ONCE, over the async gh transport (`ghJsonAsync`, or the REST pulls read
+       the main-repair open already uses). checkAcceptance and the inert-proof count are judged over that one
+       body. The default `read` is the async reader, so no real sync `gh` default stays reachable.
+    3. Delete both census rows, as the census's exact contract demands. Drop both names from W1-T9660's
+       OBJECT_LITERAL_SPAWNERS; the test keeps the names still reached.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - the real binding with an injected async reader resolves the acceptance check, and a sync reader that
+         throws if called is never called;
+       - one dispatch reads the body once and uses it for both the check and the inert-proof count.
+  acceptance:
+    - claim: "the alert-fix dispatch reads the opened pr's body over an awaited child, never the synchronous gh"
+      proof: 'unit test: test/the-alert-fix-dispatch-reads-its-pr-body-off-the-loop.test.ts'
+    - claim: "the real acceptance binding awaits an async body read"
+      proof: 'grep: test("W1-T9698: the alert-fix acceptance check awaits an async body read" in test/the-alert-fix-dispatch-reads-its-pr-body-off-the-loop.test.ts'
+    - claim: "one alert-fix open reads the pr body once for the acceptance check and the inert-proof count"
+      proof: 'grep: test("W1-T9698: one open reads the pr body once" in test/the-alert-fix-dispatch-reads-its-pr-body-off-the-loop.test.ts'
+  falsifier: |
+    At origin/main, checkAlertFixAcceptance(prUrl, asyncRead) reads `.body` off the unresolved promise, sees an
+    empty body and refuses it as having no acceptance block. Its signature returns a value, not a promise. So a
+    test that awaits the check over a body that carries a valid block fails.

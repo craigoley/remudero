@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: main red at 037a58d8f from 12:58Z, repaired by hand in #12034 after the lane escalated"
   plan_refs: [W1-T6403, W1-T5806, W1-T7760, W1-T8572, W1-T9301, W1-T9503]
   files: [src/lib/main-health-rung.ts, src/run-task.ts, test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a red main reds every open PR, and this lane spent three rounds and 20 min on a merge that could not be the cause
   attempts: 0
   rationale: |

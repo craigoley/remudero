@@ -17,7 +17,7 @@
     - test/a-draft-repair-names-only-callers-the-tree-holds.test.ts
     - test/call-site-rule.test.ts
     - test/relint-loop.test.ts
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: every reframed draft is read by hand until drafts stop inventing paths
   attempts: 0
   rationale: |
