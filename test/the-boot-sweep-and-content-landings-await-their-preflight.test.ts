@@ -15,12 +15,19 @@ import { parse as parseYaml } from "yaml";
 import { daemonBoot } from "../src/lib/daemon.js";
 import { daemonEvidenceCoverageInput } from "../src/lib/evidence-coverage-gardener.js";
 import { feedbackEntryPath, feedbackEntryRepoPath } from "../src/lib/feedback.js";
+import * as landing from "../src/lib/feedback-landing.js";
 import { queuedFeedbackDir, queuedFeedbackLandings, type LandFeedbackResult } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { planReconcileCadence } from "../src/lib/measurement-cadence.js";
+import { buildPlanReconcileCadenceInput, planReconcileCadence } from "../src/lib/measurement-cadence.js";
 import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
-import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+
+// Namespace reads, so this file still loads at the base (where these forms do not exist) and reds per subtest.
+type Rungs = { atBoot: () => Promise<LandFeedbackResult> | LandFeedbackResult };
+type Landing = { land: (inputs: readonly { relPath: string; content: string }[]) => void; settled: () => Promise<void> };
+const feedbackLandingSweepRungs = (landing as Record<string, unknown>).feedbackLandingSweepRungs as (root: string, opts: object) => Rungs;
+const planReconcileLanding = (landing as Record<string, unknown>).planReconcileLanding as (
+  root: string, opts: () => object, lander?: (...args: unknown[]) => Promise<LandFeedbackResult>) => Landing;
 
 const GREEN: PlanPrPreflightResult = { ok: true, failures: [], unreadable: [] };
 type Row = { step: string; extra?: Record<string, unknown> };
@@ -41,7 +48,7 @@ test("W1-T9695: the boot sweep awaits the async feedback landing", async () => {
   // The daemon's own boot rung is the awaited sweep, never the sync one.
   const root = mkdtempSync(join(tmpdir(), "rmd-w9695-boot-"));
   const offline = () => { throw new Error("offline fixture"); };
-  const atBoot = runTask.feedbackLandingSweepRungs(root, { git: offline, gh: offline }).atBoot();
+  const atBoot = feedbackLandingSweepRungs(root, { git: offline, gh: offline }).atBoot();
   assert.ok(atBoot instanceof Promise, "atBoot returns the awaited sweep's promise");
   await atBoot.catch(() => undefined);
 });
@@ -58,17 +65,18 @@ test("W1-T9695: the plan-reconcile landing never drives the sync preflight", asy
   // take the Promise itself for the verdict and refuse the landing.
   const asked: string[] = [];
   const planPrPreflight = async (sha: string) => (asked.push(sha), GREEN);
-  const input = runTask.buildPlanReconcileProductionInput({
+  // The measurement cadence's production land seam, over the awaited lander it defaults to.
+  const reconcile = planReconcileLanding(checkout.dir, () => ({ gh, planPrPreflight, landingOwner: "measurement-cadence" }));
+  const cadenceFor = (land: Landing["land"]) => buildPlanReconcileCadenceInput({
     checkoutRoot: checkout.dir,
     readShards: () => ids.map((taskId) => ({ taskId, path: join(checkout.dir, "plan", "tasks.d", `${taskId}.yaml`), text: `- id: ${taskId}\n  status: queued\n` })),
     creditedMergedIds: () => new Set(ids),
-    landSeams: { gh, planPrPreflight },
+    land,
   });
-  assert.ok(input);
   const report = await withLiveWritesAllowed(async () => {
-    const cadence = planReconcileCadence(input);
+    const cadence = planReconcileCadence(cadenceFor(reconcile.land));
     assert.equal(asked.length, 0, "the cadence only starts the landing; its preflight is awaited");
-    await input.settled();
+    await reconcile.settled();
     return cadence;
   });
   assert.equal(report.status, "landed");
@@ -76,14 +84,8 @@ test("W1-T9695: the plan-reconcile landing never drives the sync preflight", asy
   assert.equal(existsSync(join(checkout.dir, "plan")), false, "the landing never writes the daemon checkout");
 
   // A refused landing still fails the cadence: `settled` rethrows it.
-  const refused = runTask.buildPlanReconcileProductionInput({
-    checkoutRoot: checkout.dir,
-    readShards: () => ids.map((taskId) => ({ taskId, path: join(checkout.dir, "plan", "tasks.d", `${taskId}.yaml`), text: `- id: ${taskId}\n  status: queued\n` })),
-    creditedMergedIds: () => new Set(ids),
-    land: async () => ({ landed: false, files: [], error: "simulated async refusal" }),
-  });
-  assert.ok(refused);
-  assert.equal(planReconcileCadence(refused).status, "landed");
+  const refused = planReconcileLanding(checkout.dir, () => ({}), async () => ({ landed: false, files: [], error: "simulated async refusal" }));
+  assert.equal(planReconcileCadence(cadenceFor(refused.land)).status, "landed");
   await assert.rejects(refused.settled(), /simulated async refusal/);
 });
 

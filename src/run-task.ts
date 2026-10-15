@@ -689,18 +689,16 @@ import {
   landFeedbackStatusContent,
   landCiLearningShards,
   landCiLearningShardsAsync,
-  landPlanReconcileShardsAsync,
+  feedbackLandingSweepRungs,
+  planReconcileLanding,
   recordDecision,
   recordRuling,
-  sweepFeedbackLandingAsync,
   type CiLearningShardLander,
   type LandCiLearningShardsOptions,
-  type LandContentInput,
-  type LandFeedbackAsyncOpts,
   type LandFeedbackResult,
+  type PlanReconcileLand,
   type LandFeedbackOpts,
   type LandingReviewRequest,
-  type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
 import {
   reconcileFeedbackLanding,
@@ -23329,17 +23327,7 @@ export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
   }
 }
 
-/**
- * The daemon's two feedback-landing rungs over one set of options (W1-T5620). `perPoll` is the loop's per-iteration
- * rung and awaits its plan-PR preflight as child processes; `atBoot` is daemonBoot's boot-time pass, awaited the same
- * way since W1-T9695. Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts.
- */
-export function feedbackLandingSweepRungs(
-  root: string,
-  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
-): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
-  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
-}
+export { feedbackLandingSweepRungs };
 
 /**
  * Builds the {@link LandingReviewRequest} callback `daemonBoot` wires into `sweepFeedbackLanding`
@@ -29315,35 +29303,23 @@ export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot =
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
  * report. The real hook supplies the real shard reader and landing bridge; focused tests supply
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
-export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
-
 export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land"> {
   land?: PlanReconcileLand;
-  /** W1-T9695: the landing's git/gh/preflight seams; production passes none. */
-  landSeams?: Pick<LandFeedbackAsyncOpts, "git" | "gh" | "gitAsync" | "ghAsync" | "planPrPreflight">;
 }
 
-/** The cadence input plus `settled`: the sync cadence only STARTS an awaited landing, so the hook awaits it and a refusal still throws. */
+/** The cadence input plus `settled` (W1-T9695): the hook awaits the landing the sync cadence started. */
 export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & { settled: () => Promise<void> };
 
 export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
-  const landings: Promise<LandFeedbackResult>[] = [];
-  const requireLanded = (landing: LandFeedbackResult): void => {
-    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
-  };
+  const landing = planReconcileLanding(deps.checkoutRoot, () => ({ targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" }), deps.land);
   try {
     const cadence = buildPlanReconcileCadenceInput({
       checkoutRoot: deps.checkoutRoot,
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
-      land: (inputs) => {
-        const landOpts = { ...deps.landSeams, targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
-        const landing = (deps.land ?? landPlanReconcileShardsAsync)(deps.checkoutRoot, inputs, landOpts);
-        if (landing instanceof Promise) landings.push(landing);
-        else requireLanded(landing);
-      },
+      land: landing.land,
     });
-    return { ...cadence, settled: async () => (await Promise.all(landings)).forEach(requireLanded) };
+    return { ...cadence, settled: landing.settled };
   } catch {
     // An unavailable config, plan, ledger or credit projection must not abort the other
     // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.

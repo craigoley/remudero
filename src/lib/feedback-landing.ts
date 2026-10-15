@@ -1304,6 +1304,15 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts)));
 }
 
+/** The daemon's feedback-landing rungs (W1-T5620): both await the preflight, the boot pass since W1-T9695.
+ *  Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts. */
+export function feedbackLandingSweepRungs(
+  root: string,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
+): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
+  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+}
+
 export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
   /** W1-T5672: the awaited form of `git` for the network verbs (fetch, ls-remote, push); defaults to an injected `git`, else a real child process. */
@@ -1536,6 +1545,28 @@ export function landPlanReconcileShardsAsync(
 
 export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
   return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+}
+
+export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
+
+/** W1-T9695: the cadence's sync `land` seam over an awaited landing. `land` starts one; `settled` awaits all and throws on a refusal. */
+export function planReconcileLanding(
+  root: string,
+  opts: () => LandFeedbackAsyncOpts,
+  lander: PlanReconcileLand = landPlanReconcileShardsAsync,
+): { land: (inputs: readonly LandContentInput[]) => void; settled: () => Promise<void> } {
+  const landings: Promise<LandFeedbackResult>[] = [];
+  const requireLanded = (landing: LandFeedbackResult): void => {
+    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+  };
+  return {
+    land: (inputs) => {
+      const landing = lander(root, inputs, opts());
+      if (landing instanceof Promise) landings.push(landing);
+      else requireLanded(landing);
+    },
+    settled: async () => (await Promise.all(landings)).forEach(requireLanded),
+  };
 }
 
 function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "planPrPreflight">): LandingKind {
