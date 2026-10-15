@@ -77,17 +77,24 @@
          from the fold the pass already builds (`baseRedHistoryFromLedger`). Walk order never decides who goes
          first, so a PR walked early cannot outrank an older hold.
        - An `assessRefresh` refusal is never admitted. It keeps today's refusal reason, and the head's red is its own.
-    2. PACED BY AN OBSERVED SIGNAL, NEVER A CONSTANT. How many candidates a pass admits comes from CI uptake of
-       this admission's earlier refreshes:
-       - A head this admission refreshed, whose new head shows no started required check in this pass's snapshot,
-         is still waiting for a runner. While any such head exists, no further candidate is admitted.
-       - Once every earlier admission's CI has started, the next oldest-held candidate is admitted.
-       - So a board freed by one main fix is fed to CI as fast as runners take it. It is neither pressed all at once
-         nor capped at one per pass.
+    2. PACED BY AN OBSERVED SIGNAL, NEVER A CONSTANT: SLOW START. Operator ruling 2026-10-15: slow start,
+       recommended by the session; "fix all the issues". How many candidates a pass admits comes from CI uptake
+       of this admission's earlier refreshes:
+       - WITH NO PRIOR UPTAKE SIGNAL, ADMIT ONLY THE OLDEST-HELD CANDIDATE, the same as the unreadable case below.
+         There is no prior signal when no earlier admission refreshed a head, or when the latest admission that
+         did is older than the oldest held-since among this pass's candidates (it served an earlier main fix).
+       - A head the latest admission refreshed, whose new head shows no started required check in this pass's
+         snapshot, is still waiting for a runner. While any such head exists, no further candidate is admitted.
+       - Once every head the latest admission refreshed has started CI, admit TWICE AS MANY as it did, oldest-held
+         first. So a board freed by one main fix is fed 1, 2, 4, ... heads per pass as runners take them. It is
+         neither pressed all at once nor capped at one per pass: the width is learned from uptake.
+       - Why: as first built (#12066), a pass with no earlier admission admitted every cleared candidate. After
+         the 2026-10-15 main fix that was about 15 refreshes, so about 15 CI runs in one second, the fan-out
+         doctrine `never-fan-out-update-branch` forbids.
        - Write the reading on the admission row: admitted PRs, waiting PRs, the PR(s) whose CI has not started,
-         and the oldest held-since.
-       - Do not add a fixed maximum, minimum or per-pass N. A test drives two signal readings and shows the
-         admitted count follows them.
+         the pass's width, and the oldest held-since.
+       - Do not add a fixed maximum or per-pass N. The one head a board starts with is the unreadable floor,
+         today's behaviour, not a cap. A test drives the signal readings and shows the admitted count follows them.
        - An unreadable signal (the snapshot carries no check facts for an earlier admission) admits the oldest-held
          candidate only, and the row says `signal: unreadable`. That is today's behaviour, never worse.
     3. TWO REASONS, NOT ONE.
@@ -114,8 +121,8 @@
        - `tryPlanRepair`'s refresh;
        - W1-T7735's value test.
   acceptance:
-    - claim: "when main fixes, every held head that assessRefresh clears is admitted oldest-held first while CI takes them, not one per pass"
-      proof: "unit test: W1-T9595: every held head whose red main has fixed is admitted oldest-held first while CI takes them"
+    - claim: "when main fixes, held heads that assessRefresh clears are admitted oldest-held first, one head with no prior uptake signal, then twice as many each pass while CI takes them (slow start, operator ruling 2026-10-15)"
+      proof: "unit test: W1-T9595: slow start admits the oldest-held head first, then twice as many while CI takes them"
     - claim: "an earlier admission whose CI has not started holds the next candidate, and the hold names that PR"
       proof: "unit test: W1-T9595: a refresh whose CI has not started holds the next admission and names that PR"
     - claim: "a light pass refreshes a held head only through one admission over its snapshot, never in the per-PR fan-out"
@@ -123,7 +130,7 @@
     - claim: "an unwired surface and a paced admission give different stand-down reasons"
       proof: "unit test: W1-T9595: an unwired surface and a paced admission give different stand-down reasons"
     - claim: "the suite exists under its own title"
-      proof: "grep: W1-T9595: every held head whose red main has fixed is admitted oldest-held first in test/a-head-whose-red-main-has-fixed-is-refreshed-by-admission.test.ts"
+      proof: "grep: W1-T9595: slow start admits the oldest-held head first in test/a-head-whose-red-main-has-fixed-is-refreshed-by-admission.test.ts"
     - claim: "the sweep admits refreshes through one per-pass admission"
       proof: "grep: refreshAdmission in src/lib/sweep.ts"
   falsifier: |
@@ -132,9 +139,13 @@
       - three heads held on it with stood-down rows at t1 < t2 < t3, walked in the order t3, t1, t2;
       - an `assessRefresh` that clears all three;
       - an `updateBranch` stub that records calls;
-      - a snapshot in which every earlier admission's required CI has started.
-    At origin/main the first walked head (t3) takes `baseRedRefreshPr`. t1 and t2 stand down "spent or unwired", so
-    the first test fails on both the count and the order. Make the snapshot show t1's refresh with no started check:
-    the second test expects t2 held with a reason naming t1, and at base no such reason exists. Run the light-pass
+      - no earlier admission in the ledger, so there is no prior uptake signal.
+    Slow start (operator ruling 2026-10-15, recommended by the session; "fix all the issues"): the first pass admits
+    t1 only, and t2 and t3 wait with a reason naming t1. A second pass whose snapshot shows t1's refreshed head with
+    a started check admits t2 and t3, twice the first pass's one. At origin/main the first walked head (t3) takes
+    `baseRedRefreshPr`, so the first test fails on the order. As first built in #12066, the first pass admits all
+    three, so the first test fails on the count. Make the snapshot show t1's refresh with no started check: the
+    second test expects t2 held with a reason naming t1, and at base no such reason exists. Run the light-pass
     builder with the same board: at base `updateBranch` is never called, so the third test fails. Restore the
-    single slot after the change and the first and second tests go red again.
+    single slot after the change and the first and second tests go red again; drop slow start and the first test
+    goes red again.
