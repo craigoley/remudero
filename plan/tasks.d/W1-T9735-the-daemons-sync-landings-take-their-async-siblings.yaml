@@ -1,0 +1,61 @@
+- id: W1-T9735
+  title: "FOUR DAEMON-PATH LANDINGS STILL DRIVE THE SYNC PLAN-PR PREFLIGHT — recordDecision's landContent, setFeedbackStatus without a landing state root, the sweep's landFoldDebt and the sync gardenCheckout each reach runInTree's spawnSync checks on the loop, though each has an async form at hand (feedback-landing.ts's internal landContentAsync, the W1-T5460 landing queue swept by sweepFeedbackLandingAsync, gardenCheckoutAsync)"
+  repo: remudero
+  depends_on: [W1-T9696]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — daemon-path landings go through the async landing forms that already exist; what lands and where is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 6: the runInTree census row's sync-landings list on run-W1-T9696-1792093598744 (e02b93474)"
+  plan_refs: [W1-T9696, W1-T9695, W1-T9660, W1-T5460, W1-T9734, W1-T100]
+  files:
+    - src/lib/feedback-landing.ts
+    - src/lib/fold-debt-pull.ts
+    - src/lib/ops.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/the-daemons-sync-landings-take-their-async-siblings.test.ts
+  status: queued
+  priority: 2  # operator-2026-10-15: each sync landing holds the loop for the plan-PR preflight's in-tree checks
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf and at run-W1-T9696-1792093598744 (e02b93474), 2026-10-15:
+    - src/lib/feedback-landing.ts `recordDecision`: `landContent(root, landingKind(DECISIONS_LANDING_KIND, ...))`,
+      the sync landing. src/run-task.ts wires it as the run flow's `recordDecisionFn`.
+    - src/lib/feedback.ts `setFeedbackStatus`: with `opts.land.stateRoot` set, `landFeedbackStatusContent` queues;
+      without it, it calls `landContent` inline. src/lib/ops.ts `pollAlerts`'s reject passes
+      `{ land: deps.land ?? {} }`, with no state root.
+    - src/lib/fold-debt-pull.ts `landFoldDebt`: `(deps.land ?? landFeedback)(deps.root)`, called from src/lib/sweep.ts
+      (`landFoldDebt(pullFoldDebtEntries(input), input)`).
+    - src/run-task.ts `gardenCheckout`: `preflight: opts.preflight ?? ((input) => planPrPreflight(input, ...))` and
+      `land: (landing) => runStepsSync(gardenLandSteps(...))`. Its async twin `gardenCheckoutAsync` uses
+      `planPrPreflightAsync`. `knowledgeGardenWorkspace` still opens the sync one.
+    - Each reaches `planPrPreflightAtCommit` or `planPrPreflight` > `defaultPreflightChecks` > `runInTree`.
+    - W1-T100 shares sweep.ts and run-task.ts as a broad routing task. This task changes only which landing form
+      four daemon-path callers use.
+  design: |
+    1. Each daemon-path landing above takes its async sibling:
+       - the run flow's decision record lands through an exported async `recordDecisionAsync` over the internal
+         `landContentAsync`, or queues under the state root;
+       - `pollAlerts`'s status flip passes the daemon's state root, so it queues (W1-T5460);
+       - the sweep's fold-debt landing queues its entries for `sweepFeedbackLandingAsync`, or awaits an async
+         landing built on `landContentAsync`;
+       - the daemon's knowledge garden opens `knowledgeGardenWorkspaceAsync`.
+       Where the sync form has no remaining caller, delete it. Where a CLI verb still uses it, keep it.
+    2. Re-measure at the build's base. Update the runInTree row's comment to drop each converted landing. The row
+       itself is W1-T9736's to delete.
+    3. sweep.ts sits at its comment ceiling: no new comment lines there.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below), each with a throwing sync preflight:
+       - the run flow's decision record lands with no sync preflight call;
+       - the alert poll's reject queues its status flip under the state root;
+       - the sweep's fold-debt landing never runs the sync landing.
+  acceptance:
+    - claim: "the run flow's decision record and the alert poll's status flip never drive the sync plan-pr preflight"
+      proof: 'grep: test("W1-T9735: the decision record and the alert status flip never run the sync preflight" in test/the-daemons-sync-landings-take-their-async-siblings.test.ts'
+    - claim: "the sweep's fold-debt landing never runs the sync landing"
+      proof: 'grep: test("W1-T9735: the fold-debt landing never runs the sync landing" in test/the-daemons-sync-landings-take-their-async-siblings.test.ts'
+  falsifier: |
+    At origin/main, landFoldDebt with no `land` dep calls landFeedback, which runs syncPreflightOf, so a throwing sync
+    preflight reached through the landing opts fails the second test.

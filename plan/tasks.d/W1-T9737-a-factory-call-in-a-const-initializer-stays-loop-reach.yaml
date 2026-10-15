@@ -1,0 +1,53 @@
+- id: W1-T9737
+  title: "W1-T9701'S MODULE-LOAD SPLIT HIDES A FACTORY'S RETURNED CLOSURE FROM THE SYNC-SPAWN CENSUS — `key: factory(...)` in a column-0 const moves to the <module-load> node, but a factory runs at load only to RETURN a function the loop calls later, as `REAL_ALERT_FIX_DISPATCH_DEPS.spawn: ledgeredNonDispatchSpawn(\"alert-fix\")` does, so a sync spawn inside a future factory's returned closure escapes the census with no row"
+  repo: remudero
+  depends_on: [W1-T9701]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — whether a factory call in a const initializer is module load; no src/ behaviour changes
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 7: W1-T9701's splitObjectLiteral on run-W1-T9701-1792091409166 (c236c947f, #12152)"
+  plan_refs: [W1-T9701, W1-T9660, W1-T5689]
+  files:
+    - test/helpers/daemon-loop-walk.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  priority: 2.5  # a guard: no row escapes today, but the next factory-built seam would escape silently
+  attempts: 0
+  rationale: |
+    READ at run-W1-T9701-1792091409166 (c236c947f, #12152 open) and origin/main 5d62727bf, 2026-10-15:
+    - W1-T9701's test/helpers/daemon-loop-walk.ts `splitObjectLiteral` moves a member to module load when it matches
+      `CALL_VALUED_MEMBER` (`key: callee(` or `key: new Callee(`) and holds no `=>` or `function`. A call that is passed
+      a function stays as reach. A call passed only data does not.
+    - src/run-task.ts `REAL_ALERT_FIX_DISPATCH_DEPS` has `spawn: ledgeredNonDispatchSpawn("alert-fix")`.
+      `ledgeredNonDispatchSpawn(lane, raw = spawnWorker)` returns `benchmarkNonDispatchSpawn(lane, raw)`, a function
+      that `dispatchAlertFixRun` calls on the loop as `deps.spawn(...)`. Under the split, the walk reaches
+      `ledgeredNonDispatchSpawn`, and through it whatever the returned closure calls, only from `<module-load>`, never
+      from daemonCommand.
+    - spawnWorker is async today, so no row is lost now. A factory whose returned closure calls a sync spawner would
+      enter no row, and nothing would fail.
+    - W1-T9701 owns the split itself and W1-T9736 the property-name reading in the same two files. This task runs
+      after W1-T9701 and before W1-T9736 (which depends on it), so the three never build at once.
+  design: |
+    1. A call-valued member stays as reach when its callee is a factory: a column-0 function whose body returns a
+       function (a `return` of an arrow or `function`, a returned identifier the walk resolves to a function, or a
+       declared return type that is a function type or `typeof <function>`). Only a callee that returns data moves to
+       module load. The rule is structural and names no function.
+    2. W1-T9701's two captures (captureImportedModule, executingHarnessRevision) return data, so they stay at module
+       load and their rows stay deleted.
+    3. Tests (in the census file, `test(` titles verbatim as in the proofs below):
+       - a synthetic literal `{ spawn: makeSpawner("x") }`, where `makeSpawner` returns an arrow that calls
+         `spawnSync`, is reached from a function that names the literal, and the spawner is loop reach;
+       - `{ id: captureId("x") }`, where `captureId` returns a string, stays at module load (positive control);
+       - `REAL_ALERT_FIX_DISPATCH_DEPS`'s `spawn` member is reach, not module load.
+  acceptance:
+    - claim: "a factory call in a const initializer keeps its returned closure's callees as loop reach"
+      proof: 'grep: test("W1-T9737: a factory member of a const initializer stays loop reach" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+    - claim: "a call that returns data still moves to module load"
+      proof: 'grep: test("W1-T9737: a data-returning initializer call stays module load" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+  falsifier: |
+    At run-W1-T9701's head, splitObjectLiteral over `const D = {\n  spawn: makeSpawner("x"),\n};` moves the spawn member
+    into the load half, so a spawnSync inside makeSpawner's returned arrow is not reachable from a function naming D,
+    and the first test fails.

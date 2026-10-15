@@ -1,6 +1,6 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
-import { execFileSync } from "node:child_process";
 import { ghExec } from "../github-transport.js";
+import { execFileLoopBounded } from "../loop-bounded-child.js";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings (`import { existsSync } from "node:fs"`) — the same W1-T115 "assert via
 // injected fs" discipline src/lib/status.ts and src/lib/ledger.ts already follow (see
@@ -337,20 +337,21 @@ export function parseOwnerRepoFromRemoteUrl(url: string): { owner: string; repo:
 }
 
 /** Injectable git-remote reader — a caller can fake `getRemoteUrl` to test
- *  {@link resolveTargetOwnerRepo} without a real git repo on disk. */
+ *  {@link resolveTargetOwnerRepo} without a real git repo on disk. W1-T9700: the read is an awaited child. */
 export interface GitRemoteDeps {
-  getRemoteUrl(targetDir: string): string;
+  getRemoteUrl(targetDir: string): Promise<string>;
 }
 
 export const realGitRemoteDeps: GitRemoteDeps = {
-  getRemoteUrl: (targetDir) => execFileSync("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim(),
+  getRemoteUrl: async (targetDir) =>
+    (await execFileLoopBounded("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], { encoding: "utf8" })).stdout.trim(),
 };
 
 /** Resolve owner/repo from the TARGET checkout's own `git remote.origin.url` —
  *  `undefined` (never guessed) if the read fails or the URL doesn't parse. */
-export function resolveTargetOwnerRepo(targetDir: string, deps: GitRemoteDeps = realGitRemoteDeps): { owner: string; repo: string } | undefined {
+export async function resolveTargetOwnerRepo(targetDir: string, deps: GitRemoteDeps = realGitRemoteDeps): Promise<{ owner: string; repo: string } | undefined> {
   try {
-    return parseOwnerRepoFromRemoteUrl(deps.getRemoteUrl(targetDir));
+    return parseOwnerRepoFromRemoteUrl(await deps.getRemoteUrl(targetDir));
   } catch {
     return undefined;
   }
