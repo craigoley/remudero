@@ -9,7 +9,7 @@
  * crash at any point resumes to exactly what a clean rebuild produces.
  */
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync, type BigIntStats } from "node:fs";
 import { basename, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { systemClock, type Clock } from "./clock.js";
@@ -27,7 +27,11 @@ export const FUTURE_ROW_TOLERANCE_MS = 5 * 60_000;
 export const DEFAULT_CHUNK_BYTES = 8 << 20;
 /** A directory mtime younger than this may still move within the same timestamp tick. */
 export const DIR_GATE_SETTLE_MS = 2_000;
-/** A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good. */
+/**
+ * A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good.
+ * It is also how often every archive's head is re-read even when `stat` says nothing changed: a recycled inode re-created
+ * inside one timestamp tick can match an applied archive's stat, but never its head.
+ */
 export const DIR_GATE_RELIST_MS = 60_000;
 /** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
 export const MIN_TRANSACTION_LINES = 64;
@@ -381,6 +385,25 @@ interface Checkpoint {
   fp: string | null;
 }
 
+/**
+ * An archive whose head matched a fully applied checkpoint, as `stat` saw that file. A later listing skips it while its
+ * checkpoint row and its stat are unchanged: a state dir whose mtime moves several times a second (the live ledger and its
+ * sidecars) otherwise re-opened every archive on every tick. Any replacement under the name moves `ino` or `ctime`
+ * (which no writer can set), and an in-place rewrite moves `mtime` and `ctime`.
+ */
+interface AppliedArchive {
+  stat: string;
+  checkpoint: Checkpoint;
+}
+
+function statIdentity(st: BigIntStats): string {
+  return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+}
+
+function sameCheckpoint(a: Checkpoint, b: Checkpoint): boolean {
+  return a.ino === b.ino && a.size === b.size && a.off === b.off && a.fp === b.fp;
+}
+
 /** Hash of the first and last {@link FINGERPRINT_BYTES} before `upTo`: a replaced file fails it. */
 function fingerprint(fd: number, upTo: number): string {
   const hash = createHash("sha1");
@@ -430,6 +453,9 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   };
   let gateMtimeMs: number | undefined;
   let listedAt = Number.NEGATIVE_INFINITY;
+  /** When every archive's head was last re-read regardless of its stat ({@link DIR_GATE_RELIST_MS}). */
+  let verifiedAt = Number.NEGATIVE_INFINITY;
+  const applied = new Map<string, AppliedArchive>();
   /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
   let linesPerMs: number | undefined;
   let deadline = Number.POSITIVE_INFINITY;
@@ -571,8 +597,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     let ino: string;
     let size: number;
     let head: string;
+    let stat: string;
     let fd: number | undefined;
     const prev = known.get(name);
+    applied.delete(name);
     try {
       fd = openSync(entry.path, "r");
       const st = fstatSync(fd, { bigint: true });
@@ -580,9 +608,12 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       size = Number(st.size);
       head = headFingerprint(fd, size);
       if (archiveBacklog(prev, head, size) === 0) {
-        if (prev!.fp === null) upgrades.push({ name, ino, size, fp: `${ARCHIVE_HEAD}${head}` });
+        const upgrade = prev!.fp === null ? { name, ino, size, fp: `${ARCHIVE_HEAD}${head}` } : undefined;
+        if (upgrade) upgrades.push(upgrade);
+        applied.set(name, { stat: statIdentity(st), checkpoint: upgrade ? { ino, size, off: size, fp: upgrade.fp } : prev! });
         return true; // a rotation is immutable once named
       }
+      stat = statIdentity(st);
       if (spent(c)) {
         c.pending = true;
         c.backlogBytes += archiveBacklog(prev, head, size);
@@ -615,7 +646,22 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       off = to;
     } while (off < data.length);
     c.archivesRead++;
+    applied.set(name, { stat, checkpoint: { ino, size, off: size, fp: `${ARCHIVE_HEAD}${head}` } });
     return true;
+  }
+
+  /** Whether an archive applied by an earlier listing is still that file under that checkpoint, by `stat` alone. */
+  function stillApplied(entry: LedgerCorpusEntry, known: Map<string, Checkpoint>): boolean {
+    const name = basename(entry.path);
+    const was = applied.get(name);
+    const prev = known.get(name);
+    if (!was || !prev || !sameCheckpoint(prev, was.checkpoint)) return false;
+    try {
+      return statIdentity(statSync(entry.path, { bigint: true })) === was.stat;
+    } catch {
+      // deliberate: an archive `stat` cannot see is opened, and that open names the failure in `unread`.
+      return false;
+    }
   }
 
   function listRotations(known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult): void {
@@ -623,11 +669,18 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     if (gateMtimeMs !== undefined && dirMtimeMs === gateMtimeMs && now - listedAt < DIR_GATE_RELIST_MS) return;
     c.listed = true;
     listedAt = now;
+    if (now - verifiedAt >= DIR_GATE_RELIST_MS) {
+      applied.clear();
+      verifiedAt = now;
+    }
     const names = readdirSync(ledgerDir);
     let complete = true;
     const upgrades: ArchiveUpgrade[] = [];
-    for (const entry of ledgerRotationEntries(names, ledgerDir)) complete = ingestArchive(entry, known, now, c, upgrades) && complete;
+    for (const entry of ledgerRotationEntries(names, ledgerDir)) {
+      if (!stillApplied(entry, known)) complete = ingestArchive(entry, known, now, c, upgrades) && complete;
+    }
     const present = new Set(names);
+    for (const name of applied.keys()) if (!present.has(name)) applied.delete(name);
     const gone = [...known.keys()].filter((name) => !present.has(name));
     if (gone.length > 0 || upgrades.length > 0) {
       withWriteTransaction(db, lease, () => {
