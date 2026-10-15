@@ -18,7 +18,7 @@ function control() {
   const manifest = { format: "rmd-read-map-run-manifest-v1", root: ROOT, head: "a".repeat(40), tree: "b".repeat(40), runId: "12345678-1234-1234-1234-123456789012", preparedAtMs: 1,
     suites, suitesSha256: corpusDigest(suites), nodeVersion: process.version, nodeSha256: "c".repeat(64), mode: "shadow", skipsNothing: true,
     inputs: ["package-lock.json", "test/setup/read-map.ts", "test/setup/tmp-hygiene.ts", "scripts/lib/read-map-summary-reporter.mjs", "scripts/lib/read-map-corpus.mjs", "scripts/read-map-corpus.mjs"].map(path => ({ path, sha256: "c".repeat(64) })) };
-  const summaries = [...suites.map(x => readMapSummary({ type: "test:summary", data: { file: join(ROOT, x.path), success: true, counts } }, manifest)),
+  const summaries = [...suites.map(x => readMapSummary({ type: "test:summary", data: { file: join(ROOT, x.path), success: true, counts: { ...counts } } }, manifest)),
     readMapSummary({ type: "test:summary", data: { success: true, counts: { ...counts, tests: 2, passed: 2 } } }, manifest)];
   const records = new Map(suites.map(x => [x.path, { sha256: "d".repeat(64), modifiedMs: 2,
     value: { format: "rmd-read-record-v2", suite: x.path, reads: x.path.includes("reader") ? ["deploy/unit.json"] : [], listed: [], unknownDescriptors: false } }]));
