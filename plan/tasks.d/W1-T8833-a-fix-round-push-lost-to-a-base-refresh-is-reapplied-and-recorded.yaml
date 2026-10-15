@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: forensics on W1-T8198's #11133 fix round (operator: go through all follow-ups)"
   plan_refs: [W1-T4693, W1-T4797, W1-T5227, W1-T7096, W1-T8198]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/fix-progress-judge.ts, test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
