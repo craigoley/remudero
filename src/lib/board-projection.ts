@@ -108,11 +108,9 @@ export interface BoardStepReads {
   /** Rows an index was handed from the cache without a store read, and their body bytes. */
   reusedRows: number;
   reusedBytes: number;
-  /** Times the cache was dropped, by why: a row of a cached step deleted under it, a store behind it, or the oracle's
-   *  audit disagreeing. */
+  /** Times the cache was dropped: a cached step's row deleted under it, a store behind it, the oracle's audit. */
   resets: { deleted: number; behind: number; audit: number };
-  /** What the cache holds now: its steps; its buckets' rows and body bytes plus the plan-only sets' entries and their
-   *  string lengths. */
+  /** What the cache holds: steps; bucket rows and body bytes plus plan-only set entries and their string lengths. */
   held: { steps: number; rows: number; bytes: number };
 }
 
@@ -643,8 +641,7 @@ function noStepReads(): BoardStepReads {
   };
 }
 
-/** `bucket` with `more` merged in by (ts_ms, seq), as one `stepFacts` read returns them: a late row can sort before
- *  rows already held, so the rows are merged, never appended. A new bucket; `bucket` is left as it was. */
+/** A NEW bucket: `bucket` with `more` merged in by (ts_ms, seq), never appended, as a late row can sort before held ones. */
 function extendBucket(bucket: StepBucket, more: StepRow[]): StepBucket {
   const after = (a: { tsMs: number; seq: number }, tsMs: number, seq: number): boolean => a.tsMs > tsMs || (a.tsMs === tsMs && a.seq > seq);
   more.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
@@ -795,12 +792,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let readerNowMs: number | undefined;
   const retainFrom = (): number => readerNowMs ?? clock.now();
   const onIngest = opts.onIngest;
-  /**
-   * W1-T9604: each step an index has asked for, its rows as the fact store holds them up to `lastSeq`, in `stepFacts`
-   * order (ts_ms, then seq), with each row's ts_ms and seq. A bucket is read in full once; afterwards the ingest, which
-   * reads every new fact row anyway, queues the rows of a cached step in `stepPending`, and the next index to ask merges
-   * them into a NEW array: an array once handed to an index never changes. The plan-only sets are kept the same way.
-   */
+  /** W1-T9604: each asked step's rows up to `lastSeq`, read in full once; the ingest queues its new rows in `stepPending`
+   *  and the next ask merges them into a NEW array, so one handed out never changes. The plan-only sets likewise. */
   const stepCache = new Map<string, StepBucket>();
   const stepPending = new Map<string, StepRow[]>();
   let planOnlyCache: PlanOnlySets | undefined;
@@ -1202,11 +1195,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { n: Number(r?.n ?? 0), s: Number(r?.s ?? 0), t: Number(r?.t ?? 0) };
   };
 
-  /**
-   * W1-T9604: drops the cache when a row of a cached step was deleted under it (the fact table otherwise only grows by
-   * seq; the consistency oracle's heal deletes a corrupt or duplicate row), or the store reads behind it. Each step is
-   * checked by an index-only digest of its rows, never by reading a body.
-   */
+  /** W1-T9604: drops the cache when an index-only digest says a cached step's row was deleted under it (the consistency
+   *  oracle's heal deletes corrupt or duplicate rows; facts otherwise only grow by seq), or the store reads behind it. */
   function checkStepCache(): void {
     if (stepCache.size === 0 && !planOnlyCache) return;
     const moved = [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
@@ -1222,8 +1212,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let bucket = stepCache.get(step);
     if (!bucket) {
       bucket = readStep(step, lastSeq);
-      // Held across builds, so its rows share equal strings (W1-T6467), in a table of the cache's own: the projection's
-      // holds only its kept rows' values.
+      // Held across builds: equal strings shared (W1-T6467) in the cache's own table, not the kept rows' one.
       if (cacheStrings) for (const row of bucket.rows) internRowStrings(row as Row, cacheStrings);
       stepReads.fullReads++;
       [stepReads.fullRows, stepReads.fullBytes] = [stepReads.fullRows + bucket.rows.length, stepReads.fullBytes + bucket.bytes];
@@ -1262,8 +1251,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return own;
   }
 
-  /** What the step cache holds: its buckets' rows and body bytes, queued extensions included, and the plan-only sets'
-   *  entries (a filing PR, a reviewed head) and their string lengths: the sets keep no row. */
+  /** What the cache holds, queued rows included; the plan-only sets keep no row, so their entries are counted. */
   function heldStepCache(): BoardStepReads["held"] {
     let [rowCount, bytes] = [0, 0];
     for (const bucket of stepCache.values()) [rowCount, bytes] = [rowCount + bucket.rows.length, bytes + bucket.bytes];
@@ -1273,11 +1261,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { steps: stepCache.size, rows: rowCount, bytes };
   }
 
-  /**
-   * W1-T9604: the oracle's A/A of the cache. Every cached step and both plan-only sets, as the cache hands them out now,
-   * against `fresh`, the oracle's own uncached index at the same seq. A difference drops the cache, so the next index
-   * reads in full; the differing names ride the oracle's row.
-   */
+  /** W1-T9604: the oracle's A/A of the cache: every cached step and both plan-only sets against `fresh`, its uncached
+   *  index at the same seq. A difference drops the cache, and the differing names ride the oracle's row. */
   function auditStepCache(fresh: LedgerIndex): { steps: number; rows: number; mismatches: string[] } {
     // The audit's own look at the cache is not a build's: of its counts, only a reset it finds is kept.
     const counted = stepReads;
