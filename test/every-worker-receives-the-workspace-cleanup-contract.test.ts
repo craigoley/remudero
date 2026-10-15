@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { renderAgentsMd } from "../scripts/generate-agents-md.mjs";
+import { execFileSync } from "node:child_process";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { withWorkspaceCleanup, WORKSPACE_CLEANUP_INSTRUCTIONS } from "../src/lib/workspace-cleanup-contract.js";
 
@@ -59,7 +59,8 @@ test("provider fallback keeps exactly one cleanup contract and preserves the ori
 test("Claude and generated agent instructions require every worker to clean its owned workspace safely", () => {
   const claude = readFileSync("CLAUDE.md", "utf8");
   const agents = readFileSync("AGENTS.md", "utf8");
-  assert.equal(agents, renderAgentsMd(claude));
+  const result = execFileSync(process.execPath, ["--import", "tsx", "scripts/generate-agents-md.mjs", "--check"], { encoding: "utf8" });
+  assert.match(result, /generate-agents-md: OK/);
   for (const text of [claude, agents]) {
     assert.match(text, /Every builder, reviewer and worker must clean up its own disposable workspace artifacts/);
     assert.match(text, /preserve active\/shared paths, unpublished work and durable evidence/);

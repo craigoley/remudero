@@ -1,4 +1,6 @@
-# Finish owned work
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.**
 
 This applies to interactive builders and every dispatched worker, regardless of provider or role.
 Workers do not automatically load CLAUDE.md: the common spawn boundary injects the cleanup contract.
