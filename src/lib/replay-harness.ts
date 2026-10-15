@@ -357,7 +357,7 @@ export async function pairedReviewerReplayCommand(rest: string[], replay: typeof
   const print = input.print ?? console.log;
   try {
     if (process.env.REMUDERO_WORKER_SCOPE || process.env.REMUDERO_DAEMON_PROCESS
-      || ["daemon", "service", "host_automation"].includes(process.env.REMUDERO_PROCESS_ACTOR ?? ""))
+      || ["daemon", "service", "host_automation", "run_child"].includes(process.env.REMUDERO_PROCESS_ACTOR ?? ""))
       throw new Error("reviewer-operator-command-required");
     const { values } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       pilot: { type: "string" }, phase: { type: "string" }, cases: { type: "string" }, trust: { type: "string" },

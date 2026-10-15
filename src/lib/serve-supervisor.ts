@@ -43,6 +43,24 @@ export const COLD_START_STILL_DEGRADED_EVERY_MS = STANDBY_READY_BOUND_MS / 5;
 export const DRAIN_BACKSTOP_MS = 30_000;
 /** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
 export const SHED_BACKSTOP_MS = 10_000;
+/**
+ * W1-T9570: AFTER AN ANSWERED TIER-2 SHED, FREE MEMORY IS READ THIS OFTEN until it fits the need or
+ * {@link SHED_SETTLE_CAP_MS} passes. A new constant, not a change to any threshold. On 2026-10-15 a 1 s sampler of
+ * serve's cgroup resolved the first live answered tier-2 shed (02:25:43Z): the release came as one +1.17 GB step
+ * between two reads a second apart (02:25:50Z to 02:25:51Z). Each read is three small cgroup files.
+ */
+export const SHED_SETTLE_READ_INTERVAL_MS = 1_000;
+/**
+ * W1-T9570: BACKSTOP, THE LONGEST AN ANSWERED TIER-2 SHED WAITS FOR ITS FREED MEMORY TO SHOW, before a still-short
+ * reading restores the workers and defers; the primary stop is a reading that fits the need. A new constant, not a
+ * change to any threshold. Measured: the 02:25:43Z shed's reply-time read was 4.30 GB against a 4.94 GB need (both
+ * before W1-T9542's reader and need); the workers were restored 4 ms later, yet the cgroup read a flat or falling
+ * plateau for 7 s, then +1.17 GB at +8 s. On 2026-10-14
+ * read-model worker recycles first showed +0.41 to +0.85 GB at 6-8 s and up to +2.30 GB at 21-30 s. 30 s covers the
+ * +8 s release and the 21-30 s samples, and bounds the degraded wait of a shed that never fits. No stability stop:
+ * consecutive reads agreed within 30 MiB for the plateau's first 3 s, so "two reads agree" would judge too early.
+ */
+export const SHED_SETTLE_CAP_MS = 30_000;
 /** W1-T8873: tier 2 (worker threads) runs at most once in this window, however many memory deferrals retry inside it. */
 export const WORKER_SHED_MIN_INTERVAL_MS = 15 * 60_000;
 /**
@@ -152,11 +170,24 @@ export interface ServeSupervisorOptions {
   /** W1-T8311: the host memory budget's thresholds; defaults to the active slot's plan/policy.yaml. */
   upgradeThresholds?: (activeDir: string) => ServeUpgradeThresholds | { unread: string };
   shedBackstopMs?: number;
+  /** W1-T9570: the tier-2 settle reads' spacing and cap; default {@link SHED_SETTLE_READ_INTERVAL_MS} and {@link SHED_SETTLE_CAP_MS}. */
+  shedSettleIntervalMs?: number;
+  shedSettleCapMs?: number;
+  /** W1-T9570: the container cgroup's bytes in swap, or undefined when unreadable; defaults to {@link cgroupSwapCurrent}. */
+  swapMemory?: () => number | undefined;
   /** W1-T8873: the least gap between two worker-thread sheds; defaults to {@link WORKER_SHED_MIN_INTERVAL_MS}. */
   workerShedIntervalMs?: number;
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
+}
+
+/** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
+interface SettledFree {
+  first: number | undefined;
+  last: number | undefined;
+  reads: number;
+  settle: "fits" | "cap" | "unread" | "unanswered";
 }
 
 interface Generation {
@@ -285,6 +316,21 @@ export function procRss(pid: number, read: (path: string) => string = (path) => 
   } catch {
     return undefined; // no procfs (macOS) or the process is gone: this sample simply is not taken
   }
+}
+
+/**
+ * W1-T9570: cgroup v2 `memory.swap.current`, the bytes this container holds in swap. A heap page in swap is released
+ * from here, not from `memory.current`, so a shed that freed swapped pages shows here. Undefined when the file is
+ * absent (no swap accounting), unreadable or not a byte count: no reading, never a zero.
+ */
+export function cgroupSwapCurrent(read: (path: string) => string = (path) => readFileSync(path, "utf8"), root = "/sys/fs/cgroup"): number | undefined {
+  let text: string;
+  try {
+    text = read(join(root, "memory.swap.current")).trim();
+  } catch {
+    return undefined; // no swap accounting here, or the file is unreadable: this field is not recorded
+  }
+  return /^\d+$/.test(text) ? Number(text) : undefined;
 }
 
 /**
@@ -487,6 +533,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const deferMs = opts.deferMs ?? 60_000;
   const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
   const workerShedIntervalMs = opts.workerShedIntervalMs ?? WORKER_SHED_MIN_INTERVAL_MS;
+  const shedSettleIntervalMs = opts.shedSettleIntervalMs ?? SHED_SETTLE_READ_INTERVAL_MS;
+  const shedSettleReads = 1 + Math.floor((opts.shedSettleCapMs ?? SHED_SETTLE_CAP_MS) / Math.max(1, shedSettleIntervalMs));
+  const swapMemory = opts.swapMemory ?? (() => cgroupSwapCurrent());
   const spacingBaseMs = opts.spacingBaseMs ?? 0;
   const spacingHalfLifeMs = opts.spacingHalfLifeMs ?? SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS;
   const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
@@ -736,23 +785,51 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
    * W1-T8873, tier 2: tier 1 frees only the main heap, while the active generation's rebuildable worker threads hold
    * most of its resident bytes. A handoff already deferred for memory asks it to terminate them; it keeps answering
    * from the bodies it holds. Free memory is measured again; {@link restoreWorkers} ends the degraded mode.
+   * W1-T9570: a thread's exit does not return its heap to the cgroup at once, so an answered shed reads free memory
+   * until it is no longer `short` or the cap passes ({@link settleFree}); the row keeps the first reading and swap.
    */
-  const shedWorkers = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
+  const shedWorkers = async (generation: Generation, freeBefore: number, short: (bytes: number | undefined) => boolean): Promise<number | undefined> => {
     const startedAt = clock.now();
     lastWorkerShedAt = startedAt;
     generation.workersShedAt = startedAt;
+    const swapBefore = swapMemory();
     const reply = awaitReply(generation, GENERATION_MESSAGES.shed_workers_done);
     generation.process.send({ type: GENERATION_MESSAGES.shed_workers });
     const done = await reply;
-    const freeAfter = freeMemory();
+    const settleStartedAt = clock.now();
+    // A generation that never answered already spent the backstop: one reading, as before W1-T9570.
+    const settled = done === undefined ? unanswered(freeMemory()) : await settleFree(short);
+    const freeAfter = settled.last;
+    const swapAfter = swapMemory();
     const before = done?.beforeBytes;
     const after = done?.afterBytes;
     opts.log("serve.handoff_shed", {
       tier: 2, phase: "shed", generation: generation.id, answered: done !== undefined, workers: done?.workers, workerHeapBytes: done?.heapBytes, error: done?.error,
       beforeBytes: before, afterBytes: after, freedBytes: typeof before === "number" && typeof after === "number" ? Math.max(0, before - after) : undefined,
-      freeBefore, freeAfter, needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
+      freeBefore, freeAfter, freeAfterFirst: settled.first, freeReads: settled.reads, settle: settled.settle, settleMs: clock.now() - settleStartedAt,
+      ...(swapBefore === undefined ? {} : { swapBefore }), ...(swapAfter === undefined ? {} : { swapAfter }),
+      needBytes: need(generation).needBytes, durationMs: clock.now() - startedAt,
     });
     return freeAfter;
+  };
+
+  /** W1-T9570: the one reading taken after a tier-2 request that was never answered. */
+  const unanswered = (free: number | undefined): SettledFree => ({ first: free, last: free, reads: 1, settle: "unanswered" });
+
+  /**
+   * W1-T9570: free memory read every {@link SHED_SETTLE_READ_INTERVAL_MS} until the reading is not `short` (it fits,
+   * or it is unreadable and judges nothing, as before) or the cap's reads are spent. `settle` names which ended it.
+   */
+  const settleFree = async (short: (bytes: number | undefined) => boolean): Promise<SettledFree> => {
+    const first = freeMemory();
+    let last = first;
+    let reads = 1;
+    while (short(last) && reads < shedSettleReads) {
+      await sleep(shedSettleIntervalMs);
+      last = freeMemory();
+      reads += 1;
+    }
+    return { first, last, reads, settle: last === undefined ? "unread" : short(last) ? "cap" : "fits" };
   };
 
   /** Ends tier 2's degraded mode on the active generation: its worker threads start again. A no-op when none was shed. */
@@ -873,7 +950,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     if (short(free)) free = await shedActive(from, free);
     // Tier 2 only once an earlier attempt was deferred for memory, and at most once per interval.
     if (short(free) && deferrals > 0 && (lastWorkerShedAt === undefined || clock.now() - lastWorkerShedAt >= workerShedIntervalMs)) {
-      free = await shedWorkers(from, free ?? 0);
+      free = await shedWorkers(from, free ?? 0, short);
       // Still short: the workers come back before the deferral, so the generation is not left degraded for nothing.
       if (short(free)) await restoreWorkers("still_short");
     }
