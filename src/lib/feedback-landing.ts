@@ -678,8 +678,7 @@ function sourceRepositoryFromCwd(): LandingRepository | undefined {
 
 async function sourceRepositoryFromCwdAsync(): Promise<LandingRepository | undefined> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", process.cwd(), "config", "--get", "remote.origin.url"], { encoding: "utf8" });
-    return parseGithubRepository(stdout.trim());
+    return parseGithubRepository((await defaultGitAsync(process.cwd())(["config", "--get", "remote.origin.url"])).trim());
   } catch {
     return undefined; // as sourceRepositoryFromCwd: no source repository, no self comparison
   }
