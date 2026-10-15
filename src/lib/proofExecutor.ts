@@ -8,9 +8,9 @@
  * something that no longer matches a pattern but still leaks a fragment.
  */
 
-/** Most non-blank lines a failure tail keeps. */
+/** PRIMARY CONTROL on how many non-blank lines a failure tail keeps (the cause sits at the end of the output). */
 export const FAILURE_TAIL_MAX_LINES = 40;
-/** Most characters a failure tail keeps, not counting the omitted-lines note. */
+/** PRIMARY CONTROL on how many characters a failure tail keeps, not counting the omitted-lines note. */
 export const FAILURE_TAIL_MAX_CHARS = 3000;
 
 const REDACTED = "<redacted>";
