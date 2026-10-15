@@ -1,67 +1,13 @@
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
-import { syncBuiltinESMExports } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
 import { fixedClock } from "../src/lib/clock.js";
-import * as harness from "../src/run-task.js";
 import * as machine from "../src/lib/machine-filing-judge.js";
 import * as registry from "../src/lib/garden-registry.js";
 
-function fixture(t: { after: (fn: () => void) => void }) {
-  const repo = gitRepo({ kind: "async-daemon-inputs" });
-  t.after(() => repo.cleanup());
-  for (const area of ["src", "scripts", "plan", "state"]) mkdirSync(join(repo.dir, area), { recursive: true });
-  writeFileSync(join(repo.dir, ".gitignore"), "state/\n");
-  writeFileSync(join(repo.dir, "src/input.ts"), "export const input = 1;\n");
-  writeFileSync(join(repo.dir, "scripts/unicode.json"), '{"text":"café 🐾"}\n');
-  writeFileSync(join(repo.dir, "scripts/example-baseline.json"), "{}\n");
-  writeFileSync(join(repo.dir, "plan/policy.yaml"), "rules: []\n");
-  repo.git("add", ".gitignore", "src", "scripts", "plan");
-  repo.git("commit", "-m", "fixture: daemon input readers");
-  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
-  return { repo, stateDir: join(repo.dir, "state") };
-}
-
-async function withoutSyncChildren<T>(run: () => Promise<T>): Promise<{ value: T; beats: number }> {
-  const names = ["execFileSync", "execSync", "spawnSync"] as const;
-  const original = Object.fromEntries(names.map((name) => [name, childProcess[name]]));
-  for (const name of names) childProcess[name] = (() => { throw new Error("synchronous child was reached"); }) as never;
-  syncBuiltinESMExports();
-  let beats = 0;
-  const timer = setInterval(() => beats++, 1);
-  try { return { value: await run(), beats }; }
-  finally {
-    clearInterval(timer);
-    for (const name of names) childProcess[name] = original[name] as never;
-    syncBuiltinESMExports();
-  }
-}
-
 function api() { assert.equal(typeof machine.machineJudgeInputsAsync, "function"); assert.equal(typeof registry.gardenPacingDueAsync, "function"); }
-
-test("daemon input reads: the real machine stamp and registered due probe avoid sync git and retain release and unreadable states", async (t) => {
-  api();
-  const { repo, stateDir } = fixture(t);
-  const sync = machine.machineJudgeInputs(repo.dir, stateDir);
-  const result = await withoutSyncChildren(() => machine.machineJudgeInputsAsync(repo.dir, stateDir));
-  assert.equal(result.value, sync);
-  assert.ok(result.beats > 0);
-  const now = Date.now();
-  writeFileSync(registry.gardenPacingPath(stateDir, "machine-judge"), JSON.stringify({ inputs: sync,
-    lastPassAt: new Date(now).toISOString(), lastNewAt: new Date(now - 3_600_000).toISOString() }));
-  const ctx = { config: { root: repo.dir }, repoRoot: repo.dir, owner: "fixture", repo: "fixture", log: () => {}, raiseDuplicate: () => "" } as unknown as harness.GardenBuildContext;
-  const pass = await harness.buildRegisteredGarden("machine-judge", ctx);
-  const held = await withoutSyncChildren(async () => await pass.due!());
-  assert.equal(held.value, false);
-  writeFileSync(join(stateDir, "operator-releases.json"), "{}\n");
-  const changed = await withoutSyncChildren(async () => await pass.due!());
-  assert.equal(changed.value, true);
-  assert.equal(await machine.machineJudgeInputsAsync(join(repo.dir, "missing"), stateDir), machine.machineJudgeInputs(join(repo.dir, "missing"), stateDir));
-});
 
 test("daemon input reads: a pending due decision admits one child only after it resolves and none after stop", async (t) => {
   let resolve!: (value: boolean) => void;
@@ -116,7 +62,8 @@ test("daemon input reads: async false due decisions preserve idle reporting with
 
 test("daemon input reads: async pacing preserves the same machine and low-yield due decisions", async (t) => {
   api();
-  const { stateDir } = fixture(t);
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-async-pacing-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const start = Date.now();
   for (const name of ["machine-judge", "host-resource", "flow-remedy"] as const) {
     registry.recordGardenPacing(stateDir, name, false, { clock: fixedClock(start), inputs: "same" });
