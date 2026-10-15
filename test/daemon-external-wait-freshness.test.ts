@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runDaemon, type DaemonDeps, type DaemonFreshness, type DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
@@ -372,6 +374,18 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
   writeFileSync(planPath, PLAN_YAML);
   const cleanupGit = writeOfflineGitFixture(root);
   const repoRoot = join(root, "repos", "remudero");
+  const loadedSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const moduleDir = dirname(dirname(fileURLToPath(new URL("../src/run-task.ts", import.meta.url))));
+  const realExec = childProcess.execFileSync;
+  let bootCaptures = 0;
+  const loadedSource = t.mock.method(childProcess, "execFileSync", (...args: Parameters<typeof realExec>) => {
+    if (args[0] === "git" && Array.isArray(args[1]) && args[1].join(" ") === `-C ${moduleDir} rev-parse HEAD`) {
+      bootCaptures++;
+      return loadedSha;
+    }
+    return realExec(...args);
+  });
+  syncBuiltinESMExports();
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   const previousHome = process.env.HOME;
@@ -398,6 +412,8 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     });
     assert.equal(code, 0, "the composition root reaches the injected daemon loop");
     assert.ok(captured, "the composition root supplies its real runOne closure");
+    const capturesAtBoot = bootCaptures;
+    assert.ok(capturesAtBoot > 0, "the fixture supplies the daemon module's loaded source identity");
     const oldSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const originHead = () =>
       execFileSync("git", ["-C", repoRoot, "ls-remote", "origin", "refs/heads/main"], { encoding: "utf8" }).trim().split(/\s+/)[0];
@@ -435,7 +451,10 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
       },
       "an advance that restarts a busy daemon crosses the handoff boundary, carrying the commits it advanced by (W1-T4945)",
     );
+    assert.equal(bootCaptures, capturesAtBoot, "the CI-wait reads never recapture disk HEAD as the loaded baseline");
   } finally {
+    loadedSource.mock.restore();
+    syncBuiltinESMExports();
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     if (previousCi === undefined) delete process.env.CI;
