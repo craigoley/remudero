@@ -306,6 +306,8 @@ jobs:
         # Why: measured on PR #3542 — docs/forensics/ci-yml.md.
         env:
           RENAME_ONLY: ${{ steps.classify.outputs.rename_only }}
+          RMD_JOB_STARTED_MS: ${{ steps.admission.outputs.started_ms }}
+          RMD_JOB_TIMEOUT_MINUTES: 35
         run: |
           CLASS="${{ steps.classify.outputs.class }}"
           # W1-T4811: a rename-only pull request (every path an R100 rename between plan/tasks.d shards, blobs
