@@ -193,7 +193,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { dependabotRefreshVerdict, type DependabotRefreshVerdict } from "./dep-review.js";
+import { dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -2746,9 +2746,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // is judged unattended. The command's exit code conflates hold/escalate, so
     // the DECISION is read back off the dep-review.decided ledger line it just
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
-    depReview: async (pr, refresh) => {
+    depReview: async (pr, refresh, ownRed) => {
       await observePr(pr, "review");
-      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...(refresh?.kind === "request" ? ["--dependabot-refresh", refresh.cause] : [])]);
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...dependabotReviewArgs(refresh, ownRed)]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
@@ -12360,7 +12360,7 @@ export interface SweepDeps {
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold", which re-runs next sweep because a red check can go green on the SAME sha. */
-  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head
+  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
@@ -18951,7 +18951,7 @@ export async function runSweep(
                     head_sha: pr.headSha, check_name: refresh.check, main_sha: mainLatestRun?.sha ?? "unread", step: BASE_RED_STOOD_DOWN_STEP });
                 }
                 if (isBlockedCi(pr)) extraDisposedFields = { ...extraDisposedFields, dependabot_refresh: refresh.kind === "request" ? refresh.cause : refresh.kind };
-                depReviewOutcome = (await deps.depReview(pr, refresh)) ?? "unknown";
+                depReviewOutcome = (await deps.depReview(pr, refresh, dependabotOwnRedSignal(refresh, mainLatestRun, (pr.ciFailures ?? []).map((f) => f.name)))) ?? "unknown";
               } else {
                 acted = false;
                 standDownReason = "no depReview dep wired — dependabot PR left for the operator lane";

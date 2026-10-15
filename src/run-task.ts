@@ -206,7 +206,7 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -222,7 +222,7 @@ import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, re
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -1604,6 +1604,8 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
+  reconcileDependabotOwnRed,
+  DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
   decideDepReview,
@@ -13915,7 +13917,17 @@ export async function runFixRung(opts: {
       namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
         .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
     });
-    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
+    const branchTaskId = taskIdFromRunBranch(opts.branch);
+    const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
+    const admitUnfiledOwnDiff = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
+      if (unfiledScope && action.kind === "scope-needed" && action.paths.every((path) => baselineDiffFiles?.includes(path))) {
+        deps.log("fix.scope_amendment", { outcome: "unfiled-own-diff", paths: action.paths,
+          head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId });
+        return { kind: "commit" };
+      }
+      return action;
+    };
+    let fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -13970,7 +13982,7 @@ export async function runFixRung(opts: {
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
+        fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
@@ -14298,6 +14310,36 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
+      if (unfiledScope) {
+        const paths = [...new Set(fixAction.paths)].sort();
+        const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
+        const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
+          row.outcome === "unfiled-escalated" && row.identity_key === identityKey);
+        let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
+        let deliveryError: { error: string } | undefined;
+        if (!issueUrl) try {
+          issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+            headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
+            summary: `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
+            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} has no plan record to amend. Round ${roundId} ` +
+              `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
+              `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
+              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}`,
+            options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
+              { label: "revise-pr", detail: "revise this PR's scope explicitly, then resume its fix lane" }],
+            recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
+        } catch (error) {
+          deliveryError = { error: String(error) };
+        }
+        const reason = issueUrl ? "unfiled scope need escalated" : "unfiled scope escalation undelivered";
+        deps.log("fix.scope_amendment", { outcome: issueUrl ? "unfiled-escalated" : "unfiled-escalation-failed",
+          identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
+          issue_url: issueUrl, reason, ...deliveryError });
+        deps.log("fix.stood_down", { site: "rung.unfiled_scope", head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
+        logFixDone();
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
+      }
       let amendment: ScopeAmendmentOutcome;
       const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
       if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
@@ -23988,6 +24030,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
     } catch (error) {
       log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
+    try {
+      const ownRedFlag = flagValue(rest, "--dependabot-own-red");
+      const ownRed = reconcileDependabotOwnRed({
+        statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
+        headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
+        capture: ({ raw, submissionKey }) => (deps.captureMigrationFeedback ?? ((a) => captureFeedback(a.root, { id: a.id, raw: a.raw, origin: "repair#dep-review", submissionKey: a.submissionKey })))({ root: config.root, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      });
+      if (ownRed !== "none") console.log(`dependabot own red ${ownRed}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.own_red.failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
     }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
@@ -38314,7 +38367,7 @@ export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "
 }
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
-export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
+export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean | Promise<boolean> };
 
 /** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
  *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
@@ -38379,7 +38432,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     log,
     ...(escalate ? { escalate } : {}),
   });
-  const withDue = (pass: () => void | Promise<void>, due: () => boolean): RegisteredGardenPass => Object.assign(pass, { due });
+  const withDue = (pass: () => void | Promise<void>, due: () => boolean | Promise<boolean>): RegisteredGardenPass => Object.assign(pass, { due });
   const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(async () => {
     try {
       await runGardenAsync(spec, d);
@@ -38591,9 +38644,9 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // operator release is due at once.
     case "machine-judge": {
       const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
-      const inputs = () => machineJudgeInputs(repoRoot, stateDir);
+      const inputs = () => machineJudgeInputsAsync(repoRoot, stateDir);
       return withDue(async () => {
-        const seen = inputs();
+        const seen = await inputs();
         let found = false;
         try {
           found = machineJudgeFoundWork(await runMachineFilingJudge(ports));
@@ -38601,7 +38654,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           log("machine_judge.failed", { error: String((error as Error)?.message ?? error) });
         }
         recordGardenPacing(stateDir, "machine-judge", found, { inputs: seen });
-      }, () => gardenPacingDue(stateDir, "machine-judge", { inputs }));
+      }, () => gardenPacingDueAsync(stateDir, "machine-judge", { inputs }));
     }
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
@@ -38640,8 +38693,8 @@ export function daemonGardenPassSpawn(
   return boundedGardenPassSpawn(injected ?? childGardenPassSpawn({ ...childOpts, log }), 2);
 }
 
-export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
-  let probe: (() => boolean) | undefined;
+export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean | Promise<boolean> {
+  let probe: (() => boolean | Promise<boolean>) | undefined;
   Promise.resolve(buildRegisteredGarden(name, ctx)).then(
     (pass) => { probe = pass.due; },
     (e: unknown) => ctx.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) }),

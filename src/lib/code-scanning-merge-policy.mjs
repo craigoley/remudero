@@ -40,6 +40,18 @@ export function classifyCodeScanningMergePolicy(input) {
   if (latest.conclusion === 'success' && latest.output.title === 'No new alerts in code changed by this pull request' && summary === link) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-no-new-alerts'};
   }
+  // GitHub omits the section heading for quality-only findings. Bind the exact layout,
+  // PR link and total to the trusted check rather than treating any successful prose as safe.
+  const qualityOnly = summary.match(/^### New alerts in code changed by this pull request\n\n((?: \* [1-9][0-9]* (?:error|warning|note)\n)+)\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);
+  const total = /^([1-9][0-9]*) new alerts?$/.exec(latest.output.title ?? '')?.[1];
+  if (['success','failure'].includes(latest.conclusion) && qualityOnly?.[2] === link && total !== undefined) {
+    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)\n/g)];
+    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1]))) &&
+        new Set(rows.map(row => row[2])).size === rows.length &&
+        rows.reduce((sum,row) => sum + Number(row[1]),0) === Number(total)) {
+      return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
+    }
+  }
   // Security policy is not a quality ratchet: positively enumerated low/medium or
   // quality-only findings do not become an unbounded hold. Unknown formats stay UNKNOWN.
   const sections = summary.match(/^### New alerts in code changed by this pull request\n\n(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:(Non-security Alerts:\n(?: \* [1-9][0-9]* (?:error|warning|note)\n)+)\n)?\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);

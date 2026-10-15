@@ -140,16 +140,40 @@ resolve_target() {
   return 1
 }
 
-# ── W1-T1054: clear an untracked file only when it is provably redundant ──────────────────────
-# Trap: the daemon writes `plan/feedback/**` into this same tree and later lands identical content
-# upstream without deleting the local copy, so the next checkout can add a path that already exists
-# here byte-for-byte — the tracked-only dirty guard does not see it, and `checkout_target` fails.
-# Invariant: a path is cleared only if the incoming target adds that exact path AND the local bytes
-# equal the incoming blob (`git hash-object`, byte comparison — never a shell string, which mangles
-# binary data). An unreadable incoming blob (`git cat-file -e` fails) is treated as NOT safe, fail-
-# closed like the dirty guard itself. Every cleared path is logged by name before removal.
-# Falsifier: test/entrypoint-boot.test.ts's five "entrypoint:" cases for this predicate.
-# Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
+# ── W1-T1054 / W1-T9623: an untracked file at a path the incoming commit ADDS ─────────────────
+# The daemon writes `plan/feedback/**` into this tree and lands it upstream, so the checkout can add
+# a path that is untracked here. Identical bytes (`git hash-object` vs the incoming blob) are cleared;
+# DIFFERENT bytes are moved to state/recovered-untracked/<stamp>/<path> and ledgered, never left to
+# refuse every boot (2026-10-15: 45 such files, 2 h 6 m down). An unreadable blob or a failed move is
+# left in place, and the checkout refuses as before. Falsifier: test/entrypoint-boot.test.ts's
+# "entrypoint:" and "W1-T9623:" cases. Why: docs/forensics/entrypoint.md#clear_redundant_untracked--w1-t1054.
+RECOVERED_UNTRACKED_ROOT="$CONFIG_ROOT/state/recovered-untracked"
+MOVED_ASIDE_DIR=""
+
+json_escape() {
+  local s="${1//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "${s//$'\n'/\\n}"
+}
+
+move_untracked_aside() {
+  local path="$1" local_sha="$2" blob="$3" dest
+  if [ -z "$MOVED_ASIDE_DIR" ]; then
+    MOVED_ASIDE_DIR="$RECOVERED_UNTRACKED_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  fi
+  dest="$MOVED_ASIDE_DIR/$path"
+  if ! mkdir -p -- "$(dirname -- "$dest")" || ! mv -- "$TREE/$path" "$dest"; then
+    log "  leaving untracked '$path' in place: the incoming commit adds this path with DIFFERENT bytes, and moving it aside to $dest failed"
+    return 0
+  fi
+  log "  moved untracked '$path' aside to $dest: the incoming commit adds this path with DIFFERENT bytes, which would refuse every checkout; the local bytes are kept there"
+  [ -d "$(dirname -- "$LEDGER_FILE")" ] || return 0
+  printf '{"ts":"%s","run_id":"ENTRYPOINT-%s","task_id":"DAEMON","step":"entrypoint.untracked_moved_aside","lane":"daemon","path":"%s","moved_to":"%s","local_blob":"%s","incoming_blob":"%s","reason":"the incoming commit adds this untracked path with different bytes, so git checkout would refuse every boot"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(json_escape "$path")" "$(json_escape "$dest")" "$local_sha" "$blob" \
+    >> "$LEDGER_FILE" || log "  (the ledger line for '$path' could not be written; this log line stands)"
+  return 0
+}
+
 clear_redundant_untracked() {
   local target="$1" path blob local_sha
   while IFS= read -r -d '' path; do
@@ -163,7 +187,7 @@ clear_redundant_untracked() {
       log "  clearing untracked '$path': the incoming commit adds this exact path with identical bytes"
       rm -f -- "$TREE/$path"
     else
-      log "  leaving untracked '$path' in place: the incoming commit adds this path but with DIFFERENT bytes"
+      move_untracked_aside "$path" "$local_sha" "$blob"
     fi
   done < <(git -C "$TREE" ls-files --others --exclude-standard -z)
 }
