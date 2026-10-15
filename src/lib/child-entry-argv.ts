@@ -7,11 +7,17 @@
 //
 // W1-T8776: a tree with no current bundle first asks the shared store (src/lib/child-entry-store.ts) for a build at
 // its own source hash; a hit is copied into the tree and re-judged by childEntryIsCurrent before it runs.
+//
+// W1-T9601: a miss for the daemon's OWN tree (this package's root, where garden children and the harness-rooted gate
+// and check-proof children start) asks the store to build that tree once per source hash, so the next launch hits.
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker, type WorkerOptions } from "node:worker_threads";
-import { defaultChildEntryStoreRoot, materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
+import {
+  defaultChildEntryStoreRoot, fillStoreForOwnTree, materializeFromStore, type OwnTreeFill, type OwnTreeFillOptions, type StoreLog, type StoreLookup,
+} from "./child-entry-store.js";
+import { daemonOwnedProcess } from "./host-memory-learning.js";
 
 interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
 type CurrencyCheck = (root: string, name: string) => ChildEntryCurrency;
@@ -225,6 +231,29 @@ export interface ChildEntryLaunch {
 export interface ChildEntryStoreOptions {
   root?: string | false;
   log?: StoreLog;
+  /** W1-T9601: the tree a miss fills the store for. Default: this package's own root, the daemon's checkout. */
+  ownTree?: string;
+  /** W1-T9601: whether this process may fill. Default: {@link daemonOwnedProcess}, so a test or a shell never builds. */
+  daemonOwned?: boolean;
+  /** W1-T9601: the fill's build. Default: buildIntoStore, in a child process. */
+  build?: OwnTreeFillOptions["build"];
+}
+
+/** W1-T9601: the `source` a fill for the daemon's own tree ledgers on child_entry.store_build_requested. */
+export const DAEMON_TREE_FILL_SOURCE = "daemon-tree";
+/** This package's root: the HARNESS_ROOT garden-registry.ts, preopen-gate.ts and pr-open.ts launch from. */
+const OWN_TREE = fileURLToPath(new URL("../../", import.meta.url));
+/** W1-T9601: the misses a fill answers, meaning no build of this tree's source exists yet. A refused stored build is not one. */
+const FILLABLE_MISSES: ReadonlySet<string> = new Set(["no-stored-build", "store-empty"]);
+
+/**
+ * W1-T9601: on a fillable miss for the daemon's own tree in a daemon-owned process, request one store build for the
+ * tree's source hash, fire-and-forget: the launch that missed still runs tsx. Undefined when no fill applies.
+ */
+function fillOnMiss(root: string, lookup: StoreLookup, storeRoot: string, store: ChildEntryStoreOptions): OwnTreeFill | undefined {
+  if (lookup.outcome !== "miss" || !FILLABLE_MISSES.has(lookup.reason)) return undefined;
+  if (root !== resolve(store.ownTree ?? OWN_TREE) || !(store.daemonOwned ?? daemonOwnedProcess())) return undefined;
+  return fillStoreForOwnTree(root, lookup.hash, { storeRoot, source: DAEMON_TREE_FILL_SOURCE, log: store.log, build: store.build });
 }
 
 /**
@@ -265,7 +294,10 @@ export function childEntryArgv(
     if (lookup.outcome === "hit" && !(after?.current && typeof after.bundle === "string")) {
       lookup = { outcome: "miss", reason: `materialized-not-current: ${after?.reason}`, hash: lookup.hash };
     }
-    store.log?.(lookup.outcome === "hit" ? "child_entry.store_hit" : "child_entry.store_miss", { entry: name, tree_reason: verdict.reason, ...lookup });
+    // W1-T9601: `daemon_tree_fill` on a miss counts the tsx launches a fill was asked for, joined, or already tried.
+    const fill = fillOnMiss(resolve(root), lookup, storeRoot, store);
+    store.log?.(lookup.outcome === "hit" ? "child_entry.store_hit" : "child_entry.store_miss",
+      { entry: name, tree_reason: verdict.reason, ...lookup, ...(fill ? { daemon_tree_fill: fill } : {}) });
     if (lookup.outcome === "hit" && typeof after?.bundle === "string") {
       return { argv: [after.bundle, ...args], kind: "bundle", reason: "store-hit", store: lookup };
     }
