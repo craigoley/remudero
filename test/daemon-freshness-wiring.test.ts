@@ -280,15 +280,21 @@ test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the 
   // never hang. checkStop runs before freshness, so a broken adapter stops as `stopped`.
   const root = mkdtempSync(join(tmpdir(), "daemon-freshness-wiring-idle-"));
   let ticks = 0;
+  // The in-flight ticker also consults checkStop for as long as the worker runs, and how many times it
+  // does so in the dispatch window is scheduler-dependent (the injected sleep is instant). Count only
+  // the loop-level consultations made OUTSIDE the dispatch, or a loaded runner trips the hatch mid-run.
+  let inDispatch = false;
   const s = await runDaemon(plan, {
     refreshMerged: () => () => false,
-    checkStop: () => (++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
+    checkStop: () => (!inDispatch && ++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
     runOne: async (id) => {
       order.push("runOne:start");
+      inDispatch = true;
       // origin/main moves WHILE the worker is in flight — the exact race the brief asks about.
       advanced = true;
       await new Promise((r) => setTimeout(r, 5));
       order.push("runOne:end");
+      inDispatch = false;
       return okResult(id);
     },
     sleep: async () => {},
