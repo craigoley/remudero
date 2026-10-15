@@ -19,7 +19,7 @@ function fixture() {
 
 /** Faults affect only an isolated child's fs bindings; the assertions use real temporary inodes. */
 function probe(root: string, program: string) {
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+  const child = spawnSync(process.execPath, ["--enable-source-maps", "--import", "tsx", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';
     import fs from 'node:fs';
     import {syncBuiltinESMExports} from 'node:module';
@@ -28,7 +28,7 @@ function probe(root: string, program: string) {
     const mutationUrl=${JSON.stringify(MUTATION_URL)},capacityUrl=${JSON.stringify(CAPACITY_URL)};
     ${program}
   `, root], { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL",
-    env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "", TSX_DISABLE_CACHE: "1" } });
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, TSX_DISABLE_CACHE: "1" } });
   assert.equal(child.status, 0, String(child.error ?? child.stderr));
   return JSON.parse(child.stdout.trim());
 }

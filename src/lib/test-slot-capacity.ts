@@ -1,6 +1,7 @@
 /** Public capacity is directory-entry metadata, never readable ownership bytes or an authority token. */
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fixedClock } from "./clock.js";
 
 export interface SlotCapacityInput {
   concurrency?: number;
@@ -132,7 +133,7 @@ export function observeSlotCapacity(path: string, slot: number): SlotCapacityObs
         if (!projection.isFile() || !sameInode(owner, projection)) continue;
         if (capacity) return { state: "unknown" }; // Ambiguous projections never become spare capacity.
         capacity = { concurrency: values[1]!, ...(values[2] ? { memoryBytes: values[2] } : {}),
-          heartbeatAt: new Date(projection.mtimeMs).toISOString() };
+          heartbeatAt: fixedClock(projection.mtimeMs).iso() };
       }
     } finally { dir.closeSync(); }
     const current = lstatSync(path);

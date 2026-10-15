@@ -15,7 +15,7 @@ const MUTATION_URL = new URL("../src/lib/test-slot-mutation.ts", import.meta.url
 function recoveryProbe(program: string) {
   const root = mkdtempSync(join(tmpdir(), "rmd-private-recovery-"));
   try {
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    const child = spawnSync(process.execPath, ["--enable-source-maps", "--import", "tsx", "--input-type=module", "-e", `
       import assert from 'node:assert/strict';
       import fs from 'node:fs';
       import {syncBuiltinESMExports} from 'node:module';
@@ -37,7 +37,7 @@ function recoveryProbe(program: string) {
       if(lease.outcome!=='acquired')assert.equal(lease.childEnvironment,undefined);};
       ${program}
     `, root], { encoding: "utf8", timeout: 4000, killSignal: "SIGKILL",
-      env: { ...process.env, NODE_OPTIONS: undefined, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "", TSX_DISABLE_CACHE: "1",
+      env: { ...process.env, NODE_OPTIONS: undefined, NODE_TEST_CONTEXT: undefined, TSX_DISABLE_CACHE: "1",
         RMD_TEST_SLOT_PARENT: undefined, RMD_TEST_SLOT_DIR: root } });
     assert.equal(child.status, 0, String(child.error ?? child.stderr));
     return JSON.parse(child.stdout.trim());
