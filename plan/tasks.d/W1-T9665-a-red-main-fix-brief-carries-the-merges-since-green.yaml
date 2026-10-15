@@ -1,0 +1,71 @@
+- id: W1-T9665
+  title: "THE RED-MAIN FIX WORKER CANNOT SEE A TWO-PR COLLISION — its brief names ONE located merge and that merge's diff stat. On 2026-10-15 it named 037a58d8f (#12006, a 2-file plan-only gardener commit) while the red came from #11987 meeting #11997. Three codex rounds exited 0 with no PR; the judge escalated at 13:54Z (hand fix #12034)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the red-main fix worker is told; location, the judge, the revert step and the PR body contract are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: main red at 037a58d8f from 12:58Z, repaired by hand in #12034 after the lane escalated"
+  plan_refs: [W1-T6403, W1-T5806, W1-T7760, W1-T8572, W1-T9301, W1-T9503]
+  files: [src/lib/main-health-rung.ts, src/run-task.ts, test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: a red main reds every open PR, and this lane spent three rounds and 20 min on a merge that could not be the cause
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger, read-only; git at origin/main):
+    - #11987 (febd1bb34, 12:31Z, W1-T9503) touched src/lib/ci-friction-gardener.ts and added
+      test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts.
+      #11997 (131248633, 12:58Z) touched src/lib/ci-friction-remedy.ts and its own test.
+      The two merges share NO file. The failing test imports ci-friction-gardener.ts, and that module imports
+      ci-friction-remedy.ts, so the collision is visible only through the failing test's import closure. Each PR was
+      green on its own base. Protection is non-strict (doctrine ci-and-merging/ratchet-collision).
+    - main.repair.located 13:34:38Z: offending_sha 037a58d8f (#12006, "backlog gardener proposes place for 2 task(s)",
+      2 plan/tasks.d files, 4 lines), method first-red-run, red_detail "not ok W1-T9503: a cause owned by a test alone
+      escalates as no-owner" and "not ok W1-T9503: a source-owned cause still drafts a record lint-plan admits".
+      131248633 had no completed run (revert_withheld 13:57:34Z says so), so the first red run fell on the next commit.
+    - main.repair.fix_dispatched, then fix_refused "the fix run opened no pull request", happened three times (13:38, 13:48
+      and 13:53Z). main.repair.progress_judged gave continue, then change-approach, then escalate at 13:54:18Z: "A change of
+      approach would need concrete evidence of why the fix run refuses to open a PR, and the record does not contain it."
+    READ at origin/main (src/run-task.ts mainRepairFixPrompt, src/lib/main-health-rung.ts fixRequestFor and
+    inheritedFixRequest):
+    - The brief says "The first red merge is <offendingSha> (PR). Its diff stat:" with diffStatOf(offendingSha) only, then
+      "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced."
+    - With a plan-only merge named, the worker has nothing to repair.
+    - MainHealthFirstRedCommit.afterGreenSha, the span walk and W1-T5806's findMetPrs (prsMergedBetween plus the PR files)
+      are all computed. They feed only bisection, main.health.observed and the escalation issue, never MainRepairFixRequest.
+  design: |
+    1. MainRepairFixRequest carries `mergesSinceGreen`: every first-parent merge after first.afterGreenSha up to the red
+       head. Each entry has its sha, its PR number and subject, and its changed files. They come from the rung's existing
+       awaited readers (the span walk and MainHealthMergeReader / findMetPrs' PR-files read). Nothing new runs
+       synchronously on the loop. fixRequestFor and inheritedFixRequest both fill it.
+    2. Each entry is marked `reachesFailingTests` when its changed files meet the failing test files' import closure.
+       Compute this with the affected-suites selection (src/lib/affected-suites.ts selectAffectedSuites over the
+       awaited readAffectedSuitesInputAsync input): the merge reaches a failing test when its files select that test
+       file. A merge that ADDS the failing test also counts. If the input is unreadable, the brief says so; it never
+       claims there is no overlap.
+    3. Tiered detail, no fixed cap: a reaching merge carries its unified diff, and every other merge carries its diff
+       stat. When the text outgrows the budget the log excerpt already uses, the brief cuts whole non-reaching merges
+       first and says how many it omitted (W1-T9301's bounded-tail-with-omission form).
+    4. mainRepairFixPrompt renders a "Merges since the last green main" section with the reaching merges first.
+       - When two or more merges reach the failing tests, it says the red may be a COLLISION of those merges, each
+         green on its own base, and that the repair fixes their interaction.
+       - When the located merge reaches no failing test, the "Fix EXACTLY ONE thing" line names the reaching merges
+         instead of the located one.
+       - The PR body, its Acceptance block and its trailer are unchanged (W1-T8572).
+  acceptance:
+    - claim: "the merges-since-green brief suite runs and passes"
+      proof: 'unit test: test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts'
+    - claim: "a red main's fix brief lists every merge since the last green main with its PR number and changed files"
+      proof: 'grep: test("W1-T9665: a red main fix brief lists every merge since the last green main" in test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts'
+    - claim: "a merge whose files reach a failing test through its import closure is marked as reaching it and carries its diff"
+      proof: 'grep: test("W1-T9665: a merge that reaches a failing test through its import closure carries its diff" in test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts'
+    - claim: "two reaching merges make the brief name a collision, and a located merge that reaches no failing test is not named as the one to repair"
+      proof: 'grep: test("W1-T9665: two merges that reach the failing tests are named as a collision to repair together" in test/a-red-main-fix-brief-carries-the-merges-since-green.test.ts'
+  falsifier: |
+    At origin/main, replay 2026-10-15. The merges since green include febd1bb34 (#11987), 131248633 (#11997) and
+    037a58d8f (#12006), the located merge is 037a58d8f, and the failing test is
+    test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts. The prompt from mainRepairFixPrompt
+    contains neither "#11987" nor "#11997", so the first and third tests fail.
