@@ -3120,7 +3120,8 @@ import {
   unwireCredentialHelperSocket,
 } from "./lib/worker.js";
 import {
-  QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
+  QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
+  runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "./lib/worker-provider.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
@@ -3764,6 +3765,9 @@ export function dispatchStreamObserver(
   };
 }
 
+/** W1-T9527: the process's one quiet-bound history; every dispatch spawn's watchdog reads through it. */
+export const quietBoundHistory = createQuietBoundHistory({ holder: "run-task.quiet-worker-bound", createReader: createEscalationTriageHistoryReader });
+
 /** W1-T7807: run `rawSpawn` under the quiet-worker watchdog when `watch.enabled` (a real dispatch spawn has a process tree to
  * read; an injected one has none). `seams` default to the real ledger read, judge, nudge and checkpoint-and-push path. */
 export function watchDispatchSpawn(
@@ -3785,7 +3789,8 @@ export function watchDispatchSpawn(
   },
   seams: {
     runWatchdog?: typeof runQuietWorkerWatchdog;
-    readRows?: typeof readLedgerUnionRecordsSync;
+    readRows?: typeof readLedgerUnionRecordsSync; // tests only, and only with no `history`: no default reads the union inline
+    history?: QuietBoundHistory;
     judge?: QuietWorkerJudge;
     deliver?: typeof deliverOperatorAnswerToRunningWorker;
     hasUncommittedChanges?: typeof worktreeHasUncommittedChanges;
@@ -3798,15 +3803,18 @@ export function watchDispatchSpawn(
   const { taskId, spawnArgs, task, log } = watch;
   const state: { rootPid?: number; ended?: QuietRoundEndedError } = {};
   const abort = new AbortController();
+  const readRows = seams.history ? undefined : seams.readRows;
   const watchdogOptions: Parameters<typeof runQuietWorkerWatchdog>[0] = {
     taskId,
     runId: watch.runId,
     rootPid: () => state.rootPid,
     provider: watch.provider,
-    history: () => {
-      const read = (seams.readRows ?? readLedgerUnionRecordsSync)(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
-      return read.ok ? read.rows : [];
-    },
+    ...(readRows ? {
+      history: () => {
+        const read = readRows(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] });
+        return read.ok ? read.rows : [];
+      },
+    } : quietHistoryOptions(dirname(watch.ledgerPath), seams.history ?? quietBoundHistory)),
     fallbackBoundMs: watch.fallbackBoundMs,
     quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
     ledger: (step, fields) => log(step, fields),
