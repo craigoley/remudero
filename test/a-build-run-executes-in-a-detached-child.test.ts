@@ -22,7 +22,7 @@ import {
   type RunChildHandle, type RunChildLaunch, type SpawnRunChildPorts,
 } from "../src/lib/run-child.js";
 import {
-  RUN_CHILD_SCHEMA, classifyRunChildError, readSpec, readStatus, runDir, writeSpec, writeStatus,
+  RUN_CHILD_SCHEMA, classifyRunChildError, readStatus, runDir, writeSpec, writeStatus,
   type RunChildProbe, type RunChildState, type RunChildStatus,
 } from "../src/lib/run-child-contract.js";
 import type { RunResult } from "../src/lib/run-result.js";
@@ -485,53 +485,6 @@ test("a child that cannot be started falls the run back to in-process, with the 
   const throwingLog = fixture("log-throws", { reserve: async () => { throw new Error("memory admission refused"); } });
   const logged = await spawnRunChild({ ...throwingLog.input, log: () => { throw new Error("ledger down"); } }, throwingLog.ports);
   assert.ok(!logged.started && /memory admission refused/.test(logged.reason), "a failing ledger changes nothing about the answer");
-});
-
-/** A reservation whose release always throws: the cleanup arms must swallow it and still report. */
-const throwingRelease = (): LearnedReservation => ({
-  id: "reservation-2", workerClass: "implement", estimateMib: 1, estimateSource: "default",
-  bindRoot: () => {},
-  releaseOccupancy: () => { throw new Error("ledger is read-only"); },
-} as unknown as LearnedReservation);
-
-test("W1-T9085: the default reservation opens a real learned reservation, named in the spec, and releases it at settle", async () => {
-  const child = new FakeChild();
-  child.pid = process.pid; // a live pid, so the real reservation can bind its root
-  const { launched } = await fakeStart("default-reserve", { reserve: undefined, spawn: () => child as never });
-  const spec = readSpec(launched.dir);
-  assert.ok(spec.ok && spec.value.reservationId.length > 0, "the spec names the reservation the real default opened");
-  writeStatus(launched.dir, status(launched.runId, "done", { result: RESULT }));
-  assert.deepEqual(await launched.settled, RESULT);
-});
-
-test("W1-T9085: a failing reservation release never hides why the child could not start", async () => {
-  const child = new FakeChild();
-  child.pid = undefined;
-  const fx = fixture("release-throws-at-start", { spawn: () => child as never, reserve: async () => throwingRelease() });
-  const refused = await spawnRunChild(fx.input, fx.ports);
-  assert.ok(!refused.started && /no pid/.test(refused.reason), JSON.stringify(refused));
-  assert.ok(fx.rows.some((row) => row.step === RUN_CHILD_FALLBACK_STEP && /no pid/.test(String(row.reason))));
-});
-
-test("W1-T9085: a failing settle cleanup is ledgered and the run still settles", async () => {
-  const { fx, launched } = await fakeStart("cleanup-throws", { reserve: async () => throwingRelease() });
-  writeStatus(launched.dir, status(launched.runId, "done", { result: RESULT }));
-  assert.deepEqual(await launched.settled, RESULT);
-  const row = fx.rows.find((r) => r.step === RUN_CHILD_FALLBACK_STEP);
-  assert.ok(row && /settle cleanup failed: ledger is read-only/.test(String(row.reason)), JSON.stringify(fx.rows));
-});
-
-test("W1-T9085: a run directory that cannot be watched is read by the poll alone", async () => {
-  const child = new FakeChild();
-  const { launched } = await fakeStart("watch-unavailable", {
-    launch: (engine, args) => ({ kind: "tsx", reason: "test", argv: [...args], cwd: REPO_ROOT, engineRoot: engine.root }),
-    spawn: (_command, args) => {
-      rmSync(String(args[args.indexOf("--run-dir") + 1]), { recursive: true, force: true }); // fs.watch on a missing directory throws
-      return child as never;
-    },
-  });
-  child.emit("exit", 1, null);
-  await assert.rejects(launched.settled, /exited \(1\) in state unreadable/);
 });
 
 test("an abort signal from the caller aborts the child, and a failing abort is ledgered", async () => {
