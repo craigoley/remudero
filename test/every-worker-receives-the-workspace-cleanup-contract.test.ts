@@ -94,7 +94,9 @@ test("cash context estimates include the cleanup prompt actually sent", async ()
       config: { root, claudeBin: "/unused", workerProviders: { enabled: ["cash"] } },
       providerRouting: {
         spawnOpenWeight: async (args, _config, selection) => {
-          received = args.prompt; estimated = selection.estimatedTokens;
+          received = args.prompt;
+          assert.ok("estimatedTokens" in selection && typeof selection.estimatedTokens === "number");
+          estimated = selection.estimatedTokens;
           return { provider: "cash", text: "done", isError: false } as never;
         },
         writeStatus: () => {},
