@@ -8,8 +8,8 @@ import { gitRepo } from "./helpers/git-repo.js";
 const TEST = "test/census-reads-files.test.ts";
 const SOURCE = "src/lib/dispatch-governor.ts";
 const PRICE = { cause: { kind: "check" as const, name: "ci-log:ci-shard" }, minutes: 37.5, rounds: 39, prs: 32 };
-// A round whose ci-shard red named nothing of its own, beside another check that named a test file.
-const ROUND = { pr: 1, cause: PRICE.cause, minutes: 37.5, at: "2026-10-14T00:00:00.000Z", detail: `ci-log round — rule-checks: ${TEST}; ci-shard (1/8)` };
+// A round whose ci-shard red named a test file of its own (#11997: a sibling check's test never owns the cause).
+const ROUND = { pr: 1, cause: PRICE.cause, minutes: 37.5, at: "2026-10-14T00:00:00.000Z", detail: `ci-log round — ci-shard (1/8): ${TEST}` };
 
 function fixture(t: TestContext, testText: string) {
   const repo = gitRepo({ kind: "ci-friction-test-alone" });

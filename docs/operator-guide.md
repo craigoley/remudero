@@ -1209,6 +1209,75 @@ no launch records anything new, and the restore only re-creates empty directorie
 **After a deallocate** nothing is needed: `rmd-scratch.service` re-formats and mounts the NVMe, docker's
 `ExecStartPre` re-creates the directories, and serve rebuilds the read model on its first tick.
 
+#### The hot checkouts (W1-T9617): each container's own code on the NVMe too
+
+**Why.** Memory overcommit evicts the page cache every 60–100 s, and the refaults of each container's
+own code (node_modules, the bundled entries, the checkout's git objects) land on the disk it sits
+on: each build daemon's `<state dir>/remudero` is on the data disk (about 500 IOPS) and serve's
+`~/rmd-serve-repo` on the OS disk (about 120 IOPS, read waits of 187–549 ms measured 2026-10-15).
+With its **own switch** on, `deploy/scratch-mounts.sh` adds one bind per build daemon and moves
+serve's default code dir:
+
+| moves to `/mnt/scratch/rmd/<state dir name>/` | container path |
+|---|---|
+| `remudero` (each build daemon's checkout, node_modules included) | `/home/node/Remudero/remudero` |
+| `serve-repo` (serve's code dir; `serve-container.sh` binds it, an explicit `RMD_SERVE_REPO_DIR` still wins) | `/home/node/Remudero/remudero` in `remudero-serve` |
+
+**The switch, both operator decisions:** the file `/etc/remudero/scratch-checkouts.on`, or
+`RMD_SCRATCH_CHECKOUTS=on|off` for one run. It only adds to a scratch plan that is already on.
+Off, every plan is byte-identical to before, so merging it recycles nothing.
+
+**Cold boot.** A deallocate empties the dirs. Docker's `ExecStartPre` re-creates them (each launch
+records them in `<state dir>/.scratch-mounts`), `deploy/entrypoint.sh` clones into the empty bind
+and runs `npm ci`, and `recycle-container.sh` reads a recorded empty checkout as that re-clone, not
+as a state dir with no checkout. The state dir must still hold `state/`. Nothing durable moves:
+the ledger, lanes, plan, `state/`, the manifest and the live-edit patches stay on `/mnt/rmd`, and
+the old checkouts stay where they are as the rollback.
+
+**Host readers follow it.** The fleet launcher's tick runs `bin/rmd`, reads live edits and
+fast-forwards the checkout the RUNNING container binds (`scratch_live_checkout`), so nothing moves
+before the container does. While a re-clone has no `bin/rmd` yet the tick says so and skips.
+`host-update.sh --reclaim-only` reclaims the checkout the next launch binds, and the janitor never
+sweeps `/mnt/scratch/rmd/*/remudero` or `*/serve-repo`.
+
+**Turn it on.** The fleet converges the units onto main by itself; confirm, then flip:
+
+```sh
+./deploy/install-host-units.sh; for i in site console; do ./deploy/install-host-units.sh --instance "$i"; done   # no DRIFTED
+sudo install -D -m 0644 /dev/null /etc/remudero/scratch-checkouts.on
+```
+
+**Flipping the switch IS the recycle approval for the three build daemons.** Each watchdog tick
+(every 5 min) reads W1-T6110's mount-plan drift on `/home/node/Remudero/remudero` and recycles that
+daemon through `recycle-container.sh`'s pause-and-drain, under its usual holds (STOP, an hour's
+back-off after a failed recycle). To choose the moment yourself, run them right after the flip:
+`./deploy/recycle-container.sh --instance core` (then `console`, `site`). Each replacement's first
+boot clones and installs on the NVMe before the daemon starts. Serve does not move by itself:
+`./deploy/serve-container.sh --dry-run | grep serve-repo`, then `./deploy/serve-container.sh
+--replace`; the console is down while its clone and install run.
+
+**Verify, and let the fleet show the saving.** Every recycle and serve replace with the scratch
+mounts on appends one `recycle.checkout_placement` row to its state dir's ledger: `placement` (scratch or state-disk), the
+`checkout_disk` it sits on, `cold`, and the OUTGOING generation's `outgoing_reads` per whole disk
+(cgroup `io.stat` rios/rbytes) with its `outgoing_age_s`. Rows written before the flip measure the
+data-disk generation; the first rows after the next recycle measure the scratch one. Reads per
+second on a disk is `rios / outgoing_age_s`, so the drop on `nvme0n1` (the data disk) and `nvme0n2`
+(the OS disk) is read straight off the ledger. A cold row's rebuild time is the gap from its `ts` to
+that container's first `daemon.boot` row.
+
+```sh
+rmd ledger-grep 'recycle.checkout_placement'
+docker inspect remudero-daemon --format '{{range .Mounts}}{{.Destination}}<-{{.Source}} {{end}}' | tr ' ' '\n' | grep Remudero/remudero
+```
+
+**Roll back.** `sudo rm /etc/remudero/scratch-checkouts.on`, then recycle each daemon and replace
+serve by hand: with the switch off the plan no longer names the checkout bind, so no drift fires
+and a container keeps its scratch checkout until its next recycle. Before that recycle, check the
+old copy has no tracked edits (`git -C ~/rmd-state2/remudero status --porcelain -uno`); the
+recycle's shared-checkout guard refuses one that would block the boot's checkout. `RMD_SCRATCH_CHECKOUTS=off`
+in front of a launch does the same for that launch only. Once no container binds a scratch checkout,
+`rm -rf /mnt/scratch/rmd/<state dir name>/remudero` (or `serve-repo`) returns its space.
+
 ### Attaching a data disk to the container host
 
 The Azure host's OS disk is 30 GB and the image store fills it. Standard practice is a separate

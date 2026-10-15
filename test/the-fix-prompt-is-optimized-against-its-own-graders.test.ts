@@ -169,6 +169,8 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
     expiresAt: "2026-10-02T10:00:00.000Z",
     createdAt: "2026-09-28T10:00:00.000Z",
     rollback: { plan: "Revert to fix-rung-prompt-v0.", reason: "Rollback if commit_refused_rate regresses." },
+    // The base never resolves a failure; any reflected candidate does (W1-T9639).
+    runFixRung: (candidate) => (candidate.parentIds.length === 0 ? "fail" : "pass"),
   };
 
   const outcome = proposePromptEvolutionPromotion(input);
@@ -179,6 +181,7 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
   // so it must still be advanced through experiment-promotion's own guarded state machine.
   assert.equal(outcome.promotion?.state, "proposed");
   assert.equal(outcome.promotion?.candidate, outcome.winner?.id);
+  assert.notEqual(outcome.winner?.id, "base", "the unmodified base is the baseline, never the promoted candidate");
   assert.equal(outcome.promotion?.baseline, input.baseline);
 
   // Proposing from an empty corpus yields only the unmodified base candidate (id "base"). Naming
@@ -186,7 +189,8 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
   // refuses outright — so a candidate identical to its own baseline never smuggles a promotion
   // through unguarded; the guard is `validatePromotionRecord` itself, not a special case here.
   const emptyOutcome = proposePromptEvolutionPromotion({ ...input, transcripts: [], baseline: "base" });
-  assert.equal(emptyOutcome.winner?.id, "base");
+  assert.equal(emptyOutcome.candidates[0]?.id, "base");
+  assert.equal(emptyOutcome.winner, undefined);
   assert.equal(emptyOutcome.promotion, null, "a candidate identical to its own baseline must never validate as a promotion");
 
   // An invalid basePrompt proposes no candidates at all, so there is no winner and therefore no

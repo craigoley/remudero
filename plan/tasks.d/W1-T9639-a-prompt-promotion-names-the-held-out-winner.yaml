@@ -1,0 +1,67 @@
+- id: W1-T9639
+  title: "THE PROMPT-EVOLUTION BRIDGE CAN ONLY PROMOTE THE UNCHANGED BASE PROMPT — `proposePromptEvolutionPromotion` wraps `candidates[0]`, which `proposePromptCandidates` always fills with the unmodified base, and nothing scores a candidate on the held-out half; promote only a held-out winner that beats the base, and propose nothing when unscored"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19 span: the bridge and the W1-T4665 test that locks its defect in. One concern — which candidate the prompt-evolution bridge may promote
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T4665, W1-T4669, W1-T4619]
+  files: [src/lib/experiment-promotion.ts, test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts, test/a-prompt-promotion-names-the-held-out-winner.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    WHAT THE BRIDGE DOES:
+      - `proposePromptEvolutionPromotion` (src/lib/experiment-promotion.ts:254) sets `const winner = candidates[0]`
+        (:256) and wraps it as a `proposed` PromotionRecord.
+      - `proposePromptCandidates` (src/lib/prompt-evolution.ts:179) always starts the list with the unmodified base
+        (`const candidates: PromptCandidate[] = [base]`), then adds one reflected candidate per lesson.
+      - So the bridge can only ever propose the unchanged base prompt. Its doc comment says the candidates come from a
+        "reflective, held-out-scored search", but `scoreCandidatesOnHeldOut` (:233) and `paretoFront` (:266) have no
+        caller outside prompt-evolution.ts and its own test (git grep at 3f9003ebf).
+    THE TEST LOCKS THE DEFECT IN:
+      - test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts:174-182 asserts that a promotion exists and
+        that it names `outcome.winner`, never which candidate won. Its baseline is "fix-rung-prompt-v0" while the
+        winner's id is "base", so the unchanged prompt validates as a promotion against a differently named baseline.
+      - :189 asserts `emptyOutcome.winner?.id === "base"`.
+    HOW IT MERGED THAT WAY: W1-T4665's design (ii) said candidates are scored on a held-out half by re-running the fix
+    rung in sealed side worktrees. Its three proofs check two test titles and one call site, so the task merged without
+    that half.
+    WHY IT MATTERS: this is the only route a learned fix prompt has to production (W1-T4665 (iii)). While it picks the
+    base, the prompt-learning loop cannot learn, and its own test stays green. Found while reading
+    addyosmani/agent-skills, whose evals keep a change only with a measured before-and-after score.
+  design: |
+    1. `PromptEvolutionPromotionInput` gains `runFixRung?: (candidate: PromptCandidate, transcript: FixTranscript) =>
+       FixRungOutcome`, the exact signature `scoreCandidatesOnHeldOut` already takes.
+    2. `proposePromptEvolutionPromotion`:
+       - With no `runFixRung`, return `{ candidates, winner: undefined, promotion: null, reason: "unscored" }`.
+       - Otherwise score every candidate with `scoreCandidatesOnHeldOut(candidates, input.transcripts, input.seed,
+         runFixRung)` and take `paretoFront(scores)`.
+       - If the base scored no held-out case (`overall.scored === 0`), return `reason: "no-held-out-cases"`.
+       - The winner is a front member that is not the base and whose overall held-out pass rate is strictly above the
+         base's. Ties break by the higher overall pass rate, then by candidate id, so the choice is deterministic.
+       - If no member qualifies, return `promotion: null` with `reason: "base-not-beaten"`.
+       - The outcome gains `scores: HeldOutScoreResult[]` and `reason?: string`.
+    3. The base is the baseline, never a candidate: it is never promoted.
+    4. Update the W1-T4665 test (:155-196) to pass a `runFixRung` and to assert which candidate won. Keep its titles
+       byte-identical, because W1-T4665's own proofs grep them.
+    New tests go in test/a-prompt-promotion-names-the-held-out-winner.test.ts, with `test(` titles exactly as in the
+    proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-prompt-promotion-names-the-held-out-winner.test.ts"
+    - claim: "a reflected candidate that beats the base on the held-out half is the one promoted"
+      proof: 'grep: test("W1-T9639: a prompt promotion names the held-out winner, never the unscored base" in test/a-prompt-promotion-names-the-held-out-winner.test.ts'
+    - claim: "an unscored corpus, or one where nothing beats the base, proposes no promotion and says why"
+      proof: 'grep: test("W1-T9639: an unscored or base-winning evolution proposes no promotion" in test/a-prompt-promotion-names-the-held-out-winner.test.ts'
+  falsifier: |
+    Restore `const winner = candidates[0]`. The first test then sees a promotion naming "base", and the second sees a
+    promotion where it expects null.
+  note: |
+    SEQUENCE: W1-T9640 (the worker-model scope) and W1-T9641 (the shadow producer) build on this and edit the same
+    files. Neither starts until this merges.
