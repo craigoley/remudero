@@ -22,7 +22,7 @@ import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
-import { reserveRunChild } from "./run-child-reservation.js";
+import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
@@ -480,6 +480,10 @@ export interface RunChildHandle {
   /** Resolves the child's `RunResult`; rejects with the error the settle loop classifies, or with a lost run. */
   settled: Promise<RunResult>;
   abort(): Promise<AbortRunChildOutcome>;
+  /** Receipt only after the daemon processes the outcome; an unwatched child is replayed at the next boot. */
+  acknowledge?: (outcome: PromiseSettledResult<RunResult>) => void;
+  /** Stop local observation without signalling the child or releasing its reservation. */
+  detach?: () => void;
 }
 
 export type RunChildLaunch = { started: false; reason: string } | RunChildHandle;
@@ -568,8 +572,10 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   };
   input.signal?.addEventListener("abort", onAbort, { once: true });
   if (input.signal?.aborted) onAbort();
+  let detach: (() => void) | undefined;
   const settled = awaitRunChild({
     taskId: input.taskId, runId, dir, child, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS, watch: ports.watch !== false, log,
+    onWatch: (stop) => { detach = stop; },
     onEnd: () => {
       input.signal?.removeEventListener("abort", onAbort);
       try {
@@ -581,19 +587,21 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       }
     },
   });
-  return { started: true, runId, dir, pid, settled, abort };
+  return { started: true, runId, dir, pid, settled, abort, acknowledge: settlementReceipt(input.taskId, runId, log),
+    detach: () => { input.signal?.removeEventListener("abort", onAbort); detach?.(); } };
 }
 
 interface AwaitRunChild {
   taskId: string;
   runId: string;
   dir: string;
-  child: ChildProcess;
+  child?: ChildProcess;
   probe?: RunChildProbe;
   pollMs: number;
   watch: boolean;
   log: Log;
   onEnd: () => void;
+  onWatch?: (stop: () => void) => void;
 }
 
 /**
@@ -652,8 +660,8 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
         lost(classified.detail ?? classified.kind);
       }
     };
-    a.child.once("exit", (code, signal) => { exit = { code, signal }; check(); });
-    a.child.once("error", (error) => {
+    a.child?.once("exit", (code, signal) => { exit = { code, signal }; check(); });
+    a.child?.once("error", (error) => {
       exit = { code: null, signal: null };
       lost(`spawn error: ${reasonOf(error)}`);
     });
@@ -668,6 +676,8 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
         void error; // No watch support here: the poll above is the only reader, which is what it is for.
       }
     }
+    a.onWatch?.(() => { done = true; clearInterval(timer); watcher?.close(); });
+    check();
   });
 }
 
@@ -723,4 +733,56 @@ export async function abortRunChild(dir: string, ports: AbortRunChildPorts = {})
     }
     await wait(ports.pollMs ?? RUN_CHILD_ABORT_POLL_MS);
   }
+}
+
+export interface AdoptedRunChild extends RunChildHandle {
+  taskId: string;
+}
+
+function settlementReceipt(taskId: string, runId: string, log: Log): NonNullable<RunChildHandle["acknowledge"]> {
+  let acknowledged = false;
+  return (outcome) => {
+    if (acknowledged) return;
+    log("run_child.settled", { task_id: taskId, run_id: runId, outcome: outcome.status,
+      ...(outcome.status === "fulfilled" ? { verdict: outcome.value.verdict } : { reason: reasonOf(outcome.reason) }) });
+    acknowledged = true;
+  };
+}
+
+/** Reattach this instance's unfinished runs before boot sweeps can mistake their workers for orphans. */
+export function adoptRunChildren(input: {
+  stateRoot: string; instance: string; log: Log; settledRunIds: ReadonlySet<string>;
+}, ports: { probe?: RunChildProbe; pollMs?: number; watch?: boolean; clock?: () => number;
+  reserve?: typeof adoptRunChildReservation } = {}): AdoptedRunChild[] {
+  const root = join(input.stateRoot, "runs");
+  if (!existsSync(root)) return [];
+  const adopted: AdoptedRunChild[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith("probe-") || input.settledRunIds.has(entry.name)) continue;
+    const dir = join(root, entry.name);
+    const spec = readSpec(dir);
+    if (!spec.ok || spec.value.instance !== input.instance || spec.value.runId !== entry.name) continue;
+    const classified = classifyRunDir(dir, ports.probe);
+    const { taskId, runId } = spec.value;
+    const pid = classified.status?.identity.pid ?? 0;
+    if (classified.kind === "unreadable") {
+      input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: classified.detail });
+      continue;
+    }
+    const reservation = classified.kind === "live"
+      ? (ports.reserve ?? adoptRunChildReservation)(dir, { ledger: { root: join(input.stateRoot, "..") } }, ports.probe) : undefined;
+    if (classified.kind === "live") input.log("run_child.adopted", {
+      task_id: taskId, run_id: runId, pid, engine_sha: classified.status!.engineSha,
+      age_ms: Math.max(0, (ports.clock ?? Date.now)() - statSync(dir).birthtimeMs),
+    });
+    let detach: (() => void) | undefined;
+    const settled = awaitRunChild({
+      taskId, runId, dir, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS,
+      watch: ports.watch !== false, log: input.log, onWatch: (stop) => { detach = stop; }, onEnd: () => { reservation?.releaseOccupancy(); },
+    });
+    // Boot does more work before the pool attaches its handlers; retain the rejection on the handle.
+    void settled.catch((error: unknown) => { void error; /* The pool owns and classifies this rejection. */ });
+    adopted.push({ started: true, taskId, runId, dir, pid, settled, acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
+  }
+  return adopted;
 }

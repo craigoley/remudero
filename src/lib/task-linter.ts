@@ -1330,8 +1330,10 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         `refused: judgeCriterion (review.ts) can only carve this proof out as not_yet_built when ` +
         `"${path}" is a member of this task's declared files: — since it is not, if "${path}" is ` +
         "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
-        `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
-        "to name a path already in scope.",
+        "overrides keyword coverage and fails the PR. " + (opts.moduleExists && absentAtHead
+          ? `"${path}" does not exist in the tree, so do NOT add it to files: — name an existing ` +
+            "in-scope path in the proof, or drop the criterion (W1-T9307)."
+          : `Add "${path}" to files: or rewrite the proof to name a path already in scope.`),
     });
   });
   return violations;
@@ -3359,9 +3361,11 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);
-  const createdCovered = created.length === 0 || proofs.some((p) => !created.includes(p.path));
+  // W1-T9307: a caller the tree does not hold is not a call site — only an existing src file counts.
+  const heldProofs = proofs.filter((p) => opts.moduleExists!(p.path));
+  const createdCovered = created.length === 0 || heldProofs.some((p) => !created.includes(p.path));
   const missingExports = addedExports.filter(
-    (e) => !proofs.some((p) => p.path !== e.path && p.pattern.includes(`${e.symbol}(`)),
+    (e) => !heldProofs.some((p) => p.path !== e.path && p.pattern.includes(`${e.symbol}(`)),
   );
 
   if (createdCovered && missingExports.length === 0) return [];
@@ -3381,7 +3385,9 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
         `task ${task.id} adds ${subjects.join(", ")} but no acceptance criterion proves a CALL SITE ` +
         `for it. Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren is ` +
         `required (a bare symbol name passes on a comment), and the path must be a different src/ ` +
-        `file.${testNote} WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
+        `file that EXISTS in the tree today; never invent a caller file or add one to files:. A task ` +
+        `that adds no src module (a recon or docs task) removes the src path from files: and drops ` +
+        `the claim.${testNote} WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
         `count without its definition is unusable: MEASURED across src/ at 167c6844, ZERO modules ` +
         `have no importer at all, THREE have only TEST importers, and 77 of 2081 exported values ` +
         `are referenced nowhere outside their own file (43 of those are SCREAMING_CASE constants). ` +

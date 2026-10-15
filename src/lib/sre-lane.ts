@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
@@ -225,32 +226,37 @@ export function suspectPullRequests(mergedPrs: readonly MergedPrFiles[], frameFi
  *  `sinceSha` (exclusive) — or, with no known deploy sha, the last 24 hours — resolved to its own
  *  PR url via this repo's own squash-merge convention (a subject ending `(#NNNN)`) and the files
  *  that commit touched. A commit whose subject carries no PR number names no suspect — this repo's
- *  squash-merge titles always do, so that is a torn/foreign commit, not evidence to guess from. */
-export function mergedPrsSince(
+ *  squash-merge titles always do, so that is a torn/foreign commit, not evidence to guess from.
+ *  W1-T9637: ONE awaited `git log --name-only` child, never a synchronous `git show` per commit —
+ *  measured 2026-10-15, that per-commit form held the daemon loop 9-16 s a filing (256-259 spawns). */
+export async function mergedPrsSince(
   repoDir: string,
   owner: string,
   repo: string,
   sinceSha: string | undefined,
-  run: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8" }),
-): MergedPrFiles[] {
+  run: (args: string[]) => Promise<string> = defaultGitRead,
+): Promise<MergedPrFiles[]> {
+  const range = sinceSha ? [`${sinceSha}..origin/main`] : ["origin/main", "--since=24 hours ago"];
   try {
-    const logArgs = sinceSha
-      ? ["-C", repoDir, "log", `${sinceSha}..origin/main`, "--first-parent", "--format=%H\u0001%s"]
-      : ["-C", repoDir, "log", "origin/main", "--first-parent", "--since=24 hours ago", "--format=%H\u0001%s"];
-    const lines = run(logArgs).split("\n").filter(Boolean);
-    const out: MergedPrFiles[] = [];
-    for (const line of lines) {
-      const [sha, subject] = line.split("\u0001");
+    const out = await run(["-C", repoDir, "log", ...range, "--first-parent", "--name-only", "--format=%x00%H%x01%s"]);
+    const merged: MergedPrFiles[] = [];
+    for (const chunk of out.split("\0")) {
+      const [head = "", ...files] = chunk.split("\n");
+      const [sha, subject] = head.split("\u0001");
       const match = sha && subject ? /\(#(\d+)\)\s*$/.exec(subject) : null;
-      if (!match) continue;
-      const files = run(["-C", repoDir, "show", "--name-only", "--format=", sha]).split("\n").filter(Boolean);
-      out.push({ url: `https://github.com/${owner}/${repo}/pull/${match[1]}`, files });
+      if (match) merged.push({ url: `https://github.com/${owner}/${repo}/pull/${match[1]}`, files: files.filter(Boolean) });
     }
-    return out;
+    return merged;
   } catch {
     // deliberate: an unreadable merge window names no suspects — never a guessed one.
     return [];
   }
+}
+
+const execFileAsync = promisify(execFile);
+/** The awaited git read {@link mergedPrsSince} spawns by default: the loop keeps turning while it runs. */
+async function defaultGitRead(args: string[]): Promise<string> {
+  return (await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1 << 26 })).stdout;
 }
 
 // ── pace ─────────────────────────────────────────────────────────────────────────────────────
@@ -322,7 +328,7 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   /** The in-app frames captured for a fingerprint's recent samples, for suspect-commit matching. */
   framesFor: (fingerprint: string) => IncidentFrameLike[];
   /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
-  mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
+  mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[] | Promise<MergedPrFiles[]>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
   runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
@@ -390,7 +396,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
-  const suspectPrs = suspectPullRequests(deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
+  const suspectPrs = suspectPullRequests(await deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
   const staged = stageFeedbackCapture(deps.root, deps.landingStateRoot, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
