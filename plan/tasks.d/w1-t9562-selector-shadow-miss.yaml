@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -16,3 +17,13 @@
       proof: "grep: test/ci-friction-remedies-file-admission\\.test\\.ts in src/lib/affected-suites.ts"
     - claim: "a regression test selects test/ci-friction-remedies-file-admission.test.ts for each recorded edge"
       proof: "grep: test/ci-friction-remedies-file-admission\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan limits the remedy to a named selector edge and regression coverage in two existing files, with a specific PR, run, and commit cited as evidence."
+      - "The declared scope requests no sensitive access, deletion, irreversible action, operator decision, or merge, deployment, infrastructure, or review policy change."
+      - "The supplied family record reports 18 merged and 0 declined tasks; the filing-time gates report no additional concern."
+    judged_at: "2026-10-15T00:54:22.442Z"
+    pin: "491227a0cbb138861bab784d540297ba3e9f874120b9c394a0386091250846d6"

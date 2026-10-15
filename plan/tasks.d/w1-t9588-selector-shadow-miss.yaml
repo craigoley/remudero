@@ -1,0 +1,18 @@
+- id: W1-T9588
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a floor miss on coverage run 38655191772 for PR #11852 at 16d12d30a29333a210dcac844210f308bae3d2d2: src/lib/ledger.ts, src/lib/operator-interventions.ts, src/lib/replay-harness.ts, src/lib/run-child.ts, src/run-child-main.ts, src/run-task.ts, test/a-build-run-executes-in-a-detached-child.test.ts, test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts -> test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the floor selector includes test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts when this edge is exercised"
+      proof: "grep: test/a-shipped-detector-exits-one-and-is-wired-to-nothing\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts for each recorded edge"
+      proof: "grep: test/a-shipped-detector-exits-one-and-is-wired-to-nothing\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"

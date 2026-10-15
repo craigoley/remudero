@@ -6,6 +6,7 @@ import { checkoutHeadStamp } from "./checkout-head.js";
 import { bodyCreditedMergeTimes, ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, CI_FRICTION_ESCALATE_RUNG, type CiFrictionRemedyTask, type OwnerSearch, type RemedyEffect } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
+import { measureRemedy, prHoursMetric } from "./remedy-effect.js";
 import { slug } from "./feedback-docket.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghExec } from "./github-transport.js";
@@ -298,27 +299,6 @@ function priceEpisodes(episodes: readonly Episode[], now: number): Price[] {
     .sort((a, b) => b.hours - a.hours || b.prs - a.prs || a.key.localeCompare(b.key));
 }
 
-function effectOf(charges: readonly Charge[], key: string, merge: number, now: number): RemedyEffect {
-  const span = Math.min(Math.max(0, now - merge), CI_FRICTION_EFFECT_MAX_WINDOW_MS);
-  const before = { k: 0, n: 0 }, after = { k: 0, n: 0 };
-  for (const charge of charges) {
-    for (const [side, start, end] of [[before, merge - span, merge], [after, merge, merge + span]] as const) {
-      const hours = Math.max(0, Math.min(charge.end, end) - Math.max(charge.start, start)) / 3_600_000;
-      side.n += hours;
-      if (charge.key === key) side.k += hours;
-    }
-  }
-  const windowDays = span / 86_400_000;
-  const share = (w: typeof before) => w.n > 0 ? w.k / w.n : 0;
-  const pooled = (before.k + after.k) / (before.n + after.n || 1);
-  const se = before.n > 0 && after.n > 0 ? Math.sqrt(pooled * (1 - pooled) * (1 / before.n + 1 / after.n)) : 0;
-  const z = se > 0 ? (share(after) - share(before)) / se : 0;
-  const verdict = before.k === 0 ? "unmeasurable" : after.n > 0 && z <= -1.6449 ? "credit" :
-    share(before) * after.n >= before.k ? "debit" : "pending";
-  return { verdict, before, after, windowDays, z,
-    reason: `${verdict}: share of PR-hours ${(share(before) * 100).toFixed(1)}% (${before.k}/${before.n}) before, ${(share(after) * 100).toFixed(1)}% (${after.k}/${after.n}) after, ${windowDays} day(s) each side` };
-}
-
 /** Marks which episodes are worth a remedy: no owner, a failed end, or an open wait past the p90 of cleared ones. */
 export function markEligibility(episodes: Episode[], now: number): Map<string, number> {
   const thresholds = new Map<string, number>();
@@ -365,6 +345,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     let state = "draft";
     let effect: RemedyEffect | undefined;
     let prior: Prior | undefined;
+    let unverifiable: string | undefined;
     if (mine.some(t => !t.retired && !t.mergedAt)) state = "in_progress";
     else if (top?.retired && !top.mergedAt) state = "retired";
     else if (top?.mergedAt) {
@@ -372,8 +353,16 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
       const merge = Date.parse(top.mergedAt);
       if (!Number.isFinite(merge)) state = "in_progress";
       else {
-        effect = kind.shadowAdmission ? admissionEffect(records, price.key, merge, now) : effectOf(charges, price.key, merge, now);
-        state = effect.verdict === "pending" ? "measuring" : effect.verdict === "debit" ? "draft" : "resolved";
+        // W1-T9060: ONE measurement for every ladder. An `unmeasurable` effect is never `resolved`: it keeps measuring, and
+        // once the after-window is full it escalates "effect unverifiable" to a person.
+        effect = kind.shadowAdmission ? admissionEffect(records, price.key, merge, now)
+          : measureRemedy(top, prHoursMetric(kind.name, kind.prefix, charges), merge, now).effect;
+        const afterFull = now - merge >= CI_FRICTION_EFFECT_MAX_WINDOW_MS;
+        state = effect.verdict === "credit" ? "resolved" : effect.verdict === "debit" ? "draft" : "measuring";
+        if (effect.verdict === "unmeasurable" && afterFull) {
+          state = "escalate"; prior = { task: top, effect };
+          unverifiable = `effect unverifiable: ${effect.reason}`;
+        }
         if (state === "draft") { rung++; prior = { task: top, effect }; }
       }
     }
@@ -386,7 +375,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
       next = { class: "draft", target: origin, origin, rung, price, prior,
         charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
         population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
-        ...(state === "escalate" ? { escalation: `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) };
+        ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) };
     }
   }
   return { episodes, charges, priced, candidates, ladder, next };

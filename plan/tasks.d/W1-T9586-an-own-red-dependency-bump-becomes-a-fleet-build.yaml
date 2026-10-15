@@ -1,0 +1,64 @@
+- id: W1-T9586
+  title: "AN OWN-RED DEPENDENCY BUMP HAS NO OWNER: when a Dependabot minor/patch bump needs a companion edit (a test that pins the old version or action SHA, a derived image pin), dep-review holds it, a commit on the bot branch is refused by dep-review's own manifest allowlist, and the fix rung never sees it; an own red becomes a migration proposal the fleet builds on its own branch, as a major already does"
+  repo: remudero
+  depends_on: [W1-T9584]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — who owns a Dependabot bump whose red is its own
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: 'get them green, resolve the root causes that prevented automated flow… We need the pr queue to be automated.' (dependabot #11788/#11791/#11793)"
+  plan_refs: [W1-T54, W1-T2705, W1-T5022, W1-T6258, W1-T9584]
+  files: [src/lib/dep-review.ts, src/run-task.ts, test/an-own-red-dependency-bump-becomes-a-fleet-build.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14/15. All three open Dependabot PRs were already rebased onto main with the store-fill
+    fixture fix (f19b8c887 is an ancestor of each head) and still red, each for a reason of its own that no
+    rebase or rerun can clear:
+    - #11793 (actions group, head 2d5030059): coverage-shard (4/8) fails W1-T2781 in
+      test/mkdtemp-callsite-ci-wiring.test.ts, which expects the literal
+      `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020` (the bump moves it to 949feb24…). The
+      same literal-pin shape holds the old SHAs in test/coverage-merged-artifact.test.ts (upload-artifact
+      043fb46d…) and test/semgrep-native-install.test.ts (upload-sarif 2892aa5e…), matching the other two red
+      shards (7/8, 8/8). CI log read: job 116165924141, `# tests 4116, # fail 1`.
+    - #11788 (npm root group, head b00fda7b): test/the-haiku55-image-pins-match-its-sdk.test.ts asserts the
+      locked SDK is the literal "0.3.293" and claudeCodeVersion "2.1.293"; the bump moves the SDK to 0.3.296
+      (claudeCodeVersion 2.1.296, read with `npm view`).
+    - #11791 (/deploy image group): the same test requires deploy/package.json's @anthropic-ai/claude-code to
+      equal the locked SDK's claudeCodeVersion; the bump moves the CLI to 2.1.296 while the root SDK stays at
+      0.3.293. #11788 and #11791 can therefore never pass one at a time, by construction.
+    - dep-review.decided is `hold` on every pass for all three (22:54Z-00:42Z); the hold's only remedy is the
+      24 h escalation (DEP_REVIEW_HOLD_AGE_MS).
+    READ at origin/main 7cfdd7775:
+    - decideDepReview routes a parseable MAJOR to `migrate` (W1-T2705: captureFeedback with origin
+      repair#dep-review, then ignore and close), but a minor/patch with red checks only ever reaches `hold`.
+    - offendingFiles refuses any diff outside the manifest/lockfile allowlist, so a companion test edit pushed
+      onto the Dependabot branch turns `hold` into `refuse`: there is no in-place fix path, by design.
+    - the sweep's dep-review row outranks the ci-log fix rung (deliberately: no fleet commits on a bot branch).
+  design: |
+    In the dep-review pass, a `hold` whose red W1-T9584 classifies as the PR's OWN (a check main's newest
+    genuine run passes, or a red that survived one requested Dependabot refresh) becomes a migration proposal,
+    reusing the W1-T2705 capture path rather than a new one:
+    - captureFeedback (origin repair#dep-review) with a body naming the PR, its head, the bumps parsed from the
+      Dependabot summary, every red check, and the instruction to land the SAME version moves plus the companion
+      edits on an owned task branch (tests that pin the old literal, derived pins such as the image CLI that must
+      equal the locked SDK's claudeCodeVersion, and any sibling Dependabot PR whose bump the fix needs, named by
+      number). Submission key = (owner, repo, sorted bumps), so a regrouped Dependabot PR with the same bumps
+      files nothing new, and a sibling PR whose bumps the proposal already names is folded in, not re-filed.
+    - Unlike a major: NO `@dependabot ignore` comment and NO close. The Dependabot PR stays open and is closed by
+      the existing superseded-by row once the owned PR contains its hunks, or by Dependabot itself once main
+      carries the versions.
+    - Ledger `dep-review.own_red.feedback_captured` {pr_url, head_sha, feedback_id, red_checks}; a capture failure
+      ledgers and keeps the hold (fail closed, as the major path does). The 24 h hold escalation stays as the
+      backstop for a red that is neither main's nor classifiable.
+  acceptance:
+    - claim: "an own-red minor Dependabot hold captures one migration proposal naming its red checks, posts no Dependabot command and does not close the PR"
+      proof: 'grep: test("W1-T9586: an own-red minor dependency hold files one migration proposal and leaves the PR open" in test/an-own-red-dependency-bump-becomes-a-fleet-build.test.ts'
+    - claim: "a second pass on the same bumps, or a sibling PR whose bumps the proposal names, files nothing new"
+      proof: 'grep: test("W1-T9586: the same bumps never file a second proposal" in test/an-own-red-dependency-bump-becomes-a-fleet-build.test.ts'
+  falsifier: |
+    Leave `hold` as the only outcome for a red minor bump: the fixture's own-red PR captures no feedback and the
+    first test fails; drop the submission-key dedupe and the second pass files a duplicate.

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: read-only host check of the W1-T8775/W1-T8776 memory cut after core booted 2581c1d51 at 01:46:29Z"
   plan_refs: [W1-T8776, W1-T8775, W1-T9279, W1-T7813, W1-T4356]
   files: [src/run-task.ts, src/lib/child-entry-store.ts, src/lib/plan-pr-emitter.ts, src/lib/pr-open.ts, test/the-core-fleet-fills-the-child-entry-store.test.ts]
-  status: queued
+  status: merged
   priority: 0.5
   attempts: 0
   rationale: |

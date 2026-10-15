@@ -11,7 +11,9 @@
     From the 2026-10-14 proposal on proof-debt:W1-T5071, ratified via rmd approve:
   
     Cross-file invariant depends on both plan/tasks.yaml and MASTER-PLAN.md being consistent
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6389c9ab3e9c8cc5
   attempts: 0
   files:
     - plan/tasks.yaml
