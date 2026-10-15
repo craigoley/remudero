@@ -1,0 +1,24 @@
+- id: W1-T9608
+  title: "THE CODE PR ready_to_merged STAGE SLOWED ON THE FULL SURFACE — p50 9.2 min against a 0.3 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:code:ready_to_merged:full"
+  files:
+    - src/lib/sweep.ts
+    - test/the-code-ready-to-merged-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the code ready_to_merged stage on the full surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the code ready_to_merged stage recovers\" in test/the-code-ready-to-merged-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    code PRs, stage ready_to_merged on the full surface: p50 9.2 min against a 0.3 min baseline (rolling).
+    Last 24 h: n 76, p50 9.2, p90 16.9 min.
+    Slowest PRs: #11629 (230.6 min), #11801 (49.1 min), #11757 (45.1 min).
+    Find what these PRs share at this stage before changing a bound.
