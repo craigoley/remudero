@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -112,7 +112,7 @@ jobs:
           # leaves no such ref. It self-clears on a re-run, so it reads as noise — it cost four CI
           # cycles across #1658, #1659 and #1677 in one day.
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: Admit setup only for a shard with work
@@ -142,7 +142,7 @@ jobs:
           echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
       - name: Restore npm cache only for admitted work
         if: ${{ steps.admission.outputs.setup != 'false' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -515,7 +515,7 @@ jobs:
         run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flake-retry-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/flake-retry
@@ -523,7 +523,7 @@ jobs:
           if-no-files-found: ignore
       - name: Upload this shard's duration evidence (structured Node test events, W1-T2904)
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-duration-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-duration
@@ -539,7 +539,7 @@ jobs:
             done
       - name: Upload the fold debt main's ceiling gate filed (W1-T7853)
         if: ${{ always() && github.event_name == 'push' && matrix.shard == 1 }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-md-fold-debt-main
           path: ${{ runner.temp }}/fold-debt
@@ -550,7 +550,7 @@ jobs:
         run: node scripts/generate-plan-index.mjs --out plan/plan-index.json
       - name: Upload the console plan-index artifact (W1-T4432)
         if: ${{ matrix.shard == '1' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plan-index-console
           path: plan/plan-index.json
@@ -576,17 +576,17 @@ jobs:
         continue-on-error: true
       - name: Download every shard's flake-retry evidence (best-effort; a shard that recorded none still counts as present)
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: flake-retry-shard-*
           path: flake-retry-shards
       - name: Download every duration evidence artifact (best-effort)
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: test-duration-*
           path: test-duration-shards
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         continue-on-error: true
         with:
           node-version-file: .nvmrc
@@ -621,7 +621,7 @@ jobs:
           fi
       - name: Publish the next duration manifest proposal
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-tier-manifest-proposal
           path: test-tier-manifest.next.json
@@ -629,13 +629,13 @@ jobs:
           if-no-files-found: ignore
       - name: Download every coverage shard's instrumented duration evidence (best-effort)
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-duration-*
           path: coverage-duration-shards
       - name: Download the ledger snapshot the coverage shards weighed (W1-T4071; best-effort)
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-ledger-snapshot-*
           path: coverage-ledger-snapshots
@@ -654,7 +654,7 @@ jobs:
           fi
       - name: Publish the instrumented next duration manifest proposal
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-tier-coverage-manifest-proposal
           path: test-tier-coverage-manifest.next.json
@@ -796,7 +796,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -903,7 +903,7 @@ jobs:
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-duration-slow-${{ matrix.shard }}
           path: ${{ runner.temp }}/test-duration
@@ -1068,7 +1068,7 @@ jobs:
         id: checkout
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         id: setup-node
         with:
           node-version-file: .nvmrc
@@ -1278,7 +1278,7 @@ jobs:
       - name: Upload the fold debt this run filed (W1-T7853)
         id: upload-fold-debt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-md-fold-debt
           path: ${{ runner.temp }}/fold-debt
@@ -1434,7 +1434,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -1726,21 +1726,21 @@ jobs:
             echo "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/skipped
           fi
       - name: Upload coverage shard
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: coverage-artifact
           retention-days: 1
           if-no-files-found: error
       - name: Upload this coverage shard's instrumented duration evidence (W1-T5923 — read by flake-retry-aggregate)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-duration-shard-${{ matrix.shard }}
           path: coverage/test-durations.json
           retention-days: 7
           if-no-files-found: ignore
       - name: Upload the ledger snapshot this coverage shard weighed (W1-T4071 — read by flake-retry-aggregate)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-ledger-snapshot-shard-${{ matrix.shard }}
           path: coverage/ledger-snapshot.manifest
@@ -1750,7 +1750,7 @@ jobs:
         # No YAML conditional (the #729 discipline above), so this runs only when the shard is
         # green — which is exactly when a recovered flake would otherwise leave no record. A red
         # shard names its failing test in its own log.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flake-retry-shard-coverage-${{ matrix.shard }}
           path: ${{ runner.temp }}/flake-retry
@@ -1871,12 +1871,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
       - name: Download coverage shards
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-shard-*
           path: coverage-shards
@@ -2035,7 +2035,7 @@ jobs:
             echo "skipped" > coverage-merged-artifact/skipped
           fi
       - name: Upload merged coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-merged
           path: coverage-merged-artifact
@@ -2074,7 +2074,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -2139,7 +2139,7 @@ jobs:
         # is the failure mode this task exists to end. `always()` so a BLOCKING verdict -- the one
         # D-10 most wants counted -- is uploaded too, not only a passing one.
         if: always() && steps.trigger.outputs.matched == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-verdict-ledger
           path: state/ledger.ndjson
@@ -2328,7 +2328,7 @@ jobs:
       WAIT_CAP_SECONDS: "900"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm

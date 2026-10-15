@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: dependabot #11793's clock-sweep-report red, diagnosed as pre-existing"
   plan_refs: [W1-T4944, W1-T5033, W1-T6078, W1-T9584]
   files: [scripts/clock-sweep.mjs, test/the-clock-sweep-runs-suites-under-the-test-preload.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

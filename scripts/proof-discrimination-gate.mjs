@@ -72,6 +72,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
   let executed = 0;
   let credited = 0;
   let guarded = 0;
+  const countDiscriminated = [];
   for (const criterion of criteria) {
     // W1-T3729 — A CRITERION THE PLAN CREDITS TO AN EARLIER MERGE IS STALE BY CONSTRUCTION.
     //
@@ -119,10 +120,20 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
     }
     executed += 1;
     if (result.status === CHECK_PROOF_EXIT.executedStale) {
+      // W1-T5418 — PREVENTED, NOT RETRIED: a `grep:` proof that matches MORE lines at head than at the
+      // merge base was made true in more places by this PR, so it discriminates by count. Refusing it
+      // only spent a fix round to rewrite a proof that already names what the diff added.
+      if (proof.startsWith("grep:")) {
+        const { head, base } = proofCounts(result.stdout);
+        if (/^\d+$/.test(head) && /^\d+$/.test(base) && Number(head) > Number(base)) {
+          countDiscriminated.push({ proof, head, base });
+          continue;
+        }
+      }
       stale.push({ proof, ...proofCounts(result.stdout), output: result.stdout.trim() });
     }
   }
-  return { stale, unreadable, executed, credited, guarded };
+  return { stale, unreadable, executed, credited, guarded, countDiscriminated };
 }
 
 /**

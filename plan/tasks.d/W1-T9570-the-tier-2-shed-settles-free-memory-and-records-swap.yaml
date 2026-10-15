@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: items (c) and (d) that W1-T9508's build (#11855) deferred to serve-supervisor.ts; filing approved"
   plan_refs: [W1-T9508, W1-T8873, W1-T9542, W1-T9504]
   files: [src/lib/serve-supervisor.ts, test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts, test/the-tier-2-shed-settles-free-memory-and-records-swap.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: review-throughput diagnosis (\"figure out why reviews aren't posting efficiently\"); operator approved this filing 2026-10-14. Standing rulings: no hard fixed thresholds, a bound that fires on a healthy condition is the repo's recurring defect"
   plan_refs: [W1-T1044, W1-T1219, W1-T2582, W1-T2584, W1-T5931, W1-T9558, W1-T9554, W1-T9352, W1-T8172, W1-T7697, W1-T9544, W1-T9556]
   files: [src/lib/daemon.ts, plan/policy.yaml, test/daemon.test.ts, test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

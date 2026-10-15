@@ -13,8 +13,8 @@
  * minutes per build and already run under CI; the fast gate is the set a build can satisfy alone.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
@@ -32,11 +32,25 @@ export const PREOPEN_GATE_BACKSTOP_MS = 15 * 60_000;
 export type PreopenGateResult =
   | { kind: "pass"; durationMs: number }
   | { kind: "fail"; failedSteps: string[]; durationMs: number }
-  | { kind: "unmeasured"; reason: string; durationMs: number };
+  | { kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer };
+
+/**
+ * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
+ * (its own idle loop), or the parent's execFile timer (the daemon's loop — the last line, and the one a frozen
+ * loop holds off).
+ */
+export type GateDeadlineEnforcer = "timeout" | "runner" | "parent";
+
+export interface GateRun {
+  exitCode: number | null;
+  error?: string;
+  /** Set when the backstop ended the gate: which enforcer did. */
+  deadlineEnforcedBy?: GateDeadlineEnforcer;
+}
 
 export interface PreopenGateOptions {
   /** Runs the fast gate in `cwd`; resolves when the child exits, whatever its status. */
-  runGate?: (cwd: string) => Promise<{ exitCode: number | null; error?: string }>;
+  runGate?: (cwd: string) => Promise<GateRun>;
   readFile?: (path: string) => string;
   clock?: Clock;
   /** W1-T8778: where `child_entry.spawned` goes. Default: the host ledger, best effort. Only the default `runGate` writes it. */
@@ -76,25 +90,96 @@ const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
  * worktree, which keeps its `--repo-root`), else {@link preopenGateCommand}'s `bin/rmd`, which starts tsx.
  * `child_entry.spawned` records which ran and why.
  */
-export function preopenGateLaunch(cwd: string, log: GateLog = ledgerGateLog, harnessRmd: string = HARNESS_RMD, harnessRoot: string = HARNESS_ROOT): { file: string; args: string[] } {
+export function preopenGateLaunch(
+  cwd: string, log: GateLog = ledgerGateLog, harnessRmd: string = HARNESS_RMD, harnessRoot: string = HARNESS_ROOT,
+  rowExtra: Record<string, unknown> = {},
+): { file: string; args: string[] } {
   const own = existsSync(join(cwd, "bin", "rmd"));
   const root = own ? cwd : harnessRoot;
   const launch = childEntryArgv(root, "run-task", "src/run-task.ts", own ? ["preflight", "--fast"] : ["preflight", "--fast", "--repo-root", cwd], undefined, { log });
-  log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "preflight --fast", launch));
+  log(CHILD_ENTRY_SPAWNED_STEP, { ...childEntrySpawnedRow("run-task", "preflight --fast", launch), ...rowExtra });
   return launch.kind === "bundle" ? { file: process.execPath, args: launch.argv } : preopenGateCommand(cwd, harnessRmd);
 }
 
-/** `harnessRmd` given means the caller chose the launcher (tests): it is run as given and no bundle is considered. */
-export function defaultRunGate(cwd: string, harnessRmd?: string, log?: GateLog): Promise<{ exitCode: number | null; error?: string }> {
-  const { file, args } = harnessRmd === undefined ? preopenGateLaunch(cwd, log) : preopenGateCommand(cwd, harnessRmd);
+/** W1-T9556: the plain-node runner that holds the gate's deadline on its own loop and kills the gate's process group. */
+export const DEADLINE_RUNNER = fileURLToPath(new URL("../../scripts/run-with-deadline.mjs", import.meta.url));
+/** Mirrors scripts/run-with-deadline.mjs: a deadline kill's exit status (coreutils `timeout`'s too) and its stderr line. */
+export const GATE_DEADLINE_EXIT_CODE = 124;
+export const GATE_DEADLINE_MARKER = "rmd-deadline-exceeded";
+/** How long a group signalled SIGTERM at the deadline has to leave before it is SIGKILLed. A teardown grace, not a bound on the gate. */
+export const GATE_KILL_GRACE_MS = 5_000;
+
+/** A PATH lookup with no spawn: the first executable `name` on `pathEnv`, or `null`. */
+export function findOnPath(name: string, pathEnv: string | undefined = process.env.PATH): string | null {
+  for (const dir of (pathEnv ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Not here (absent or not executable): the next PATH entry is the answer, and none at all means `null`.
+    }
+  }
+  return null;
+}
+
+let resolvedTimeoutBin: string | null | undefined;
+/** coreutils `timeout`, resolved once per process; `null` where it is absent (macOS dev hosts). */
+export function gateTimeoutBin(): string | null {
+  if (resolvedTimeoutBin === undefined) resolvedTimeoutBin = findOnPath("timeout");
+  return resolvedTimeoutBin;
+}
+
+/** Which enforcers are armed for a launch, outermost-first: what `child_entry.spawned` records as `deadline_enforced_by`. */
+export function armedEnforcers(timeoutBin: string | null): GateDeadlineEnforcer[] {
+  return timeoutBin ? ["timeout", "runner", "parent"] : ["runner", "parent"];
+}
+
+/** The runner argv that runs `file args` under an absolute `deadlineAt`, with coreutils `timeout` inside when present. */
+export function deadlineRunnerArgs(file: string, args: readonly string[], deadlineAt: number, timeoutBin: string | null, runner: string = DEADLINE_RUNNER): string[] {
+  return [runner, String(deadlineAt), String(GATE_KILL_GRACE_MS), ...(timeoutBin ? ["--kernel-timeout", timeoutBin] : []), "--", file, ...args];
+}
+
+/** Classify a finished gate child: a backstop kill by any enforcer is "fast gate exceeded its backstop". */
+export function classifyGateExit(error: (Error & { code?: unknown; killed?: boolean }) | null, stderr: string): GateRun {
+  if (!error) return { exitCode: 0 };
+  const code = typeof error.code === "number" ? error.code : null;
+  if (error.killed === true) return { exitCode: code, error: "fast gate exceeded its backstop", deadlineEnforcedBy: "parent" };
+  if (code === GATE_DEADLINE_EXIT_CODE) {
+    const by = new RegExp(`${GATE_DEADLINE_MARKER} enforced_by=(timeout|runner)`).exec(stderr)?.[1] as GateDeadlineEnforcer | undefined;
+    return { exitCode: code, error: "fast gate exceeded its backstop", deadlineEnforcedBy: by ?? "timeout" };
+  }
+  return { exitCode: code, ...(code === null ? { error: error.message } : {}) };
+}
+
+export interface RunGateDeadline {
+  /** The backstop; default {@link PREOPEN_GATE_BACKSTOP_MS}. */
+  backstopMs?: number;
+  /** coreutils `timeout`, or `null` for none; default {@link gateTimeoutBin}. */
+  timeoutBin?: string | null;
+  /** Where the absolute deadline is read from; default the system clock. */
+  clock?: Clock;
+}
+
+/**
+ * `harnessRmd` given means the caller chose the launcher (tests): it is run as given and no bundle is considered.
+ *
+ * W1-T9556: the gate runs under scripts/run-with-deadline.mjs, so its deadline is held by a process whose loop is
+ * idle — and by coreutils `timeout` inside it where present — rather than by this process's loop, which a sync
+ * spawn or ledger read can freeze for minutes. execFile's own timeout stays as a third, later line.
+ */
+export function defaultRunGate(cwd: string, harnessRmd?: string, log?: GateLog, deadline: RunGateDeadline = {}): Promise<GateRun> {
+  const backstopMs = deadline.backstopMs ?? PREOPEN_GATE_BACKSTOP_MS;
+  const timeoutBin = deadline.timeoutBin === undefined ? gateTimeoutBin() : deadline.timeoutBin;
+  const deadlineAt = (deadline.clock ?? systemClock).now() + backstopMs;
+  const { file, args } = harnessRmd === undefined
+    ? preopenGateLaunch(cwd, log, HARNESS_RMD, HARNESS_ROOT, { deadline_enforced_by: armedEnforcers(timeoutBin) })
+    : preopenGateCommand(cwd, harnessRmd);
   return new Promise((resolve) => {
-    execFile(file, args, { cwd, timeout: PREOPEN_GATE_BACKSTOP_MS, maxBuffer: 64 * 1024 * 1024 },
-      (error, _stdout, _stderr) => {
-        if (!error) return resolve({ exitCode: 0 });
-        const code = typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : null;
-        const killed = (error as { killed?: boolean }).killed === true;
-        resolve({ exitCode: code, ...(code === null || killed ? { error: killed ? "fast gate exceeded its backstop" : error.message } : {}) });
-      });
+    execFile(process.execPath, deadlineRunnerArgs(file, args, deadlineAt, timeoutBin),
+      { cwd, timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 },
+      (error, _stdout, stderr) => resolve(classifyGateExit(error, String(stderr))));
   });
 }
 
@@ -125,7 +210,9 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const startedAt = now();
   const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log)))(worktreePath);
   const durationMs = now() - startedAt;
-  if (run.error !== undefined) return { kind: "unmeasured", reason: run.error, durationMs };
+  if (run.error !== undefined) {
+    return { kind: "unmeasured", reason: run.error, durationMs, ...(run.deadlineEnforcedBy ? { deadlineEnforcedBy: run.deadlineEnforcedBy } : {}) };
+  }
   const read = readGateSummary(worktreePath, startedAt, deps.readFile);
   if ("unreadable" in read) return { kind: "unmeasured", reason: read.unreadable, durationMs };
   if (read.failedSteps.length === 0) return { kind: "pass", durationMs };

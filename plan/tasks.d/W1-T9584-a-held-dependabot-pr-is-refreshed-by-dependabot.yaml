@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: 'get them green, resolve the root causes that prevented automated flow… We need the pr queue to be automated.' (dependabot #11788/#11791/#11793)"
   plan_refs: [W1-T54, W1-T100, W1-T4351, W1-T5022, W1-T3244, W1-T6258]
   files: [src/lib/sweep.ts, src/lib/dep-review.ts, src/run-task.ts, test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

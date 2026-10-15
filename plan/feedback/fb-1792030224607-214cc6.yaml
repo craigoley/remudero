@@ -1,0 +1,20 @@
+id: fb-1792030224607-214cc6
+ts: 2026-10-15T02:10:24.607Z
+raw: "[answer to feedback#fb-1789382125003-abdb87] site-intake. Authorized
+  follow-up routing decision from the operator-approved daemon recovery work:
+  retain the explicit dependency on companion fb-1789382055450-2b1a3c and
+  implement the SignIn and Waitlist copy alignment together in remudero-site. A
+  separate core coordination task is not needed without evidence of a core
+  defect. Preserve email-only interest registration, the approved neutral
+  Register interest positioning, and private-console authorization; use test
+  credentials for configured-runtime coverage. Confirm the site intake/task
+  receipts before considering this routing block resolved."
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1789382125003-abdb87
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#9913:comment:6048020817
+thread_id: null
