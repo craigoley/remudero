@@ -180,9 +180,8 @@ export interface IssuesIntakeDeps {
   dryRun?: boolean;
   /** W1-T7754: explicit shadow only; absent preserves legacy capture and selection. */
   admission?: FeedbackAdmissionContext;
-  /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
+  /** W1-T9615/W1-T9696: a new entry is staged in this state root's landing queue, never landed here; the CLI injects `capture`. */
   landingStateRoot?: string;
-  /** W1-T9696: the CLI's inline capture (`captureFeedback`); absent, a new entry is staged and never landed here. */
   capture?: (root: string, opts: CaptureFeedbackOptions) => FeedbackEntry;
 }
 
