@@ -21,6 +21,11 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
  * every tick is one entry with a count, never a queue of copies. When the daemon cannot drain it,
  * `scripts/fleet-heartbeat.sh` publishes the undrained entries and the off-host heartbeat watch
  * raises them. No new credential lands on the host.
+ *
+ * 2026-10-15 (W1-T9625): THE ONE ALERT THE DAEMON CANNOT CARRY IS ITS OWN DEATH. A crash-loop
+ * escalation raised while the daemon's container is down is posted by `rmd host-alert` itself, with
+ * the credential the host already holds (launcher-host-alerts.ts), and recorded here as delivered
+ * (recordHostDeliveredEscalation) so this drain never posts it twice.
  */
 export const ESCALATION_SPOOL_DIRNAME = "escalation-spool";
 /** The daemon's last drain pass: ISO start time on line 1. Plain text, so bash can read it. */
@@ -147,6 +152,22 @@ export function spoolEscalation(stateDir: string, e: Escalation, meta: SpoolMeta
   if (prior.url && prior.detail === digest(e.detail)) return prior.url;
   upsert(stateDir, { ...base(escalationSpoolKey(e), meta, e.summary), kind: "escalate", escalation: e }, e.taskId);
   return prior.url ?? "";
+}
+
+/**
+ * W1-T9625 -- the HOST posted this escalation itself (`rmd host-alert`, while the daemon that drains
+ * the spool was down). Recorded exactly as the drain records its own delivery: the delivered record
+ * the daemon's drain and spoolEscalation read, so neither posts it again, and the pending entry is
+ * dropped. A drain already mid-post meanwhile lands on the same title, where `escalate`'s dedup
+ * turns it into a comment on this issue, never a second one.
+ */
+export function recordHostDeliveredEscalation(stateDir: string, e: Escalation, url: string, meta: SpoolMeta): void {
+  const key = escalationSpoolKey(e);
+  const dir = escalationSpoolDir(stateDir);
+  mkdirSync(join(dir, DELIVERED_DIRNAME), { recursive: true });
+  writeAtomic(join(dir, DELIVERED_DIRNAME, `${key}.json`), `${JSON.stringify({ url, detail: digest(e.detail), deliveredAt: meta.clock.iso(), by: meta.source })}\n`);
+  rmSync(join(dir, `${key}.json`), { force: true });
+  ledger(stateDir, e.taskId, HOST_ESCALATION_STEPS.delivered, { key, kind: "escalate", source: meta.source, issue_url: url, direct: true });
 }
 
 /** Queue a close or a comment on an issue the host cannot reach. A close also drops any still-spooled

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: core outage 08:22-10:29Z root-cause investigation (read-only on the host)"
   plan_refs: [W1-T9623, W1-T2749, W1-T5732, W1-T1054]
   files: [src/lib/feedback.ts, src/lib/sre-lane.ts, test/a-landed-incident-is-never-re-captured-with-new-bytes.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
