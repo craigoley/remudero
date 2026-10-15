@@ -193,6 +193,8 @@ function rig(w: World, lane: MainRepairLane, ledgerPath: string, shardLog: reado
         ],
       };
     }
+    // W1-T9690: the red head's own run teaches the rung that "ci" carries the required check.
+    if (path === `repos/${OWNER}/${REPO}/actions/runs/3/jobs?per_page=100`) return { jobs: [{ id: 30, name: "ci", status: "completed", conclusion: w.ci }] };
     if (path === `repos/${OWNER}/${REPO}/commits/${RED_MERGE}`) return { files: [{ filename: "src/lib/daemon.ts", additions: 9, deletions: 0 }] };
     const pull = /^repos\/craigoley\/remudero\/pulls\/(\d+)$/.exec(path)?.[1];
     if (pull && w.prs.has(pull)) return { state: w.prs.get(pull)!.state, merged: w.prs.get(pull)!.merged, head: { sha: "f".repeat(40) } };
