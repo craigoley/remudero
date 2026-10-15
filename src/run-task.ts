@@ -2845,7 +2845,7 @@ export function buildSweepEffects(
       resetTrackedDirty: (_repoDir: string, ownerPath: string, _branch: string, localSha: string) =>
         resetTrackedDirtyFixOwner(ownerPath, localSha),
     },
-    depReviewCommandImpl: depReviewCommand,
+    depReviewCommandImpl: (pr, rest) => depReviewCommand(pr, rest, { root: repoRoot, landingStateRoot: feedbackLandingStateRoot }),
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown,
     ghLiveStateImpl: ghLiveState,
     fixRungTaskForImpl: fixRungTaskFor,
@@ -23920,6 +23920,21 @@ export interface DepReviewDeps {
   }) => FeedbackEntry;
   prMutations?: DepReviewPrMutations;
   nodePin?: NodePinSyncIo;
+  /** W1-T9664: the checkout triage reads, where both proposals are written; omitted ⇒ `repoRoot`, never `config.root`. */
+  root?: string;
+  /** W1-T9664: the daemon's landing state root. Given, a proposal is STAGED for the async landing sweep, not landed inline. */
+  landingStateRoot?: string;
+}
+
+/** W1-T9664: the real proposal capture. Staged, a record the queue refused throws, so the caller keeps the bot PR open. */
+function depReviewProposalCapture(landingStateRoot: string | undefined): NonNullable<DepReviewDeps["captureMigrationFeedback"]> {
+  return ({ root, id, raw, submissionKey }) => {
+    const opts = { id, raw, origin: "repair#dep-review" as const, submissionKey };
+    if (landingStateRoot === undefined) return captureFeedback(root, opts);
+    const staged = stageFeedbackCapture(root, landingStateRoot, opts);
+    if (staged.error !== undefined) throw new Error(`proposal ${staged.entry.id} was not staged: ${staged.error}`);
+    return staged.entry;
+  };
 }
 
 export function defaultNodePinSyncIo(
@@ -24027,6 +24042,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
+  const proposalRoot = deps.root ?? repoRoot;
+  const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
 
   if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
     const sync = syncNodePinForImageBump(
@@ -24100,7 +24117,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       const ownRed = reconcileDependabotOwnRed({
         statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
         headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
-        capture: ({ raw, submissionKey }) => (deps.captureMigrationFeedback ?? ((a) => captureFeedback(a.root, { id: a.id, raw: a.raw, origin: "repair#dep-review", submissionKey: a.submissionKey })))({ root: config.root, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+        capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
       });
       if (ownRed !== "none") console.log(`dependabot own red ${ownRed}: ${view.url}`);
     } catch (error) {
@@ -24122,18 +24139,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
     let entry: FeedbackEntry;
     try {
-      entry = (deps.captureMigrationFeedback ?? ((args) =>
-        captureFeedback(args.root, {
-          id: args.id,
-          raw: args.raw,
-          origin: "repair#dep-review",
-          submissionKey: args.submissionKey,
-        })))({
-        root: config.root,
-        id: feedbackId,
-        raw,
-        submissionKey,
-      });
+      entry = captureProposal({ root: proposalRoot, id: feedbackId, raw, submissionKey });
     } catch (e) {
       log("dep-review.migrate.capture_failed", {
         pr_url: view.url,
