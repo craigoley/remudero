@@ -39,9 +39,10 @@ function harness() {
     }),
   };
   let minted = 0;
+  // W1-T9551: #10203's retry recovers, or a red no retry recovered is main-inherited, not a flake.
   const evidence = (pr: number, titles: string[], ts = NOW) => log("test.flake_retry", {
-    file: FILE, headline: "retry also failed", ci_run_id: pr * 10, shard: 3, source: "selector-shadow",
-    retry_outcome: "also_failed", head_sha: `head-${pr}`, base_sha: `base-${pr}`, pr_numbers: [pr], titles,
+    file: FILE, headline: pr === 10203 ? "recovered on retry" : "retry also failed", ci_run_id: pr * 10, shard: 3, source: "selector-shadow",
+    retry_outcome: pr === 10203 ? "recovered" : "also_failed", head_sha: `head-${pr}`, base_sha: `base-${pr}`, pr_numbers: [pr], titles,
   }, ts);
   const rows = (step: string): Row[] => readFileSync(ledger, "utf8").split("\n").filter(Boolean)
     .map((l) => JSON.parse(l) as Row).filter((r) => r.step === step);

@@ -1,3 +1,4 @@
+// @census-reads: none — it drives src/lib/status-board.ts, never reads it
 // @source-text-subject: lib/status-board.ts's cadence interval resolution and fallback invariant.
 
 import assert from "node:assert/strict";

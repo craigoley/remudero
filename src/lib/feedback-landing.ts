@@ -209,8 +209,7 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-/** W1-T5672: a child-process call the landing generator hands its driver. The sync driver runs `run` on the
- *  thread; the async driver awaits `runAsync`, so the loop turns while the child process lives. */
+/** W1-T5672: a child-process ask; the sync driver runs `run`, the async one awaits `runAsync` so the loop turns meanwhile. */
 type NetAsk = { run: () => string; runAsync: () => Promise<string>; verb?: "git" | "gh" };
 type LandingAsk = PlanPrPreflightAsk | NetAsk;
 type AskReply = PlanPrPreflightResult | string;
@@ -245,8 +244,7 @@ function landingNet(git: GitExec, gh: GhExec, seam: { gitAsync?: GitExecAsync; g
   };
 }
 
-/** The async seam for a per-poll sweep: an explicit one wins, an injected sync `git`/`gh` is resolved as-is
- *  (an offline test seam), and only an un-injected one spawns a real, awaited child process. */
+/** The awaited seam: an explicit one wins, an injected sync `git`/`gh` resolves as-is (a test seam), else a real child. */
 function asyncSeamsOf(
   root: string,
   opts: { git?: GitExec; gh?: GhExec; gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
@@ -1396,6 +1394,14 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts), meter), meter);
 }
 
+/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). */
+export function feedbackLandingSweepRungs(
+  root: string,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
+): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
+  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+}
+
 export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
   /** W1-T5672: the awaited form of `git` for the network verbs (fetch, ls-remote, push); defaults to an injected `git`, else a real child process. */
@@ -1510,6 +1516,18 @@ function landContent(
   return driveLanding(landContentSteps(root, kind, inputs, opts), syncPreflightOf(root, opts));
 }
 
+export interface LandFeedbackAsyncOpts extends Omit<LandFeedbackOpts, "planPrPreflight"> {
+  planPrPreflight?: PlanPrPreflightAsyncFn;
+  gitAsync?: GitExecAsync;
+  ghAsync?: GhExecAsync;
+}
+
+async function landContentAsync(root: string, kind: LandingKind, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
+  const { planPrPreflight, ...landOpts } = opts;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
+  return driveLandingAsync(landContentSteps(root, kind, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
+}
+
 function* landContentSteps(
   root: string,
   kind: LandingKind,
@@ -1615,12 +1633,42 @@ function* landContentSteps(
   }
 }
 
-export function landPlanReconcileShards(
+export function landPlanReconcileShardsAsync(
   root: string,
   inputs: readonly LandContentInput[],
-  opts: LandFeedbackOpts = {},
-): LandFeedbackResult {
-  const kind = landingKind(
+  opts: LandFeedbackAsyncOpts = {},
+): Promise<LandFeedbackResult> {
+  return landContentAsync(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+}
+
+export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
+  return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+}
+
+export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
+
+/** W1-T9695: the cadence's sync `land` seam over an awaited landing. `land` starts one; `settled` awaits all and throws on a refusal. */
+export function planReconcileLanding(
+  root: string,
+  opts: () => LandFeedbackAsyncOpts,
+  lander: PlanReconcileLand = landPlanReconcileShardsAsync,
+): { land: (inputs: readonly LandContentInput[]) => void; settled: () => Promise<void> } {
+  const landings: Promise<LandFeedbackResult>[] = [];
+  const requireLanded = (landing: LandFeedbackResult): void => {
+    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+  };
+  return {
+    land: (inputs) => {
+      const landing = lander(root, inputs, opts());
+      if (landing instanceof Promise) landings.push(landing);
+      else requireLanded(landing);
+    },
+    settled: async () => (await Promise.all(landings)).forEach(requireLanded),
+  };
+}
+
+function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "planPrPreflight">): LandingKind {
+  return landingKind(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
@@ -1630,7 +1678,6 @@ export function landPlanReconcileShards(
     opts,
     opts.git ?? defaultGit(root),
   );
-  return landContent(root, kind, [...inputs], opts);
 }
 
 /** `<root>/plan/decisions.d/<taskId>-<runId>.md` — one file per decision.autochoose resolution,
@@ -1965,6 +2012,12 @@ export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
    *  measurement-cadence.ts's `ciLearningRecordVerdict`. */
   recordVerdict: (contents: string, label: string) => { ok: boolean; reason: string };
 }
+
+export type CiLearningShardLander = (
+  drafts: readonly CiLearningShardDraft[],
+  checkoutRoot: string,
+  deps: LandCiLearningShardsOptions,
+) => CiLearningFilingResult | Promise<CiLearningFilingResult>;
 
 /** Stage CI-learning shards in daemon state, then land that durable queue via a gated PR; the daemon awaits the Async form (W1-T5965). */
 export function landCiLearningShards(

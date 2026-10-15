@@ -281,6 +281,8 @@ export interface ReadGeneration<T> {
   source: "worker" | "inline";
   /** When the read that produced `facts` began, from the plane's injected clock (W1-T5762). */
   publishedAtMs: number;
+  /** W1-T9704: when that read's facts arrived. A served generation is aged from here, so a slow read is not born stale. */
+  settledAtMs?: number;
   facts: T;
 }
 
@@ -304,7 +306,7 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
   ReadGeneration<T> | undefined {
   if (!published) return undefined;
   const maxAgeMs = bound.maxAgeMs ?? TICK_READ_MAX_AGE_MS;
-  const ageMs = (bound.clock ?? systemClock).now() - published.publishedAtMs;
+  const ageMs = (bound.clock ?? systemClock).now() - (published.settledAtMs ?? published.publishedAtMs);
   if (ageMs <= maxAgeMs) return published;
   if (bound.log) {
     let latest = staleRefusals.get(bound.log);
@@ -312,7 +314,8 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
     if (latest.get(bound.consumer) !== published.generation) {
       latest.set(bound.consumer, published.generation);
       bound.log("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
-        age_ms: ageMs, max_age_ms: maxAgeMs });
+        age_ms: ageMs, max_age_ms: maxAgeMs,
+        ...(published.settledAtMs === undefined ? {} : { read_ms: published.settledAtMs - published.publishedAtMs }) });
     }
   }
   return undefined;
@@ -399,13 +402,14 @@ export function startReadPlane<I, O>(options: {
             pending.set(id, { resolve, reject });
             held.postMessage({ generation: id, input: captured });
           });
-          return freezeReadGeneration({ generation: id, source: "worker", publishedAtMs, facts });
+          return freezeReadGeneration({ generation: id, source: "worker", publishedAtMs, settledAtMs: now(), facts });
         } catch (error) {
           pending.delete(id);
           if (stopped) throw error;
           options.log("read_plane.inline", { generation: id, reason: String(error) });
           publishedAtMs = now();
-          return freezeReadGeneration({ generation: id, source: "inline", publishedAtMs, facts: await options.inline(captured) });
+          const facts = await options.inline(captured);
+          return freezeReadGeneration({ generation: id, source: "inline", publishedAtMs, settledAtMs: now(), facts });
         }
       };
       const result = tail.then(run);

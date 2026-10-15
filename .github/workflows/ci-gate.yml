@@ -165,12 +165,15 @@ jobs:
       # this file's read groups by name AND producer class (W1-T5695), and a skip never fails.
       # W1-T5695: `light-gates` is that job's own run, green by construction (continue-on-error
       # steps); each gate it runs is posted under its own REQUIRED name, `rule-checks` included.
+      # W1-T9448: coverage-ledger is an internal prerequisite, not a new independent gate.
+      # Its failure skips the matrix and the existing REQUIRED coverage-ratchet refuses that.
       ADVISORY: >-
         [
         "squash-trailer-gate",
         "light-gates",
         "gate-monotonic",
         "flake-retry-aggregate",
+        "coverage-ledger",
         "test-slow-shard (1/2)",
         "test-slow-shard (2/2)",
         "ci-shard (1/8)",

@@ -112,7 +112,7 @@ test('coverage sharding: every declared lossless V8 bundle is required before No
 
   const required = workflow.jobs['coverage-ratchet-required'];
   assert.equal(required.name, 'coverage-ratchet');
-  assert.deepEqual(required.needs, ['coverage-ratchet']);
+  assert.deepEqual(required.needs, ['coverage-ratchet', 'coverage-ledger']);
   assert.equal(required.if, '${{ always() }}');
   const download = required.steps?.find((step) => step.name === 'Download coverage shards');
   assert.match(download?.uses ?? '', /^actions\/download-artifact@[0-9a-f]{40}$/);

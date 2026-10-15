@@ -29,6 +29,7 @@ const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml")
 
 type CiJob = {
   name: string;
+  needs?: string | string[];
   "timeout-minutes"?: number;
   steps?: Array<{ run?: string }>;
 };
@@ -187,9 +188,23 @@ test("the coverage aggregator survives the observed ten-minute raw V8 merge and 
   assert.ok(typeof shardMinutes === "number" && shardMinutes > 0, "coverage shards need a finite bound");
   assert.ok(typeof aggregatorMinutes === "number" && aggregatorMinutes > 10,
     "PR #8080's raw V8 merge was cancelled at the former 10-minute aggregator bound");
-  const dependencySeconds = (shardMinutes + aggregatorMinutes) * 60;
+  const pathMinutes = (id: string, graph = jobs, visiting = new Set<string>()): number => {
+    assert.ok(!visiting.has(id), `CI dependency cycle at ${id}`);
+    const job = graph[id];
+    assert.ok(job, `CI dependency ${id} must exist`);
+    const own = job["timeout-minutes"];
+    assert.ok(typeof own === "number" && own > 0, `CI dependency ${id} needs a finite bound`);
+    const parents = typeof job.needs === "string" ? [job.needs] : job.needs ?? [];
+    const next = new Set([...visiting, id]);
+    return own + Math.max(0, ...parents.map(parent => pathMinutes(parent, graph, next)));
+  };
+  const dependencySeconds = pathMinutes("coverage-ratchet-required") * 60;
   assert.ok(waitCapSeconds - dependencySeconds >= 300,
     "ci-gate must leave at least five minutes beyond the coverage shard and its dependent aggregator");
+  const expanded: Record<string, CiJob> = { ...jobs, "coverage-ledger": { name: "coverage-ledger", "timeout-minutes": 5 } };
+  expanded["coverage-ratchet"] = { ...jobs["coverage-ratchet"]!, needs: ["coverage-ledger"] };
+  assert.ok(waitCapSeconds - pathMinutes("coverage-ratchet-required", expanded) * 60 < 300,
+    "a five-minute serial resolver must fail the unchanged margin, not vanish from the dependency sum");
 });
 
 // ── acceptance 4: the coupling to ci-gate's cap is written down in ci.yml itself ────────────

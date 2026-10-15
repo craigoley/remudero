@@ -338,10 +338,21 @@ export function buildSourceSizeSignal(base, head, entries) {
   return { schema_version: SOURCE_SIZE_SIGNAL_SCHEMA_VERSION, base, head, hotspots };
 }
 
-/** Read the refreshed merge-base-to-HEAD source diff. No baseline file is consulted. */
-export function measureSourceSizeSignal(root, baseRef = "origin/main") {
+/**
+ * Read the refreshed merge-base-to-HEAD source diff. No baseline file is consulted.
+ *
+ * W1-T9619: the pre-open gate runs sandboxed with no network, so a refresh that cannot reach origin measures
+ * against the origin/main already here and says so on stderr; with no local origin/main it still fails.
+ */
+export function measureSourceSizeSignal(root, baseRef = "origin/main", warn = (line) => console.error(line)) {
   if (baseRef === "origin/main") {
-    runGit(root, ["fetch", "origin", "main"], "refresh origin/main");
+    const fetched = gitResult(root, ["fetch", "origin", "main"]);
+    if (fetched.status !== 0) {
+      const detail = `${fetched.stderr || fetched.stdout || "git returned no diagnostic"}`.trim().split("\n").at(-1);
+      const local = gitResult(root, ["rev-parse", "--verify", "-q", "origin/main"]);
+      if (local.status !== 0) throw new Error(`refresh origin/main: ${detail}`);
+      warn(`source-size-signal: origin/main not refreshed (${detail}); measured against the local origin/main ${local.stdout.trim().slice(0, 12)}`);
+    }
   }
   const head = runGit(root, ["rev-parse", "HEAD"], "resolve HEAD").trim();
   const base = runGit(root, ["merge-base", baseRef, "HEAD"], `resolve merge base against ${baseRef}`).trim();
