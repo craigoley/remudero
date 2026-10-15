@@ -1,0 +1,63 @@
+- id: W1-T9553
+  title: "THE EVIDENCE-COVERAGE GARDENER'S FINDINGS NEVER REACH THEIR RECORDS — its 2026-10-14 18:46Z pass measured the containment served-model gap at 51% and the feedback-summary gaps at 55%, but every record on main still shows its September number (80.3%, 86%, 86.3%), and evidence-coverage-containment-cost was closed as already decided (#10976) while its gap is still open at 51%; each pass lands the measured value on an open record, and a closed record whose gap is still measurably open is reopened with that evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern — what the evidence-coverage gardener writes to its own feedback records; it still never gates
+  band_meaning: blast-radius
+  origin: "operator 2026-10-14: GRILL backlog pass (~/Remudero-notes/grill-recommendations-2026-10-14.md, separate items 1 and 2)"
+  plan_refs: [W1-T4622, W1-T4640, W1-T5460]
+  files: [src/lib/evidence-coverage-gardener.ts, test/evidence-coverage-findings-reach-their-records.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-14: triage and the grill judge these records on numbers two weeks stale, and one live gap (containment/cost, 51%) is closed as already decided
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (host gardener state evidence-coverage-gardener.json, last pass 18:46Z): the gaps
+    containment/servedModel and containment/cost were last filed at 51%, feedback-summary/servedModel and
+    feedback-summary/cost at 55%. On origin/main 699dbec37 the records still read their first filing:
+    plan/feedback/evidence-coverage-containment-served-model.yaml and -containment-cost.yaml "49/61 ... (80.3%)",
+    -feedback-summary-served-model.yaml "43/50 ... (86.0%)", -feedback-summary-cost.yaml "44/51 ... (86.3%)".
+    `git log` shows no gardener write to any of the four since 2026-09-29/30 (#7805, #7941); every later
+    commit is triage. evidence-coverage-containment-cost reads `status: rejected` since #10976 ("already
+    decided, no task") while the gardener still measures its gap open.
+    READ at origin/main (src/lib/evidence-coverage-gardener.ts):
+    - `runEvidenceCoverageGardener`'s `fileOnce` stamps `open.filedDigest` as soon as `deps.file` returns, and
+      the dedup is that LOCAL state digest, not what the record on main says.
+    - `feedbackEvidenceCoverageFiler` calls `landFeedbackStatusContent(...)` (src/lib/feedback-landing.ts) for an
+      existing record and DISCARDS its `LandFeedbackResult`: a `{ landed: false, error }` returns normally, the
+      digest is stamped, and the update is never retried. Whether the four updates were refused there or lost
+      later is for the builder to establish from the gardener's `evidence_coverage.filed` rows and the landing
+      rows; the discarded result is the seam where a loss reads as success.
+    - The filer writes `raw` only and never looks at `status`, so a closed record is silently updated in place
+      (or not at all) and stays closed.
+  design: |
+    1. A landing that neither landed nor queued is a failure: the filer throws on a `LandFeedbackResult` with
+       `landed: false` and no `queued`, so `fileOnce` leaves the digest unset and the next pass retries (the
+       existing `evidence_coverage.filing_failed` path).
+    2. The update is judged against the RECORD, not only the local digest: on each pass, for every open gap, the
+       gardener reads the record's current `raw` (checkout or queued landing) and lands an update whenever the
+       measured coverage line it would write differs from the one the record holds, so a lost landing heals on
+       the next pass instead of being remembered as done.
+    3. Reopen with evidence: when a gap is measurably open (below its floor or baseline, over a sufficient
+       denominator) and its record's status is closed (`rejected`, or `accepted`/`answered` with no open task
+       naming the record), the gardener sets the record back to `new` and appends a dated evidence line (the
+       measured coverage, the window, the closing status it overrides and the PR that closed it when known). It
+       does this once per closing, not every pass: a record reopened and closed again with the gap unchanged is
+       reopened only when the measured value moves.
+    4. A `grilling` record keeps `grilling`; only its measured value is updated (the grill reads the live number).
+    5. It still never gates: no merge, review or dispatch path reads any of this.
+  acceptance:
+    - claim: "a landing that neither lands nor queues is retried on the next pass, not remembered as filed"
+      proof: 'grep: test("W1-T9553: a refused landing is retried on the next pass" in test/evidence-coverage-findings-reach-their-records.test.ts'
+    - claim: "an open record's measured coverage is updated whenever the record on main shows a different value"
+      proof: 'grep: test("W1-T9553: an open record shows the measured value of the latest pass" in test/evidence-coverage-findings-reach-their-records.test.ts'
+    - claim: "a closed record whose gap is still measurably open is reopened with the evidence"
+      proof: 'grep: test("W1-T9553: a closed record whose gap is still open is reopened with evidence" in test/evidence-coverage-findings-reach-their-records.test.ts'
+  falsifier: |
+    Seed a record reading 80.3% and a landing that returns `{ landed: false, error }`. At origin/main the pass
+    reports it updated, stamps the digest, and a second pass writes nothing: the record stays at 80.3%. With
+    the change the second pass lands 51%. Seed the record `status: rejected` with a 51% gap: at origin/main it
+    stays rejected; with the change it reads `new` with the evidence line.

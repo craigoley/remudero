@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,7 +22,8 @@ import {
   type GoLiveApi,
   type GoLiveDeps,
 } from "../src/lib/onboarding-golive.js";
-import { buildOnboardingGoLiveRoutes, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { buildOnboardingGoLiveRoutes, buildRegistryRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { readSelectedInstanceRegistry } from "../src/lib/instance-registry-selection.js";
 import { createService, createConfirmNonceStore, makeConfirmNonceRoute, type Route, type IdentityProvider } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -680,4 +681,101 @@ test("selected writer cannot use another managed repository's shadow runs", asyn
   const f = selectedApi({ text: REGISTRY.replace("github_repo: acme/widgets", "github_repo: other/widgets") });
   const error = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
   assert.equal(error.code, "shadow_evidence_invalid"); assert.ok(f.calls.every(call => call.method === "GET"));
+});
+
+function lifecycleRegistry(): string {
+  const fields = [
+    "repo: widgets", "project: fixture", "retired: false", "primary: false",
+    "state_dir: /fixture/private/state", "container_name: fixture-widgets", "service_user: fixture-user",
+    "image: registry.example.invalid/widgets:fixture", "max_old_space_mb: 1024",
+    "service_name: widgets.service", "watchdog_service_name: widgets-watchdog.service", "watchdog_timer_name: widgets-watchdog.timer",
+    "launcher_path: /fixture/private/launcher", "revival_log: /fixture/private/revivals",
+    "gh_app_id: 101", "gh_app_installation_id: 202", "gh_app_private_key_path: /run/fixture/container-app.pem",
+    "gh_app_private_key_host_path: /fixture/private/host-app.pem", "claude_dir: /fixture/private/claude",
+    "codex_dir: /fixture/private/codex", "container_config_dir: /fixture/private/config",
+  ].map(line => `    ${line}\n`).join("");
+  return REGISTRY.replace("    mode: shadow # flips via PR\n", "    mode: shadow # flips via PR\n" + fields);
+}
+
+test("selected registry writer preserves full lifecycle fields in only its target", async () => {
+  const text = lifecycleRegistry(), f = selectedApi({ text, filePath: "private/selected registry.yaml" }), deps = selectedDeps(f);
+  const receipt = await requestGoLive({ instance: "widgets", actor: "owner" }, deps);
+  const writes = f.calls.filter(c => c.method !== "GET");
+  assert.deepEqual(writes.map(c => [c.method, c.path]), [["POST", "repos/acme/registry/git/refs"], ["PUT", f.contentPath], ["POST", "repos/acme/registry/pulls"]]);
+  assert.equal(writes[1].body?.sha, f.blob); assert.equal(writes[0].body?.sha, f.baseSha);
+  assert.notEqual(writes[1].body?.branch, "main");
+  assert.equal(Buffer.from(String(writes[1].body?.content), "base64").toString("utf8"), text.replace("mode: shadow # flips via PR", "mode: live # flips via PR"));
+  assert.equal(receipt.status, "review_pending"); assert.equal(receipt.binding?.publication_permission, "not-granted");
+  assert.ok(f.calls.every(c => c.path.startsWith("repos/acme/registry")), "no legacy repository or second registry is consulted");
+});
+
+test("selected registry lifecycle compatibility never permits unknown fields or unsafe identity", async (t) => {
+  const dir = makeTempDir("lifecycle-refusals"); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "registry.yaml"), valid = lifecycleRegistry();
+  writeFileSync(path, valid); assert.equal((await readSelectedInstanceRegistry({ cliPath: path })).kind, "ready");
+  for (const text of [
+    valid.replace("    gh_app_id:", "    future_authority: yes\n    gh_app_id:"),
+    valid + "future_root: true\n", valid.replace("github_repo: acme/widgets", "github_repo: not-a-repository"),
+    valid.replace("mode: shadow #", "mode: unsafe #"), valid.replace("primary: false", "primary: maybe"),
+    valid.replace("retired: false", "retired: maybe"), valid.replace("    gh_app_id:", "    repo: duplicate\n    gh_app_id:"),
+  ]) {
+    writeFileSync(path, text);
+    assert.notEqual((await readSelectedInstanceRegistry({ cliPath: path })).kind, "ready");
+    const f = selectedApi({ text });
+    await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)));
+    assert.ok(f.calls.every(call => call.method === "GET"), "failed explicit selection cannot fall back or write");
+  }
+});
+
+test("selected registry lifecycle field revisions invalidate bound reads and writes", async (t) => {
+  const dir = makeTempDir("lifecycle-revisions"); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "registry.yaml"), text = lifecycleRegistry(), changed = text.replace("/fixture/private/host-app.pem", "/fixture/private/revised-host-app.pem");
+  writeFileSync(path, text);
+  const initial = await readSelectedInstanceRegistry({ cliPath: path }); assert.equal(initial.kind, "ready");
+  if (initial.kind !== "ready") return;
+  const snapshot = JSON.stringify(initial.binding); writeFileSync(path, changed);
+  assert.deepEqual(await initial.binding.recheck(), { kind: "changed" }); assert.equal(JSON.stringify(initial.binding), snapshot);
+  const bytes = Buffer.from(changed), blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+  let reads = 0;
+  const f = selectedApi({ text, change: (call, value) => {
+    if (call.path === "repos/acme/registry") reads++;
+    const v = value as Record<string, unknown>;
+    if (reads > 1 && call.path.includes("/git/trees/")) return { ...v, tree: (v.tree as Array<Record<string, unknown>>).map(entry => entry.type === "blob" ? { ...entry, sha: blob } : entry) };
+    if (reads > 1 && call.path.includes("/contents/")) return { ...v, sha: blob, size: bytes.length, content: bytes.toString("base64") };
+    return value;
+  } });
+  assert.equal((await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(f)))).code, "registry_target_stale");
+  assert.ok(f.calls.every(call => call.method === "GET"), "even a carried-only field change prevents the first effect");
+});
+
+test("selected registry lifecycle fields never enter public projections or receipts", async (t) => {
+  const dir = makeTempDir("lifecycle-private"); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "registry.yaml"), text = lifecycleRegistry(); writeFileSync(path, text);
+  const read = await readSelectedInstanceRegistry({ cliPath: path }); assert.equal(read.kind, "ready");
+  if (read.kind !== "ready") return;
+  const route = buildRegistryRoute({ repoRegistryPath: join(dir, "healthy-legacy.yaml"), hostRegistryPath: path, selectedRegistry: { cliPath: path } });
+  const served = await invoke(route); assert.equal(served.status, 200);
+  const f = selectedApi({ text }), deps = selectedDeps(f), receipt = await requestGoLive({ instance: "widgets", actor: "owner" }, deps);
+  const partial = selectedApi({ text, change: (call, value) => call.method === "PUT" ? new Error("fixture upload failed") : value });
+  const failed = await codeOf(requestGoLive({ instance: "widgets", actor: "owner" }, selectedDeps(partial)));
+  const serialized = JSON.stringify([read.binding, read.binding.publicProjection(), served, receipt, deps.written, failed]);
+  for (const privateValue of [path, "gh_app_private_key_host_path", "/fixture/private/", "/run/fixture/", "registry.example.invalid/"]) assert.ok(!serialized.includes(privateValue), privateValue);
+  assert.equal(read.binding.publicationPermission, "not-granted"); assert.equal(served.body.publicationPermission, "not-granted");
+  assert.equal(receipt.binding?.publication_permission, "not-granted");
+  assert.equal((failed.receipt as { binding: { publication_permission: string } }).binding.publication_permission, "not-granted");
+  assert.ok(!partial.calls.some(call => call.path.endsWith("/pulls")), "unknown upload cannot publish a success PR");
+});
+
+test("selected registry lifecycle field support preserves legacy and bounded compatibility", async (t) => {
+  const dir = makeTempDir("lifecycle-legacy"); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "registry.yaml"); writeFileSync(path, lifecycleRegistry());
+  assert.deepEqual(await readSelectedInstanceRegistry({ legacyPath: path }), { kind: "legacy" });
+  for (const contractVersion of [1, 2]) assert.equal((await readSelectedInstanceRegistry({ cliPath: path, contractVersion, requiredCapabilities: ["identity", "mode", "primary"] })).kind, "ready");
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, contractVersion: 3 }), { kind: "refused", reason: "unsupported_contract" });
+  assert.deepEqual(await readSelectedInstanceRegistry({ cliPath: path, requiredCapabilities: ["credential-access"] }), { kind: "refused", reason: "unsupported_capability" });
+  assert.deepEqual(await readSelectedInstanceRegistry({ envPath: "", configuredPath: path }), { kind: "refused", reason: "invalid_path" });
+  const legacy = fakeApi({}, lifecycleRegistry()), deps = goLiveDeps(legacy.api);
+  const receipt = await requestGoLive({ instance: "widgets", actor: "owner" }, deps);
+  assert.deepEqual(receipt, { status: "review_pending", instance: "widgets", pr_url: "https://github.com/acme/fleet/pull/42", pr_number: 42 });
+  assert.deepEqual(legacy.calls.map(call => call.method), ["GET", "GET", "GET", "POST", "PUT", "POST"]);
 });

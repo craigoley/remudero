@@ -148,12 +148,35 @@ export function renderCoverageSummary(summary) {
   return `${output.join('\n')}\n`;
 }
 
+/** esbuild's name for the code a `define` substitutes. tsx's COMMONJS transform defines `import.meta`, so a module
+ *  that uses it and is compiled as CommonJS carries this as a second source map source, resolved beside the module. */
+const SYNTHETIC_DEFINE_SOURCE = /(?:^|\/)<define:[^>]*>$/;
+
+/** The refusal for a shard source the raw range merge never saw, naming the shard(s) and the record's functions.
+ *  A `<define:...>` key is not a file at all (W1-T421): it names the CommonJS compile that produced it. */
+export function missingSourceMessage(key, seen = { shards: new Set(), functions: new Set() }) {
+  const shards = [...seen.shards].sort((a, b) => a - b);
+  const functions = [...seen.functions];
+  const where = `coverage shard ${shards.join(', ') || '?'}` +
+    (functions.length > 0 ? `; its functions: ${functions.slice(0, 8).join(', ')}${functions.length > 8 ? ', ...' : ''}` : '');
+  const head = `shard LCOV has positive line hits missing from the raw range merge: ${key} (${where})`;
+  if (!SYNTHETIC_DEFINE_SOURCE.test(key)) return head;
+  return `${head}. This is not a source file: it is the synthetic source esbuild names when tsx compiles a module ` +
+    `that uses import.meta as COMMONJS. A suite in that shard loads the real src graph through tsx's CommonJS ` +
+    `loader: a generated .ts/.js module written outside any "type": "module" package scope (os.tmpdir() has none) ` +
+    `that imports src/, or a tsx/cjs/api require. That is the W1-T421 out-of-root import (test/helpers/mutant-module.ts); ` +
+    `the functions above live in the src modules it re-entered. Give the generated module an .mts/.mjs name or ` +
+    `write {"type":"module"} into its directory's package.json.`;
+}
+
 /** Union line-hit evidence from independently generated shard LCOV. Node's serial raw-range merge
  *  can zero a line hit present in one shard; max per (SF, line) is the set union for line coverage,
  *  while branch/function totals remain sourced from the raw range merge. */
 export function mergeShardLineHits(summary, lcovTexts) {
   if (!Array.isArray(lcovTexts) || lcovTexts.length === 0) throw new Error('at least one shard lcov is required');
   const shardHits = new Map();
+  /** key -> { shards, functions } for every source a shard reports a positive line hit on, so a refusal names them. */
+  const positive = new Map();
   const sourceKey = sourceFile => relative(summary.workingDirectory, resolve(summary.workingDirectory, sourceFile)).split(sep).join('/');
   for (const [shard, text] of lcovTexts.entries()) {
     if (typeof text !== 'string' || text.length === 0) throw new Error(`coverage shard ${shard + 1} has empty lcov`);
@@ -169,6 +192,12 @@ export function mergeShardLineHits(summary, lcovTexts) {
           throw new Error(`coverage shard ${shard + 1} has an invalid DA record for ${record.sourceFile}`);
         }
         lines.set(line, Math.max(lines.get(line) ?? 0, hits));
+      }
+      if (record.da.some(({ hits }) => hits > 0)) {
+        const seen = positive.get(key) ?? { shards: new Set(), functions: new Set() };
+        seen.shards.add(shard + 1);
+        for (const { names } of record.fn) for (const name of names) if (name) seen.functions.add(name);
+        positive.set(key, seen);
       }
     }
   }
@@ -200,7 +229,7 @@ export function mergeShardLineHits(summary, lcovTexts) {
   }
   for (const [key, lines] of shardHits) {
     if ([...lines.values()].some((hits) => hits > 0) && !aggregate.has(key)) {
-      throw new Error(`shard LCOV has positive line hits missing from the raw range merge: ${key}`);
+      throw new Error(missingSourceMessage(key, positive.get(key)));
     }
   }
   summary.totals.coveredLineCount = summary.files.reduce((sum, file) => sum + file.coveredLineCount, 0);

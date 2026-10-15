@@ -127,9 +127,10 @@ test("repo/knowledge isolation reaches the real SDK spawn boundary and retains t
   assert.equal(result.text, "fixture done");
 });
 
-test("default workers are unchanged and opted-in unknown or leaked inventory cannot earn success credit", async t => {
+test("default workers keep no opt-in hook and opted-in unknown or leaked inventory cannot earn success credit", async t => {
   const baseline = await capture(t, false, []);
-  assert.equal("strictMcpConfig" in baseline.options, false);
+  // W1-T9489 retired the old pin: every Claude spawn is now strict, with the opt-in's hook and evidence still absent.
+  assert.equal(baseline.options.strictMcpConfig, true);
   assert.equal("hooks" in baseline.options, false);
   assert.equal(typeof baseline.options.settings, "string");
   assert.equal("mcp_isolation" in workerLedgerFields(baseline.result), false);

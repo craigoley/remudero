@@ -24,11 +24,11 @@ function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_RO
 
 test("a ci-friction remedy naming its owning code and a new regression test is admitted as a parked proposal", () => {
   const yaml = ciFrictionShardYaml(
-    { price: { cause: { kind: "check", name: "reviewer-unmet" }, minutes: 12, rounds: 3, prs: 2 }, rung: 1, owner: { files: ["src/run-task.ts"], why: [] }, rounds: [] },
+    { price: { cause: { kind: "check", name: "fixture-never-built" }, minutes: 12, rounds: 3, prs: 2 }, rung: 1, owner: { files: ["src/run-task.ts"], why: [] }, rounds: [] },
     "W1-T99999",
   );
   const files = loadPlanFromYaml(yaml, "x").tasks[0]!.files;
-  assert.deepEqual(files, ["src/run-task.ts", "test/check-reviewer-unmet.test.ts"]);
+  assert.deepEqual(files, ["src/run-task.ts", "test/check-fixture-never-built.test.ts"]);
   assert.equal(existsSync(join(REPO_ROOT, files[1]!)), false, "the regression test does not exist before the build writes it");
   assert.deepEqual(admit(yaml), []);
 });

@@ -147,6 +147,7 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
   if (name === "host-resource") {
     return { intervalFor: (i) => Math.max(1_000, Math.min(i, HOST_RESOURCE_MIN_INTERVAL_MS)), minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   }
+  if (name === "flow-remedy") return { intervalFor: sameInterval, minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   if (name === "overseer") return { intervalFor: (i) => Math.max(i, OVERSEER_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "scout") return { intervalFor: (i) => Math.max(i, SCOUT_MIN_INTERVAL_MS), minIntervalMs: 0, hourly: false };
   if (name === "flow" || name === "fix-lane") return { intervalFor: (i) => Math.max(i, FLOW_DUE_PROBE_INTERVAL_MS), minIntervalMs: 0, hourly: false };
@@ -196,6 +197,12 @@ export function readGardenPacing(stateDir: string, name: RegisteredGardenName): 
 export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, opts: { clock?: Clock; inputs?: () => string } = {}): boolean {
   const pacing = readGardenPacing(stateDir, name);
   if (pacing === undefined) return true;
+  if (name === "host-resource" || name === "flow-remedy") {
+    const elapsed = (opts.clock ?? systemClock).now() - Date.parse(pacing.lastPassAt);
+    if (elapsed < HOST_RESOURCE_MIN_INTERVAL_MS) return false;
+    if (name === "host-resource" && elapsed >= FLOW_DUE_PROBE_INTERVAL_MS) return true;
+    return opts.inputs === undefined || opts.inputs() !== pacing.inputs;
+  }
   if (opts.inputs !== undefined && opts.inputs() !== pacing.inputs) return true;
   const last = Date.parse(pacing.lastPassAt); // expiring-fixture: exempt -- written by recordGardenPacing from the injected clock; tests derive it from that clock, never a fixed literal.
   const quiet = Math.max(0, last - Date.parse(pacing.lastNewAt));
@@ -209,6 +216,22 @@ export function recordGardenPacing(stateDir: string, name: RegisteredGardenName,
   const pacing: GardenPacing = { lastPassAt: at, lastNewAt: found || prior === undefined ? at : prior.lastNewAt,
     ...(opts.inputs === undefined ? {} : { inputs: opts.inputs }) };
   writeAtomic(gardenPacingPath(stateDir, name), JSON.stringify(pacing) + "\n");
+}
+
+/** Persistent low-yield pacing at the same production pass/probe boundary. Capture inputs BEFORE
+ *  awaiting the child, so a mid-pass change remains due; a rejected pass writes no completion. */
+export function lowYieldGardenPass(
+  stateDir: string, name: "host-resource" | "flow-remedy",
+  pass: (() => void | Promise<void>) & { due?: () => boolean },
+  opts: { clock?: Clock; inputs: () => string },
+): (() => Promise<void>) & { due: () => boolean } {
+  const run = async (): Promise<void> => {
+    const startedAt = (opts.clock ?? systemClock).now();
+    const inputs = opts.inputs();
+    await pass();
+    recordGardenPacing(stateDir, name, true, { clock: fixedClock(startedAt), inputs });
+  };
+  return Object.assign(run, { due: () => gardenPacingDue(stateDir, name, opts) && (pass.due?.() ?? true) });
 }
 
 /**
@@ -234,6 +257,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
   let running = false;
   let lastStartMs = -Infinity;
   let reportedBucket: number | undefined;
+  let idleBucket: number | undefined;
   const observe = (event: GardenerRuntimeEvent): void => {
     try { wiring.observe?.(event); }
     catch { wiring.log("garden.telemetry_failed", { name, reason: "observer-failed" }); }
@@ -256,7 +280,12 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const hourly = schedule.hourly && bucket !== reportedBucket;
     if (!hourly && wiring.due) {
       try {
-        if (!wiring.due()) { observe(event("idle", { reason: "inputs-unchanged" })); return; }
+        if (!wiring.due()) {
+          const lowYield = name === "host-resource" || name === "flow-remedy";
+          if (!lowYield || idleBucket !== bucket) observe(event("idle", { reason: "inputs-unchanged" }));
+          idleBucket = bucket;
+          return;
+        }
       } catch (e) {
         wiring.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) });
       }
@@ -388,7 +417,9 @@ export function gardenChildNodeArgv(
  * skipped in the child: the parent already decided which code it runs. The child runs under
  * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists. In a
  * daemon-owned process each child also holds a "garden" host-memory reservation for its lifetime (about 1 GB each,
- * 2-3 at once, measured 2026-10-10 and unreserved until now), and under an enforced budget it waits its turn first.
+ * 2-3 at once, measured 2026-10-10 and unreserved until now). Under an enforced garden budget (operator 2026-10-14) a
+ * child that would not fit is DEFERRED, not waited for: no child starts, memory_budget.enforce_defer names it, the pass
+ * resolves null, and with no pacing recorded the garden stays due for its next tick.
  */
 export function childGardenPassSpawn(
   opts: {
@@ -422,7 +453,9 @@ export function childGardenPassSpawn(
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
   return async (name, args, signal) => {
-    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve }, opts.admission);
+    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve,
+      onShortfall: "defer" }, opts.admission);
+    if (admission.kind === "deferred") return null;
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.

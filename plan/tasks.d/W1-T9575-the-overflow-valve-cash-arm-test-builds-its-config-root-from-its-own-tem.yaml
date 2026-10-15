@@ -1,0 +1,29 @@
+- id: W1-T9575
+  title: The overflow-valve cash-arm test builds its config root from its own temp dir, so a cash cap reservation never lands in a shared /tmp
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - test/the-overflow-valve-is-reachable-from-a-blocked-auction.test.ts
+  acceptance:
+    - claim: the behavioural spawnWorker test passes the per-test temp directory as the config root instead of the literal /tmp
+      proof: "grep: cfg({ root in test/the-overflow-valve-is-reachable-from-a-blocked-auction.test.ts"
+    - claim: the cash-serveable-surface subtest records its cash spawn when run in this sandbox
+      proof: "unit test: a blocked auction reaches the overflow valve, and only after cash has refused"
+  origin: followup:DAEMON-1789594936651:2026-09-16T22:03:14.624Z:0
+  rationale: >-
+    From the 2026-09-16 follow-up on https://github.com/craigoley/remudero/pull/5823, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]:
+    `test/the-overflow-valve-is-reachable-from-a-blocked-auction.test.ts`'s "a cash-serveable
+    surface takes the cheaper arm" subtest fails locally in this sandbox (cash-fallback spawn
+    count 0 vs expected 1) but every CI shard for the equivalent tree reports SUCCESS — worth
+    confirming what sandbox-only condition (network/mkdtemp/timing) causes the divergence,
+    consistent with prior rounds' notes about `/tmp`-rooted worker-home artifacts in this
+    environment. — from unfiled (run DAEMON-1789594936651,
+    https://github.com/craigoley/remudero/pull/5823)

@@ -1,0 +1,2 @@
+- claim: the proof-discrimination refusal lesson is present in a matched learning
+  proof: "grep: ci-learning:11139:proof-discrimination in learnings/ci.yaml"

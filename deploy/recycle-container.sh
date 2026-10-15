@@ -812,9 +812,13 @@ CAPTURED_get() { local ref="CAPTURED__$1"; printf '%s' "${!ref-}"; }
 CAPTURED_SOURCE_set() { printf -v "CAPTURED_SOURCE__$1" '%s' "$2"; }
 CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}"; }
 
+# W1-T9500: RMD_INSTANCE_NAME is THIS script's own derived name, set from --instance at the
+# replacement `docker run` below and never captured: a container carrying it is one a recycle
+# named, not drift. It is not in deploy/runtime-env-vars.sh, whose lists are pass-through and
+# scratch-derived names.
 is_declared_runtime_var() {
   local needle="$1" candidate
-  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}"; do
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
   return 1
@@ -2061,6 +2065,33 @@ echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 
 COMMISSION_PHASE="replace"
 
+record_recycled_cadence_child() {
+  local state run_id pid attempt status at
+  [ -r "${STATE_DIR}/state/measurement-cadence-child.json" ] || return 0
+  state="$(tr '\n' ' ' < "${STATE_DIR}/state/measurement-cadence-child.json" 2>/dev/null)" || return 0
+  run_id="$(printf '%s\n' "${state}" | sed -n 's/.*"runId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  pid="$(printf '%s\n' "${state}" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  attempt="$(printf '%s\n' "${state}" | sed -n 's/.*"attempt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  status="$(printf '%s\n' "${state}" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ "${status}" = running ] || return 0
+  case "${run_id}" in ''|*[!a-zA-Z0-9_-]*) return 0 ;; esac
+  case "${pid}:${attempt}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  [ "${pid}" -gt 0 ] && [ "${attempt}" -gt 0 ] || return 0
+  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | awk -v pid="${pid}" -v run="${run_id}" '
+        $1 == pid { for (i = 3; i <= NF - 2; i++)
+          if ($i == "--measurement-cadence-child" && $(i + 2) == run) found = 1 }
+        END { exit !found }
+      ' || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" || return 0
+  printf '{"runId":"%s","pid":%s,"container":"%s","at":"%s","by":"deploy/recycle-container.sh"}\n' \
+    "${run_id}" "${pid}" "${CONTAINER_NAME}" "${at}" \
+    > "${STATE_DIR}/state/measurement-cadence-child.recycled.json" 2>/dev/null || true
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.cadence_child_killed","lane":"deploy","cadence_run_id":"%s","cadence_pid":%s,"attempt":%s,"container":"%s"}\n' \
+    "${at}" "$$" "${run_id}" "${pid}" "${attempt}" "${CONTAINER_NAME}" \
+    >> "${LEDGER_FILE}" 2>/dev/null || true
+}
+
 # ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
 # `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
 # chance to release the drain lock cleanly before this script ever removes the container — the
@@ -2084,6 +2115,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     RECYCLE_PAUSE_BODY="${RECYCLE_PAUSE_STOPPING}"
   fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
   run_docker_control rm docker rm "${CONTAINER_NAME}"
@@ -2154,6 +2186,13 @@ if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
+fi
+# W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
+# /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
+# could not tell which instance it was and the SRE lane never started on core. A recycle run with
+# --instance holds the name; the legacy no-instance path has none to give and adds nothing.
+if [ -n "${INSTANCE_NAME}" ]; then
+  DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
 fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null

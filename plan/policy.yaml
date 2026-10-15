@@ -877,11 +877,19 @@ sweep:
   # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
   # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
   # nothing switches it on a timer. Read by host-memory-shadow.ts
-  # itself, never by validatePolicy.
+  # itself, never by validatePolicy. `classModes` overrides mode for named worker classes: garden
+  # (gardener/cleanup-bot children) enforces on operator 2026-10-14, after the 10-14 loop stalls in which
+  # the shadow verdict would have refused the 3 running garden children. A garden child that would not
+  # fit is deferred to its next pass (memory_budget.enforce_defer), never dropped. Builds, fixes and
+  # reviews stay in shadow until W1-T8472 lands.
   hostMemoryBudget:
     mode:
       value: "shadow"
       origin: "proposal"
+    classModes:
+      garden:
+        value: "enforce"
+        origin: "proposal"
     # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
     hostReserveMib:
       value: 2048
@@ -1741,3 +1749,15 @@ issueRevalidation:
     origin: "net-new"
     min: 1
     max: 20
+
+# W1-T8245: who may hold which instance. `automationSetters` lists the setter classes that count as the fleet's
+# OWN automation on that instance (src/lib/foreign-pause-detector.ts); every other class from W1-T7839's actor
+# evidence is foreign, and a hold with no actor evidence is `unverified`, which no policy can list. This names
+# a hold, it never refuses one: the foreign-pause detector judges a foreign hold by the idle lane-slot minutes
+# it caused against what the instance's own automation holds normally cost (ownHistoryBound), not by its clock.
+# Classes: daemon, host-recycle, human-at-a-terminal, agent-session, remote-non-interactive, host-automation.
+# For core: the daemon's freshness/restart drain and the host recycle (deploy/recycle-container.sh).
+pausePolicy:
+  core:
+    automationSetters: [daemon, host-recycle]
+    origin: "operator ruling 2026-10-11: serve work never pauses core; only the daemon's drain and the host recycle do"
