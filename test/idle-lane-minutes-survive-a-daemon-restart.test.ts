@@ -9,7 +9,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 
 // ── W1-T4939: the idle-lane account must survive a daemon restart ───────────────────────────
 //
