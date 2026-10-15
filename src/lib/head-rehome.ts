@@ -1,5 +1,4 @@
 import { extractTaskTrailerId } from "./review.js";
-import { taskIdFromRunBranch } from "./status.js";
 import { ghJson } from "./github-transport.js";
 
 export interface HeadRehomePr {
@@ -29,22 +28,36 @@ export interface HeadRehomeObservation extends HeadRehomePr {
 }
 
 export interface QuietHeadDecision { quiet: boolean; reason: string }
-export interface HeadRehomeAction { action: "rehome"; headName: string; headSha: string; reason: string }
-export type HeadRehomePlan = HeadRehomeAction | { action: "none" | "refused"; reason: string; needsQuietJudgment?: boolean };
-export interface ReplacementPr { prNumber: number; prUrl: string; headSha: string }
+/** W1-T9055: the repair head-identity-gate's own refusal text prescribes — ONE new head commit carrying
+ *  `Remudero-Task: <trailer>` on the PR's own branch. Never an amend, a force-push or a replacement PR. */
+export interface HeadTrailerAction { action: "trailer"; trailer: string; message: string; headSha: string; reason: string }
+export type HeadRehomePlan = HeadTrailerAction | { action: "none" | "refused"; reason: string; needsQuietJudgment?: boolean };
+export interface HeadRehomePlanOptions {
+  conformingHead?: boolean;
+  /** Is this task filed in the plan AND not yet merged? Unwired, every repaired head declares `PR-<n>`. */
+  filedUnmerged?: (taskId: string) => boolean;
+}
 
 export function headIdentityRed(pr: HeadRehomePr): boolean {
   return [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)].includes("head-identity-gate");
 }
 
+/** The empty commit's message: a commitlint-valid header, body lines under 100 columns, the trailer last. */
+export function identityCommitMessage(prNumber: number, trailer: string): string {
+  return `chore(identity): credit pr ${prNumber}'s head to ${trailer}\n\n` +
+    "head-identity-gate refused this head: its branch is not run-<task>-<ms> and its head commit\n" +
+    "carried no task trailer. rmd sweep added this empty commit (same tree) on the PR's own\n" +
+    "branch, as the gate prescribes, instead of opening a replacement pull request.\n\n" +
+    `Remudero-Task: ${trailer}`;
+}
+
 export function headRehomePlan(
   pr: HeadRehomePr,
   live: HeadRehomeObservation,
-  nowMs: number,
   quiet?: QuietHeadDecision,
-  conformingHead = false,
+  opts: HeadRehomePlanOptions = {},
 ): HeadRehomePlan {
-  if (conformingHead || !headIdentityRed(pr)) return { action: "none", reason: "head needs no branch repair" };
+  if (opts.conformingHead || !headIdentityRed(pr)) return { action: "none", reason: "head needs no identity repair" };
   if (live.headSha !== pr.headSha || live.headRefName !== pr.headRefName) return { action: "refused", reason: "head moved" };
   if (live.state !== "open" || live.isDraft || live.mergeState === "dirty" || live.sameRepository === false) {
     return { action: "refused", reason: "PR is closed, draft, conflicted or from a fork" };
@@ -61,32 +74,25 @@ export function headRehomePlan(
   if (extractTaskTrailerId(live.commitMessages.at(-1)!) !== undefined) return { action: "none", reason: "head commit already has a task trailer" };
   if (quiet === undefined) return { action: "refused", reason: "quietness not established: no judgment", needsQuietJudgment: true };
   if (quiet.quiet !== true) return { action: "refused", reason: `quietness not established: ${quiet.reason}`, needsQuietJudgment: false };
+  // A trailer CREDITS its task at squash, so only an earlier commit's own trailer is re-asserted, and only for a
+  // filed, unmerged task — never an id a subject merely mentions, another PR's number, or a merged task.
   const trailered = new Set(live.commitMessages.map(extractTaskTrailerId).filter((id): id is string => id !== undefined));
-  const mentioned = new Set(live.commitMessages.flatMap(message => message.match(/\bW\d+-T\d+\b/g) ?? []));
-  const ids = trailered.size ? trailered : mentioned;
-  const taskId = ids.size === 1 ? [...ids][0] : undefined;
-  if (taskId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(taskId) || taskIdFromRunBranch(`run-${taskId}-1`) !== taskId)) {
-    return { action: "refused", reason: "task identity cannot form a branch" };
-  }
-  return { action: "rehome", headName: `run-${taskId ?? "unfiled"}-${nowMs}`, headSha: pr.headSha,
+  const earlier = trailered.size === 1 ? [...trailered][0] : undefined;
+  const reassert = earlier !== undefined && /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(earlier) && !/^PR-\d+$/.test(earlier) &&
+    opts.filedUnmerged?.(earlier) === true;
+  const trailer = reassert ? earlier : `PR-${pr.prNumber}`;
+  return { action: "trailer", trailer, message: identityCommitMessage(pr.prNumber, trailer), headSha: pr.headSha,
     reason: `head-identity-only red; ${quiet.reason}` };
 }
 
 export interface HeadRehomePorts {
   observe: (pr: HeadRehomePr) => Promise<HeadRehomeObservation>;
   judgeQuiet: (pr: HeadRehomeObservation) => Promise<QuietHeadDecision>;
-  ensureBranch: (headName: string, sha: string) => Promise<void>;
-  findReplacement: (pr: HeadRehomePr, headName: string) => Promise<ReplacementPr | undefined>;
-  openReplacement: (pr: HeadRehomeObservation, plan: HeadRehomeAction, body: string) => Promise<ReplacementPr>;
   readHead: (pr: HeadRehomePr) => Promise<string>;
-  closeOriginal: (pr: HeadRehomePr, replacement: ReplacementPr) => Promise<void>;
-}
-
-export function rehomeBody(pr: HeadRehomeObservation): string {
-  const backlink = `Rehomed from ${pr.prUrl} (head-identity-gate).`;
-  const trailer = /^Remudero-Task:[^\n]*\s*$/.exec(pr.body.split("\n").at(-1) ?? "");
-  return trailer ? `${pr.body.slice(0, pr.body.lastIndexOf(trailer[0])).trimEnd()}\n\n${backlink}\n\n${trailer[0]}`
-    : `${pr.body}\n\n${backlink}`;
+  /** Append ONE commit — the observed head's own tree, parent `observedSha` — to the PR's head ref by
+   *  fast-forward only, and resolve to its sha once the PR's head is that commit. A moved head throws. */
+  appendIdentityCommit: (pr: HeadRehomePr, observedSha: string, message: string) => Promise<string>;
+  filedUnmerged?: (taskId: string) => boolean;
 }
 
 export function createHeadRehomePorts(opts: {
@@ -134,36 +140,28 @@ export function createHeadRehomePorts(opts: {
         redRequiredChecks: [], pendingChecks: [...pending.map(c => c.name ?? c.context ?? "unknown"),
           ...[...required].filter(name => !latest.some(c => (c.name ?? c.context) === name))].filter(name => name !== "remudero-review") };
     },
-    ensureBranch: async (headName, sha) => {
-      const refs = (api(["api", `${root}/git/matching-refs/heads/${headName}`]) as { ref: string; object: { sha: string } }[])
-        .filter(ref => ref.ref === `refs/heads/${headName}`);
-      if (refs.length) {
-        if (refs[0].object.sha !== sha) throw new Error("replacement branch points to another head");
-        return;
-      }
-      api(["api", "-X", "POST", `${root}/git/refs`, "-f", `ref=refs/heads/${headName}`, "-f", `sha=${sha}`]);
-    },
-    findReplacement: async (pr, headName) => {
-      const prs = api(["api", `${root}/pulls?state=all&head=${opts.owner}:${headName}`]) as
-        { number: number; html_url: string; body: string; state: string; head: { sha: string } }[];
-      if (!prs.length) return undefined;
-      const existing = prs.find(row => row.body?.includes(`Rehomed from ${pr.prUrl} (head-identity-gate).`));
-      if (!existing || existing.head.sha !== pr.headSha || existing.state !== "open") throw new Error("replacement PR does not match open source head and backlink");
-      return { prNumber: existing.number, prUrl: existing.html_url, headSha: existing.head.sha };
-    },
-    openReplacement: async (pr, plan, body) => {
-      const created = api(["api", "-X", "POST", `${root}/pulls`, "-f", `head=${plan.headName}`, "-f", `base=${pr.baseRef ?? "main"}`,
-        "-f", `title=${pr.title}`, "-f", `body=${body}`]) as { number: number; html_url: string; head: { sha: string } };
-      return { prNumber: created.number, prUrl: created.html_url, headSha: created.head.sha };
-    },
     readHead: async (pr) => {
       const live = pull(pr);
       if (live.state !== "open" || live.draft || live.head.ref !== pr.headRefName) throw new Error("source PR no longer open on its observed branch");
       return live.head.sha;
     },
-    closeOriginal: async (pr, replacement) => {
-      api(["api", "-X", "POST", `${root}/issues/${pr.prNumber}/comments`, "-f", `body=Rehomed by rmd sweep to ${replacement.prUrl}; same head ${pr.headSha}.`]);
-      api(["api", "-X", "PATCH", `${root}/pulls/${pr.prNumber}`, "-f", "state=closed"]);
+    appendIdentityCommit: async (pr, observedSha, message) => {
+      const ref = pr.headRefName;
+      if (!ref) throw new Error("head ref unknown");
+      const base = api(["api", `${root}/git/commits/${observedSha}`]) as { sha: string; tree: { sha: string } };
+      if (base.sha !== observedSha) throw new Error("observed head commit unreadable");
+      const created = api(["api", "-X", "POST", `${root}/git/commits`, "-f", `message=${message}`,
+        "-f", `tree=${base.tree.sha}`, "-f", `parents[]=${observedSha}`]) as { sha: string };
+      // The fresh read narrows the window; `force=false` closes it for a push of any descendant, which this
+      // commit cannot fast-forward. Either refusal leaves the author's ref exactly as it was.
+      const current = api(["api", `${root}/git/ref/heads/${ref}`]) as { object: { sha: string } };
+      if (current.object.sha !== observedSha) throw new Error("head moved before identity commit push");
+      const updated = api(["api", "-X", "PATCH", `${root}/git/refs/heads/${ref}`, "-f", `sha=${created.sha}`,
+        "-F", "force=false"]) as { object: { sha: string } };
+      if (updated.object.sha !== created.sha) throw new Error("head ref did not advance to the identity commit");
+      const live = pull(pr);
+      if (live.head.sha !== created.sha) throw new Error(`PR head is ${live.head.sha}, not identity commit ${created.sha}`);
+      return created.sha;
     },
   };
 }

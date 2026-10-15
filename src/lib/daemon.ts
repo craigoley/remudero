@@ -119,7 +119,9 @@ import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnv
 import type { DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
-import type { RetroTriggerDecision } from "./retro.js";
+import type { LedgerRecord, RetroTriggerDecision } from "./retro.js";
+import { settledSpansByClass } from "./cost-anomaly.js";
+import { deriveTaskClass } from "./task-class.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
@@ -131,7 +133,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, fixedClock, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
@@ -363,6 +365,80 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
       : (values[middle - 1] + values[middle]) / 2, samples: values.length };
   };
   return { yieldCost: estimate(gaps), remaining: new Map([...durations].map(([phase, values]) => [phase, estimate(values)])) };
+}
+
+/** W1-T9069: one lane's expected finish under a latched restart; `undefined` means no estimate is known yet. */
+export interface LatchedRestartLane { taskId: string; expectedFinishMs: number | undefined }
+/** W1-T9069: the latch as the decision reads it: the holdouts, the refills admitted under it, and the idle lanes. */
+export interface LatchedRestartState {
+  holdouts: readonly LatchedRestartLane[];
+  refills: readonly LatchedRestartLane[];
+  idleLanes: number;
+}
+export interface LatchedRestartComparison { taskId: string; holdCostMs: number; yieldCostMs: number; yields: boolean }
+export interface LatchedRestartDecision {
+  /** R: the latest expected finish among the remaining holdouts; now when none remain; undefined when a holdout has no estimate. */
+  restartAtMs: number | undefined;
+  /** Holdouts to ask to yield, in the order the comparison took them. */
+  yieldTaskIds: string[];
+  /** The hold and yield costs of the last comparison made (undefined when none was). */
+  holdCostMs: number | undefined;
+  yieldCostMs: number | undefined;
+  compared: LatchedRestartComparison[];
+}
+
+/** W1-T9069: where the restart is expected, and which holdouts the idle lane time says to ask to yield. Pure.
+ *  Holding costs the lane time that would sit idle until R: each idle lane from now, every other lane from its own
+ *  expected finish. While that costs at least the measured yield cost the holdout setting R is asked to yield, its
+ *  lane counts as idle, and R is recomputed over the rest. No yield cost compares nothing (W1-T8927 yields every run). */
+export function decideLatchedRestart(
+  state: LatchedRestartState,
+  estimates: { yieldCostMs: number | undefined },
+  nowMs: number,
+): LatchedRestartDecision {
+  let holdouts = [...state.holdouts];
+  let idleLanes = state.idleLanes;
+  const decision: LatchedRestartDecision = { restartAtMs: nowMs, yieldTaskIds: [], holdCostMs: undefined,
+    yieldCostMs: estimates.yieldCostMs, compared: [] };
+  for (;;) {
+    if (holdouts.some((h) => h.expectedFinishMs === undefined)) return { ...decision, restartAtMs: undefined };
+    if (holdouts.length === 0) return { ...decision, restartAtMs: nowMs };
+    const setter = holdouts.reduce((a, b) => (b.expectedFinishMs! > a.expectedFinishMs! ? b : a));
+    const restartAtMs = Math.max(nowMs, setter.expectedFinishMs!);
+    const idleUntilRestart = (lane: LatchedRestartLane): number =>
+      Math.max(0, restartAtMs - Math.max(nowMs, lane.expectedFinishMs ?? restartAtMs));
+    const holdCostMs = idleLanes * (restartAtMs - nowMs) +
+      [...holdouts.filter((h) => h !== setter), ...state.refills].reduce((sum, lane) => sum + idleUntilRestart(lane), 0);
+    decision.restartAtMs = restartAtMs;
+    decision.holdCostMs = holdCostMs;
+    if (estimates.yieldCostMs === undefined) return decision;
+    const yields = holdCostMs >= estimates.yieldCostMs;
+    decision.compared.push({ taskId: setter.taskId, holdCostMs, yieldCostMs: estimates.yieldCostMs, yields });
+    if (!yields) return decision;
+    decision.yieldTaskIds.push(setter.taskId);
+    holdouts = holdouts.filter((h) => h !== setter);
+    idleLanes++;
+  }
+}
+
+/** W1-T9069: each task class's median settled span (`run.start` to `verdict`) over the restart-history lines. A
+ *  class with no settled span is absent, never zero. */
+export function classMedianSpans(rawLines: readonly string[]): Map<string, number> {
+  const records: LedgerRecord[] = [];
+  for (const raw of new Set(rawLines)) {
+    try {
+      const row = JSON.parse(raw) as LedgerRecord | null;
+      if (row && typeof row === "object") records.push(row);
+    } catch (error) { /* a torn row is not a span */ continue; }
+  }
+  const medians = new Map<string, number>();
+  for (const [taskClass, { spansMs }] of settledSpansByClass(records)) {
+    if (spansMs.length === 0) continue;
+    const sorted = [...spansMs].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    medians.set(taskClass, sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2);
+  }
+  return medians;
 }
 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
@@ -6237,6 +6313,17 @@ export async function runDaemon(
     const holdoutDeadlines = new Map<string, number>();
     const yieldAsked = new Set<string>();
     const admittedUnderLatch = new Set<string>();
+    // W1-T9069: what the latch cost. A lane is idle from the moment it frees (or the latch finds it parked) until a
+    // refill starts on it or the restart fires; a holdout's outcome defaults to finished and a yield overwrites it.
+    const laneIdleSince = new Map<number, number>();
+    const latchParked = new Map<number, string>();
+    const holdoutOutcomes = new Map<string, string>();
+    const holdoutAnswers = new Map<string, string>();
+    const refillExpectedFinish = new Map<string, number>();
+    const latchCandidateSpans = new Map<string, number>();
+    let idleLaneMs = 0;
+    let firstRestartAtMs: number | undefined;
+    let classSpans: Map<string, number> | undefined;
     const slowLane = (t: Task): boolean => measuredRefillBound && daemonClock.now() - laneStartedAtMs.get(t.id)! > refillBoundMs;
     const restartStillWaitingOnHoldout = (): boolean => restartHoldouts.size > 0;
     // Re-read at every decision, never latched: a refilled sibling can outlive the measured length AFTER a lane freed.
@@ -6246,7 +6333,9 @@ export async function runDaemon(
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
         // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
-        for (const t of inFlightTasks) restartHoldouts.add(t.id);
+        for (const t of inFlightTasks) { restartHoldouts.add(t.id); holdoutOutcomes.set(t.id, "finished"); }
+        // A lane already parked when the latch lands is idle under it from now.
+        for (const parked of parkedLanes) laneIdleSince.set(parked.lane, restartWait.decidedAtMs);
       }
       inFlightFreshness ??= freshness;
     };
@@ -6255,12 +6344,29 @@ export async function runDaemon(
     let settledFreshness = selfFreshness;
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
-    const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
+    const parkedLanes: Array<{ lane: number; finished: Task; latch?: true; wake: (next: Promise<Task | undefined>) => void }> = [];
     const governorParked = new Map<number, string>();
-    const wakeParkedLanes = (): void => {
+    // W1-T9069: a lane parked behind a latched restart wakes only on a latch state change, never on the tick.
+    const wakeParkedLanes = (includeLatch = false): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
+      const waking = parkedLanes.filter((parked) => includeLatch || !parked.latch);
+      for (const parked of waking) parkedLanes.splice(parkedLanes.indexOf(parked), 1);
       // Deferred: a throwing decision reaches the pool's fault outcome, never strands an owned sibling.
-      for (const { lane, finished, wake } of parkedLanes.splice(0)) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
+      for (const { lane, finished, wake } of waking) wake(Promise.resolve().then(() => decideRefill(lane, finished)));
+    };
+    const latchSelfScoped = (): boolean => inFlightFreshness?.changes?.some((change) =>
+      DAEMON_SELF_COMMIT_SCOPE.test(change.subject ?? "") ||
+      change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)))) === true;
+    const latchState = (): LatchedRestartState => ({
+      holdouts: [...restartHoldouts].map((taskId) => ({ taskId, expectedFinishMs: holdoutDeadlines.get(taskId) })),
+      refills: [...inFlightTasks].filter((t) => admittedUnderLatch.has(t.id) && !restartHoldouts.has(t.id))
+        .map((t) => ({ taskId: t.id, expectedFinishMs: refillExpectedFinish.get(t.id) })),
+      idleLanes: laneIdleSince.size,
+    });
+    const decideLatch = (nowMs: number, yieldCostMs: number | undefined): LatchedRestartDecision => {
+      const decision = decideLatchedRestart(latchState(), { yieldCostMs }, nowMs);
+      if (firstRestartAtMs === undefined && decision.restartAtMs !== undefined && restartHoldouts.size > 0) firstRestartAtMs = decision.restartAtMs;
+      return decision;
     };
     // W1-T8235: a lane change is a sample. The hold that emptied the slot is whichever step this lane's decision wrote.
     const sampleLaneChange = (): void => sampleIdleLane(inFlightTasks.size, true, undefined, false);
@@ -6268,6 +6374,7 @@ export async function runDaemon(
       inFlightTasks.delete(finished);
       resetIdleLaneTick();
       restartHoldouts.delete(finished.id);
+      if (inFlightFreshness) laneIdleSince.set(lane, daemonClock.now());
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
         if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
@@ -6276,7 +6383,7 @@ export async function runDaemon(
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
       const decision = decideRefill(lane, finished);
-      wakeParkedLanes();
+      wakeParkedLanes(true);
       return decision;
     };
     const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
@@ -6325,6 +6432,8 @@ export async function runDaemon(
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
         let next: Task | undefined;
+        // W1-T9069: set when a latched restart leaves candidates but none ends before it; the lane then parks.
+        let latchPark: { reason: string; restartAtMs?: number; budgetMs?: number; nearest?: { task: string; spanMs: number } } | undefined;
         const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
@@ -6350,13 +6459,39 @@ export async function runDaemon(
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
           const poolIds = new Set(pool.map((t) => t.id));
           for (const d of fits.serialized) if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
-          next = fits.dispatch.find((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
+          const candidates = fits.dispatch.filter((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
+          if (inFlightFreshness && restartStillWaitingOnHoldout() && !refillClosed) {
+            // W1-T9069: under a latch only work that ends before the restart's expected time R is taken.
+            const nowMs = daemonClock.now();
+            const expected = decideLatch(nowMs, undefined).restartAtMs;
+            let nearest: { task: string; spanMs: number } | undefined;
+            let missing = 0;
+            for (const t of candidates) {
+              const spanMs = (classSpans ??= classMedianSpans(restartHistoryLines)).get(deriveTaskClass(t));
+              if (spanMs === undefined) { missing++; continue; }
+              if (expected !== undefined && !latchSelfScoped() && spanMs <= expected - nowMs) {
+                next = t;
+                latchCandidateSpans.set(t.id, spanMs);
+                break;
+              }
+              if (nearest === undefined || spanMs < nearest.spanMs) nearest = { task: t.id, spanMs };
+            }
+            if (!next && candidates.length > 0) {
+              latchPark = {
+                reason: latchSelfScoped() ? "self-scoped restart" : expected === undefined ? "restart time unknown"
+                  : expected <= nowMs ? "restart expected now" : nearest === undefined && missing > 0 ? "no class span estimate"
+                  : "no task ends before the restart",
+                ...(expected !== undefined && expected > nowMs ? { restartAtMs: expected, budgetMs: expected - nowMs } : {}),
+                ...(nearest ? { nearest } : {}),
+              };
+            }
+          } else next = candidates[0];
           if (next) nextSnapshot = snapshot;
         };
         const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
-        const conclude = (): Task | undefined => {
+        const conclude = (): Task | undefined | Promise<Task | undefined> => {
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
             const latched = refillClosed ?? (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??
@@ -6366,6 +6501,21 @@ export async function runDaemon(
               next = undefined;
             }
           }
+          if (!next && latchPark && reason === undefined && !refillClosed && restartStillWaitingOnHoldout() &&
+            !deps.checkStop?.() && !deps.checkPause?.()) {
+            // One row per lane and state; every latch state change wakes the lane to decide again.
+            const key = [latchPark.reason, latchPark.restartAtMs ?? "", latchPark.nearest?.task ?? "", latchPark.nearest?.spanMs ?? ""].join("|");
+            if (latchParked.get(lane) !== key) {
+              latchParked.set(lane, key);
+              log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: latchPark.reason,
+                restart_at_ms: latchPark.restartAtMs ?? null, budget_ms: latchPark.budgetMs ?? null,
+                nearest_task: latchPark.nearest?.task ?? null, nearest_span_ms: latchPark.nearest?.spanMs ?? null,
+                phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
+            }
+            sampleLaneChange();
+            return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, latch: true, wake }));
+          }
+          latchParked.delete(lane);
           if (!next) {
             log("dispatch.lane_refill_held", {
               lane,
@@ -6442,7 +6592,7 @@ export async function runDaemon(
       });
     };
     const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
-      wakeParkedLanes();
+      wakeParkedLanes(Boolean(deps.checkStop?.() || deps.checkPause?.()));
       if (inFlightFreshness && inFlightTasks.size > 0) return reportRestartWait(inFlightFreshness);
       if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
       const read = deps.checkFreshness!();
@@ -6526,7 +6676,14 @@ export async function runDaemon(
       snapshots.push(refill?.snapshot ?? { plan: planForBatch, isMerged });
       passIds.add(task.id);
       inFlightTasks.add(task);
-      if (inFlightFreshness) admittedUnderLatch.add(task.id);
+      if (inFlightFreshness) {
+        admittedUnderLatch.add(task.id);
+        const span = latchCandidateSpans.get(task.id);
+        if (span !== undefined) refillExpectedFinish.set(task.id, preparedStartTimes.get(task.id)! + span);
+      }
+      const idleSince = laneIdleSince.get(lane);
+      if (idleSince !== undefined) { idleLaneMs += Math.max(0, preparedStartTimes.get(task.id)! - idleSince); laneIdleSince.delete(lane); }
+      latchParked.delete(lane);
       laneStartedAtMs.set(task.id, preparedStartTimes.get(task.id)!);
       attempted.push(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
@@ -6554,38 +6711,59 @@ export async function runDaemon(
         const remaining = restartHistory.remaining.get(phase);
         const yieldCost = restartHistory.yieldCost;
         const nowMs = daemonClock.now();
-        const selfScoped = inFlightFreshness.changes?.some((change) =>
-          DAEMON_SELF_COMMIT_SCOPE.test(change.subject ?? "") ||
-          change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix))));
+        const selfScoped = latchSelfScoped();
         // A self-scoped code change only delays the daemon's own reload by the holdout, so it takes the same cost
         // comparison as any other restart; an install-input change still yields every run, because its restart
         // reinstalls the node_modules every running worktree links.
         const installChanged = changesInstallInputs(inFlightFreshness.changes);
         const deadline = holdoutDeadlines.get(id);
-        const reason = installChanged ? INSTALL_INPUTS_RELEASE
+        // W1-T9069: a refill admitted under the latch is never a holdout and never moves R later.
+        const underLatch = admittedUnderLatch.has(id) && !restartHoldouts.has(id);
+        const expectedAt = underLatch ? decideLatch(nowMs, undefined).restartAtMs : undefined;
+        let reason = installChanged ? INSTALL_INPUTS_RELEASE
           : yieldAsked.has(id) ? "already_asked"
+          : underLatch ? (expectedAt === undefined || nowMs < expectedAt ? "latch_refill_continues" : "latch_refill_past_restart")
           : deadline !== undefined && nowMs >= deadline ? "estimate_elapsed"
           : remaining?.ms === undefined || yieldCost.ms === undefined ? "no_history"
           : remaining.ms >= yieldCost.ms ? "yield_is_cheaper" : "finish_is_cheaper";
+        if (reason === "finish_is_cheaper") {
+          if (deadline === undefined) holdoutDeadlines.set(id, nowMs + remaining!.ms!);
+          // The idle lane time until R against the measured yield cost: the holdout that sets R yields when holding costs more.
+          if (decideLatch(nowMs, yieldCost.ms).yieldTaskIds.includes(id)) reason = "idle_lanes_cost_more";
+        }
+        if (reason === "latch_refill_continues") return undefined;
         const hold = reason === "finish_is_cheaper";
-        if (hold && deadline === undefined) holdoutDeadlines.set(id, nowMs + remaining!.ms!);
-        log(hold ? "daemon.restart_holdout" : "daemon.restart_yield_asked", {
-          task_id: id, run_id: context?.runId ?? null, phase, reason, self_scoped: selfScoped === true,
+        const latch = decideLatch(nowMs, yieldCost.ms);
+        // W1-T9069: one row per change of this run's answer, never one per watchdog poll.
+        const answer = [hold ? "holdout" : "yield", reason, phase, holdoutDeadlines.get(id) ?? "", latch.restartAtMs ?? ""].join("|");
+        const changed = holdoutAnswers.get(id) !== answer;
+        holdoutAnswers.set(id, answer);
+        if (changed) log(hold ? "daemon.restart_holdout" : "daemon.restart_yield_asked", {
+          task_id: id, run_id: context?.runId ?? null, phase, reason, self_scoped: selfScoped,
           remaining_ms: remaining?.ms ?? null, remaining_samples: remaining?.samples ?? 0,
           yield_cost_ms: yieldCost.ms ?? null, yield_samples: yieldCost.samples,
           deadline_ms: holdoutDeadlines.get(id) ?? null,
+          restart_at_ms: latch.restartAtMs ?? null, hold_cost_ms: latch.holdCostMs ?? null,
+          in_flight: [...inFlightTasks].map((t) => ({ task_id: t.id, holdout: restartHoldouts.has(t.id),
+            admitted_under_latch: admittedUnderLatch.has(t.id),
+            expected_finish_ms: holdoutDeadlines.get(t.id) ?? refillExpectedFinish.get(t.id) ?? null,
+            remaining_ms: (() => { const at = holdoutDeadlines.get(t.id) ?? refillExpectedFinish.get(t.id); return at === undefined ? null : Math.max(0, at - nowMs); })() })),
           old_sha: inFlightFreshness.oldSha, new_sha: inFlightFreshness.newSha,
         });
         if (hold) {
-          refillClosed ??= "stale code";
           restartHoldouts.add(id);
-          wakeParkedLanes();
+          // The holdout's first estimate is a latch state change: a lane parked for want of R decides again.
+          if (changed) wakeParkedLanes(true);
           return undefined;
+        }
+        if (!yieldAsked.has(id)) {
+          holdoutOutcomes.set(id, reason === "idle_lanes_cost_more" ? "yielded_on_cost"
+            : reason === "estimate_elapsed" ? "yielded_on_estimate_elapsed" : `yielded_${reason}`);
         }
         yieldAsked.add(id);
         restartHoldouts.delete(id);
         if (!restartStillWaitingOnHoldout()) refillClosed ??= "stale code";
-        wakeParkedLanes();
+        wakeParkedLanes(true);
         return inFlightFreshness;
       } }).then((outcome) => {
         const length = daemonClock.now() - startedAtMs;
@@ -6809,6 +6987,20 @@ export async function runDaemon(
 
     if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
+      // W1-T9069: one row per latch with what the wait cost in lane time.
+      const firedAtMs = daemonClock.now();
+      for (const since of laneIdleSince.values()) idleLaneMs += Math.max(0, firedAtMs - since);
+      laneIdleSince.clear();
+      log("daemon.restart_latch_cost", {
+        latched_at: fixedClock(restartWait.decidedAtMs).iso(), fired_at: fixedClock(firedAtMs).iso(),
+        waited_ms: Math.max(0, firedAtMs - restartWait.decidedAtMs), idle_lane_ms: idleLaneMs,
+        refills_under_latch: admittedUnderLatch.size,
+        holdouts: [...holdoutOutcomes].map(([task_id, outcome]) => ({ task_id, outcome })),
+        yields_asked: yieldAsked.size,
+        restart_expected_at_ms: firstRestartAtMs ?? null,
+        restart_expected_error_ms: firstRestartAtMs === undefined ? null : firedAtMs - firstRestartAtMs,
+        old_sha: inFlightFreshness.oldSha, new_sha: inFlightFreshness.newSha,
+      });
       return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
 

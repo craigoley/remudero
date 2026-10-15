@@ -13,6 +13,17 @@
 import type { CiFailure } from "./sweep.js";
 import type { ReviewVerdict } from "./review.js";
 
+/** W1-T7748: the first unchanged FIXED round earns one re-read at this head. */
+export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
+}
+
+/** W1-T5334: unstated and FLAKE no-op rounds get the same one re-read; BASE_RED and repeats do not. */
+export function shouldSelfHealNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
+  if (shouldRecheckAfterNothingChanged(fixKind, reason, refusedAtHead)) return true;
+  return reason === "the worker changed nothing" && refusedAtHead <= 1 && (fixKind === undefined || fixKind === "FLAKE");
+}
+
 /**
  * W1-T528: PURE classifier for a failed update-branch request (W1-T1208: the REST `gh api` PUT,
  * not the `gh pr update-branch` subcommand), same shape as {@link armFailureAction}.
