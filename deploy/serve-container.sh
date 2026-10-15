@@ -293,6 +293,19 @@ if [ ! -d "${STATE_DIR}" ]; then
   exit 1
 fi
 
+# W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), serve's code dir defaults
+# to <scratch>/rmd/<key>/serve-repo, re-cloned by the container when a deallocate empties it, and the
+# daemon checkout it must never equal may be the daemon's scratch one. An explicit RMD_SERVE_REPO_DIR
+# still wins, and every refusal below still applies to whichever dir is chosen.
+SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
+  . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
+  if [ -z "${RMD_SERVE_REPO_DIR:-}" ] && SERVE_SCRATCH_REPO_DIR="$(scratch_code_dir "${STATE_DIR}" "${CONTAINER_NAME}")"; then
+    SERVE_REPO_DIR="${SERVE_SCRATCH_REPO_DIR}"
+  fi
+  SERVE_DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${DAEMON_CONTAINER}")" || SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+fi
+
 if [ -L "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR must be a real directory, not a symlink." >&2
   echo "  A symlink can silently resolve back to the daemon checkout and reintroduce the shared-code race." >&2
@@ -302,7 +315,8 @@ if [ -e "${SERVE_REPO_DIR}" ] && [ ! -d "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR exists but is not a directory: ${SERVE_REPO_DIR}" >&2
   exit 1
 fi
-if [ -d "${SERVE_REPO_DIR}" ] && [ "$(cd -P "${SERVE_REPO_DIR}" && pwd)" = "$(cd -P "${STATE_DIR}/remudero" 2>/dev/null && pwd)" ]; then
+if [ -d "${SERVE_REPO_DIR}" ] && { [ "$(cd -P "${SERVE_REPO_DIR}" && pwd)" = "$(cd -P "${STATE_DIR}/remudero" 2>/dev/null && pwd)" ] ||
+   [ "$(cd -P "${SERVE_REPO_DIR}" && pwd)" = "$(cd -P "${SERVE_DAEMON_CHECKOUT}" 2>/dev/null && pwd)" ]; }; then
   echo "serve-container: REFUSING — serve code directory is the daemon checkout: ${SERVE_REPO_DIR}" >&2
   echo "  Give serve its own checkout; state stays shared, loaded code must not." >&2
   exit 1
@@ -789,8 +803,14 @@ if [ "${SERVE_SUPERVISOR}" = "on" ]; then
   echo "serve-container: serve supervisor ON — generations in ${SERVE_GENS_DIR} (touch ${SERVE_GENS_DIR}/handoff.off to recycle the old way)"
 fi
 
+SERVE_OUTGOING_READS="" # W1-T9617: the replaced generation's reads per disk, read before it stops
+SERVE_CHECKOUT_COLD=false
+[ -e "${SERVE_REPO_DIR}/.git" ] || SERVE_CHECKOUT_COLD=true
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   serve_replace_admission "before docker stop"
+  if command -v scratch_outgoing_reads >/dev/null 2>&1; then
+    SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
+  fi
   echo "serve-container: docker stop ${CONTAINER_NAME}"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
@@ -800,6 +820,9 @@ fi
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 docker "${RUN_ARGS[@]}" >/dev/null
+if command -v scratch_placement_row >/dev/null 2>&1; then
+  scratch_placement_row "${STATE_DIR}/state/ledger.ndjson" "${CONTAINER_NAME}" "${SERVE_REPO_DIR}" "${SERVE_CHECKOUT_COLD}" "${SERVE_OUTGOING_READS}"
+fi
 
 # ── 6. PROVE THE THREE THINGS THAT ACTUALLY DECIDE REACHABILITY ─────────────────────────────────
 # A container that started is not a console that answers. Each check below is one of the ways this

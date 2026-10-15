@@ -17,13 +17,25 @@
 # docker After=/Wants= rmd-scratch.service, never RequiresMountsFor=/mnt/scratch: a script mounts
 # the disk, not a mount unit, so at boot that directive would order docker after nothing.
 #
+# W1-T9617 — THE HOT CHECKOUTS, behind their OWN switch (RMD_SCRATCH_CHECKOUTS, the file
+# /etc/remudero/scratch-checkouts.on; both operator decisions, off by default). With it on, each
+# build daemon's own checkout (<state-dir>/remudero, node_modules included) is bound from
+# <scratch>/rmd/<key>/remudero, and serve's code dir defaults to <scratch>/rmd/<key>/serve-repo
+# (serve-container.sh binds that one itself). An empty one is a re-clone: entrypoint.sh clones into
+# it and runs npm ci. Off, every plan below is byte-identical to before, so no bind drifts on merge.
+# The old copies stay on their disks as the rollback. Host readers of the checkout resolve it here.
+#
 # USAGE  . scratch-mounts.sh; scratch_plan <state-dir> <container>; scratch_prepare; scratch_fresh_tmp
+#        scratch_daemon_checkout|scratch_live_checkout <state-dir> <container>; scratch_code_dir
 #        scratch-mounts.sh --restore <state-dir>...                  (root, at docker start)
 # SEAMS  RMD_SCRATCH_ROOT (/mnt/scratch), RMD_SCRATCH_SWITCH (/etc/remudero/scratch-mounts.on),
+#        RMD_SCRATCH_CHECKOUTS_SWITCH (/etc/remudero/scratch-checkouts.on), RMD_CGROUP_ROOT
+#        (/sys/fs/cgroup), RMD_SYS_DEV_BLOCK (/sys/dev/block),
 #        RMD_SCRATCH_MOUNTS_FILE (/proc/mounts); the installer's RMD_SCRATCH_STATE_DIRS and
 #        RMD_SCRATCH_LIB_PATH (/usr/local/bin/rmd-scratch-mounts, written only on a real host).
 
 SCRATCH_STATE_DEST="/home/node/Remudero"
+SCRATCH_CHECKOUT_DEST="${SCRATCH_STATE_DEST}/remudero"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
 SCRATCH_WORKER_HOME_DEST="/home/node/rmd-scratch/worker-homes"
 SCRATCH_TEST_SLOT_DEST="/home/node/rmd-scratch/test-slots"
@@ -72,16 +84,24 @@ scratch_enabled() {
   esac
 }
 
-# Sets SCRATCH_ARGS (docker run arguments), SCRATCH_BINDS (host<TAB>container per line),
-# SCRATCH_DIRS (host dirs to create), SCRATCH_CONTAINER_TMP and SCRATCH_NOTE. Returns 1, with
-# SCRATCH_ARGS empty, when the binds are off or cannot be used. Changes nothing on disk.
-scratch_plan() {
-  local state_dir="$1" container="$2" key base
-  SCRATCH_ARGS=()
-  SCRATCH_BINDS=""
-  SCRATCH_DIRS=()
-  SCRATCH_CONTAINER_TMP=""
-  SCRATCH_STATE_DIR="${state_dir}"
+# W1-T9617: the hot checkouts' own switch. It only ever adds to a scratch plan that is already on.
+scratch_checkouts_enabled() {
+  case "${RMD_SCRATCH_CHECKOUTS:-auto}" in
+    on) return 0 ;;
+    off) return 1 ;;
+    *) [ -e "${RMD_SCRATCH_CHECKOUTS_SWITCH:-/etc/remudero/scratch-checkouts.on}" ] ;;
+  esac
+}
+
+# Serve's code dir is its own checkout (serve-container.sh binds it); a build daemon's is the
+# shared <state-dir>/remudero. `remudero-serve` is the only serve container the fleet names.
+scratch_is_serve() { case "$1" in *-serve) return 0 ;; esac; return 1; }
+
+# Sets SCRATCH_BASE (<scratch>/rmd/<key>), or SCRATCH_NOTE and returns 1 when the scratch binds are
+# off or cannot be used for this state dir and container. Reads nothing but the switch and mounts.
+scratch_base_for() {
+  local state_dir="$1" container="$2" key
+  SCRATCH_BASE=""
   if ! scratch_enabled; then
     SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage, repos and the read model stay on the state disk"
     return 1
@@ -97,9 +117,62 @@ scratch_plan() {
   key="$(basename "${state_dir}" | tr -c 'A-Za-z0-9_.\n-' '_')"
   case "${key}" in ""|.|..) SCRATCH_NOTE="NOT USED — state dir ${state_dir} has no usable name"; return 1 ;; esac
   case "${container}" in ""|*[!A-Za-z0-9_.-]*) SCRATCH_NOTE="NOT USED — container name '${container}' is not Docker-safe"; return 1 ;; esac
-  base="$(scratch_root)/rmd/${key}"
+  SCRATCH_BASE="$(scratch_root)/rmd/${key}"
+}
+
+# Prints the scratch placement of <container>'s code checkout and returns 0 when the hot checkouts
+# move (both switches on, scratch usable); prints nothing and returns 1 otherwise.
+scratch_code_dir() {
+  scratch_checkouts_enabled && scratch_base_for "$1" "$2" || return 1
+  if scratch_is_serve "$2"; then printf '%s/serve-repo\n' "${SCRATCH_BASE}"; else printf '%s/remudero\n' "${SCRATCH_BASE}"; fi
+}
+
+# The checkout a build daemon's NEXT launch binds: on scratch when the switch moves it, else the
+# literal <state-dir>/remudero. The recycle's repo marker and shared-checkout guard read this one.
+scratch_daemon_checkout() {
+  scratch_code_dir "$1" "${2:-remudero-daemon}" || printf '%s/remudero\n' "${1%/}"
+}
+
+# The checkout the RUNNING <container> binds at /home/node/Remudero/remudero — what a host tick that
+# runs bin/rmd, fast-forwards or reads edits must use. A container that binds none there reads the
+# state dir's own copy; one docker cannot inspect falls back to the planned placement. Switching the
+# placement therefore moves no host reader before the recycle that moves the container itself.
+scratch_live_checkout() {
+  local state_dir="$1" container="$2" mounts src dest found=""
+  if mounts="$(docker inspect --format '{{range .Mounts}}{{.Destination}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}' "${container}" 2>/dev/null)"; then
+    while IFS='	' read -r dest src; do
+      [ "${dest}" = "${SCRATCH_CHECKOUT_DEST}" ] && [ -n "${src}" ] && found="${src}"
+    done <<EOF
+${mounts}
+EOF
+    printf '%s\n' "${found:-${state_dir%/}/remudero}"
+    return 0
+  fi
+  scratch_daemon_checkout "${state_dir}" "${container}"
+}
+
+# Sets SCRATCH_ARGS (docker run arguments), SCRATCH_BINDS (host<TAB>container per line),
+# SCRATCH_DIRS (host dirs to create), SCRATCH_CONTAINER_TMP and SCRATCH_NOTE. Returns 1, with
+# SCRATCH_ARGS empty, when the binds are off or cannot be used. Changes nothing on disk.
+scratch_plan() {
+  local state_dir="$1" container="$2" base checkout_bind="" code_dir=""
+  SCRATCH_ARGS=()
+  SCRATCH_BINDS=""
+  SCRATCH_DIRS=()
+  SCRATCH_CONTAINER_TMP=""
+  SCRATCH_CODE_DIR=""
+  SCRATCH_STATE_DIR="${state_dir}"
+  scratch_base_for "${state_dir}" "${container}" || return 1
+  base="${SCRATCH_BASE}"
+  # W1-T9617: a build daemon's checkout is one more bind; serve's code dir is only recorded (and
+  # created) here, because serve-container.sh binds it at that same path itself.
+  if code_dir="$(scratch_code_dir "${state_dir}" "${container}")"; then
+    SCRATCH_CODE_DIR="${code_dir}"
+    if scratch_is_serve "${container}"; then SCRATCH_DIRS+=("${code_dir}"); else checkout_bind="${code_dir}	${SCRATCH_CHECKOUT_DEST}
+"; fi
+  fi
   SCRATCH_CONTAINER_TMP="${base}/containers/${container}/tmp"
-  SCRATCH_BINDS="${base}/worktrees	${SCRATCH_STATE_DEST}/worktrees
+  SCRATCH_BINDS="${checkout_bind}${base}/worktrees	${SCRATCH_STATE_DEST}/worktrees
 ${base}/tmp	${SCRATCH_STATE_DEST}/tmp
 ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
 ${base}/repos	${SCRATCH_STATE_DEST}/repos
@@ -119,6 +192,7 @@ EOF
   SCRATCH_ARGS+=(-e "RMD_WORKER_HOME_DIR=${SCRATCH_STATE_DEST}:${SCRATCH_WORKER_HOME_DEST}")
   SCRATCH_ARGS+=(-e "RMD_TEST_SLOT_DIR=${SCRATCH_TEST_SLOT_DEST}")
   SCRATCH_NOTE="on — worktrees, tmp, coverage, repos, the read model, worker homes and /tmp under ${base}; test slots shared at $(scratch_test_slot_dir)"
+  [ -z "${SCRATCH_CODE_DIR}" ] || SCRATCH_NOTE="${SCRATCH_NOTE}; the code checkout at ${SCRATCH_CODE_DIR} (scratch-checkouts on)"
   return 0
 }
 
@@ -172,6 +246,71 @@ scratch_fresh_tmp() {
   # Never fatal: a launch must not die after the old container is gone; scratch_prepare made it.
   rm -rf "${SCRATCH_CONTAINER_TMP}" 2>/dev/null || true
   mkdir -p "${SCRATCH_CONTAINER_TMP}" 2>/dev/null || true
+  return 0
+}
+
+# ── W1-T9617: THE PLACEMENT PROVES ITSELF ──────────────────────────────────────────────────────
+# Each recycle appends one recycle.checkout_placement row: the disk the new container's checkout
+# sits on, whether it starts cold (no .git yet: a re-clone), and what the OUTGOING container read
+# from each whole disk over its life (cgroup io.stat, cumulative, with its age). Rows written before
+# the switch flips measure the data-disk generation and rows after it the scratch one, so reads/s
+# per disk is rios / outgoing_age_s on each side. A cold row's rebuild time is the gap from its ts
+# to that container's first daemon.boot row. Every read here is best-effort and never fails a launch.
+
+# The whole disk holding <path> (nvme0n1 for a partition on it); nothing when unreadable.
+scratch_disk_of() {
+  local mm sys="${RMD_SYS_DEV_BLOCK:-/sys/dev/block}" uevent
+  mm="$(stat -c '%Hd:%Ld' "$1" 2>/dev/null)" || return 1
+  uevent="${sys}/${mm}/uevent"
+  [ ! -e "${sys}/${mm}/partition" ] || uevent="${sys}/${mm}/../uevent"
+  sed -n 's/^DEVNAME=//p' "${uevent}" 2>/dev/null | head -n 1
+}
+
+# `"outgoing_age_s":N,"outgoing_reads":{"<disk>":{"rios":N,"rbytes":N},...}` for <container>, read
+# before it stops. Returns 1 and prints nothing when docker, its cgroup or io.stat is unreadable.
+scratch_outgoing_reads() {
+  local sys="${RMD_SYS_DEV_BLOCK:-/sys/dev/block}" cgroot="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
+  local inspect id started cg="" d mm rest kv rios rbytes name reads="" start age=null
+  inspect="$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$1" 2>/dev/null)" || return 1
+  id="${inspect%% *}"
+  started="${inspect#* }"
+  case "${id}" in ""|*[!0-9a-f]*) return 1 ;; esac
+  for d in "${cgroot}/system.slice/docker-${id}.scope" "${cgroot}/docker/${id}"; do
+    if [ -r "${d}/io.stat" ]; then cg="${d}"; break; fi
+  done
+  [ -n "${cg}" ] || return 1
+  while read -r mm rest; do
+    rios=""
+    rbytes=""
+    for kv in ${rest}; do
+      case "${kv}" in rios=*) rios="${kv#rios=}" ;; rbytes=*) rbytes="${kv#rbytes=}" ;; esac
+    done
+    case "${rios}" in ""|*[!0-9]*) continue ;; esac
+    case "${rbytes}" in ""|*[!0-9]*) continue ;; esac
+    name="$(sed -n 's/^DEVNAME=//p' "${sys}/${mm}/uevent" 2>/dev/null | head -n 1)"
+    case "${name}" in ""|*[!A-Za-z0-9_.-]*) name="${mm}" ;; esac
+    reads="${reads}${reads:+,}\"${name}\":{\"rios\":${rios},\"rbytes\":${rbytes}}"
+  done < "${cg}/io.stat"
+  if start="$(date -u -d "${started}" +%s 2>/dev/null)" && [ "${start}" -le "$(date -u +%s)" ]; then
+    age=$(($(date -u +%s) - start))
+  fi
+  printf '"outgoing_age_s":%s,"outgoing_reads":{%s}' "${age}" "${reads}"
+}
+
+# Appends one recycle.checkout_placement row to <ledger> for <container>, whose launch binds the
+# checkout <checkout>; <cold> is true when that checkout held no .git before the launch, and
+# <outgoing> is scratch_outgoing_reads' text (empty when unread). Never fails the caller.
+scratch_placement_row() {
+  local ledger="$1" container="$2" checkout="$3" cold="$4" outgoing="$5" placement=state-disk disk switch=off
+  [ -d "$(dirname "${ledger}")" ] || return 0
+  case "${checkout}" in "$(scratch_root)/rmd/"*) placement=scratch ;; esac
+  disk="$(scratch_disk_of "${checkout}" 2>/dev/null || true)"
+  case "${disk}" in ""|*[!A-Za-z0-9_.:-]*) disk=null ;; *) disk="\"${disk}\"" ;; esac
+  case "${cold}" in true|false) ;; *) cold=null ;; esac
+  ! scratch_checkouts_enabled || switch=on
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.checkout_placement","lane":"deploy","container":"%s","placement":"%s","checkout":"%s","checkout_disk":%s,"cold":%s,"checkouts_switch":"%s"%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "${container}" "${placement}" "$(printf '%s' "${checkout}" | tr -d '"\\')" \
+    "${disk}" "${cold}" "${switch}" "${outgoing:+,${outgoing}}" >> "${ledger}" 2>/dev/null || true
   return 0
 }
 

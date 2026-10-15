@@ -561,8 +561,28 @@ fi
 # a first deploy impossible. FIRST_BOOT (RMD_RECYCLE_FIRST_BOOT=1 or --first-boot, above) is the
 # operator's explicit word that this run IS that first boot. It is NEVER inferred from the directory
 # being empty or absent — only this flag turns the refusal off.
+#
+# W1-T9617 — A RECORDED SCRATCH CHECKOUT IS A RE-CLONE, NOT AN EMPTY STATE DIR. With the hot
+# checkouts on scratch (deploy/scratch-mounts.sh), the checkout this launch binds is DAEMON_CHECKOUT,
+# and a deallocate empties it; entrypoint.sh re-clones into the empty bind. So the repo marker also
+# holds when DAEMON_CHECKOUT has a .git, or is a scratch dir an earlier launch recorded in
+# <state-dir>/.scratch-mounts. The state/ marker is required exactly as before.
+DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+RECYCLE_OUTGOING_READS=""
+if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
+  . "${SCRIPT_DIR}/scratch-mounts.sh"
+  DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${CONTAINER_NAME}")" || DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+fi
 STATE_DIR_CHECKOUT_MARKER="${STATE_DIR}/state"
 STATE_DIR_REPO_MARKER="${STATE_DIR}/remudero/.git"
+if [ ! -e "${STATE_DIR_REPO_MARKER}" ] && [ "${DAEMON_CHECKOUT}" != "${STATE_DIR}/remudero" ] &&
+   { [ -e "${DAEMON_CHECKOUT}/.git" ] || grep -qxF -- "${DAEMON_CHECKOUT}" "${STATE_DIR}/.scratch-mounts" 2>/dev/null; }; then
+  STATE_DIR_REPO_MARKER="${DAEMON_CHECKOUT}/.git"
+  if [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
+    STATE_DIR_REPO_MARKER="${STATE_DIR}/.scratch-mounts"
+    echo "recycle-container: ${DAEMON_CHECKOUT} is a recorded scratch checkout with no .git — the boot re-clones it"
+  fi
+fi
 if [ "${FIRST_BOOT}" != "1" ]; then
   if [ ! -d "${STATE_DIR}" ] || [ ! -d "${STATE_DIR_CHECKOUT_MARKER}" ] || [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
     echo "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
@@ -714,7 +734,8 @@ fi
 # with no network to origin right now is not proof the checkout is safe, but this script cannot
 # tell the difference between that and a git that is simply absent, and refusing on undecidable
 # input would turn a network hiccup into a self-inflicted outage this guard exists to prevent.
-DAEMON_TREE="${STATE_DIR}/remudero"
+# W1-T9617: the checkout the replacement binds — on scratch when the hot checkouts moved it.
+DAEMON_TREE="${DAEMON_CHECKOUT}"
 DIRTY_TRACKED_PATHS=()
 INCOMING_PATHS=()
 BLOCKING_PATHS=()
@@ -2176,6 +2197,10 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     mv -f "${PAUSE_FILE}.stopping.$$" "${PAUSE_FILE}"
     RECYCLE_PAUSE_BODY="${RECYCLE_PAUSE_STOPPING}"
   fi
+  # W1-T9617: what the outgoing container read from each disk over its life, read before it stops.
+  if command -v scratch_outgoing_reads >/dev/null 2>&1; then
+    RECYCLE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
+  fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
@@ -2209,10 +2234,12 @@ echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
 # while optional mounts are appended only when their host directories actually exist.
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
+LAUNCH_CHECKOUT="${STATE_DIR}/remudero" # W1-T9617: the checkout this launch binds, for its placement row
 if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
   . "${SCRIPT_DIR}/scratch-mounts.sh"
   if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && scratch_prepare; then
     scratch_fresh_tmp
+    [ -z "${SCRATCH_CODE_DIR:-}" ] || LAUNCH_CHECKOUT="${SCRATCH_CODE_DIR}"
     while IFS='	' read -r scratch_src scratch_dest; do
       RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${scratch_src}" "${scratch_dest}" rw)
     done <<EOF
@@ -2221,6 +2248,8 @@ EOF
   fi
   echo "recycle-container: scratch mounts ${SCRATCH_NOTE}"
 fi
+LAUNCH_CHECKOUT_COLD=false
+[ -e "${LAUNCH_CHECKOUT}/.git" ] || LAUNCH_CHECKOUT_COLD=true
 DOCKER_RUN_ARGS=(
   -d --name "${CONTAINER_NAME}"
   --restart=on-failure:5
@@ -2270,6 +2299,10 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
   echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
+fi
+# W1-T9617: where this generation's checkout landed, and what the one it replaced read per disk.
+if command -v scratch_placement_row >/dev/null 2>&1; then
+  scratch_placement_row "${LEDGER_FILE}" "${CONTAINER_NAME}" "${LAUNCH_CHECKOUT}" "${LAUNCH_CHECKOUT_COLD}" "${RECYCLE_OUTGOING_READS}"
 fi
 # The memory.high annotation is the one policy argument Docker accepts without proving it reached
 # the cgroup — read the kernel's own value back and name a miss in the log (never fatal).
