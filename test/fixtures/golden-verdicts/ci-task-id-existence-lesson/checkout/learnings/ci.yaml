@@ -1,6 +1,6 @@
 - id: task-id-existence-cites-must-resolve
   subsystem: ci
   lifecycle: active
-  files: ["plan/tasks.d/**", "plan/tasks.yaml", "src/**", "deploy/**", "scripts/task-id-existence-check.mjs"]
+  files: ["plan/tasks.d/**", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]
   fact: Cite only a W1-T id that resolves to a refs/rmd-id reservation on origin or a declared plan record; reserve the id before citing it.
   src: "ci-learning:10904:task-id-existence"

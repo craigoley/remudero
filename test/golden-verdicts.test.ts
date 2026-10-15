@@ -460,7 +460,7 @@ test("GOLDEN — TASK-ID-EXISTENCE LESSON: the cited incident executes and the i
   assertGolden(verdict, golden);
 
   const learningsDir = join(HERE, "..", "learnings");
-  for (const taskFile of ["plan/tasks.d/W1-T8446.yaml", "src/lib/sweep.ts", "deploy/host-update.sh", "scripts/task-id-existence-check.mjs"]) {
+  for (const taskFile of ["plan/tasks.d/W1-T8446.yaml", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]) {
     const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
     const selected = selectLearnings(entries, [taskFile]).selected;
     assert.ok(selected.some((entry) => entry.id === "task-id-existence-cites-must-resolve"), taskFile);
