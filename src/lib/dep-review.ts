@@ -1150,8 +1150,7 @@ function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{
 
 export type DependabotOwnRedOutcome = "none" | "observed" | "captured" | "folded" | "proposed" | "unkeyed" | "failed";
 
-/** After {@link reconcileDependabotRefresh}: the first own-red pass records the head so held siblings register, the
- *  next files ONE proposal naming them all, and bumps a proposal already names fold into it. */
+/** Pass one records the head so held siblings register; pass two files ONE proposal; named bumps fold into it. */
 export function reconcileDependabotOwnRed(args: {
   statePath: string;
   owner: string;
