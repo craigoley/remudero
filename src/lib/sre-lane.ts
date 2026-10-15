@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fixedClock, systemClock } from "./clock.js";
 import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { captureFeedback, listFeedback, readLandedFeedbackEntry, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
 import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
@@ -153,9 +153,9 @@ export function worstOpenIncident(
   evidence: readonly IncidentEvidence[],
   isOpen: (fingerprint: string) => boolean,
 ): IncidentEvidence | undefined {
-  return evidence
-    .filter((e) => !isOpen(e.fingerprint))
-    .sort((a, b) => b.burnPerHour - a.burnPerHour)[0];
+  // Sorted first, then the first not-open one: the same answer as filter-then-sort (the sort is stable),
+  // but `isOpen` runs only until a survivor is found, since W1-T9624's landed check costs a git read.
+  return [...evidence].sort((a, b) => b.burnPerHour - a.burnPerHour).find((e) => !isOpen(e.fingerprint));
 }
 
 // ── dedupe against open work ─────────────────────────────────────────────────────────────────
@@ -181,6 +181,19 @@ export function openIncidentFeedbackOrigins(root: string): Set<string> {
     }
   }
   return origins;
+}
+
+/** The feedback id this lane files a fingerprint under. */
+export function incidentFeedbackId(fingerprint: string): string {
+  return `incident-${fingerprint.slice(0, 16)}`;
+}
+
+/** W1-T9624: true when origin/main already holds this fingerprint's entry, open. The working tree can lack
+ *  a landed entry while the checkout's HEAD lags main, and {@link openIncidentFeedbackOrigins} reads only
+ *  the working tree. */
+export function landedIncidentOpen(fingerprint: string, readLanded: (id: string) => FeedbackEntry | null): boolean {
+  const landed = readLanded(incidentFeedbackId(fingerprint));
+  return landed !== null && landed.origin === incidentFeedbackOrigin(fingerprint) && landed.status !== CLOSED_FEEDBACK_STATUS;
 }
 
 /** True when `fingerprint` already has open feedback (this repo's own store) or an open plan task
@@ -310,6 +323,8 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   detectors?: readonly FleetFlowDetector[];
   readFlowRows?: FleetFlowInput["readRows"];
   writeFlowEvent?: FleetFlowInput["writeEvent"];
+  /** W1-T9624 seam: the entry origin/main holds for a feedback id. Absent, {@link readLandedFeedbackEntry}. */
+  readLandedEntry?: (id: string) => FeedbackEntry | null;
 };
 
 export interface SreLanePass {
@@ -361,7 +376,8 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     if (event) events.push(event);
   }
   const evidence = aggregateIncidents(events);
-  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
+  const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntry(deps.root, id));
+  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIncidentOpen(fp, readLanded));
   if (!worst) return { room };
 
   const runbook = runMatchingRunbook ? await runMatchingRunbook(worst) : undefined;
@@ -372,7 +388,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   captureFeedback(deps.root, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
-    id: `incident-${worst.fingerprint.slice(0, 16)}`,
+    id: incidentFeedbackId(worst.fingerprint),
   });
   store[worst.fingerprint] = { ts: fixedClock(now).iso() };
   writeAtomic(sreLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");

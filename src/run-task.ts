@@ -1604,6 +1604,8 @@ import {
   buildDepReviewEscalation,
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
+  reconcileDependabotOwnRed,
+  DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
   decideDepReview,
@@ -13915,7 +13917,17 @@ export async function runFixRung(opts: {
       namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
         .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
     });
-    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
+    const branchTaskId = taskIdFromRunBranch(opts.branch);
+    const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
+    const admitUnfiledOwnDiff = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
+      if (unfiledScope && action.kind === "scope-needed" && action.paths.every((path) => baselineDiffFiles?.includes(path))) {
+        deps.log("fix.scope_amendment", { outcome: "unfiled-own-diff", paths: action.paths,
+          head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId });
+        return { kind: "commit" };
+      }
+      return action;
+    };
+    let fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -13970,7 +13982,7 @@ export async function runFixRung(opts: {
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
+        fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
@@ -14298,6 +14310,36 @@ export async function runFixRung(opts: {
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
+      if (unfiledScope) {
+        const paths = [...new Set(fixAction.paths)].sort();
+        const identityKey = createHash("sha256").update(JSON.stringify([prNumber, priorHeadSha, paths])).digest("hex");
+        const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
+          row.outcome === "unfiled-escalated" && row.identity_key === identityKey);
+        let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
+        let deliveryError: { error: string } | undefined;
+        if (!issueUrl) try {
+          issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
+            headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
+            summary: `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
+            detail: `@${opts.reviewBase.owner}: ${opts.prUrl} has no plan record to amend. Round ${roundId} ` +
+              `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
+              `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
+              `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}`,
+            options: [{ label: "route-repair", detail: "route the named paths to their owner or a filed repair task" },
+              { label: "revise-pr", detail: "revise this PR's scope explicitly, then resume its fix lane" }],
+            recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
+        } catch (error) {
+          deliveryError = { error: String(error) };
+        }
+        const reason = issueUrl ? "unfiled scope need escalated" : "unfiled scope escalation undelivered";
+        deps.log("fix.scope_amendment", { outcome: issueUrl ? "unfiled-escalated" : "unfiled-escalation-failed",
+          identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
+          issue_url: issueUrl, reason, ...deliveryError });
+        deps.log("fix.stood_down", { site: "rung.unfiled_scope", head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
+        logFixDone();
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
+      }
       let amendment: ScopeAmendmentOutcome;
       const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
       if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
@@ -23988,6 +24030,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
     } catch (error) {
       log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
+    try {
+      const ownRedFlag = flagValue(rest, "--dependabot-own-red");
+      const ownRed = reconcileDependabotOwnRed({
+        statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
+        headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
+        capture: ({ raw, submissionKey }) => (deps.captureMigrationFeedback ?? ((a) => captureFeedback(a.root, { id: a.id, raw: a.raw, origin: "repair#dep-review", submissionKey: a.submissionKey })))({ root: config.root, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+      });
+      if (ownRed !== "none") console.log(`dependabot own red ${ownRed}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.own_red.failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
     }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;

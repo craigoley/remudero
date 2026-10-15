@@ -1,0 +1,53 @@
+- id: W1-T9623
+  title: "A DIFFERING UNTRACKED FILE IS MOVED ASIDE, NOT A BOOT-BLOCKER: on 2026-10-15 45 re-captured plan/feedback/incident-*.yaml files in the core checkout differed from the copies #11901/#11946 had landed, the entrypoint's clear_redundant_untracked clears only byte-identical copies, so git checkout refused at the 08:22:44 freshness restart and on every boot after it until a hand move at 10:28:42 (2 h 6 m with no core daemon); the entrypoint moves such a file to state/recovered-untracked/<stamp>/<path>, logs and ledgers it, and boots"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what the boot checkout does with an untracked file the incoming commit adds with different bytes
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: core outage 08:22-10:29Z root-cause investigation (read-only on the host)"
+  plan_refs: [W1-T1054, W1-T2749, W1-T5732, W1-T490]
+  files: [deploy/entrypoint.sh, docs/forensics/entrypoint.md, test/entrypoint-boot.test.ts]
+  status: queued
+  priority: 0
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only):
+    - 08:22:44 core (pid 496048) wrote daemon_selfrestart_for_freshness (old_sha 52c19d0, new_sha df4b31d) and exited 75.
+    - The daemon checkout's HEAD reflog has no entry between 05:38:35 (checkout to 52c19d0) and 10:29:06 (checkout
+      52c19d0 -> 32cfb064f). So no boot from 08:22:44 to 10:29 got past the checkout.
+    - docker events: every start died exit 1 within 0.84-1.96 s; the restart throttle (120 s) never ran, so the death is in
+      the entrypoint, before `rmd daemon`. No daemon.* row came from any revived container in that window. The reviver's
+      `docker rm -f` destroyed every crashed container's log, so the error text itself is gone.
+    - state/recovered-feedback/2026-10-15-entrypoint/ was created at 10:28:42 holding 45 plan/feedback/incident-*.yaml
+      files (mtimes 06:19-08:13). Each one's `git hash-object` differs from its blob at 32cfb064f; 42 were landed by #11901
+      (06:06), 3 by #11946 (07:48). The next revive, at 10:29:04, booted, with no "clearing untracked" line in its log.
+    - Example diff, incident-fc02119ad9d1b757.yaml: landed ts 06:17:14 Count 1; local ts 08:10:31 Count 8 (sre_lane.filed
+      08:11:25, count 8). incident-04ed80b8cbe6d7d0.yaml: landed ts 04:41:37 (#11901, 06:06); local ts 06:40:40.
+    READ at origin/main 8b45ddbe7, deploy/entrypoint.sh:
+    - clear_redundant_untracked removes an untracked path only when the incoming target adds it with identical bytes; a
+      differing one is logged "leaving untracked ... DIFFERENT bytes" and kept.
+    - checkout_target then runs `git checkout --detach`, which refuses to overwrite the untracked file, and dies
+      "cannot check out main". sync_tree runs on every boot and on every in-container freshness restart, so a kept file
+      refuses every boot until a human removes it. W1-T1054 recorded the same class (identical bytes) taking the fleet
+      down for hours.
+    INFERRED: leaving a differing file protects nothing. No boot can proceed past it, and the bytes can be kept elsewhere.
+  design: |
+    In clear_redundant_untracked, a path the incoming target adds with DIFFERENT bytes goes to move_untracked_aside.
+    It moves the file to $CONFIG_ROOT/state/recovered-untracked/<UTC stamp>-<pid>/<path> (same filesystem, a rename), logs
+    the move by name, and appends an entrypoint.untracked_moved_aside ledger row with path, moved_to, local_blob,
+    incoming_blob and the reason. If the move fails, the file stays in place and the checkout refuses with CHECKOUT FAILED
+    exactly as before. Identical bytes are still cleared (W1-T1054), and an unreadable incoming blob is still left.
+  acceptance:
+    - claim: "an untracked file the incoming commit adds with different bytes is moved under state/recovered-untracked with its bytes intact, and the boot lands on the incoming commit"
+      proof: "grep: W1-T9623: a differing untracked file at an incoming path is moved aside byte for byte and the boot proceeds in test/entrypoint-boot.test.ts"
+    - claim: "the move is recorded as an entrypoint.untracked_moved_aside ledger row carrying both blobs and the reason"
+      proof: "grep: W1-T9623: a moved-aside file is written to the ledger with both blobs and the reason in test/entrypoint-boot.test.ts"
+    - claim: "a move that cannot be made still refuses the checkout and leaves the file and HEAD untouched"
+      proof: "grep: W1-T9623: when the move aside cannot be made, the checkout still refuses and the file stays put in test/entrypoint-boot.test.ts"
+  falsifier: |
+    Restore the "leaving untracked ... DIFFERENT bytes" branch: the boot exits non-zero, HEAD stays on the old sha, no ledger
+    row is written, and the three W1-T9623 tests fail.
