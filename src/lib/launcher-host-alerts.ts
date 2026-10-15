@@ -2,7 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { githubSlugOf, REFUSAL_ESCALATE_AT, REFUSAL_PERSISTING_AT } from "./deployer.js";
 import { escalate, ghIssueGateway, type Escalation, type EscalationOption, type IssueGateway } from "./escalate.js";
 import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, signAppJwt } from "./github-app.js";
@@ -349,21 +349,14 @@ if (!res.ok || typeof body.token !== "string") {
 process.stdout.write(JSON.stringify({ token: body.token }));
 `;
 
-export interface HostTokenDeps {
-  env: NodeJS.ProcessEnv;
-  readKey: (path: string) => string;
-  spawn: SpawnSyncFn;
-  now: () => number;
-  /** The exchange endpoint for an installation id; GitHub's, outside tests. */
-  exchangeUrl: (installationId: string) => string;
-}
-
-const realTokenDeps: HostTokenDeps = {
-  env: process.env,
-  readKey: (path) => readFileSync(path, "utf8"),
+/** The token seams' production values; a test overrides any of them. */
+const realTokenSeams = {
+  env: process.env as NodeJS.ProcessEnv,
+  readKey: (path: string): string => readFileSync(path, "utf8"),
   spawn: realSpawnSync,
-  now: Date.now,
-  exchangeUrl: (id) => `https://api.github.com/app/installations/${encodeURIComponent(id)}/access_tokens`,
+  clock: systemClock as Clock,
+  /** The exchange endpoint for an installation id; GitHub's, outside tests. */
+  exchangeUrl: (id: string): string => `https://api.github.com/app/installations/${encodeURIComponent(id)}/access_tokens`,
 };
 
 /**
@@ -371,15 +364,15 @@ const realTokenDeps: HostTokenDeps = {
  * GH_APP_INSTALLATION_ID and the key at GH_APP_PRIVATE_KEY_PATH when all three are set, else
  * GH_TOKEN. Throws naming what is missing or what failed; never logs either secret.
  */
-export function hostGithubToken(deps: Partial<HostTokenDeps> = {}): string {
-  const d = { ...realTokenDeps, ...deps };
+export function hostGithubToken(seams: Partial<typeof realTokenSeams> = {}): string {
+  const d = { ...realTokenSeams, ...seams };
   const appId = d.env[GH_APP_ID_ENV];
   const installationId = d.env[GH_APP_INSTALLATION_ID_ENV];
   const keyPath = d.env[GH_APP_PRIVATE_KEY_PATH_ENV];
   if (appId && installationId && keyPath) {
     let jwt: string;
     try {
-      jwt = signAppJwt(appId, d.readKey(keyPath), d.now);
+      jwt = signAppJwt(appId, d.readKey(keyPath), () => d.clock.now());
     } catch (err) {
       throw new Error(`the App key at ${keyPath} could not sign a JWT: ${(err as Error).message}`);
     }
@@ -422,21 +415,23 @@ export function realHostDirectDelivery(stateDir: string): HostDirectDelivery {
   };
 }
 
-export interface HostPostDeps {
-  token: () => string;
-  repo: () => { owner: string; repo: string };
-  /** The needs-human transport for owner/repo, its `gh` children carrying `env` (the host token). */
-  issues: (owner: string, repo: string, env: NodeJS.ProcessEnv) => IssueGateway;
-}
-
 /** One escalation through `escalate` as the host: its dedup searches the open needs-human issues
  *  for the same task id and title first, so an issue the daemon already opened takes this as a
  *  comment instead of a duplicate. Returns the issue url (`""` when escalate opened none). */
-export function postAsHost(stateDir: string, e: Escalation, deps: Partial<HostPostDeps> = {}): string {
-  const token = (deps.token ?? hostGithubToken)();
-  const { owner, repo } = (deps.repo ?? hostAlertRepo)();
+export function postAsHost(
+  stateDir: string,
+  e: Escalation,
+  seams: {
+    token?: () => string;
+    repo?: () => { owner: string; repo: string };
+    /** The needs-human transport for owner/repo, its `gh` children carrying `env` (the host token). */
+    issues?: (owner: string, repo: string, env: NodeJS.ProcessEnv) => IssueGateway;
+  } = {},
+): string {
+  const token = (seams.token ?? hostGithubToken)();
+  const { owner, repo } = (seams.repo ?? hostAlertRepo)();
   const env = { ...process.env, GH_TOKEN: token };
-  const issues = (deps.issues ?? ((o: string, r: string, childEnv: NodeJS.ProcessEnv) =>
+  const issues = (seams.issues ?? ((o: string, r: string, childEnv: NodeJS.ProcessEnv) =>
     ghIssueGateway(o, r, { exec: (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: childEnv }) })))(owner, repo, env);
   return escalate(e, { issues, ledgerPath: join(stateDir, LEDGER_FILENAME), runId: e.runId ?? e.taskId });
 }

@@ -64,9 +64,11 @@ function pending(stateDir: string): SpoolEntry[] {
   return readdirSync(dir).filter((n) => n.endsWith(".json")).map((n) => JSON.parse(readFileSync(join(dir, n), "utf8")) as SpoolEntry);
 }
 
-function ledgerRows(stateDir: string): Array<Record<string, unknown>> {
+/** The host_escalation.delivered rows the module wrote under `stateDir`. */
+function deliveredRows(stateDir: string): Array<Record<string, unknown>> {
   const path = join(stateDir, "ledger.ndjson");
-  return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+  const rows = existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+  return rows.filter((r) => r.step === HOST_ESCALATION_STEPS.delivered);
 }
 
 /** The host's delivery, in memory: what docker says about the container and what `escalate` posted. */
@@ -122,7 +124,7 @@ test("a down-daemon alert reaches github without the daemon, and the daemon does
   // The spool holds nothing for the daemon to post, and the delivery is recorded as the drain's own.
   assert.deepEqual(pending(dir), []);
   assert.equal(deliveredEscalationUrl(dir, identity), ISSUE);
-  const delivered = ledgerRows(dir).filter((r) => r.step === HOST_ESCALATION_STEPS.delivered);
+  const delivered = deliveredRows(dir);
   assert.equal(delivered.length, 1);
   assert.equal(delivered[0].issue_url, ISSUE);
   assert.equal(delivered[0].direct, true);
