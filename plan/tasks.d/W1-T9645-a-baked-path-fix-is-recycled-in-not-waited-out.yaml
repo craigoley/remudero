@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-15: the W1-T9623 boot fix sat unshipped behind the deploy-logic lag deferral while core was recycled by hand"
   plan_refs: [W1-T9623, W1-T6249, W1-T6282, W1-T3240, W1-T9094]
-  files: [deploy/install-host-units.sh, test/a-baked-path-fix-is-recycled-in-not-waited-out.test.ts]
+  files: [deploy/install-host-units.sh, test/a-baked-path-fix-is-recycled-in-not-waited-out.test.ts, test/a-busy-daemon-tree-behind-on-deploy-logic-reaches-the-drain-recycle.test.ts]
   status: queued
   priority: 1
   attempts: 0
