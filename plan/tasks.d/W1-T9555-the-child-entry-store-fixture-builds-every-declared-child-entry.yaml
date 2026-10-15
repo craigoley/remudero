@@ -6,11 +6,11 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 4.00
-  risk: low  # one test file's fixture; no production code
+  risk: high  # Rule 19: one concern (fixtures read CHILD_ENTRIES) across three test files; no production code
   band_meaning: blast-radius
   origin: "operator 2026-10-14: the #11758/#11744 main red that W1-T9532 misfiled as a flake"
   plan_refs: [W1-T9374, W1-T9082, W1-T9532]
-  files: [test/the-core-fleet-fills-the-child-entry-store.test.ts]
+  files: [test/the-core-fleet-fills-the-child-entry-store.test.ts, test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -29,14 +29,29 @@
     2. `WORKER_ENTRIES` stay unwritten: the build already skips a declared worker missing from a fixture tree.
     3. A test asserts that a populated tree holds every `CHILD_ENTRIES` source, so a fixture that drifts from the
        real list fails by name instead of as a store build error.
-    Out of scope (observed, not filed here): other fixtures that copy the build script and hand-write
-    src/run-child-main.ts, e.g. test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts and
-    test/a-run-child-owns-its-github-token-and-credential-socket.test.ts.
+    4. AMENDED 2026-10-14 (operator "go"): the two other fixtures on main that copy the real build script and
+       hand-write every child entry source get the same treatment.
+       - `makeTree()` in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts writes
+         src/run-task.ts and src/run-child-main.ts by hand beside its marker `check-proof-main` source. It writes a
+         stub for every other `CHILD_ENTRIES` source instead.
+       - The W1-T8775 CLI test in test/a-daemon-child-entry-is-precompiled.test.ts writes all three sources by hand.
+         It also pins the manifest names and the `--check` lines to the literal list. It writes a stub per
+         `CHILD_ENTRIES` source and asserts the names and lines from `CHILD_ENTRIES` in declared order.
+       #11744 had to touch both files by hand when it added run-child.
+    Not in scope: test/a-run-child-runs-from-an-engine-tree-pinned-to-its-revision.test.ts (it only passes the
+    "src/run-child-main.ts" path to the argv builders with a fake currency, and builds nothing) and
+    test/a-run-child-owns-its-github-token-and-credential-socket.test.ts (it copies the real src/ tree and builds
+    the one run-child entry by name). The original note named these two by mistake, and neither writes a child
+    entry source.
   acceptance:
     - claim: "the store-fill fixture writes every declared child entry source from CHILD_ENTRIES"
       proof: 'grep: test("W1-T9555: the store-fill fixture writes every declared child entry source" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
     - claim: "the fixture reads the real CHILD_ENTRIES list rather than hard-coding entries"
       proof: 'grep: import { CHILD_ENTRIES } from "\.\./scripts/build-child-entries\.mjs" in test/the-core-fleet-fills-the-child-entry-store.test.ts'
+    - claim: "the shared-bundle fixture writes its non-marker child entry sources from CHILD_ENTRIES"
+      proof: 'grep: CHILD_ENTRIES in test/every-worktree-at-one-source-hash-shares-one-built-bundle.test.ts'
+    - claim: "the build CLI test derives its sources, manifest names and check lines from CHILD_ENTRIES"
+      proof: 'grep: CHILD_ENTRIES\.map( in test/a-daemon-child-entry-is-precompiled.test.ts'
   falsifier: |
     Delete the CHILD_ENTRIES loop from populate() and restore one hand-written entry: the new test names the
     missing source and fails. At origin/main the fixture has no CHILD_ENTRIES import and no such test.
