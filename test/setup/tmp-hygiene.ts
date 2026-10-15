@@ -145,7 +145,7 @@ if (process.env.NODE_V8_COVERAGE !== undefined) {
 // RMD_GH_TRANSPORT_FLOOR=enforce. Inherited, it refused a suite's second gh-shim read inside 180 s:
 // test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts went 5 of 11 red on host env alone.
 // A test of a mode sets it itself, after this runs. Main thread only: under SHARE_ENV a worker's
-// delete would clear the mode its parent test chose.
+// delete would clear the mode its parent test chose (#11882).
 if (isMainThread) delete process.env.RMD_GH_TRANSPORT_FLOOR;
 
 /**
