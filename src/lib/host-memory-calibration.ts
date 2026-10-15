@@ -149,7 +149,8 @@ const finite = (n: unknown): n is number => typeof n === "number" && Number.isFi
 const validForecast = (o: MemoryForecast): boolean => o !== null && typeof o === "object" &&
   [o.at, o.projectedMib, o.initialMib].every(finite) && o.quantile >= 0.5 && o.quantile < 1 &&
   typeof o.id === "string" && o.id.length > 0 && typeof o.generation === "string" && o.generation.length > 0 &&
-  typeof o.scenario === "string" && o.scenario.length > 0 && typeof o.model === "string" && o.model.length > 0 && o.basis === "cgroup-current-mib";
+  ["serve-steady", "serve-stopped", "serve-cold-start", "unknown"].includes(o.scenario) &&
+  [JOINT_MODEL, "legacy-one-tail-fallback", "unavailable"].includes(o.model) && o.basis === "cgroup-current-mib";
 
 export function readCalibrationState(stateDir: string, io: Pick<CalibrationIo, "read"> = defaultIo): CalibrationState {
   const raw = JSON.parse(io.read(calibrationStatePath(stateDir))) as CalibrationState;

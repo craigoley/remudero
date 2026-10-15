@@ -55,12 +55,14 @@ test("W1-T8879: the real config loader refuses unsupported joint enforcement and
   policy.mode.value = "enforce";
   policy.calibrationStateDir = { value: stateDir, origin: "proposal" };
   const path = join(repo.dir, "joint.yaml"); writeFileSync(path, stringifyYaml(doc));
+  const observe = (at: number) => ({ at, mib: 1000, peakMib: 3000, generation: "g1" });
   writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
-  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now)), /joint enforce refused/);
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now), observe), /joint enforce refused/);
   state.outcomes = state.outcomes.map(o => ({ ...o, miss: false, observedMaxMib: 3000 }));
   writeFileSync(calibrationStatePath(stateDir), JSON.stringify(state));
-  assert.equal(loadHostMemoryBudgetPolicy(path, fixedClock(now)).claimModel, JOINT_MODEL);
-  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now + CALIBRATION_DAY_MS)), /joint enforce refused/, "qualification is not cached into permanent permission");
+  assert.equal(loadHostMemoryBudgetPolicy(path, fixedClock(now), observe).claimModel, JOINT_MODEL);
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now), at => ({ ...observe(at), generation: "g2" })), /current generation/);
+  assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now + CALIBRATION_DAY_MS), observe), /joint enforce refused/, "qualification is not cached into permanent permission");
   writeFileSync(calibrationStatePath(stateDir), "{}");
   assert.throws(() => loadHostMemoryBudgetPolicy(path, fixedClock(now)), /invalid calibration state/);
   repo.cleanup();

@@ -108,6 +108,8 @@ export type ShadowMode = (typeof SHADOW_MODES)[number];
 export const HOST_MEMORY_BUDGET_ORIGIN = "proposal";
 
 export interface HostMemoryBudgetPolicy {
+  /** Derived afresh by the loader, never parsed as operator-supplied permission. */
+  jointQualification?: { generation: string; scenarios: string[] };
   claimModel?: "legacy-one-tail" | typeof JOINT_MODEL;
   jointQuantile?: number;
   maxBacktestMissRate?: number;
@@ -221,7 +223,8 @@ export function hostMemoryBudgetModeFor(policy: Pick<HostMemoryBudgetPolicy, "mo
 const cachedPolicies = new Map<string, HostMemoryBudgetPolicy>();
 
 /** The shipped `sweep.hostMemoryBudget`, read once per process. Throws on an invalid block; the recorder catches it. */
-export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath(), clock: Clock = systemClock): HostMemoryBudgetPolicy {
+export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath(), clock: Clock = systemClock,
+  observe: typeof kernelMemoryObservation = kernelMemoryObservation): HostMemoryBudgetPolicy {
   let policy = cachedPolicies.get(path);
   if (!policy) {
     const doc = mapping("policy.yaml", parseYaml(readFileSync(path, "utf8")));
@@ -230,8 +233,11 @@ export function loadHostMemoryBudgetPolicy(path: string = installPolicyPath(), c
   }
   if (policy.claimModel === JOINT_MODEL && (policy.mode === "enforce" || Object.values(policy.classModes ?? {}).includes("enforce"))) {
     if (!policy.calibrationStateDir) throw new Error("joint enforce refused: calibrationStateDir is missing");
-    const report = calibrationReport(readCalibrationState(policy.calibrationStateDir), clock.now(), policy.jointQuantile, policy.maxBacktestMissRate);
+    const now = clock.now(), state = readCalibrationState(policy.calibrationStateDir), current = observe(now);
+    const report = calibrationReport(state, now, policy.jointQuantile, policy.maxBacktestMissRate);
+    if (current.mib === null || state.generation !== current.generation) throw new Error("joint enforce refused: current generation is not qualified");
     if (!report.qualified) throw new Error(`joint enforce refused: ${report.reasons.join("; ")}; evidence ${policy.calibrationStateDir}`);
+    return { ...policy, jointQualification: { generation: state.generation, scenarios: Object.keys(report.scenarios) } };
   }
   return policy;
 }
@@ -1472,6 +1478,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   };
   const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
+  if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce" &&
+      !policy.jointQualification?.scenarios.includes(inputs.serve.scenario)) throw new Error("joint enforce unavailable: current scenario is not qualified");
   const candidate = jointClaimFor(gathered, ports, policy);
   if (candidate.kind !== "joint") throw new Error(`joint enforce unavailable: ${candidate.reason}`);
   return { ...gathered, jointClaim: candidate, containerLift: { unlearned: "joint model is not the legacy pressure cohort" } };
