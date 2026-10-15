@@ -20,7 +20,7 @@ import { test, type TestContext } from "node:test";
 import type { SpawnSyncReturns } from "node:child_process";
 
 import { fixedClock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
+import type { Escalation, IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV } from "../src/lib/github-app.js";
 import {
   deliveredEscalationUrl,
@@ -34,7 +34,9 @@ import {
   hostAlertCommandResult,
   hostAlertRepo,
   hostGithubToken,
+  launcherAlertEscalation,
   launcherAlertIdentity,
+  postAsHost,
   raiseLauncherAlert,
   realHostDirectDelivery,
   type ContainerRunState,
@@ -275,4 +277,39 @@ test("the post goes to the checkout's own github repo, and is refused under the 
   assert.equal(pending(dir).length, 1);
   const stub = (process.env.PATH ?? "").split(":")[0];
   assert.equal(existsSync(join(stub, "probed")), false, "a suite must never probe this machine's docker");
+});
+
+test("the host's post dedups onto an issue the daemon already opened instead of opening a second", (t) => {
+  const dir = scratch(t, "host-post");
+  const e = launcherAlertEscalation({
+    v: 1, instance: INSTANCE, condition: "crash-loop", count: 1, firstAt: "2026-10-15T08:43:51Z", lastAt: "2026-10-15T08:43:51Z",
+    firstMessage: LOOP.message, lastMessage: LOOP.message,
+  });
+  const open: Array<OpenIssue & { comments: string[] }> = [];
+  const tokens: Array<string | undefined> = [];
+  const gateway = (): IssueGateway => ({
+    create: (title, body) => {
+      const url = `https://github.com/craigoley/remudero/issues/${11965 + open.length}`;
+      open.push({ number: 11965 + open.length, url, title, body, comments: [] });
+      return url;
+    },
+    listOpen: () => open,
+    comment: (url, body) => open.find((i) => i.url === url)?.comments.push(body),
+  });
+  const deps = {
+    token: () => "ghs_host",
+    repo: () => ({ owner: "craigoley", repo: "remudero" }),
+    issues: (owner: string, repo: string, env: NodeJS.ProcessEnv) => {
+      assert.equal(`${owner}/${repo}`, "craigoley/remudero");
+      tokens.push(env.GH_TOKEN);
+      return gateway();
+    },
+  };
+  const first = postAsHost(dir, e, deps);
+  assert.equal(first, "https://github.com/craigoley/remudero/issues/11965");
+  assert.deepEqual(tokens, ["ghs_host"], "the gh children carry the host's own token");
+  // The same escalation again (the daemon's drain, or a second host attempt): one issue, a comment.
+  const second = postAsHost(dir, { ...e, detail: `${e.detail}\n(observed again)` }, deps);
+  assert.equal(second, first);
+  assert.equal(open.length, 1, "never a second issue for one crash loop");
 });

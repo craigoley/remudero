@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "./clock.js";
 import { githubSlugOf, REFUSAL_ESCALATE_AT, REFUSAL_PERSISTING_AT } from "./deployer.js";
-import { escalate, ghIssueGateway, type Escalation, type EscalationOption } from "./escalate.js";
+import { escalate, ghIssueGateway, type Escalation, type EscalationOption, type IssueGateway } from "./escalate.js";
 import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, signAppJwt } from "./github-app.js";
 import { ghExec } from "./github-transport.js";
 import {
@@ -417,13 +417,28 @@ export function realHostDirectDelivery(stateDir: string): HostDirectDelivery {
     containerState: (instance) => dockerContainerState(instance),
     post: (e) => {
       if (isTestRunner()) throw new Error(`refused under the test runner: the host posting ${e.taskId} would reach the live repo`);
-      const token = hostGithubToken();
-      const { owner, repo } = hostAlertRepo();
-      const env = { ...process.env, GH_TOKEN: token };
-      const issues = ghIssueGateway(owner, repo, { exec: (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env }) });
-      return escalate(e, { issues, ledgerPath: join(stateDir, LEDGER_FILENAME), runId: e.runId ?? e.taskId });
+      return postAsHost(stateDir, e);
     },
   };
+}
+
+export interface HostPostDeps {
+  token: () => string;
+  repo: () => { owner: string; repo: string };
+  /** The needs-human transport for owner/repo, its `gh` children carrying `env` (the host token). */
+  issues: (owner: string, repo: string, env: NodeJS.ProcessEnv) => IssueGateway;
+}
+
+/** One escalation through `escalate` as the host: its dedup searches the open needs-human issues
+ *  for the same task id and title first, so an issue the daemon already opened takes this as a
+ *  comment instead of a duplicate. Returns the issue url (`""` when escalate opened none). */
+export function postAsHost(stateDir: string, e: Escalation, deps: Partial<HostPostDeps> = {}): string {
+  const token = (deps.token ?? hostGithubToken)();
+  const { owner, repo } = (deps.repo ?? hostAlertRepo)();
+  const env = { ...process.env, GH_TOKEN: token };
+  const issues = (deps.issues ?? ((o: string, r: string, childEnv: NodeJS.ProcessEnv) =>
+    ghIssueGateway(o, r, { exec: (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: childEnv }) })))(owner, repo, env);
+  return escalate(e, { issues, ledgerPath: join(stateDir, LEDGER_FILENAME), runId: e.runId ?? e.taskId });
 }
 
 /** The launcher saw the step succeed: end the run, and withdraw or close what it escalated. */
