@@ -157,7 +157,7 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
   for (const name of ["evidence-coverage", "selector-shadow", "machine-judge"] as const) {
     const pass = await buildRegisteredGarden(name, ctx);
     assert.equal(typeof pass.due, "function", `${name} exposes a due probe`);
-    assert.equal(pass.due!(), true, `${name} with nothing recorded is due`);
+    assert.equal(await pass.due!(), true, `${name} with nothing recorded is due`);
   }
   writeFileSync(evidenceCoverageStatePath(stateDir), JSON.stringify({ version: 1, cells: {}, lastPassAt: new Date().toISOString() }));
   assert.equal((await buildRegisteredGarden("evidence-coverage", ctx)).due!(), false, "measured just now");
@@ -166,9 +166,9 @@ test("the daemon builds due probes for evidence-coverage, selector-shadow and ma
     lastPassAt: new Date(Date.now() - 60_000).toISOString(), lastNewAt: new Date(Date.now() - 3_600_000).toISOString(),
     inputs: machineJudgeInputs(process.cwd(), stateDir),
   }));
-  assert.equal(judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
+  assert.equal(await judge.due!(), false, "nothing new for an hour, and the inputs are unchanged");
   writeFileSync(join(stateDir, "operator-releases.json"), JSON.stringify({ releases: { "W1-T1": "2026-10-09T12:00:00Z" } }));
-  assert.equal(judge.due!(), true, "an operator release is judged now");
+  assert.equal(await judge.due!(), true, "an operator release is judged now");
 });
 
 test("the daemon's export garden paces a pending PR on the board's open-PR snapshot", async (t) => {
