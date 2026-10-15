@@ -15068,10 +15068,10 @@ export async function runSweep(
       }
     },
   };
+  sweepDeps.markPrelude?.("sweep_entry");
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
-  sweepDeps.markPrelude?.("sweep_entry");
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
