@@ -548,15 +548,16 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
 }
 
 /** The daemon's deps (src/run-task.ts): the windowed ledger union, refused whole when any file in the
- *  window is unreadable, and feedback filed into the daemon's own checkout. */
-export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"] }): EvidenceCoverageInput {
+ *  window is unreadable, and feedback filed into the daemon's own checkout. W1-T9695: a status update
+ *  queues under `landingStateRoot` for the per-poll async sweep, so no plan-PR preflight runs on the loop. */
+export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"]; landingStateRoot?: string }): EvidenceCoverageInput {
   return {
     stateDir: input.stateDir,
     readRows: (sinceTs) => {
       const read = readLedgerUnionRecordsSync(input.stateDir, { sinceTs, step: EVIDENCE_STEPS, refuseIncomplete: true });
       return read.ok ? { ok: true, rows: read.rows } : { ok: false, reason: `ledger union incomplete: ${read.unread.length} unread` };
     },
-    file: feedbackEvidenceCoverageFiler(input.root),
+    file: feedbackEvidenceCoverageFiler(input.root, input.landingStateRoot === undefined ? {} : { stateRoot: input.landingStateRoot }),
     log: input.log,
   };
 }

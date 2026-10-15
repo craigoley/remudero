@@ -2,10 +2,11 @@ import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
 import { childEntryArgv, type ChildEntryStoreOptions } from "./child-entry-argv.js";
 import { fileURLToPath } from "node:url";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
@@ -139,17 +140,18 @@ export function defaultProofRunnerAsync(
 ): Promise<OpenPullRequestProofResult> {
   const timeoutMs = opts.timeoutMs ?? PR_OPEN_PROOF_TIMEOUT_MS;
   return new Promise((resolve) => {
-    let timedOut = false;
     const child = execFile(
       opts.bin ?? PROOF_NODE,
       proofArgs(proof, mergeBase, target, opts.bin, undefined, opts.store),
       { cwd: repoRoot, encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER, env: proofEnv() },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
-        clearTimeout(timer);
+        bound.cancel();
+        const timedOut = bound.timedOut;
         // A numeric code is an exit; a string code (ENOENT, a buffer overflow) is a child that never
         // ran to completion; neither, with a signal, is a kill. Only the second carries `error`.
+        // W1-T9651: a child stopped at its bound never reads as a clean exit, even when it exited 0.
         const code = err?.code;
-        const status = err ? (typeof code === "number" ? code : null) : 0;
+        const status = timedOut ? null : err ? (typeof code === "number" ? code : null) : 0;
         const spawnFailure = typeof code === "string" ? err?.message : undefined;
         resolve({
           status,
@@ -160,11 +162,7 @@ export function defaultProofRunnerAsync(
         });
       },
     );
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child, opts.graceMs);
-    }, timeoutMs);
+    const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
   });
 }
 

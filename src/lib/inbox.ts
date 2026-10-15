@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -20,14 +21,14 @@ import { isGhRateLimitError } from "./status.js";
 /** A draft-lint finding: the linter's own `LintViolation`s plus this rung's `draft-parse` finding. Structurally typed
  *  so both flow through one path without widening the linter's closed union. */
 export type DraftLintViolation = RelintViolation;
-import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
+import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadStoreDeps } from "./inbox-thread.js";
 import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
@@ -2148,6 +2149,24 @@ function draftMissingPathViolations(task: import("./plan.js").Task, facts: Draft
     message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, a slug-named test, or a CREATES: declaration` }));
 }
 
+/** W1-T9307: a call-site-shaped proof (`grep: <sym>( in src/<x>.ts`) must name a caller the tree HOLDS. A path absent from
+ *  the checkout, or declared on a `CREATES:` line, is a module under test and never evidence the program reaches it. */
+function draftCallSiteAbsentViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
+  const creates = draftCreatedPaths(task);
+  const out: DraftLintViolation[] = [];
+  for (const criterion of task.acceptance ?? []) {
+    const m = /^grep:\s*(.+?)\s+in\s+(\S+)\s*$/i.exec(String(criterion.proof ?? "").trim());
+    if (!m || !m[1].includes("(")) continue;
+    const path = m[2];
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) continue;
+    const created = creates.has(path);
+    if (!created && facts.moduleExists(path)) continue;
+    out.push({ check: "draft-call-site-absent", severity: "block",
+      message: `${task.id}: call-site proof ${JSON.stringify(criterion.proof)} names ${JSON.stringify(path)}, which ${created ? "is declared on a CREATES: line" : "the tree does not hold"}; a new file is never the caller. Name an existing src file that already calls the symbol, or drop the claim — never invent a caller file or add one to files:` });
+  }
+  return out;
+}
+
 /** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
 export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
   return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
@@ -2195,6 +2214,7 @@ export function lintDraftedFragment(
   const directoryGuidance = "; name the files the task changes, never a directory";
   for (const task of tasks) {
     violations.push(...draftMissingPathViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
+    violations.push(...draftCallSiteAbsentViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
     violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
@@ -2218,9 +2238,38 @@ export function lintDraftedFragment(
   return violations;
 }
 
+/** W1-T9307: for every `[call-site]` violation, the callers the TREE holds (via {@link callSiteCandidates}), so the drafter
+ *  — which cannot see the tree — picks a real path or drops the claim. Empty when no call-site violation fired. */
+function draftCallSiteCandidateLines(fragmentYaml: string, violations: DraftLintViolation[], root: string): string[] {
+  const lines: string[] = [];
+  let declared: ReadonlyMap<string, string[]> = new Map();
+  try {
+    declared = new Map(parseTasksFromYaml(fragmentYaml, "inbox relint").map((t) => [t.id, t.files ?? []]));
+  } catch {
+    declared = new Map(); // an unparseable fragment is draft-parse's finding; no declared files to offer
+  }
+  for (const v of violations) {
+    if (v.check !== "call-site") continue;
+    const taskId = /^task (\S+) adds /.exec(v.message)?.[1];
+    for (const m of v.message.matchAll(/new exported value (\S+) in (\S+?)(?:,|\s+but\b)/g)) {
+      const found = callSiteCandidates(root, m[1], { exclude: m[2] });
+      lines.push(found.length > 0
+        ? `Existing src files that already call ${m[1]}( — name ONE of these in the call-site proof: ${found.join(", ")}`
+        : `No existing src file calls ${m[1]}( — remove the claim (and the src path from files: if the task adds no src module); do NOT invent a caller file.`);
+    }
+    for (const m of v.message.matchAll(/new module (\S+?)(?:,|\s+but\b)/g)) {
+      const found = callSiteCandidates(root, undefined, { exclude: m[1], declared: taskId ? declared.get(taskId) : undefined });
+      lines.push(found.length > 0
+        ? `Existing declared src files you may name as the caller of ${m[1]}: ${found.join(", ")}`
+        : `No existing src file is declared that could call ${m[1]} — drop the call-site claim and remove ${m[1]} from files: if the task adds no src module; do NOT invent a caller file.`);
+    }
+  }
+  return lines.length > 0 ? [...lines, ""] : [];
+}
+
 /** The redraft prompt: the failed fragment + its violations + the Rule-19 resolution doctrine (the #588 merits test),
  *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
-export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
+export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[], root: string = HARNESS_ROOT): string {
   return [
     `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + one-line summary between the SAME literal markers as before:`,
     "",
@@ -2236,6 +2285,7 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
     "",
     ...relintGuidanceLines(violations),
     "",
+    ...draftCallSiteCandidateLines(fragmentYaml, violations, root),
     "The fragment you must fix:",
     fragmentYaml,
   ].join("\n");
@@ -2468,24 +2518,19 @@ export function gitGrepAnchorTrueAsync(
       ? [...new Set(pass.anchors.filter((a) => (a.path || null) === (anchor.path || null) && batchableAnchor(a)).map((a) => a.pattern))]
       : [anchor.pattern];
     const args = ["grep", "-I", ...(grouped ? ["--no-color", "--no-line-number", "--no-column", "--no-heading", "--no-break", "-h"] : ["-q"]), ...patterns.flatMap((pattern) => ["-e", pattern]), ref, ...(anchor.path ? ["--", anchor.path] : [])];
-    let timedOut = false;
     let done = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let bound: LoopBound | undefined;
     const child = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
       done = true;
-      clearTimeout(timer);
-      if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
+      bound?.cancel();
+      if (bound?.timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
       if (!err) return resolve(grouped ? stdout : "matched");
       // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
       if ((err as { code?: unknown }).code === 1) return resolve("");
       reject(err);
     });
     if (done) return;
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child);
-    }, timeoutMs);
+    bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
   });
   if (grouped && pending === undefined) batches!.set(groupKey, result);
   return result.then(

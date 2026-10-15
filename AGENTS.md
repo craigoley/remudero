@@ -44,6 +44,9 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   restored is the evidence it is load-bearing.**
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.**
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
   `run-<taskId>-*` branch — never from ledger verdict lines.**
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`

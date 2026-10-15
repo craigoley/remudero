@@ -52,14 +52,39 @@ non-target byte. Public projections, serialized bindings, diagnostics and
 success/incomplete receipts expose none of those operational paths or values;
 publication permission remains `not-granted`.
 
-This source step does not upgrade shell `mode` handling or qualify all daemon,
-lifecycle and effect consumers. Old shell binaries still reject `mode`; do not
-give them new safety grammar or swap their authoritative file during active work.
+W1-T9559 did not upgrade shell `mode` handling or qualify all daemon, lifecycle
+and effect consumers. W1-T9571 supplies the narrow shell compatibility below;
+old shell binaries still reject `mode`. Do not give old binaries new safety
+grammar or swap their authoritative file during active work.
 WORKERS CONTINUE for isolated source validation. Actual selection/replacement,
 credential mounts and incompatible shared state still need the separate human
 drain/stop approvals below. Admission remains opt-in SHADOW ONLY, with owner/admin
 override and the complete Apache public implementation preserved. No schedule,
 live policy/configuration, deployment or private-value move is included.
+
+### Lifecycle mode grammar
+
+W1-T9571 extends the existing installer and recycler case blocks to validate one
+optional `mode` field in the selected row. They accept exactly case-sensitive
+`shadow` or `live`, bare or in balanced double quotes, with the existing inline
+comment and trailing-whitespace handling. Empty values, single or broken quotes,
+other words, extra value text and duplicate mode fields (even equal duplicates)
+refuse before installer artifact writes or recycler Docker/Azure effects.
+Unrelated unknown fields still refuse; this is not a general YAML/schema upgrade.
+
+Mode is carried registry metadata, not authority. Recognition adds no runtime
+environment override, overlay selection, credential permission, admission
+activation or private-source publication permission. An absent mode preserves
+legacy rendered output and recycle effects; owner-authored PAUSE/STOP holds,
+instance identity and existing lifecycle guards remain independent and intact.
+
+The behavioral suites execute the actual scripts with system Bash 3.2, temporary
+rendering/state/lock roots and recording effect transports. They compare valid
+mode against absent-mode output/effects, trap invalid values before effects and
+remove/restore the real recognition and validation arms. Shell branches are
+qualified by those effects and falsifiers, not by TypeScript LCOV instrumentation.
+This does not qualify every selected-path, digest or daemon/effect consumer, and
+does not install or recycle a live instance. Admission remains opt-in SHADOW ONLY.
 
 ### Explicit proposal writer target
 
@@ -106,8 +131,8 @@ Operational fields remain hashed but are not projected. Legacy parser/route
 behavior is unchanged when explicit selection is absent.
 
 This is a tested reader window, not compatibility with arbitrary future inputs.
-Old shell installers/recyclers currently reject mode; they are not upgraded by
-this task. Do not hand a new safety grammar to old binaries or replace their
+Shell installers/recyclers predating W1-T9571 reject mode; the reader/writer
+contract alone does not upgrade them. Do not hand new safety grammar to old binaries or replace their
 shared legacy file under running work. Later lifecycle/daemon/effect integration
 requires separately filed scope and normal merge. Untrusted workers/proofs must
 not receive the private overlay merely because a mount is read-only: read-only
