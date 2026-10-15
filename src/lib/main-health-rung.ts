@@ -9,6 +9,8 @@ import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-r
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
@@ -1025,6 +1027,29 @@ function metPrFields(lookup: MetPrLookup | undefined): Record<string, unknown> {
   return lookup?.unreadable ? { met_prs_unreadable: lookup.unreadable } : {};
 }
 
+interface WorkflowEvidence {
+  readonly required: string;
+  readonly carries: Set<string>;
+  readonly carriesNone: Set<string>;
+}
+
+/** W1-T9690 — the one learner the walk back and a red head share: true when the run's jobs hold a
+ *  required check; a completed run with jobs but none required marks its workflow as carrying none. */
+function learnWorkflow(
+  learned: WorkflowEvidence,
+  run: MainHealthRunHistoryEntry,
+  jobs: readonly RollupCheckEntry[],
+  required: ReadonlySet<string>,
+): boolean {
+  const workflow = run.workflowName;
+  if (judgedRollup(jobs, required).length > 0) {
+    if (workflow !== undefined) learned.carries.add(workflow);
+    return true;
+  }
+  if (!mainRunIsInProgress(run) && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
+  return false;
+}
+
 /** W1-T7757: a job that reached a conclusion (or a terminal status), as opposed to one still queued or running. */
 function jobConcluded(job: RollupCheckEntry): boolean {
   return (job.conclusion ?? "") !== "" || (job.state ?? "") !== "" || (job.status ?? "").toUpperCase() === "COMPLETED";
@@ -1239,6 +1264,8 @@ export function escalationFor(observation: MainHealthObservation, branch: string
 interface RepairEvidence {
   readonly runHistory?: readonly MainHealthRunHistoryEntry[];
   readonly required: ReadonlySet<string>;
+  /** W1-T9678: the workflows learned to carry the required checks, as the first-red boundary reads them. */
+  readonly requiredWorkflows?: ReadonlySet<string>;
 }
 
 /** One red observation, as the repair lane acts on it. */
@@ -1250,6 +1277,97 @@ interface RepairContext {
   readonly atMs: number;
   readonly red: MainRedSignature;
   readonly evidence?: RepairEvidence;
+}
+
+/** The flake-incident gardener's FLAKE_INCIDENT_MAIN_INHERITED_STEP, spelled here so this module (imported by
+ *  sweep.ts) never loads the gardener's filing graph; a test pins the two equal. */
+export const MAIN_INHERITED_HINT_SOURCE_STEP = "flake_incident.main_inherited";
+const FLAKE_INCIDENT_MAIN_INHERITED_STEP = MAIN_INHERITED_HINT_SOURCE_STEP;
+
+/** W1-T9551: a `flake_incident.main_inherited` row — a red no retry recovered — that this rung has not answered. */
+export interface MainInheritedHint {
+  origin: string;
+  file: string;
+  title: string;
+  prs: number[];
+  prsCount: number;
+}
+
+/** The rows that answer a hint, each once per PR count: covered by a repair, main green on it, or main still red on it. */
+export const MAIN_INHERITED_HINT_STEPS = Object.freeze({
+  covered: "main.health.inherited_hint_covered",
+  resolved: "main.health.inherited_hint_resolved",
+  confirmed: "main.health.inherited_hint_confirmed",
+});
+
+/** Reads only the bytes appended since its last call and parses only hint and answer lines, so a pass
+ *  every two minutes never re-parses the ledger. A file that shrank (compaction) is re-read from 0. */
+export function mainInheritedHintReader(ledgerPath: string): () => { pending: MainInheritedHint[]; torn: number } {
+  let offset = 0;
+  let decoder = new StringDecoder("utf8");
+  let carry = "";
+  let torn = 0;
+  const latest = new Map<string, MainInheritedHint>();
+  const answered = new Map<string, number>();
+  const take = (line: string): void => {
+    if (!line.includes(FLAKE_INCIDENT_MAIN_INHERITED_STEP) && !line.includes("main.health.inherited_hint_")) return;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch (error) {
+      torn++; // counted and returned: a torn line is not an absent one
+      void error;
+      return;
+    }
+    const prsCount = typeof row.prs_count === "number" ? row.prs_count : 0;
+    if (typeof row.origin !== "string") return;
+    if (row.step === FLAKE_INCIDENT_MAIN_INHERITED_STEP && typeof row.file === "string") {
+      if ((latest.get(row.origin)?.prsCount ?? -1) > prsCount) return;
+      const prs = Array.isArray(row.prs) ? row.prs.filter((n): n is number => typeof n === "number") : [];
+      latest.set(row.origin, { origin: row.origin, file: row.file, title: typeof row.title === "string" ? row.title : "", prs, prsCount });
+    } else if (typeof row.step === "string" && row.step.startsWith("main.health.inherited_hint_")) {
+      answered.set(row.origin, Math.max(answered.get(row.origin) ?? -1, prsCount));
+    }
+  };
+  return () => {
+    // Size the descriptor it reads, never the path (CodeQL js/file-system-race): the ledger rotates under the daemon.
+    let fd: number | undefined;
+    try { fd = openSync(ledgerPath, "r"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      const size = fd === undefined ? 0 : fstatSync(fd).size;
+      if (size < offset) {
+        offset = 0;
+        decoder = new StringDecoder("utf8");
+        carry = "";
+        latest.clear();
+        answered.clear();
+      }
+      const chunk = Buffer.alloc(fd !== undefined && size > offset ? 1 << 20 : 0);
+      while (fd !== undefined && offset < size) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
+        if (n <= 0) break;
+        offset += n;
+        const lines = (carry + decoder.write(chunk.subarray(0, n))).split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) take(line);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return { pending: [...latest.values()].filter((h) => (answered.get(h.origin) ?? -1) < h.prsCount), torn };
+  };
+}
+
+/** Whether a repair's red names the hint's test: its `not ok <title>` line, or for a file-level hint, the file. */
+function repairCoversHint(record: MainRepairRecord, hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return record.red?.detail?.includes(`not ok ${hint.title}`) === true;
+  return record.inherited?.testFiles.includes(hint.file) === true;
+}
+
+/** Whether main's own red, read this pass, still fails the hint's test. */
+function redNamesHint(red: MainRedSignature, failures: readonly CiFailure[], hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return red.detail?.includes(`not ok ${hint.title}`) === true;
+  return failures.some((failure) => failure.logTail.includes(hint.file));
 }
 
 function isMainHealthIssue(issue: OpenIssue): boolean {
@@ -1280,7 +1398,23 @@ export function buildMainHealthRung(
   // they crowd the newest completed history, and each one read costs a jobs read. A workflow is
   // passed over only once a run of it with jobs held no required check, and never once one did.
   // Keyed by the required set, so a changed ci-gate list relearns from scratch.
-  let workflowEvidence: { required: string; carries: Set<string>; carriesNone: Set<string> } | undefined;
+  let workflowEvidence: WorkflowEvidence | undefined;
+  const learnedFor = (required: ReadonlySet<string>): WorkflowEvidence => {
+    const key = [...required].sort().join(",");
+    if (workflowEvidence?.required !== key) workflowEvidence = { required: key, carries: new Set(), carriesNone: new Set() };
+    return workflowEvidence;
+  };
+  /** One run's jobs through the per-head cache; a running run is cached only once its required jobs concluded (W1-T7757). */
+  const jobsOf = async (run: MainHealthRunHistoryEntry, required: ReadonlySet<string>): Promise<RollupCheckEntry[]> => {
+    const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
+    const cached = runHistoryCache?.jobsByRunId.get(jobsKey);
+    if (cached) return cached;
+    const jobs = rollupFromJobs(
+      (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+    );
+    if (!mainRunIsInProgress(run) || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+    return jobs;
+  };
   const mergeReader = deps.mergeReader ?? restMergeReader(owner, repo, deps.fetch);
   const readPrFiles =
     deps.readPrFiles ??
@@ -1310,6 +1444,29 @@ export function buildMainHealthRung(
   let ratchetPrUrl: string | undefined;
   let ratchetDeclinedSignature: string | undefined;
   const ratchetOpened = new Set<string>();
+  const readHints = mainInheritedHintReader(deps.ledgerPath);
+  const hintFields = (hint: MainInheritedHint): Record<string, unknown> =>
+    ({ origin: hint.origin, file: hint.file, title: hint.title, prs: hint.prs, prs_count: hint.prsCount });
+  /** W1-T9551: answer each pending main-inherited hint once. A repair whose red names it covers it; on a
+   *  green main it is resolved; on a red main that still fails it, the red path below repairs it. */
+  const answerHints = (sha: string, state: string, red?: { signature: MainRedSignature; failures: readonly CiFailure[] }): void => {
+    const { pending, torn } = readHints();
+    if (torn > 0 && pending.length > 0) deps.log("main.health.inherited_hint_torn", { torn });
+    if (pending.length === 0) return;
+    const records = [...mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()];
+    for (const hint of pending) {
+      const covering = records.find((record) => repairCoversHint(record, hint));
+      if (covering) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.covered, {
+          ...hintFields(hint), offending_sha: covering.offendingSha, fix_pr_url: covering.fixPrUrl ?? null, repair_resolved: covering.resolved,
+        });
+      } else if (state === "green") {
+        deps.log(MAIN_INHERITED_HINT_STEPS.resolved, { ...hintFields(hint), head_sha: sha });
+      } else if (red && redNamesHint(red.signature, red.failures, hint)) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.confirmed, { ...hintFields(hint), head_sha: sha, red_signature: describeMainRed(red.signature) });
+      }
+    }
+  };
   const repairRow = (step: string, fields: Record<string, unknown>): void => {
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, surface: "main", ...fields });
     repairsMayBeActive = true;
@@ -1699,9 +1856,9 @@ export function buildMainHealthRung(
   const spanCache = new Map<string, readonly string[] | null>();
   /** The unattributed commits between the first red's last green and it, newest first; undefined when
    *  main's first-parent chain could not be read between them (named in the log, never guessed). */
-  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[]): Promise<readonly string[] | undefined> => {
+  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[], verdictKey: string): Promise<readonly string[] | undefined> => {
     if (first.span) return first.span;
-    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}`;
+    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}:${verdictKey}`;
     const cached = spanCache.get(key);
     if (cached !== undefined) return cached ?? undefined;
     try {
@@ -1747,7 +1904,10 @@ export function buildMainHealthRung(
       fields: {},
       probeVerdicts: new Map<string, MainProbeVerdict>(),
     };
-    const span = await spanOf(first, history);
+    // W1-T9678: only a run of a workflow carrying the required checks is a verdict; with that set unknown, none is.
+    const workflows = ctx.evidence?.requiredWorkflows;
+    const verdictRuns = workflows ? history.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName)) : [];
+    const span = await spanOf(first, verdictRuns, workflows ? [...workflows].sort().join(",") : "unknown");
     if (span === undefined || span.length === 0) return asFirstRed;
     const probes = lane.probes ?? (restProbes ??= restMainProbes(owner, repo, deps.fetch));
     const state = mainBisectionFromLedger(lines, first.headSha);
@@ -2152,9 +2312,7 @@ export function buildMainHealthRung(
       let walkedPast = 0;
       const headReason = observation.reason;
       if (runHistory && recentShas && mainHealthHeadInconclusive(observation)) {
-        const requiredKey = [...required].sort().join(",");
-        if (workflowEvidence?.required !== requiredKey) workflowEvidence = { required: requiredKey, carries: new Set(), carriesNone: new Set() };
-        const learned = workflowEvidence;
+        const learned = learnedFor(required);
         const { runs, skipped } = mainHealthWalkRuns(runHistory, recentShas);
         let decidedBy: MainHealthRunHistoryEntry | undefined;
         // W1-T7757: the newest commit passed over because a required check of it is still running.
@@ -2162,17 +2320,10 @@ export function buildMainHealthRung(
         for (const run of runs) {
           const workflow = run.workflowName;
           if (workflow !== undefined && learned.carriesNone.has(workflow) && !learned.carries.has(workflow)) continue;
-          const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
           const running = mainRunIsInProgress(run);
           let jobs: RollupCheckEntry[];
           try {
-            jobs =
-              runHistoryCache?.jobsByRunId.get(jobsKey) ??
-              rollupFromJobs(
-                (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
-              );
-            // W1-T7757: only a run whose required jobs have all concluded is cached; a pending run is read again.
-            if (!running || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+            jobs = await jobsOf(run, required);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -2183,16 +2334,14 @@ export function buildMainHealthRung(
             });
             break;
           }
-          if (judgedRollup(jobs, required).length === 0) {
+          if (!learnWorkflow(learned, run, jobs, required)) {
             // A running run's required jobs may simply not have registered yet: that proves nothing
             // about the workflow, unless it is already known to carry required checks (then it is pending).
-            if (running && workflow !== undefined && learned.carries.has(workflow)) {
-              if (run.headSha !== sha) pendingCommit ??= { sha: run.headSha, checks: [] };
+            if (running && workflow !== undefined && learned.carries.has(workflow) && run.headSha !== sha) {
+              pendingCommit ??= { sha: run.headSha, checks: [] };
             }
-            else if (!running && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
             continue;
           }
-          if (workflow !== undefined) learned.carries.add(workflow);
           const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
           if (fallback.state === "undetermined") {
             // A running commit with a required check still going decides nothing YET: remembered, and the
@@ -2277,6 +2426,26 @@ export function buildMainHealthRung(
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
       }
+      // W1-T9690: a red head never walked back, so its own completed runs teach the set the boundary reads.
+      const learned = observation.state === "red" && runHistory ? learnedFor(required) : undefined;
+      if (learned && learned.carries.size === 0) {
+        for (const run of runHistory!) {
+          const workflow = run.workflowName;
+          if (run.headSha !== decidedBySha || workflow === undefined || mainRunIsInProgress(run) || learned.carriesNone.has(workflow)) continue;
+          try {
+            learnWorkflow(learned, run, await jobsOf(run, required), required);
+          } catch (error) {
+            deps.log("main.health.completed_run_unreadable", {
+              branch,
+              sha,
+              run_sha: run.headSha,
+              run_id: run.runId,
+              error: String((error as Error)?.message ?? error),
+            });
+            break;
+          }
+        }
+      }
       // EVERY check on the deciding run, judged alike: the advisory list and `decideBaseRed`'s census.
       const everyCheck = mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging);
       const advisoryFailing =
@@ -2312,7 +2481,11 @@ export function buildMainHealthRung(
         metPrCache = { sha: decidedBySha, lookup };
       }
       const metLookup = observation.state === "red" ? metPrCache?.lookup : undefined;
-      repairEvidence = { ...(runHistory ? { runHistory } : {}), required };
+      repairEvidence = {
+        ...(runHistory ? { runHistory } : {}),
+        required,
+        ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+      };
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -2338,6 +2511,7 @@ export function buildMainHealthRung(
         ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
         ...metPrFields(metLookup),
       });
+      if (observation.state !== "red") answerHints(sha, observation.state);
 
       if (observation.state === "red") {
         resolvedSignature = undefined;
@@ -2387,7 +2561,8 @@ export function buildMainHealthRung(
           });
         }
         observation = enrichMainHealthObservation(observation, {
-          ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+          // W1-T9690: always passed, so an empty (unknown) set names no green rather than reading every workflow.
+          requiredWorkflows: workflowEvidence?.carries ?? new Set<string>(),
           ...(failures ? { ciFailures: failures } : {}),
           ...(ciFailuresUnavailable ? { ciFailuresUnavailable } : {}),
           ...(runHistory ? { runHistory } : {}),
@@ -2491,6 +2666,7 @@ export function buildMainHealthRung(
             shards.length > 0 && shardFailures.length > 0 ? shardFailures : failures,
           );
         }
+        answerHints(sha, "red", { signature: mainRedSignature([...observation.failingChecks], repairFailures), failures: repairFailures });
         if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, repairFailures, startedAtMs))) {
           repairedSignature = signature;
           lastSuccessfulObservationAtMs = startedAtMs;

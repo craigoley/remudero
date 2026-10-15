@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: core outage 08:22-10:29Z; operator asked that a crash-looping core fall back to the last known-good code and alert"
   plan_refs: [W1-T9623, W1-T1054, W1-T490, W1-T2965, W1-T2501]
   files: [deploy/entrypoint.sh, src/lib/daemon.ts, test/entrypoint-boot.test.ts, test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

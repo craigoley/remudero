@@ -125,6 +125,7 @@ function harness(work: (bodyFile: string, args: SpawnWorkerArgs) => string) {
     fetch,
     readDiff: () => FIX_DIFF,
     readHeadSubject: () => "fix(ledger): keep refresh.clearance decision-relevant",
+    readRemoteBranchHead: async () => "f1x".padEnd(40, "0"), // W1-T9667: the worker's push landed
   };
   return {
     root,

@@ -1,0 +1,24 @@
+- id: W1-T9715
+  title: Implement stricter evidence requirements for the reconciled incident
+  repo: remudero
+  depends_on:
+    - W1-T9714
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: blast-radius
+  status: queued
+  attempts: 0
+  files:
+    - MASTER-PLAN.md
+    - plan/tasks.yaml
+  acceptance:
+    - claim: MASTER-PLAN.md reflects stricter evidence requirements for the reconciled incident
+      proof: "unit test: verify stricter evidence clause in MASTER-PLAN.md"
+  origin: architect
+  rationale: >-
+    From the 2026-10-08 follow-up on W1-T5117-1791436776050, ratified via rmd approve:
+  
+    follow-up harvest [research]: Reconcile W1-T5117 with W1-T5769, because the incident appears
+    covered while stricter evidence requirements remain open. — from W1-T5117 (run
+    W1-T5117-1791436776050)

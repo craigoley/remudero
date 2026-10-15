@@ -1,6 +1,6 @@
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
-import { captureFeedback, feedbackCaptured, stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
+import { feedbackCaptured, stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
 import { contributionOriginFromRest, feedbackContentDigest, readAdmissionRestAsync, type ContributionOrigin,
   type FeedbackAdmissionSubject, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ManagedRepo } from "./managed-repos.js";
@@ -180,8 +180,9 @@ export interface IssuesIntakeDeps {
   dryRun?: boolean;
   /** W1-T7754: explicit shadow only; absent preserves legacy capture and selection. */
   admission?: FeedbackAdmissionContext;
-  /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
+  /** W1-T9615/W1-T9696: a new entry is staged in this state root's landing queue, never landed here; the CLI injects `capture`. */
   landingStateRoot?: string;
+  capture?: (root: string, opts: CaptureFeedbackOptions) => FeedbackEntry;
 }
 
 export interface IssuesIntakeResult {
@@ -245,9 +246,7 @@ export async function pollIssues(managedRepos: ManagedRepo[], deps: IssuesIntake
           admission: { ...deps.admission, nowMs: now, currentSubject: subject },
         } : {}),
       };
-      created.push(deps.landingStateRoot === undefined
-        ? captureFeedback(deps.root, capture)
-        : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
+      created.push(deps.capture ? deps.capture(deps.root, capture) : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
     }
   }
 
