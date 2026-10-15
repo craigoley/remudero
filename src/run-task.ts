@@ -481,8 +481,8 @@ import {
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
   pendingWorkerBoundaryHandoffs,
+  daemonPushTokenSource,
   receivePackCredentialProbe,
-  type PushTokenSource,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -35960,15 +35960,6 @@ function readAvailableMibBounded(
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
-
-/** W1-T9680: the token a worker push sends — the credential socket's scoped mint while it listens, else GH_TOKEN. */
-export function daemonPushTokenSource(repo: string, mint: ScopedTokenMint | undefined, env: NodeJS.ProcessEnv = process.env): PushTokenSource {
-  return async () => {
-    if (mint) return mint(repo);
-    const token = env.GH_TOKEN;
-    return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
-  };
-}
 
 /**
  * W1-T916 — the ONE ref read behind {@link DrainDeps.readPushedRunBranches} and its daemon twin.

@@ -18,7 +18,6 @@ import * as drainModule from "../src/lib/drain.js";
 import { PushFailedError } from "../src/lib/git-push.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
-import * as runTaskModule from "../src/run-task.js";
 
 // Read off the namespaces so the file still loads at the merge base, where these do not exist.
 type Probe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
@@ -26,7 +25,7 @@ type TokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reas
 const { receivePackCredentialProbe } = daemonModule as unknown as {
   receivePackCredentialProbe: (opts: { originUrl: string; token: TokenSource; timeoutMs?: number }) => () => Promise<Probe>;
 };
-const { daemonPushTokenSource } = runTaskModule as unknown as {
+const { daemonPushTokenSource } = daemonModule as unknown as {
   daemonPushTokenSource: (repo: string, mint: ((repo: string) => ReturnType<TokenSource>) | undefined, env?: NodeJS.ProcessEnv) => TokenSource;
 };
 const { laneCredentialRefusal } = drainModule as unknown as {

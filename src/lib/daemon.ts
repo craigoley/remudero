@@ -1819,6 +1819,19 @@ export type FleetCredentialProbe = { state: "alive" } | { state: "refused" | "un
 /** W1-T9680: where the probe's push token comes from — a mint like the credential socket's, or a fixed token. */
 export type PushTokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
 
+/** W1-T9680: the token a worker push sends — the credential socket's scoped mint while it listens, else GH_TOKEN. */
+export function daemonPushTokenSource(
+  repo: string,
+  mint: ((repo: string) => ReturnType<PushTokenSource>) | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): PushTokenSource {
+  return async () => {
+    if (mint) return mint(repo);
+    const token = env.GH_TOKEN;
+    return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
+  };
+}
+
 /**
  * W1-T9680 — the fleet push credential probe: receive-pack discovery at `originUrl` with the token a worker push
  * sends. The repo is public, so an upload-pack read (`git ls-remote`) answers 200 with no credential at all;
