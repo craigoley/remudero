@@ -509,8 +509,8 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
-  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
-  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
+  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
 
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
