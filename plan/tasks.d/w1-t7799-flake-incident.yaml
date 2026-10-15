@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a deterministic main red, superseded by W1-T9551 (gardener) and W1-T9694 (judge). A cost-of-delay fixture pinned to a fixed date aged out on 2026-10-10 (a time bomb); main dbca9031a read red on test-slow at 12:27Z and the sweep reproduced this test failing on main dbca9031a (sweep.base_reproduction verdict reproduced, 12:19Z); #10656 (d39c4c0fe, 13:14Z) rebased the fixture and main read green at 13:20Z; all 4 cited runs ran on bases a495e78e1/dbca9031a, before the fix; its own evidence reads "0 recovered on retry, 4 also failed"; operator 2026-10-15 via the fan-out session
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/new-work-is-ordered-by-cost-of-delay.test.ts#W1-T4064: the daemon reads filing dates from the plan path it was given"
