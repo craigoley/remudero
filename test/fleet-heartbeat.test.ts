@@ -184,7 +184,7 @@ test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught
   // tick, so a single-step rule reports a stale or absent poll on a perfectly live daemon.
   const beat = runBeat({
     ledger: MIXED_LEDGER,
-    mutate: [`ledger_union_grep '"step":"daemon\\.'`, `ledger_union_grep '"step":"daemon.iteration"'`],
+    mutate: [`line ~ /"step":"daemon\\./)`, `line ~ /"step":"daemon\\.iteration"/)`],
   });
   assert.notEqual(
     field(beat.published, "daemon_last_ts"),
@@ -195,16 +195,11 @@ test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught
 });
 
 test("MUTANT: taking the LAST daemon line instead of the max is caught", () => {
-  // W1-T2349's deploy-supervisor probe mirrors this exact grep/sed/sort/tail idiom for the
-  // `deploy.` prefix, so the bare sed/sort/tail fragment alone is no longer unique in the script —
-  // the find string below anchors on the preceding `daemon\.` grep clause to stay unique to THIS
-  // block, byte-for-byte as the committed script has it.
+  // The one-pass union read (ledger_union_answers) keeps a running MAX; the mutant drops the
+  // comparison, so every daemon line read simply overwrites the answer — the last line wins.
   const beat = runBeat({
     ledger: MIXED_LEDGER,
-    mutate: [
-      `ledger_union_grep '"step":"daemon\\.' \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | sort | tail -n 1`,
-      `ledger_union_grep '"step":"daemon\\.' \\\n    | sed -n 's/^{"ts":"\\([^"]*\\)".*/\\1/p' | tail -n 1`,
-    ],
+    mutate: [`if (!haveMax || ts > max) { max = ts; haveMax = 1 }`, `{ max = ts; haveMax = 1 }`],
   });
   assert.equal(
     field(beat.published, "daemon_last_ts"),
@@ -386,7 +381,7 @@ test("THE OTHER DIRECTION: a daemon that DIED mid-dispatch still reads STALE —
 test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — the whole fix rides on that prefix", () => {
   const beat = runBeat({
     ledger: MID_DISPATCH_LEDGER,
-    mutate: [`ledger_union_grep '"step":"daemon\\.'`, `ledger_union_grep '"step":"daemon\\.\\(idle\\|iteration\\|headroom\\)"'`],
+    mutate: [`line ~ /"step":"daemon\\./)`, `line ~ /"step":"daemon\\.(idle|iteration|headroom)"/)`],
   });
   const v = field(beat.published, "daemon_verdict");
   assert.ok(

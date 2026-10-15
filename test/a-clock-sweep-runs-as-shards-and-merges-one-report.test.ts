@@ -354,7 +354,9 @@ test("W1-T5102: the real CLIs shard a throwaway checkout and merge its results",
   const root = mkdtempSync(join(tmpdir(), "rmd-clock-sweep-shards-"));
   try {
     mkdirSync(join(root, "scripts", "lib"), { recursive: true });
-    mkdirSync(join(root, "test"));
+    mkdirSync(join(root, "test", "setup"), { recursive: true });
+    // runSuite imports the suite preload (W1-T9587); the throwaway checkout carries an inert stand-in.
+    writeFileSync(join(root, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
     for (const f of ["clock-sweep.mjs", "clock-sweep-aggregate.mjs", "clock-sweep-baseline.json", "clock-shift.mjs", "lib/argv.mjs", "lib/repo-root.mjs"]) {
       copyFileSync(join(REPO_ROOT, "scripts", f), join(root, "scripts", f));
     }

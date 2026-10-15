@@ -55,7 +55,7 @@ test("knowledge garden slow child leaves the parent timer responsive", async (t)
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, reserve: () => undefined, log: f.ctx.log });
   let ticks = 0;
   const timer = setInterval(() => { ticks++; }, 5);
-  let exit: number | null;
+  let exit: Awaited<ReturnType<typeof spawn>>;
   try { exit = await spawn("knowledge", [], { stopped: false }); }
   finally { clearInterval(timer); }
   assert.equal(exit, 0, "the actual registry runs knowledge in the owned child");

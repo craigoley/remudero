@@ -1,0 +1,28 @@
+id: incident-dccf9e2a4a76538b
+ts: 2026-10-15T04:06:25.174Z
+raw: >-
+  Incident dccf9e2a4a76: intervention cli-approve:no-recorded-cause
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 11, burn: 11.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=cli.approve target=cli:approve actor=unknown cause=cli-approve:no-recorded-cause — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#dccf9e2a4a76538bc6c2c0349d48fe67c629d667c274795dd61242200512724f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

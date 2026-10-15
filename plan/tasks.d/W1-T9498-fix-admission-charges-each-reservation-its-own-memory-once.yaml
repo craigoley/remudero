@@ -15,7 +15,7 @@
     - test/fix-admission-charges-each-reservation-its-own-memory-once.test.ts
     # existing admission tests that may encode slot-count arithmetic; each changes only if red without the change
     - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
-  status: queued
+  status: merged
   priority: 1  # measured: red share 9.2% -> 25.8% and red -> first remedy 5.3 -> 39 min (10-13 vs 10-14 re-measure)
   attempts: 0
   rationale: |

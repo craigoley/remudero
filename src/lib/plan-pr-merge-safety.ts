@@ -52,6 +52,8 @@ export interface PlanMergeSafetyReadings {
   mainPlanPaths?: string[];
   /** Read for EVERY behind plan PR (W1-T5780): disjoint paths are evidence, never a merge basis. */
   mergedTree?: MergedTreePlan;
+  /** W1-T9536 — the same two compares' full file lists, for the own-files overlap check. */
+  ownFiles?: OwnFilesReadings;
   error?: string;
 }
 
@@ -105,6 +107,67 @@ export function plansDisjoint(prPaths: readonly string[], mainPaths: readonly st
   return !prPaths.some((p) => main.has(p));
 }
 
+/** W1-T5696 — the files `main` changed since a PR head, from the same compare call that measures the
+ *  distance. `truncated` when GitHub capped the list (300), so absence of a path proves nothing. */
+export interface BaseChangedFiles {
+  files: readonly string[];
+  truncated: boolean;
+}
+
+/** W1-T5696 — main-side paths that move a PR's verdict without touching any of the PR's own files:
+ *  recorded baselines, the two CI workflows, and the dependency/compiler manifests. `*` matches within
+ *  one path segment. */
+export const REFRESH_RELEVANT_BASE_PATHS: readonly string[] = [
+  "scripts/*-baseline.json",
+  ".github/workflows/ci.yml",
+  ".github/workflows/ci-gate.yml",
+  "package.json",
+  "package-lock.json",
+  "tsconfig*.json",
+];
+
+/** `*` is the only glob character; every other character in a path glob is literal. */
+function refreshPathMatches(glob: string, path: string): boolean {
+  const parts = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join("[^/]*")}$`).test(path);
+}
+
+/** W1-T5696 — does `main` carry a change this PR must re-run against, and which files say so? A
+ *  missing map entry, unknown PR file list or truncated base list is `distance-unknown`: today's
+ *  refresh is kept. */
+export function distanceRefreshCause(
+  behindBy: number,
+  prFiles: readonly string[] | undefined,
+  base: BaseChangedFiles | undefined,
+  ceiling: number,
+): { reason: "distance-overlap" | "distance-baseline" | "distance-ceiling" | "distance-unknown" | undefined; files: string[] } {
+  if (base === undefined || prFiles === undefined || base.truncated) return { reason: "distance-unknown", files: [] };
+  const own = new Set(prFiles);
+  const overlap = base.files.filter((f) => own.has(f));
+  if (overlap.length > 0) return { reason: "distance-overlap", files: overlap };
+  const relevant = base.files.filter((f) => REFRESH_RELEVANT_BASE_PATHS.some((glob) => refreshPathMatches(glob, f)));
+  if (relevant.length > 0) return { reason: "distance-baseline", files: relevant };
+  if (behindBy > ceiling) return { reason: "distance-ceiling", files: [] };
+  return { reason: undefined, files: [] };
+}
+
+/** W1-T9536 — the PR's own non-plan files (`undefined` when unread or cut short) and main's files
+ *  since the merge base. Plan paths are left to the merged-plan load (W1-T5748). */
+export interface OwnFilesReadings {
+  prFiles?: string[];
+  mainFiles?: BaseChangedFiles;
+  error?: string;
+}
+
+/** W1-T9536 — W1-T5696's overlap and baseline arms, with no distance arm: main changed this PR's own
+ *  files, a refresh-relevant path, or a list went unread. Any cause refreshes a behind PR. */
+export function mainChangedOwnFiles(own: OwnFilesReadings | undefined): { cause: "overlap" | "baseline" | "unread"; files: string[] } | undefined {
+  const cause = distanceRefreshCause(0, own?.prFiles, own?.error === undefined ? own?.mainFiles : undefined, Infinity);
+  if (cause.reason === "distance-overlap") return { cause: "overlap", files: cause.files };
+  if (cause.reason === "distance-baseline") return { cause: "baseline", files: cause.files };
+  return cause.reason === undefined ? undefined : { cause: "unread", files: [] };
+}
+
 /** This PR's earlier `plan_pr_behind` refreshes, with the head each one replaced. */
 export function planPrRefreshesFromLedger(lines: ReadonlyArray<Record<string, unknown>>, prUrl: string): PlanPrRefreshes {
   const rows = lines.filter((l) => l.step === "automerge.direct_merge_updated" && l.reason === "plan_pr_behind" && l.pr_url === prUrl);
@@ -148,10 +211,66 @@ export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
     });
 }
 
+/** Both lists a compare names (a rename counts its old path); `undefined` without a files array. */
+function compareFiles(compare: unknown): BaseChangedFiles | undefined {
+  const files = (compare as { files?: unknown } | undefined)?.files;
+  if (!Array.isArray(files)) return undefined;
+  const names = files
+    .flatMap((f) => [(f as { filename?: unknown })?.filename, (f as { previous_filename?: unknown })?.previous_filename])
+    .filter((p): p is string => typeof p === "string");
+  return { files: names, truncated: files.length >= COMPARE_FILES_SHOWN };
+}
+
+function ownFilesFrom(prCompare: unknown, mainCompare: unknown, planDir: string): OwnFilesReadings {
+  const pr = compareFiles(prCompare);
+  const mainFiles = compareFiles(mainCompare);
+  const prFiles = pr && !pr.truncated ? pr.files.filter((p) => !p.startsWith(`${planDir}/`)) : undefined;
+  return { ...(prFiles ? { prFiles } : {}), ...(mainFiles ? { mainFiles } : {}) };
+}
+
+type CompareReads =
+  | { base: string; head: string; prCompare: unknown; mainCompare: unknown; mainTip: string }
+  | { error: string; prCompare?: unknown };
+
+/** The PR's row (base ref, head), `compare/<base>...<head>` (its files, merge base and main's tip),
+ *  then `compare/<merge base>...<main tip>` (main's files since). A read that throws propagates. */
+function* compareReadsSteps(target: { owner: string; repo: string; prNumber: number }, rest: (args: string[]) => unknown): Steps<CompareReads> {
+  const api = `repos/${target.owner}/${target.repo}`;
+  const pr = (yield* step(() => rest(singlePrRestArgs(target.owner, target.repo, target.prNumber)))) as
+    | { base?: { ref?: unknown }; head?: { sha?: unknown } }
+    | undefined;
+  const base = pr?.base?.ref;
+  const head = pr?.head?.sha;
+  if (typeof base !== "string" || typeof head !== "string") return { error: "the pull read named no base ref or head sha" };
+  const prCompare = (yield* step(() => rest(["api", `${api}/compare/${encodeURIComponent(base)}...${head}`]))) as
+    | { base_commit?: { sha?: unknown }; merge_base_commit?: { sha?: unknown } }
+    | undefined;
+  const mergeBase = prCompare?.merge_base_commit?.sha;
+  const mainTip = prCompare?.base_commit?.sha;
+  if (typeof mergeBase !== "string" || typeof mainTip !== "string") return { prCompare, error: "the compare named no merge base or main tip" };
+  const mainCompare = yield* step(() => rest(["api", `${api}/compare/${mergeBase}...${mainTip}`]));
+  return { base, head, prCompare, mainCompare, mainTip };
+}
+
+/** W1-T9536 — {@link OwnFilesReadings} for a behind PR that touches no plan path. */
+export function* readOwnFilesSteps(
+  target: { owner: string; repo: string; prNumber: number },
+  rest: (args: string[]) => unknown,
+  plan: PlanRelPaths = planRelPaths("/", () => undefined),
+): Steps<OwnFilesReadings> {
+  try {
+    const reads = yield* compareReadsSteps(target, rest);
+    if ("error" in reads) return { error: reads.error };
+    return ownFilesFrom(reads.prCompare, reads.mainCompare, plan.planDir);
+  } catch (e) {
+    // an unread list is the reading: mainChangedOwnFiles refreshes on it.
+    return { error: String((e as Error)?.message ?? e) };
+  }
+}
+
 /**
- * The readings for one PR: its row (base ref, head), `compare/<base>...<head>` (the PR's plan
- * paths, its merge base and main's tip), then `compare/<merge base>...<main tip>` (main's plan
- * paths since). Git then merges the two for EVERY PR: the path lists are evidence only (W1-T5780).
+ * The readings for one PR, from {@link compareReadsSteps}'s reads. Git then merges the two for EVERY
+ * PR: the path lists are evidence only (W1-T5780).
  */
 export function* readPlanMergeSafetySteps(
   target: { owner: string; repo: string; prNumber: number },
@@ -159,26 +278,17 @@ export function* readPlanMergeSafetySteps(
   git: PlanSafetyGit,
   plan: PlanRelPaths = planRelPaths("/", () => undefined),
 ): Steps<PlanMergeSafetyReadings> {
-  const api = `repos/${target.owner}/${target.repo}`;
   try {
-    const pr = (yield* step(() => rest(singlePrRestArgs(target.owner, target.repo, target.prNumber)))) as
-      | { base?: { ref?: unknown }; head?: { sha?: unknown } }
-      | undefined;
-    const base = pr?.base?.ref;
-    const head = pr?.head?.sha;
-    if (typeof base !== "string" || typeof head !== "string") return { error: "the pull read named no base ref or head sha" };
-    const prCompare = (yield* step(() => rest(["api", `${api}/compare/${encodeURIComponent(base)}...${head}`]))) as
-      | { base_commit?: { sha?: unknown }; merge_base_commit?: { sha?: unknown } }
-      | undefined;
-    const prPlanPaths = comparePlanPaths(prCompare, plan.planDir);
-    const mergeBase = prCompare?.merge_base_commit?.sha;
-    const mainTip = prCompare?.base_commit?.sha;
-    if (typeof mergeBase !== "string" || typeof mainTip !== "string") return { prPlanPaths, error: "the compare named no merge base or main tip" };
-    const mainCompare = yield* step(() => rest(["api", `${api}/compare/${mergeBase}...${mainTip}`]));
-    const mainPlanPaths = comparePlanPaths(mainCompare, plan.planDir);
+    const reads = yield* compareReadsSteps(target, rest);
+    if ("error" in reads) {
+      return "prCompare" in reads ? { prPlanPaths: comparePlanPaths(reads.prCompare, plan.planDir), error: reads.error } : { error: reads.error };
+    }
+    const prPlanPaths = comparePlanPaths(reads.prCompare, plan.planDir);
+    const mainPlanPaths = comparePlanPaths(reads.mainCompare, plan.planDir);
     const readings = { ...(prPlanPaths ? { prPlanPaths } : {}), ...(mainPlanPaths ? { mainPlanPaths } : {}) };
-    const mergedTree = yield* mergedTreePlanSteps(git, plan, { sha: mainTip, ref: base }, { sha: head, ref: `refs/pull/${target.prNumber}/head` });
-    return { ...readings, mergedTree };
+    const ownFiles = ownFilesFrom(reads.prCompare, reads.mainCompare, plan.planDir);
+    const mergedTree = yield* mergedTreePlanSteps(git, plan, { sha: reads.mainTip, ref: reads.base }, { sha: reads.head, ref: `refs/pull/${target.prNumber}/head` });
+    return { ...readings, ownFiles, mergedTree };
   } catch (e) {
     // the read failure is the reading: decidePlanPrMergeSafety refreshes on it, naming it.
     return { error: String((e as Error)?.message ?? e) };
