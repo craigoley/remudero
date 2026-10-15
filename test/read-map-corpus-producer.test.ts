@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error — native script ESM is outside this project's tsconfig source roots.
 import { assessReadMapCorpus, collectReadMapCorpus, corpusDigest, prepareReadMapCorpus, readCorpusBytes, readMapSummary, validateCorpusManifest } from "../scripts/lib/read-map-corpus.mjs";
 // @ts-expect-error — native CLI ESM is outside this project's tsconfig source roots.
@@ -94,17 +95,16 @@ test("custom read map reporter captures summary only never private stdout or tes
 });
 
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), "rmd-read-map-producer-")), root = join(home, "repo"), directory = join(home, "run");
-  mkdirSync(root); const put = (path: string, body: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), body); };
+  const home = mkdtempSync(join(tmpdir(), "rmd-read-map-producer-")), repo = gitRepo({ seedCommit: false, kind: "read-map-source" }), root = repo.dir, directory = join(home, "run");
+  const put = (path: string, body: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), body); };
   for (const path of ["scripts/lib/read-map-corpus.mjs", "scripts/lib/read-map-summary-reporter.mjs", "scripts/read-map-corpus.mjs", "scripts/lib/argv.mjs", "test/setup/read-map.ts"]) put(path, readFileSync(join(ROOT, path), "utf8"));
   put("package.json", '{"type":"module"}'); put("package-lock.json", "{}");
   put("test/setup/tmp-hygiene.ts", 'import {installReadMapFromEnv} from "./read-map.ts"; await installReadMapFromEnv();\n');
   put("deploy/unit.json", '{"positive":true}\n');
   put("test/a-reader.test.ts", 'import {test} from "node:test"; import {readFileSync} from "node:fs"; test("actual reader",()=>readFileSync("deploy/unit.json"));\n');
   put("test/b-other.test.ts", 'import {test} from "node:test"; test("actual non-reader",()=>{});\n');
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: "pipe" });
-  git("init"); git("add", "."); git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "source-bound corpus fixture");
-  return { home, root, directory, git };
+  const git = repo.git; git("add", "."); git("commit", "-m", "source-bound corpus fixture");
+  return { home, root, directory, git, cleanup: () => { repo.cleanup(); rmSync(home, { recursive: true, force: true }); } };
 }
 test("real Node per-file summaries and real fs reads produce a committed two-suite observation", () => {
   const fx = fixture();
@@ -123,7 +123,7 @@ test("real Node per-file summaries and real fs reads produce a committed two-sui
     assert.equal(report.liveNarrowingAllowed, false);
     writeFileSync(join(fx.root, "deploy/unit.json"), "changed");
     assert.equal(collectReadMapCorpus(fx.directory).state, "INCOMPLETE");
-  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+  } finally { fx.cleanup(); }
 });
 test("prepare refuses reuse dirty trees and output inside the source checkout", () => {
   const fx = fixture();
@@ -131,7 +131,7 @@ test("prepare refuses reuse dirty trees and output inside the source checkout", 
     assert.throws(() => prepareReadMapCorpus(fx.root, join(fx.root, "records")), /outside/);
     prepareReadMapCorpus(fx.root, fx.directory); assert.throws(() => prepareReadMapCorpus(fx.root, fx.directory), /never reused/);
     writeFileSync(join(fx.root, "untracked"), "not committed"); assert.throws(() => prepareReadMapCorpus(fx.root, join(fx.home, "second")), /clean committed/);
-  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+  } finally { fx.cleanup(); }
 });
 test("unbounded symlink and unclosed artifacts are not empty successful observations", () => {
   const fx = fixture();
@@ -142,7 +142,7 @@ test("unbounded symlink and unclosed artifacts are not empty successful observat
     assert.throws(() => readCorpusBytes(join(fx.directory, "manifest.json"), 1), /bounded regular/);
     writeFileSync(join(fx.directory, "summaries.ndjson"), "{}"); assert.throws(() => collectReadMapCorpus(fx.directory), /unclosed/);
     assert.equal(existsSync(join(fx.root, "dist")), false);
-  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+  } finally { fx.cleanup(); }
 });
 test("producer CLI refuses an implicit run and exposes explicit prepare and collect commands", () => {
   assert.equal(main([]), 2); assert.equal(main(["run", "--directory", "/nonexistent"]), 2);
