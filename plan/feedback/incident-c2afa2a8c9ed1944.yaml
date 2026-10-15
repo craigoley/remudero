@@ -1,0 +1,29 @@
+id: incident-c2afa2a8c9ed1944
+ts: 2026-10-15T05:21:10.791Z
+raw: >-
+  Incident c2afa2a8c9ed: intervention
+  automerge-hold:hold-set-by-an-agent-session-not-the-ope
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=automerge.hold_released target=pr#10339 actor=operator_human cause=automerge-hold:hold-set-by-an-agent-session-not-the-ope — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c2afa2a8c9ed194463289de0fcc2a8d8b84403d40d8b4fdde18627d09852f765
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

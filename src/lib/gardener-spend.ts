@@ -76,11 +76,10 @@ function costAccumulator(runtime: ReturnType<typeof parseGardenerRuntime>, obser
     }
     const key = JSON.stringify([name, passId]);
     let pass = passes.get(key);
-    const before = pass ? Buffer.byteLength(JSON.stringify(pass)) : -1;
+    const before = pass && pass.priced + pass.unpriced > 0 ? Buffer.byteLength(JSON.stringify(pass)) : -1;
     if (!pass) {
       pass = { name, passId, parent: false, complete: false, interrupted: false, priced: 0, unpriced: 0, usd: 0 };
       passes.set(key, pass);
-      compact.passes.push(pass);
     }
     if (parent) {
       pass.parent = true;
@@ -89,7 +88,13 @@ function costAccumulator(runtime: ReturnType<typeof parseGardenerRuntime>, obser
         row.step === "garden.pass" && row.exit === 0);
     } else if (row.cost === undefined || row.cost < 0) pass.unpriced++;
     else { pass.priced++; pass.usd += row.cost; }
-    bytes += Buffer.byteLength(JSON.stringify(pass)) - before;
+    // Retain parent state in the identity-bounded join index, but serialize only cost-bearing
+    // passes. Idle/deferred/cancelled parent-only history is not provider cost payload. A later
+    // producer (or a later parent) still joins the same exact pass; absent prices remain unknown.
+    if (pass.priced + pass.unpriced > 0) {
+      if (before < 0) compact.passes.push(pass);
+      bytes += Buffer.byteLength(JSON.stringify(pass)) - before;
+    }
     if (!Number.isFinite(pass.usd)) bytes = Infinity;
   } };
 }

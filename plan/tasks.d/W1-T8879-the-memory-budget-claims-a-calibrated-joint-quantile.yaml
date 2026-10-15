@@ -10,7 +10,16 @@
   band_meaning: span
   origin: "operator ruling 2026-10-12: no VM resize; right-size with what we have"
   plan_refs: [W1-T7093, W1-T7094, W1-T7095]
-  files: [src/lib/host-memory-shadow.ts, test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - src/lib/host-memory-learning.ts
+    - src/lib/host-memory-calibration.ts
+    - src/lib/daemon-footprint.ts
+    - test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts
+    - test/a-memory-estimate-is-learned-from-measured-tree-peaks.test.ts
+    - test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts
+    - test/a-test-run-inside-a-worker-tree-reserves-its-own-memory.test.ts
+    - test/test-fan-out-is-sized-by-learned-per-file-peaks.test.ts
   status: queued
   priority: 2
   attempts: 0
@@ -31,6 +40,11 @@
     - Tree peaks are a sum of per-process VmHWM, which overstates concurrency (members peak at different times).
     INFERRED: enforcing today's model would idle about half the fleet with no measured safety gain.
     OWNERSHIP: W1-T7093/7094/7095 (merged) built the ledger, shadow verdicts and fairness; none calibrates the claim.
+    CORRECTION 2026-10-14: main already uses typical-plus-one-tail rather than a summed-p90 decision, and it has an
+    independently approved garden-only legacy enforcement override. This task must preserve that policy and its
+    measurement basis. It introduces a separately named joint candidate in shadow, not implicit enforcement permission.
+    The added files are the existing sample producer, passive daemon heartbeat collector, bounded calibration module
+    and existing producer fixtures. One task and concern; no new reservation, activation, limit or concurrency change.
   design: |
     1. Replace the sum of per-claim p90s with a joint quantile over the live claims' measured peak distributions:
        - the convolution of the empirical per-class samples, or the existing typical + one-tail rule where samples are
@@ -42,9 +56,19 @@
        Ledger the miss rate per scenario. `hostMemoryBudget.mode: enforce` is refused unless the back-test miss rate is
        ≤ the policy bound over the last 24 h (the config loader names the evidence).
     4. The mode stays shadow; no limit or concurrency change.
+    5. Preserve paired legacy HWM measurements for the existing enforcer; never relabel them concurrent RSS. New joint
+       enforcement requires explicit model selection and fresh, same-generation, supported-scenario qualification.
+       Back-test frozen starts without censoring later starts. Compare cgroup charge with charge, not working set.
+       A monotonic same-generation kernel lifetime high-water reading may conservatively bound the future window; it
+       must be labelled as an upper bound that can include earlier peaks, never an exact interval maximum. Missing,
+       stale, reset, incomplete or fallback populations cannot qualify. No kernel peak reset or new timer.
   acceptance:
     - claim: "the shadow budget sizes concurrent claims with a calibrated joint quantile, ledgers its back-test miss rate, and refuses an enforce mode that its own back-test does not support"
       proof: 'grep: test("W1-T8879: the memory budget claims a calibrated joint quantile" in test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts'
+    - claim: "the production shadow-budget path calls the calibrated joint estimator rather than leaving its new module test-only"
+      proof: "grep: jointMemoryClaim( in src/lib/host-memory-shadow.ts"
+    - claim: "the existing daemon heartbeat invokes the passive calibration collector without a new timer"
+      proof: "grep: collectMemoryCalibration( in src/lib/daemon-footprint.ts"
   falsifier: |
     Restore the sum of per-claim p90s: the fixture with five live claims projects 6.1 GB instead of ≤4.6 GB, and the test
     fails. Drop the enforce refusal: the config with a 42% miss rate is accepted, and the test fails.

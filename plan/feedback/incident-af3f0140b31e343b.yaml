@@ -1,0 +1,29 @@
+id: incident-af3f0140b31e343b
+ts: 2026-10-15T05:07:43.483Z
+raw: >-
+  Incident af3f0140b31e: anomaly cost.anomaly:src
+
+  First seen: 2026-10-14T22:51:41.312Z
+
+  Last seen: 2026-10-15T01:48:45.359Z
+
+  Count: 18, burn: 6.10/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task W1-T9085 (run W1-T9085-1792014654870) cost $5.74 against class "src"'s median $0.55 (×8, n=147, excluded=3)
+    - task W1-T8241 (run W1-T8241-1792026047614) cost $4.7 against class "src"'s median $0.55 (×8, n=145, excluded=3)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#af3f0140b31e343b0309fc964179bb4103a6fa8843640eef5f1d88622e9036c1
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

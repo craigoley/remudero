@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.21
   status: queued
@@ -38,10 +38,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "low"
+    action: proceed
+    confidence: 0.68
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The declared scope includes scripts/proof-discrimination-gate.mjs, but the record does not explain how preventing fix rounds preserves proof discrimination; whether the remedy changes review policy cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The acceptance proof greps for a test declaration; that alone does not establish the claimed behavior that the harness no longer spends a fix round on this cause."
-    judged_at: "2026-10-03T04:10:54.681Z"
-    pin: "e73fc496a11329738de6e2fd583e0c3bf5bee59fbd7a0430b32df613cbab9a14"
+      - "The declared files are a CI gate script (scripts/proof-discrimination-gate.mjs) and a new test file. Neither is described as touching secrets, credentials, auth, permissions, deploys, or data deletion."
+      - "The gate script is a CI check, so the change could alter what that check enforces. The description frames the goal as preventing fix rounds, and it does not say the gate would be weakened or removed. That keeps this inside CI-friction work rather than a merge or review policy change, although I cannot confirm that without a diff."
+      - "The acceptance is a grep proof for a named test in a test file that does not yet exist at base, which is expected for a new test. It is verifiable and auto-checked."
+      - "The family record is mixed (25 merged, 40 declined, Beta mean 0.61), and the previous rung was docs-only. This calls for a closer look but does not meet the HIGH criteria. PR CI and review still apply afterward."
+    judged_at: "2026-10-15T02:38:10.067Z"
+    pin: "e12d20c0fc6f05db5139f8f482514c7798b7324de6f90ac4bf03ad0991691042"

@@ -1,0 +1,91 @@
+- id: W1-T9604
+  title: "THE BOARD INDEX EXTENDS ITS STEP BUCKETS INSTEAD OF RE-READING HISTORY: each storeIndex that board-projection.ts builds re-runs stepFacts over every row of each step it is asked for, and planOnlyFacts over every pr.opened, review.posted and plan-only marker body. A now-view build can make two such indexes. The fact table only grows by seq, so the buckets and the plan-only sets can be kept and extended with the rows past the last seq read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, how storeIndex obtains its step buckets and plan-only sets; high for blast radius: every board read (now-view, status board, snapshot) reads through them
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: read-only investigation of serve's heavy views thread, 02:51-03:16Z (coordinator brief, third record of this filing)"
+  plan_refs: [W1-T9436, W1-T6016, W1-T6253, W1-T2323]
+  files: [src/lib/board-projection.ts, test/a-board-index-extends-its-step-buckets.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main (symbols in src/lib/board-projection.ts unless named):
+    - createBoardProjection's sql.stepFacts is
+      `SELECT seq, ts_ms, body FROM fact WHERE step = ? AND seq <= ? ORDER BY ts_ms, seq`.
+      sql.planOnlyFacts is `SELECT step, body FROM fact WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ?
+      AND json_type(body, '$.plan_only') = 'true'`. Its third step is PLAN_ONLY_REVIEW_MARKER_STEP
+      (review.plan_only_reviewed, ledger-carry.ts).
+    - storeIndex (W1-T9436) builds a fresh `steps` Map and fresh plan-only sets for each index. byStep.get(step)
+      runs stepFacts.all(step, upTo) and JSON.parses every row on the index's first ask for that step.
+      planOnlyFilingPrUrls and planOnlyReviewedHeads run planOnlyFacts once per index. That query has SQLite
+      json_type every body of those three steps up to upTo. Nothing is kept between indexes.
+    - storeIndex is called from project() (the ledgerIndex given to projectPlan on each update that re-derives) and
+      from the projection's index(bound). now-view.ts's board stage calls `b.index = h.board.index(b.rows)` after
+      `h.board.update(...)`, and the snapshot stage hands that index to computeBoardSnapshot. So one now-view build
+      can build two indexes, and each reads every requested step from seq 0.
+    - Steps read through byStep: status.ts indexedStepRows reads verdict, verdict.merged, daemon.boot and
+      escalation.issue_opened. now-view.ts stepRows reads dep-review.decided, escalation.issue_opened and
+      ratify.approved.
+    - ledger-projector.ts: fact(seq INTEGER PRIMARY KEY, ...), with the index fact_step on (step, ts_ms). A
+      read-model rebuild writes a new file (read-model-cli.ts), so one db handle only grows by seq.
+    OBSERVED. Core ledger union, all 356 rotations plus ledger.ndjson, every file opened. Counts are distinct lines
+    where marked.
+    - review.posted: 9,197 distinct rows, 35.6 MB of JSON. pr.opened: 2,019. review.plan_only_reviewed: 1,072.
+      Rows with plan_only true: 3,415 review.posted, 331 pr.opened and 1,072 markers.
+    - The six steps named above hold about 36,100 rows (not de-duplicated across rotation overlap). verdict.merged
+      alone is 27,294.
+    - read_model.now_slow_stage, instance core, thread views, lane heavy:
+      - 02:31-03:21Z: 50 slow stages, 32 of them board. The board stage had a median of 16.9 s, a max of 67.6 s and
+        612 s in total. Snapshot had 17 slow stages, median 3.1 s.
+      - 00:00-03:21Z: 186 slow board stages, median 12.5 s, max 84.3 s, 3,135 s in total.
+      - Slow-stage time per 10-minute bucket, 02:20-03:20Z: 93-162 s.
+    NOT RE-VERIFIED, NOT CITED: the serve investigation's per-thread read rates and syscall counts, the fact-store
+    count of review.posted rows (it reads the read-model file, not the ledger), and its estimate of the board
+    stage's total thread time.
+    INFERRED: board stage time is spent in update(), project() and index(), and the share spent in the two full-step
+    scans is not measured. Design step 4 records it, so the PR states the before and after from the ledger.
+  design: |
+    1. One step cache per projection. Inside createBoardProjection, keep for each step that any index has asked for:
+       its parsed rows in stepFacts order (ts_ms, then seq) and the highest seq read. Keep the same for the plan-only
+       filing and reviewed sets. Each index still reads at its own upTo (lastSeq when it is built).
+    2. Extend, never re-read. When an index asks for a step whose cached seq is below upTo, read only
+       `step = ? AND seq > cached AND seq <= upTo`. Merge those rows into the bucket in (ts_ms, seq) order. A late
+       row can carry a ts_ms below rows already held, so an append is wrong and the merge is required. Extend the
+       plan-only sets the same way. Each index sees the bucket as it stands at its own upTo. A later index's
+       extension never changes rows that an earlier index already handed out.
+    3. Safety. If the store's max seq reads below a cached high mark (a different or rebuilt file behind the handle),
+       drop the cache and read in full. BOARD_UNREAD_STEPS still return []. Rows stay withoutUnreadFields and stay
+       interned as today. If any reader mutates a bucket row, the cache hands out copies; the builder checks this.
+       The board oracle (oracleWith) is unchanged and stays the safety net.
+    4. Measure. The board stage's read_model.now_slow_stage row, or a sibling row, records the rows read in full and
+       the rows read as extension for each index, plus the bytes held. W1-T9436 cut the projection's per-row history
+       for memory, so the PR states the held rows and bytes on a production-sized fixture. No size cap or other
+       constant is added.
+    5. Not changed: which tasks re-derive (W1-T6016, queued, also in board-projection.ts, so whichever lands
+       second rebases). taskFacts per-task buckets, the stamps and the snapshot stage. A follow-up candidate, not
+       this task: oracleWith re-projects every plan task (3,778 shards on main) each BOARD_ORACLE_INTERVAL_MS (10 min).
+    Tests go in test/a-board-index-extends-its-step-buckets.test.ts, with each title written as test("<title>", verbatim as in the proofs. Drive
+    createBoardProjection over a real in-memory fact store.
+  acceptance:
+    - claim: "after rows are appended, an index whose buckets were extended is deep-equal to a fresh full read at the same seq, for every byStep step and both plan-only sets, including a late row whose ts_ms sorts before rows already held"
+      proof: 'grep: test("W1-T9604: an extended step bucket equals a fresh full read" in test/a-board-index-extends-its-step-buckets.test.ts'
+    - claim: "a second index at a later seq reads only the rows past the cached seq for a step already read"
+      proof: 'grep: test("W1-T9604: a later index reads only the new rows of a cached step" in test/a-board-index-extends-its-step-buckets.test.ts'
+    - claim: "an earlier index's buckets do not change when a later index extends the cache"
+      proof: 'grep: test("W1-T9604: an earlier index keeps the rows it was built at" in test/a-board-index-extends-its-step-buckets.test.ts'
+    - claim: "a store whose max seq falls below the cached seq is read in full again"
+      proof: 'grep: test("W1-T9604: a store behind the cache is read in full" in test/a-board-index-extends-its-step-buckets.test.ts'
+    - claim: "the new suite passes as a whole"
+      proof: "unit test: test/a-board-index-extends-its-step-buckets.test.ts"
+  falsifier: |
+    On origin/main, count the rows stepFacts returns across two indexes built at seq 1,000 and seq 1,010 over one
+    store. The second index reads all 1,010 rows of the step again, so the second test fails. Append the extension
+    rows instead of merging them by (ts_ms, seq): a late row with an early ts_ms makes the extended bucket differ from
+    the fresh read, and the first test fails. Share one mutable bucket array between indexes: the earlier index's
+    bucket grows, and the third test fails.
