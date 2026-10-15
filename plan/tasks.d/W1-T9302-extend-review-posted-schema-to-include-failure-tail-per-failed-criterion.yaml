@@ -8,7 +8,8 @@
   verify: auto
   risk: medium
   priority: 3
-  status: queued
+  status: done
+  # plan gardener: retire W1-T9302 commit fabd54324e83760319b5362cfc342f5a3ee54f19 — Every acceptance proof now holds on main, and did not when it was filed.
   # backlog gardener: band=3 evidence=ecea85614ba442f5
   attempts: 0
   files:

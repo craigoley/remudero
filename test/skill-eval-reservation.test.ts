@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 import type { ReservedEvalBinding, ReservedEvalQualificationInput } from "../src/lib/skill-eval-reservation.js";
 
@@ -60,6 +61,31 @@ test("reservation-backed eval qualification is default-off and never dispatch pe
   assert.equal(qualified.requiredRuntimeMs, 80 * MINUTE + 30_000);
   assert.equal(qualified.workers, 3);
   assert.deepEqual(input, before, "read-only even when evidence fits; no lease or grant is consumed");
+});
+
+test("canonical eval consumption uses a persisted approved grant and cannot renew READY on replay", async t => {
+  // Keep production acceptance discriminating at the existing base test path:
+  // absence of the new consumer is an assertion, never a module-load error.
+  const source = new URL("../src/lib/skill-eval-grant-consumption.ts", import.meta.url);
+  const consumer = (existsSync(source) ? await import(source.href) : {}) as typeof import("../src/lib/skill-eval-grant-consumption.js");
+  assert.equal(typeof consumer.consumeReservedEvalGrant, "function", "the canonical consumer must exist");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const input = fixture(), readyBefore = structuredClone(input.ready), grantBefore = JSON.stringify(input.grant);
+  db.exec(consumer.RESERVED_EVAL_GRANT_TABLE_SQL);
+  db.prepare("INSERT INTO reserved_eval_grants(id,grant_json,approval_ref,state) VALUES(?,?,?,'fresh')")
+    .run(input.grant!.id, grantBefore, "private-fixture-approval");
+  const opts = { enabled: true, grantId: input.grant!.id, runId: "first-fixture", input, db };
+  const first = consumer.consumeReservedEvalGrant(opts);
+  assert.equal(first.state, "consumed"); assert.equal(first.dispatchAllowed, false);
+  assert.equal(db.isTransaction, false, "consumption must commit before returning its receipt");
+  assert.deepEqual({ ...db.prepare("SELECT state,run_id,grant_json FROM reserved_eval_grants").get()! },
+    { state: "consumed", run_id: "first-fixture", grant_json: grantBefore });
+  input.grant!.finishByMs += 60 * MINUTE; // A caller's still-fresh assertion is not canonical authority.
+  const replay = consumer.consumeReservedEvalGrant({ ...opts, runId: "replacement-fixture" });
+  assert.equal(replay.state, "refused"); assert.equal(replay.dispatchAllowed, false);
+  assert.deepEqual(input.ready, readyBefore, "the original READY and terminal history are unchanged");
+  assert.equal(db.prepare("SELECT run_id FROM reserved_eval_grants").get()!.run_id, "first-fixture");
 });
 
 test("reservation-backed eval never renews original READY on retry or missing approval", async () => {

@@ -1,0 +1,79 @@
+- id: W1-T9589
+  title: "A FIX-ROUND FLAKE COUNTS TOWARD A FLAKE INCIDENT — W1-T9561 writes `test.flake_retry` rows with `source: \"fix-round\"` for a red the PR's diff cannot reach, but the flake-incident gardener's `observationsOf` keeps only `source: \"selector-shadow\"` rows that carry `ci_run_id` and `shard`, so no fix-round flake can ever become an incident"
+  repo: remudero
+  depends_on: [W1-T9561]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern, which test.flake_retry rows the flake-incident gardener counts; one source file and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-14: follow-up found while reviewing #11881 (W1-T9561); operator approved it 2026-10-14 (\"go with all recommended follow ups\")"
+  plan_refs: [W1-T9561, W1-T6406, W1-T7269, W1-T7270]
+  files:
+    - src/lib/flake-incident-gardener.ts
+    - test/a-fix-round-flake-counts-toward-a-flake-incident.test.ts
+  status: queued
+  priority: 1.5  # W1-T9561's own design says the gardener counts these rows; until this lands every rerouted flake is evidence nobody reads
+  attempts: 0
+  rationale: |
+    READ 2026-10-14 from #11881's head (0f53a6c21, `git fetch origin refs/pull/11881/head`):
+      - `fixRoundFlakeRetryRows` (src/lib/fix-outcome.ts) writes, once per failing file after a rerouted round's
+        requeue reports, `{ file, source: "fix-round", headline, retry_outcome: "recovered" | "also_failed",
+        pr_numbers: [<pr>], head_sha }`. `pr_numbers` and `head_sha` are left out when unknown. The ledger writer adds
+        `ts`, `task_id` and `run_id`. The row has NO `ci_run_id`, NO `shard`, NO `base_sha` and NO `titles`.
+      - The same round first writes `fix.scope_rerouted` with `{ paths, attribution, reason, reached,
+        failing_test_files, head_sha }`. A reroute happens only when `redAttribution` returned
+        `attribution: "diff-cannot-reach"`: the PR's changed paths (main tip to head) reach no file in each failing
+        test's import closure, and every failing file was recorded `passes` at main.
+    WHY THE GARDENER DROPS THEM (src/lib/flake-incident-gardener.ts on origin/main):
+      - `observationsOf` skips a row unless `row.source === "selector-shadow"`, then skips it again unless
+        `ci_run_id` and `shard` are counts. A fix-round row fails both checks.
+      - Even past that filter, `evidenceOf` counts a PR as clear only when the row has both `baseSha` and `headSha`
+        and `readChangedPaths(base, head)` misses the test and its imports. A fix-round row has no `base_sha`, so it
+        would read as touching and never count.
+      - W1-T9561's design (step 3) says "W1-T6406's flake-incident gardener counts the flake across unrelated PRs
+        through its own tiered policy". Today it does not.
+  design: |
+    1. `observationsOf` accepts a `source: "fix-round"` row with a string `file`, `retry_outcome` recovered or
+       also_failed, at least one count in `pr_numbers`, a string `head_sha` and a parseable `ts`. A row missing any of
+       these is skipped, as today. The selector-shadow branch is unchanged.
+    2. Never fabricate the missing fields. `FlakeObservation.runId` and `.shard` become optional and are absent on a
+       fix-round observation. Its dedup key is `fix-round|<pr>|<head_sha>|<file>|<outcome>`. Any code that reads
+       `runId` reads only the observations that have one.
+    3. The clear verdict for a fix-round observation comes from the reroute that wrote it, not from a GitHub read.
+       Add `fix.scope_rerouted` to `FLAKE_INCIDENT_EVIDENCE_STEPS` and bump `FLAKE_INCIDENT_DIGEST_VERSION`, because
+       that constant keys the per-rotation digests. The observation is clear only when a `fix.scope_rerouted` row with
+       the same `task_id` and `head_sha` has `attribution: "diff-cannot-reach"` and names the file in
+       `failing_test_files`. With no such row it is not clear, which is today's rule for an unreadable file list, so
+       the PR is not counted. That attribution is stricter than the gardener's own check, since it walks the whole
+       import closure and not only the test's direct imports. A fix-round observation never spends a
+       `changedPathReadsPerPass` read.
+    4. One retry seen twice counts once. If a selector-shadow observation has the same PR, `head_sha` and file, the
+       fix-round observation adds nothing to `recovered` or `alsoFailed`. PRs are already a set.
+    5. The filed shard's rationale names what it has. `CI runs:` lists only the run ids it read, and when every
+       observation came from a fix round it says so instead of printing an empty list. The evidence line names both
+       sources (coverage-shard logs and fix-round reroutes) with each one's count. The tiered policy (`watchPrs`,
+       `filePrs`, the window) is unchanged, so this adds no threshold.
+    6. Out of scope: changing W1-T9561's row shape. If the build finds the join in step 3 cannot be made reliably,
+       stop and report it. Do not widen this task into src/lib/fix-outcome.ts.
+  acceptance:
+    - claim: "three unrelated PRs whose fix rounds each rerouted the same failing file as diff-cannot-reach file one flake incident, with no ci_run_id, shard or base_sha in the rows and no changed-path read"
+      proof: "unit test: W1-T9589: fix-round flake rows from three unrelated PRs file one flake incident"
+    - claim: "a fix-round row with no matching diff-cannot-reach reroute on its task and head does not count its PR"
+      proof: "unit test: W1-T9589: a fix-round flake row without its diff-cannot-reach reroute is not counted"
+    - claim: "a fix-round row and a selector-shadow row for the same PR, head and file count as one retry"
+      proof: "unit test: W1-T9589: one retry seen by a fix round and a coverage shard counts once"
+    - claim: "the suite exists under its own title"
+      proof: "grep: W1-T9589: fix-round flake rows from three unrelated PRs file one flake incident in test/a-fix-round-flake-counts-toward-a-flake-incident.test.ts"
+    - claim: "the gardener reads the reroute step as evidence"
+      proof: "grep: fix\\.scope_rerouted in src/lib/flake-incident-gardener.ts"
+  falsifier: |
+    Seed the ledger with three fix-round `test.flake_retry` rows in #11881's exact shape (file
+    test/the-state-snapshot-actually-runs-on-this-host.test.ts, `retry_outcome: "also_failed"`, `pr_numbers` 101, 102
+    and 103, distinct `head_sha` and `task_id`), each with its `fix.scope_rerouted` row (`attribution:
+    "diff-cannot-reach"`, `failing_test_files` naming that file), and a `readChangedPaths` that throws if called. At
+    origin/main `observationsOf` drops all three rows on `source`, no group reaches `watchPrs`, and no
+    `flake_incident.filed` row is written, so the first test fails. Remove one PR's `fix.scope_rerouted` row: the
+    second test must then see only two PRs, `flake_incident.watch` and no filing. Count a fix-round row as clear
+    without the join: the second test files an incident and fails.
