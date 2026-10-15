@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { fixedClock, systemClock } from "./clock.js";
 import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { captureFeedback, listFeedback, readLandedFeedbackEntry, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { listFeedback, readLandedFeedbackEntry, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { overlayQueuedFeedbackEntries } from "./feedback-landing.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
 import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
@@ -42,7 +43,7 @@ export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDet
  * ruling 2026-09-23). A small own-timer loop (mirrors gardener.ts, fleet-lane.ts) reads incident
  * evidence (W1-T4383 `incident.event`/`incident.sampled`, W1-T4384 invariant findings), dedupes
  * against work the fleet already has open, gathers evidence, and files one `incident#<fingerprint>`
- * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
+ * entry per pass via {@link stageFeedbackCapture} (W1-T9615) — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
  * INVARIANT: flow incident rows and filing feedback are this lane's write surfaces besides the allowlisted, reversible
@@ -172,10 +173,12 @@ export function incidentFeedbackOrigin(fingerprint: string): FeedbackOrigin {
 const CLOSED_FEEDBACK_STATUS: FeedbackStatus = "rejected";
 
 /** Every `incident#<fingerprint>` origin this repo has open feedback for right now — a read over
- *  {@link listFeedback}, the same store {@link captureFeedback} writes into. */
-export function openIncidentFeedbackOrigins(root: string): Set<string> {
+ *  {@link listFeedback}, the same store {@link stageFeedbackCapture} writes into. W1-T9615: given `stateRoot`, the
+ *  records waiting in its landing queue count too, so a filing staged last pass is seen before it lands. */
+export function openIncidentFeedbackOrigins(root: string, stateRoot?: string): Set<string> {
   const origins = new Set<string>();
-  for (const entry of listFeedback(root)) {
+  const entries = listFeedback(root);
+  for (const entry of stateRoot === undefined ? entries : overlayQueuedFeedbackEntries(entries, stateRoot)) {
     if (typeof entry.origin === "string" && entry.origin.startsWith("incident#") && entry.status !== CLOSED_FEEDBACK_STATUS) {
       origins.add(entry.origin);
     }
@@ -307,8 +310,11 @@ function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly st
 /** `stateDir`, `mergedLastDay` and `clock` are fleet-lane.ts's own members — this lane paces and
  *  pauses exactly as that one does — so they are reused from {@link FleetLaneDeps}, not redeclared. */
 export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "clock"> & {
-  /** Repo root — where {@link captureFeedback}/{@link listFeedback} read and write. */
+  /** Repo root — where {@link stageFeedbackCapture}/{@link listFeedback} read and write. */
   root: string;
+  /** W1-T9615: the daemon's state root, whose landing queue the per-poll async sweep drains. A filing is staged there and
+   *  never landed inline. Absent, the entry stays in `root`'s checkout for that sweep's dirty scan. */
+  landingStateRoot?: string;
   /** Every incident.event/incident.sampled row this pass should consider, read-only. */
   readEvents: () => IncidentLedgerEvent[];
   /** True when a plan task already exists for this fingerprint (the plan-side dedupe half). */
@@ -367,7 +373,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const runMatchingRunbook = deps.runbookPass;
   if (room <= 0 && !runMatchingRunbook) return { room };
 
-  const openOrigins = openIncidentFeedbackOrigins(deps.root);
+  const openOrigins = openIncidentFeedbackOrigins(deps.root, deps.landingStateRoot);
   const events = [...deps.readEvents()];
   // An injected or lagging incident reader may not yet see this pass's writes. Include each once.
   for (const row of flowRows) {
@@ -385,7 +391,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
   const suspectPrs = suspectPullRequests(deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
-  captureFeedback(deps.root, {
+  const staged = stageFeedbackCapture(deps.root, deps.landingStateRoot, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
     id: incidentFeedbackId(worst.fingerprint),
@@ -397,6 +403,8 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     count: worst.count,
     burn_per_hour: worst.burnPerHour,
     suspect_prs: suspectPrs.length,
+    landing: staged.queued ? "queued" : "checkout",
+    ...(staged.error === undefined ? {} : { landing_error: staged.error }),
   });
   return { filed: worst.fingerprint, room: room - 1, runbook };
 }
@@ -428,9 +436,10 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 }
 
 /** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
- *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. */
+ *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. W1-T9615: a filing is staged in the landing
+ *  queue of the daemon's state root (the parent of `stateDir` unless named), never landed on the loop. */
 export function daemonSreLaneInput(
-  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string; landingStateRoot?: string },
 ): SreLaneInput {
   const instance = resolveSreLaneInstance({
     stateRoot: dirname(input.stateDir),
@@ -440,6 +449,7 @@ export function daemonSreLaneInput(
   return {
     stateDir: input.stateDir,
     root: input.root,
+    landingStateRoot: input.landingStateRoot ?? dirname(input.stateDir),
     detectors: SRE_LANE_DETECTORS.map((detector) =>
       detector.id === "idle-capacity" ? idleCapacityDetector(name)
         : detector.id === FOREIGN_PAUSE_DETECTOR_ID ? foreignPauseDetector(name) : detector),

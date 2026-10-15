@@ -40,10 +40,15 @@ export function trackedSourceFiles(): string[] {
   return execFileSync("git", [sub, "src/**/*.ts", "src/*.ts"], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
 }
 
+/** W1-T9615: a column-0 object-literal const (`const defaultPreflightChecks = {`). Its member arrows are not
+ *  functions to {@link topLevelFunctions}, so a name reached only through one (plan-pr-emitter's `runInTree`, the
+ *  sync preflight's in-tree spawn) is invisible to the function-only walk. */
+const OBJECT_DECL = /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\{/;
+
 /** Column-0 function declarations (generators included) and column-0 arrow consts; a body runs to the
  *  next column-0 declaration (a closing brace at column 0 is NOT a boundary: a multi-line parameter type
- *  closes with one). */
-export function topLevelFunctions(): Fn[] {
+ *  closes with one). `objectLiterals` also walks {@link OBJECT_DECL} bodies. */
+export function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[] {
   const fns: Fn[] = [];
   const decl =
     /^(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/;
@@ -51,7 +56,7 @@ export function topLevelFunctions(): Fn[] {
   for (const file of trackedSourceFiles()) {
     const lines = stripComments(readFileSync(new URL(`../../${file}`, import.meta.url), "utf8")).split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const m = decl.exec(lines[i]!);
+      const m = decl.exec(lines[i]!) ?? (opts.objectLiterals ? OBJECT_DECL.exec(lines[i]!) : null);
       if (!m) continue;
       let end = i + 1;
       while (end < lines.length && !NEXT_DECL.test(lines[end]!)) end++;
