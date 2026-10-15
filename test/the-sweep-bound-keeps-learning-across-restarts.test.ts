@@ -17,7 +17,7 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { readLedgerRawLines, readRestartHistoryLines } from "../src/run-task.js";
 
 // A namespace import, so the file still loads at base and each test reddens on its own.
-const { learnedSweepBound, recordSettledSweep } = daemon;
+const { learnedSweepBound, recordSettledSweep, settledSweepDurations } = daemon;
 
 const REAL_SLEEP: DaemonDeps["sleep"] = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MIN = 60_000;
@@ -117,4 +117,10 @@ test("W1-T9632: an unreadable archive union seeds the sweep bound from the live 
     assert.deepEqual(lines.find((l) => l.step === "daemon.sweep.seeded")?.extra, { samples: 6, source: "live_ledger" });
     assert.deepEqual(lines.find((l) => l.step === "daemon.sweep.started")?.extra, { bound_ms: p90x3(seeded), bound_basis: "observed_passes", samples: 6 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T9632: the boot seed orders settled passes by ts, and keeps file order when a row has none", () => {
+  assert.deepEqual(settledSweepDurations([settledRow(300, 5), settledRow(100, 50)]), [100, 300], "the union's file order is not time order");
+  const untimed = JSON.stringify({ step: "daemon.sweep.settled", elapsed_ms: 300 });
+  assert.deepEqual(settledSweepDurations([untimed, settledRow(100, 50)]), [300, 100]);
 });
